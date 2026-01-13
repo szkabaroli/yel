@@ -1,7 +1,7 @@
 // Yel Compiler wrapper
 // Uses the WASI component compiled with jco
 
-import { compiler } from './compiler/yel_dsl_cli.js';
+import { compiler } from './compiler/yelc.js';
 
 export interface Diagnostic {
   /** Plain error message for UIs and LSPs */
