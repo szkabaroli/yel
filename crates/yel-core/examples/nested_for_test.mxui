@@ -1,0 +1,27 @@
+package yel:nested@1.0.0;
+
+record Item {
+    name: string,
+    count: u32,
+}
+
+export component NestedFor {
+    items: list<Item> = [
+        { name: "Alice", count: 2 },
+        { name: "Bob", count: 3 },
+    ];
+    numbers: list<u32> = [1, 2, 3];
+
+    VStack {
+        for item in items key(item.name) {
+            VStack {
+                Text { "{item.name}" }
+                HStack {
+                    for n in numbers key(n) {
+                        Text { "[{n}]" }
+                    }
+                }
+            }
+        }
+    }
+}

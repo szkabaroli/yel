@@ -1,0 +1,91 @@
+package yel:compiler@0.1.0;
+
+/// Yel Compiler interface
+interface compiler {
+    /// Output format for compilation.
+    enum output-format {
+        /// Generated Rust source code
+        rust,
+        /// Generated WIT interface
+        wit,
+        /// WebAssembly component binary
+        wasm,
+        /// WebAssembly Text format (WAT/WAST)
+        wast,
+        /// HIR (High-level IR) as JSON - name resolved, syntax desugared
+        hir,
+        /// THIR (Typed HIR) as JSON - fully type-checked
+        thir,
+    }
+
+    /// Result of a successful compilation.
+    record compile-result {
+        /// Generated Rust code (empty if not requested)
+        rust-code: string,
+        /// Generated WIT code (empty if not requested)
+        wit-code: string,
+        /// Generated WASM bytes (empty if not requested)
+        wasm-bytes: list<u8>,
+        /// Generated WAST code (empty if not requested)
+        wast-code: string,
+        /// Generated HIR as JSON (empty if not requested)
+        hir-code: string,
+        /// Generated THIR as JSON (empty if not requested)
+        thir-code: string,
+    }
+
+    /// A diagnostic message from the compiler.
+    record diagnostic {
+        /// Plain error message for UIs and LSPs
+        message: string,
+        /// Rendered error with source context and formatting (for terminal display)
+        rendered: string,
+        /// Line number (1-indexed, 0 if unknown)
+        line: u32,
+        /// Column number (1-indexed, 0 if unknown)
+        column: u32,
+        /// Length of the span in characters (0 if unknown, defaults to 1)
+        length: u32,
+        /// Severity: "error", "warning", "info"
+        severity: string,
+    }
+
+    /// Result of compilation - either success or failure with diagnostics.
+    variant compile-outcome {
+        /// Compilation succeeded
+        success(compile-result),
+        /// Compilation failed with diagnostics
+        failure(list<diagnostic>),
+    }
+
+    /// Compile a single Yel source file.
+    ///
+    /// Arguments:
+    /// - filename: The filename for error reporting
+    /// - source: The Yel source code
+    /// - format: Desired output format
+    ///
+    /// Returns the compilation result or error diagnostics.
+    compile: func(filename: string, source: string, format: output-format) -> compile-outcome;
+
+    /// Compile multiple Yel source files together.
+    ///
+    /// Arguments:
+    /// - files: List of (filename, source) pairs
+    /// - format: Desired output format
+    ///
+    /// Returns the compilation result or error diagnostics.
+    compile-multi: func(files: list<tuple<string, string>>, format: output-format) -> compile-outcome;
+
+    /// Parse source and return AST as JSON.
+    /// Useful for tooling like syntax highlighters and formatters.
+    parse-to-json: func(source: string) -> result<string, string>;
+
+    /// Check source for errors without generating output.
+    /// Returns list of diagnostics (empty if no errors).
+    check: func(filename: string, source: string) -> list<diagnostic>;
+}
+
+world yel-compiler {
+    export compiler;
+}

@@ -1,0 +1,420 @@
+// Yel Grammar
+
+// ######################################
+// Error Recovery
+// ######################################
+// CATCH_ALL rules enable multi-error parsing by consuming invalid content
+// and continuing to parse. The parser succeeds but CATCH_ALL nodes
+// indicate syntax errors that should be reported.
+
+// Non-whitespace newline for error recovery
+NL = @{ "\n" | "\r\n" | "\r" }
+
+// Consume any line that doesn't match valid syntax (stops at newline)
+// Atomic (@) to prevent implicit whitespace skipping
+CATCH_ALL = @{ (!NL ~ ANY)+ ~ NL }
+
+// Consume invalid content inside blocks (stops at closing brace or newline)
+BLOCK_LEVEL_CATCH_ALL = @{ !("}" | NL) ~ (!NL ~ ANY)+ ~ NL? }
+
+// Entry point - with error recovery
+file = { SOI ~ package_decl? ~ (top_level_item | CATCH_ALL)* ~ EOI }
+
+// Top-level items: records, enums, variants and components
+top_level_item = _{ record_decl | enum_decl | variant_decl | component }
+
+// Record type declaration: record Name { field: type, ... }
+record_decl = {
+    "record" ~ identifier ~ "{" ~
+        record_field_list? ~
+    "}"
+}
+
+record_field_list = { record_field_or_error ~ ("," ~ record_field_or_error)* ~ ","? }
+
+record_field_or_error = _{ record_field | BLOCK_LEVEL_CATCH_ALL }
+
+record_field = {
+    identifier ~ ":" ~ type_annotation
+}
+
+// Enum type declaration (WIT-style, no payloads):
+// enum color { red, green, blue }
+enum_decl = {
+    "enum" ~ identifier ~ "{" ~
+        enum_cases? ~
+    "}"
+}
+
+enum_cases = { enum_case ~ ("," ~ enum_case)* ~ ","? }
+
+// Enum case names use kebab-case (lowercase with hyphens)
+enum_case = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
+
+// Variant type declaration (WIT-style, with optional payloads):
+// variant filter { all, none, some(list<string>) }
+variant_decl = {
+    "variant" ~ identifier ~ "{" ~
+        variant_cases? ~
+    "}"
+}
+
+variant_cases = { variant_case ~ ("," ~ variant_case)* ~ ","? }
+
+// Variant case: name or name(type)
+variant_case = {
+    variant_case_name ~ ("(" ~ type_annotation ~ ")")?
+}
+
+// Variant case names use kebab-case (lowercase with hyphens)
+variant_case_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
+
+// Package declaration: package namespace:name@version;
+package_decl = {
+    "package" ~ package_id ~ ";"
+}
+
+package_id = {
+    package_namespace ~ ":" ~ package_name ~ package_version?
+}
+
+package_namespace = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+package_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+package_version = @{ "@" ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)* }
+
+// Component definition: [export] component Name { ... }
+component = {
+    export_modifier? ~ "component" ~ identifier ~ "{" ~
+        component_member* ~
+    "}"
+}
+
+component_member = _{
+    property_decl
+    | function_decl
+    | node
+    | BLOCK_LEVEL_CATCH_ALL  // Error recovery: skip invalid lines inside component
+}
+
+// Function declaration: [export] name: func(args) -> ret;
+function_decl = {
+    export_modifier? ~ identifier ~ ":" ~ func_type ~ ";"
+}
+
+export_modifier = { "export" }
+
+func_type = {
+    "func" ~ "(" ~ func_params? ~ ")" ~ func_return?
+}
+
+func_params = {
+    func_param ~ ("," ~ func_param)*
+}
+
+func_param = {
+    identifier ~ ":" ~ type_annotation
+}
+
+func_return = {
+    "->" ~ type_annotation
+}
+
+// Property declaration: name: type = value;
+property_decl = {
+    identifier ~ ":" ~ type_annotation ~ ("=" ~ expr)? ~ ";"
+}
+
+// Type annotations - aligned with WIT specification
+// Note: func_type is NOT included here to avoid conflicts with function_decl.
+// Function types are declared via function_decl (e.g., on-click: func())
+type_annotation = {
+    primitive_type
+    | list_type
+    | option_type
+    | result_type
+    | tuple_type
+    | named_type
+}
+
+// WIT primitive types
+primitive_type = {
+    // Boolean
+    "bool"
+    // Signed integers
+    | "s64" | "s32" | "s16" | "s8"
+    // Unsigned integers
+    | "u64" | "u32" | "u16" | "u8"
+    // Floats
+    | "f64" | "f32"
+    // Character and string
+    | "char" | "string"
+    // Aliases for convenience
+    | "int"    // alias for s32
+    | "float"  // alias for f32
+    // UI-specific types
+    | "length" | "physical-length" | "angle" | "duration"
+    | "percent" | "relative-font-size"
+    | "color" | "brush" | "image" | "easing"
+}
+
+// WIT compound types
+list_type = { "list" ~ "<" ~ type_annotation ~ ">" }
+option_type = { "option" ~ "<" ~ type_annotation ~ ">" }
+result_type = { "result" ~ ("<" ~ result_types ~ ">")? }
+result_types = { type_annotation ~ ("," ~ type_annotation)? }
+tuple_type = { "tuple" ~ "<" ~ type_list ~ ">" }
+type_list = { type_annotation ~ ("," ~ type_annotation)* }
+
+// Named/custom types (resources, records, etc.)
+named_type = { identifier }
+
+// Nodes (UI tree)
+node = _{
+    if_node
+    | for_node
+    | element_node
+    | string_node
+}
+
+// Bare string as content: "Hello {name}"
+string_node = { string_expr }
+
+// Element node: div { ... } or Button { ... }
+element_node = {
+    element_name ~ "{" ~
+        element_content? ~
+    "}"
+}
+
+// Element names: lowercase (html-like) or uppercase (component)
+element_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+
+// Element content: items separated by optional commas
+element_content = { element_item ~ (","? ~ element_item)* ~ ","? }
+
+element_item = _{
+    named_prop      // name: value (including closures)
+    | node            // child element, if, for
+    | string_expr     // positional string content
+    | BLOCK_LEVEL_CATCH_ALL  // Error recovery: skip invalid lines inside element
+}
+
+// Named property: font-size: 24px, clicked: { ... }, set value: { ... }
+// Optional modifier prefix: set, get, etc.
+named_prop = {
+    prop_modifier? ~ attr_name ~ ":" ~ expr
+}
+
+// Property modifiers for special bindings
+prop_modifier = { "set" }
+
+// Attribute names use kebab-case (lowercase with hyphens)
+attr_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
+
+// If node
+if_node = {
+    "if" ~ expr ~ "{" ~ if_body ~ "}" ~
+    else_if_branch* ~
+    else_branch?
+}
+
+if_body = { (node ~ ","?)* }
+
+else_if_branch = {
+    "else" ~ "if" ~ expr ~ "{" ~ if_body ~ "}"
+}
+
+else_branch = {
+    "else" ~ "{" ~ if_body ~ "}"
+}
+
+// For node: for item in collection key(expr) { ... }
+for_node = {
+    "for" ~ identifier ~ "in" ~ expr ~ key_clause? ~ "{" ~ for_body ~ "}"
+}
+
+key_clause = { "key" ~ "(" ~ expr ~ ")" }
+
+for_body = { (node ~ ","?)* }
+
+// Statements (inside handlers)
+statement = {
+    if_statement
+    | assign_statement
+    | expr_statement
+}
+
+if_statement = {
+    "if" ~ expr ~ "{" ~ statement* ~ "}" ~ ("else" ~ "{" ~ statement* ~ "}")?
+}
+
+assign_statement = {
+    expr ~ (compound_op | "=") ~ expr ~ ";"
+}
+
+expr_statement = { expr ~ ";" }
+
+compound_op = { "+=" | "-=" | "*=" | "/=" }
+
+// Expressions - flat structure for PrattParser
+expr = { prefix* ~ primary ~ postfix* ~ (infix ~ prefix* ~ primary ~ postfix*)* ~ ternary_suffix? }
+
+// Ternary operator suffix: ? then_expr : else_expr
+ternary_suffix = { "?" ~ expr ~ ":" ~ expr }
+
+infix = _{ range_inclusive | range | or | and | eq | neq | lte | gte | lt | gt | add | sub | mul | div | modulo }
+range_inclusive = { "..=" }
+range           = { ".." }
+or              = { "||" }
+and             = { "&&" }
+eq              = { "==" }
+neq             = { "!=" }
+lte             = { "<=" }
+gte             = { ">=" }
+lt              = { "<" }
+gt              = { ">" }
+add             = { "+" }
+sub             = { "-" }
+mul             = { "*" }
+div             = { "/" }
+modulo          = { "%" }
+
+prefix = _{ neg | not }
+neg    =  { "-" }
+not    =  { "!" }
+
+postfix = _{ call | optional_member | member | index }
+call            =  { "(" ~ args? ~ ")" }
+optional_member =  { "?." ~ identifier }
+member          =  { "." ~ identifier }
+index           =  { "[" ~ expr ~ "]" }
+
+args = { expr ~ ("," ~ expr)* }
+
+primary = _{
+    closure_with_params   // { param: type -> body } - must be first (has ->)
+    | record_literal      // { field: value, ... } - requires at least one field
+    | closure_no_params   // { body } - closure without params (catches empty {} too)
+    | tuple_literal
+    | "(" ~ expr ~ ")"
+    | literal
+    | identifier
+}
+
+// Closure expression: { body } or { param: type -> body }
+// Examples: { count += 1; }, { x: s32 -> x + 1 }, { 10 }
+//
+// Disambiguation from record literals:
+// - { param: type -> body } - closure with typed params (has ->)
+// - { field: value, ... } - record literal (comma-separated field: expr pairs)
+// - { statements; expr? } - closure without params (has ; or single expr)
+// - { } - empty closure
+
+// Closure with typed parameters: { x: s32 -> body } or { x: s32, y: s32 -> body }
+closure_with_params = {
+    "{" ~ closure_param_list ~ "->" ~ closure_body ~ "}"
+}
+
+closure_param_list = {
+    closure_param ~ ("," ~ closure_param)*
+}
+
+closure_param = {
+    identifier ~ ":" ~ type_annotation
+}
+
+// Closure without parameters: { body }
+closure_no_params = {
+    "{" ~ closure_body ~ "}"
+}
+
+// Closure body: zero or more statements, optionally ending with an expression
+closure_body = {
+    statement* ~ trailing_expr?
+}
+
+// Trailing expression in closure body (no semicolon)
+trailing_expr = { expr }
+
+// Tuple literal: (value1, value2, ...) - must have at least 2 elements or trailing comma
+// Single element with comma: (x,) is a 1-tuple
+// Multiple elements: (x, y) or (x, y, z)
+tuple_literal = { "(" ~ expr ~ "," ~ (expr ~ ("," ~ expr)*)? ~ ","? ~ ")" }
+
+// Record literal (anonymous): { field: value, field2: value2, ... }
+// Type is inferred from context (e.g., property type annotation)
+// NOTE: Requires at least one field - empty {} is parsed as empty closure
+record_literal = {
+    "{" ~ record_literal_fields ~ "}"
+}
+
+// At least one field required (so empty {} is closure, not record)
+record_literal_fields = {
+    record_literal_field ~ ("," ~ record_literal_field)* ~ ","?
+}
+
+record_literal_field = {
+    identifier ~ ":" ~ expr
+}
+
+// Literals
+literal = {
+    list_literal
+    | unit_literal
+    | float_literal
+    | int_literal
+    | color_literal
+    | char_literal
+    | string_expr
+    | bool_literal
+}
+
+// List literal: [], [1, 2, 3], [a, b,] (trailing comma allowed)
+list_literal = { "[" ~ (expr ~ ("," ~ expr)* ~ ","?)? ~ "]" }
+
+// Numbers with units: 8px, 100ms, 45deg, 50%, 1.5rem
+unit_literal = @{
+    "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? ~ unit_suffix
+}
+
+unit_suffix = {
+    // Length units
+    "px" | "pt" | "in" | "mm" | "cm" | "phx"
+    // Angle units
+    | "deg" | "rad" | "turn"
+    // Duration units
+    | "ms" | "s"
+    // Relative units
+    | "rem" | "%"
+}
+
+int_literal = @{ "-"? ~ ASCII_DIGIT+ }
+float_literal = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
+bool_literal = { "true" | "false" }
+
+// Character literal: 'a', '\n', '\\'
+char_literal = { "'" ~ char_inner ~ "'" }
+char_inner = @{ escape_seq | (!("'" | "\\") ~ ANY) }
+escape_seq = @{ "\\" ~ ("n" | "r" | "t" | "\\" | "'" | "\"" | "0") }
+
+// Color literal: #rgb, #rrggbb, #rrggbbaa
+color_literal = @{ "#" ~ ASCII_HEX_DIGIT{3,8} }
+
+// String expression with single-brace interpolation
+// Examples: "hello", "{count}", "Hello {name}!"
+// Use compound atomic ($) to prevent WHITESPACE from consuming spaces inside strings
+string_expr = ${ "\"" ~ string_part* ~ "\"" }
+string_part = _{
+    interpolation
+    | string_text
+}
+interpolation = { "{" ~ expr ~ "}" }
+string_text = @{ (!("\"" | "{") ~ ANY)+ }
+
+// Identifiers - support kebab-case (lowercase with hyphens)
+// e.g., selected-id, on-click, mail-item
+identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+
+// Whitespace and comments
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT = _{ "//" ~ (!"\n" ~ ANY)* | "/*" ~ (!"*/" ~ ANY)* ~ "*/" }

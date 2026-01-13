@@ -1,0 +1,45 @@
+package yel:counter@1.0.0;
+
+record Item {
+    name: string,
+    subitems: list<string>,
+}
+
+export component Counter {
+    count: s32 = 0;
+    label: string = "Count";
+    items: list<Item> = [
+        { name: "Alice", subitems: ["a1", "a2"] },
+        { name: "Bob", subitems: ["b1", "b2", "b3"] },
+    ];
+
+    VStack {
+        Text { "{label}: {count}" }
+
+        HStack {
+            Button {
+                "-"
+                clicked: { count -= 1; }
+            }
+            Button {
+                "+"
+                clicked: { count += 1; }
+            }
+        }
+
+        if count > 10 {
+            Text { "High count!" }
+        } else if count < 0 {
+            Text { "Negative!" }
+        }
+
+        for item in items key(item.name) {
+            VStack {
+                Text { "{item.name}" }
+                for sub in item.subitems key(sub) {
+                    Text { "- {sub}" }
+                }
+            }
+        }
+    }
+}

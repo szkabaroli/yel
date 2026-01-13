@@ -1,0 +1,39 @@
+[package]
+name = "yel-core"
+version = "0.1.0"
+edition = "2021"
+description = "Yel compiler"
+license = "Apache-2.0"
+
+[dependencies]
+# Parsing
+pest = "2.7"
+pest_derive = "2.7"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1"
+
+# Code generation
+quote = "1.0"
+proc-macro2 = "1.0"
+syn = "2.0"
+prettyplease = "0.2"
+wasm-encoder = "0.225"
+wasmprinter = "0.225"
+wit-parser = "0.225"
+wit-component = "0.225"
+wasm-metadata = "0.225"
+wit-encoder = { version = "0.225", features = ["from-parser"] }
+semver = "1.0"
+
+# Utilities
+indexmap = "2.0"
+parking_lot = "0.12"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
