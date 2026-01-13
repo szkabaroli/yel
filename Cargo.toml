@@ -1,0 +1,9 @@
+[workspace]
+members = [
+  "crates/yel-dsl-next",
+  "crates/yel-dsl-cli",
+  "crates/yel-dsl-example",
+  "crates/yel-host",
+  "crates/yel-smith",
+]
+resolver = "2"

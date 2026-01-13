@@ -1,0 +1,43 @@
+{
+  "name": "mxui-ast-viewer",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json"
+  },
+  "devDependencies": {
+    "@internationalized/date": "^3.10.1",
+    "@lezer/generator": "^1.8.0",
+    "@lucide/svelte": "^0.562.0",
+    "@sveltejs/vite-plugin-svelte": "^6.2.4",
+    "@tailwindcss/vite": "^4.1.18",
+    "@codemirror/lint": "^6.9.2",
+    "@tsconfig/svelte": "^5.0.6",
+    "@types/node": "^24.10.1",
+    "bits-ui": "^2.15.2",
+    "paneforge": "^1.0.2",
+    "svelte": "^5.43.8",
+    "svelte-check": "^4.3.4",
+    "tailwind-variants": "^3.2.2",
+    "tailwindcss": "^4.1.18",
+    "typescript": "~5.9.3",
+    "vite": "^7.2.4"
+  },
+  "dependencies": {
+    "@bytecodealliance/jco": "^1.15.4",
+    "@bytecodealliance/preview2-shim": "^0.17.0",
+    "@codemirror/lang-javascript": "^6.2.4",
+    "@codemirror/language": "^6.12.1",
+    "@codemirror/state": "^6.5.3",
+    "@codemirror/view": "^6.39.8",
+    "@lezer/highlight": "^1.2.3",
+    "@uiw/codemirror-theme-github": "^4.23.0",
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^3.4.0"
+  },
+  "packageManager": "pnpm@10.20.0+sha512.cf9998222162dd85864d0a8102e7892e7ba4ceadebbf5a31f9c2fce48dfce317a9c53b9f6464d1ef9042cba2e02ae02a9f7c143a2b438cd93c91840f0192b9dd"
+}
