@@ -31,4 +31,20 @@ export default defineConfig({
     exclude: ['@bytecodealliance/jco'],
   },
   assetsInclude: ['**/*.wasm'],
+  build: {
+    // Enable source maps for debugging (optional)
+    sourcemap: false,
+    // Optimize chunk splitting
+    rollupOptions: {
+      output: {
+        // Hash WASM files for cache busting
+        assetFileNames: (assetInfo) => {
+          if (assetInfo.name?.endsWith('.wasm')) {
+            return 'assets/[name]-[hash][extname]';
+          }
+          return 'assets/[name]-[hash][extname]';
+        },
+      },
+    },
+  },
 })

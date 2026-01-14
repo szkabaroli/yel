@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:compiler": "cd .. && cargo build -p yelc --release --target wasm32-wasip2 && cd yel-viewer && npm run transpile:compiler",
+    "transpile:compiler": "jco transpile ../target/wasm32-wasip2/release/yelc.wasm --name yelc --out-dir src/lib/compiler --minify --valid-lifting-optimization --no-nodejs-compat",
+    "build:all": "npm run build:compiler && npm run build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json"
   },

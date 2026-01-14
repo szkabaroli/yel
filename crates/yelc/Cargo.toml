@@ -1,29 +1,35 @@
 [package]
+description = "CLI for the Yel DSL compiler"
+edition = "2024"
 name = "yelc"
 version = "0.1.0"
-edition = "2024"
-description = "CLI for the Yel DSL compiler"
 
 [lib]
+crate-type = ["cdylib", "rlib"]
 name = "yelc"
 path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "yelc"
 path = "src/main.rs"
 
 [dependencies]
-yel-core = { path = "../yel-core" }
-yel-wasm-codegen = { path = "../yel-wasm-codegen" }
-clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-serde = { version = "1.0", features = ["derive"] }
+clap = {version = "4", features = ["derive"]}
+serde = {version = "1.0", features = ["derive"]}
 serde_json = "1.0"
 wasmprinter = "0.227"
+yel-core = {path = "../yel-core"}
+yel-wasm-codegen = {path = "../yel-wasm-codegen"}
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wit-bindgen = "0.50"
+wit-bindgen = "0.51"
+
+[profile.release]
+codegen-units = 1 # Better optimization
+lto = true # Link-time optimization
+opt-level = "z" # Optimize for size
+strip = true # Strip symbols
 
 [features]
 default = []
