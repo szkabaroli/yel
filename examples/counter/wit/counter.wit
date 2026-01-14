@@ -1,0 +1,27 @@
+package yel:counter@1.0.0;
+
+interface counter-component {
+  resource counter {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    dispatch: func(handler-id: u32);
+    get-count: func() -> s32;
+    set-count: func(value: s32);
+  }
+}
+
+interface dom-events {
+  dispatch: func(handler-id: u32);
+}
+
+interface counter-callbacks {
+  increment: func();
+}
+
+world counter-ui {
+  import counter-callbacks;
+  import yel:ui/dom@0.1.0;
+  export counter-component;
+}
+

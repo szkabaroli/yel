@@ -1,0 +1,106 @@
+{
+  "name": "yel-vscode",
+  "displayName": "Yel Language Support",
+  "description": "Language support for Yel",
+  "version": "0.1.0",
+  "publisher": "szkabaroli",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/szkabaroli/yel"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:yel"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "yel.restartServer",
+        "title": "Yel: Restart Language Server"
+      }
+    ],
+    "languages": [
+      {
+        "id": "yel",
+        "aliases": [
+          "YEL",
+          "Yel",
+          "yel"
+        ],
+        "extensions": [
+          ".yel"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "yel",
+        "scopeName": "source.yel",
+        "path": "./syntaxes/yel.tmLanguage.json"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "yel",
+        "scopes": {
+          "type": ["entity.name.type.yel"],
+          "enum": ["entity.name.type.enum.yel"],
+          "struct": ["entity.name.type.struct.yel"],
+          "enumMember": ["variable.other.enummember.yel"],
+          "variable": ["variable.other.yel"],
+          "property": ["variable.other.property.yel"],
+          "keyword": ["keyword.yel"]
+        }
+      }
+    ],
+    "configurationDefaults": {
+      "[yel]": {
+        "editor.semanticHighlighting.enabled": true
+      }
+    },
+    "configuration": {
+      "title": "Yel",
+      "properties": {
+        "yel.server.path": {
+          "type": "string",
+          "default": null,
+          "description": "Path to yel-lsp binary. If not set, uses bundled binary."
+        },
+        "yel.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js --production",
+    "watch": "node esbuild.js --watch",
+    "package": "vsce package",
+    "lint": "eslint src --ext ts"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "esbuild": "^0.19.0",
+    "typescript": "^5.3.0"
+  }
+}

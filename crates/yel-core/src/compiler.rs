@@ -206,11 +206,7 @@ impl Compiler {
     pub fn lower_to_lir(&self, thir: &ThirComponent) -> LirComponent {
         lower_to_lir(thir, &self.ctx)
     }
-
-    // TODO: Rust codegen removed - needs update for block-based LIR
-    // pub fn generate_rust(&self, lir: &LirComponent) -> String { ... }
-    // pub fn compile_to_rust(&mut self, source: &str) -> CompileResult<String> { ... }
-
+    
     /// Check if there were any errors.
     pub fn has_errors(&self) -> bool {
         self.ctx.has_errors()

@@ -1,0 +1,16 @@
+[package]
+name = "counter-example"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "counter_logic"
+crate-type = ["cdylib"]
+
+[workspace]
+
+[build-dependencies]
+which = "8.0"
+
+[dependencies]
+wit-bindgen = "0.51"

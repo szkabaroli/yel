@@ -1,0 +1,11 @@
+package yel:counter@1.0.0;
+
+// This interface is imported by the UI component
+// The Rust business logic component must export this interface
+interface counter-callbacks {
+  increment: func();
+}
+
+world counter-logic {
+  export counter-callbacks;
+}

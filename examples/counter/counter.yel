@@ -1,0 +1,24 @@
+package yel:counter@1.0.0;
+
+use yel:ui/dom@0.1.0;
+
+export component Counter {
+    count: s32 = 0;
+
+    export increment: func() -> string;
+
+    VStack {
+        Text { "Count: {count}" }
+
+        HStack {
+            Button {
+                "-"
+                clicked: { count -= 1; }
+            }
+            Button {
+                "+"
+                clicked: { count += 1; }
+            }
+        }
+    }
+}

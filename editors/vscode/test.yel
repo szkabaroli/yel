@@ -1,0 +1,44 @@
+// Sample Yel file for testing the extension
+
+component Counter {
+    in property initial: int = 0;
+    out property count: int = initial;
+    callback incremented();
+
+    VStack {
+        Text {
+            content: "Count: {{count}}";
+            font-size: 24px;
+            color: #333333;
+        }
+
+        HStack {
+            Button {
+                label: "-";
+                clicked => {
+                    count -= 1;
+                }
+            }
+
+            Button {
+                label: "+";
+                clicked => {
+                    count += 1;
+                    incremented();
+                }
+            }
+        }
+
+        if count > 10 {
+            Text {
+                content: "High count!";
+                color: #ff0000;
+            }
+        }
+    }
+}
+
+// Uncomment below for a syntax error test:
+// component Broken {
+//     property missing_type;
+// }

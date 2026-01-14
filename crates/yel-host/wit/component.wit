@@ -1,0 +1,21 @@
+package yel:host;
+
+// Main world definition for the counter-ui host
+// References interfaces from yel:ui and yel:counter packages in deps/
+world counter-ui {
+    import yel:ui/dom@0.1.0;
+    // import yel:counter/counter-callbacks@1.0.0;
+    export yel:ui/counter-component@0.1.0;
+}
+
+// World for nested parent component testing
+world nested-ui {
+    import yel:ui/dom@0.1.0;
+    export yel:ui/nested-parent-component@0.1.0;
+}
+
+// World for temperature converter component testing
+world temp-converter-ui {
+    import yel:ui/dom@0.1.0;
+    export yel:ui/temp-converter-component@0.1.0;
+}

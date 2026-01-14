@@ -1,0 +1,854 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Yel",
+  "fileTypes": ["yel"],
+  "scopeName": "source.yel",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#package" },
+    { "include": "#imports" },
+    { "include": "#record-declaration" },
+    { "include": "#enum-declaration" },
+    { "include": "#variant-declaration" },
+    { "include": "#component-declaration" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "comment": "documentation comments",
+          "name": "comment.line.documentation.yel",
+          "match": "(///).*$",
+          "captures": {
+            "1": { "name": "punctuation.definition.comment.yel" }
+          }
+        },
+        {
+          "comment": "line comments",
+          "name": "comment.line.double-slash.yel",
+          "match": "(//).*$",
+          "captures": {
+            "1": { "name": "punctuation.definition.comment.yel" }
+          }
+        },
+        {
+          "comment": "block comments",
+          "name": "comment.block.yel",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.begin.yel" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.comment.end.yel" }
+          }
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "comment": "comma",
+          "name": "punctuation.separator.comma.yel",
+          "match": ","
+        },
+        {
+          "comment": "semicolon",
+          "name": "punctuation.terminator.semicolon.yel",
+          "match": ";"
+        },
+        {
+          "comment": "curly braces",
+          "name": "punctuation.brackets.curly.yel",
+          "match": "[{}]"
+        },
+        {
+          "comment": "parentheses",
+          "name": "punctuation.brackets.round.yel",
+          "match": "[()]"
+        },
+        {
+          "comment": "square brackets",
+          "name": "punctuation.brackets.square.yel",
+          "match": "[\\[\\]]"
+        },
+        {
+          "comment": "angle brackets",
+          "name": "punctuation.brackets.angle.yel",
+          "match": "[<>]"
+        },
+        {
+          "comment": "colon",
+          "name": "punctuation.separator.colon.yel",
+          "match": ":(?!:)"
+        },
+        {
+          "comment": "dot access",
+          "name": "punctuation.accessor.dot.yel",
+          "match": "\\.(?!\\.)"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "comment": "control flow keywords",
+          "name": "keyword.control.yel",
+          "match": "\\b(if|else|for|in)\\b"
+        },
+        {
+          "comment": "declaration keywords",
+          "name": "keyword.declaration.yel storage.type.yel",
+          "match": "\\b(component|record|enum|variant|func)\\b"
+        },
+        {
+          "comment": "property direction keywords",
+          "name": "keyword.other.direction.yel",
+          "match": "\\b(in|out|inout)\\b"
+        },
+        {
+          "comment": "other keywords",
+          "name": "keyword.other.yel",
+          "match": "\\b(import|from|export|package|key)\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "comment": "fat arrow",
+          "name": "keyword.operator.arrow.fat.yel",
+          "match": "=>"
+        },
+        {
+          "comment": "skinny arrow",
+          "name": "keyword.operator.arrow.skinny.yel",
+          "match": "->"
+        },
+        {
+          "comment": "range operator",
+          "name": "keyword.operator.range.yel",
+          "match": "\\.\\.(=)?"
+        },
+        {
+          "comment": "comparison operators",
+          "name": "keyword.operator.comparison.yel",
+          "match": "(==|!=|<=|>=|<|>)"
+        },
+        {
+          "comment": "logical operators",
+          "name": "keyword.operator.logical.yel",
+          "match": "(\\|\\||&&|!(?!=))"
+        },
+        {
+          "comment": "assignment operators",
+          "name": "keyword.operator.assignment.yel",
+          "match": "(\\+=|-=|\\*=|/=|%=|=)"
+        },
+        {
+          "comment": "arithmetic operators",
+          "name": "keyword.operator.arithmetic.yel",
+          "match": "(\\+|-|\\*|/|%)(?![>=])"
+        },
+        {
+          "comment": "ternary operator",
+          "name": "keyword.operator.ternary.yel",
+          "match": "\\?"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "comment": "boolean literals",
+          "name": "constant.language.boolean.yel",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "comment": "none literal",
+          "name": "constant.language.none.yel",
+          "match": "\\bnone\\b"
+        },
+        {
+          "comment": "color hex literals",
+          "name": "constant.other.color.hex.yel",
+          "match": "#[0-9a-fA-F]{3,8}\\b"
+        },
+        {
+          "comment": "numbers with units",
+          "name": "constant.numeric.unit.yel",
+          "match": "-?\\d+(\\.\\d+)?(px|pt|in|mm|cm|phx|deg|rad|turn|ms|s|rem|%)\\b",
+          "captures": {
+            "2": { "name": "keyword.other.unit.yel" }
+          }
+        },
+        {
+          "comment": "floating point numbers",
+          "name": "constant.numeric.float.yel",
+          "match": "-?\\d+\\.\\d+\\b"
+        },
+        {
+          "comment": "integer numbers",
+          "name": "constant.numeric.integer.yel",
+          "match": "-?\\d+\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "comment": "double-quoted strings with interpolation",
+          "name": "string.quoted.double.yel",
+          "begin": "\"",
+          "end": "\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.yel" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.yel" }
+          },
+          "patterns": [
+            { "include": "#string-interpolation" },
+            { "include": "#string-escapes" }
+          ]
+        }
+      ]
+    },
+    "string-interpolation": {
+      "comment": "string interpolation",
+      "name": "meta.interpolation.yel",
+      "begin": "(\\{)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.interpolation.begin.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.interpolation.end.yel" }
+      },
+      "patterns": [
+        { "include": "#expressions" }
+      ]
+    },
+    "string-escapes": {
+      "comment": "escape sequences",
+      "name": "constant.character.escape.yel",
+      "match": "\\\\(.|$)"
+    },
+    "types": {
+      "patterns": [
+        {
+          "comment": "primitive types",
+          "name": "entity.name.type.primitive.yel",
+          "match": "\\b(bool|string|char|s8|s16|s32|s64|u8|u16|u32|u64|f32|f64|length|physical-length|angle|duration|percent|relative-font-size|color|brush|image|easing)\\b"
+        },
+        {
+          "comment": "generic types (list, option, result)",
+          "begin": "\\b(list|option|result|tuple)(<)",
+          "end": "(>)",
+          "beginCaptures": {
+            "1": { "name": "entity.name.type.generic.yel" },
+            "2": { "name": "punctuation.brackets.angle.yel" }
+          },
+          "endCaptures": {
+            "1": { "name": "punctuation.brackets.angle.yel" }
+          },
+          "patterns": [
+            { "include": "#types" },
+            { "include": "#punctuation" }
+          ]
+        },
+        {
+          "comment": "named types (PascalCase)",
+          "name": "entity.name.type.yel",
+          "match": "\\b[A-Z][a-zA-Z0-9]*\\b"
+        },
+        {
+          "comment": "named types (kebab-case)",
+          "name": "entity.name.type.yel",
+          "match": "\\b[a-z][a-z0-9]*(-[a-z0-9]+)+\\b"
+        }
+      ]
+    },
+    "package": {
+      "comment": "package declaration",
+      "name": "meta.package.yel",
+      "match": "\\b(package)\\s+([a-z][a-z0-9]*)(:)([a-z][a-z0-9-]*)(@)([0-9]+\\.[0-9]+\\.[0-9]+)\\s*(;)",
+      "captures": {
+        "1": { "name": "keyword.declaration.package.yel" },
+        "2": { "name": "entity.name.namespace.yel" },
+        "3": { "name": "punctuation.separator.yel" },
+        "4": { "name": "entity.name.type.yel" },
+        "5": { "name": "punctuation.separator.yel" },
+        "6": { "name": "constant.numeric.version.yel" },
+        "7": { "name": "punctuation.terminator.semicolon.yel" }
+      }
+    },
+    "imports": {
+      "comment": "import statements",
+      "name": "meta.import.yel",
+      "begin": "\\b(import)\\b",
+      "end": "(;)",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.import.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.terminator.semicolon.yel" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        {
+          "name": "keyword.control.from.yel",
+          "match": "\\bfrom\\b"
+        },
+        {
+          "name": "entity.name.type.component.yel",
+          "match": "\\b[A-Z][a-zA-Z0-9]*\\b"
+        },
+        { "include": "#strings" }
+      ]
+    },
+    "record-declaration": {
+      "comment": "record type declaration",
+      "name": "meta.declaration.record.yel",
+      "begin": "\\b(record)\\s+([a-zA-Z][a-zA-Z0-9-]*)\\s*(\\{)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": { "name": "keyword.declaration.record.yel storage.type.yel" },
+        "2": { "name": "entity.name.type.record.yel" },
+        "3": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#record-field" }
+      ]
+    },
+    "record-field": {
+      "comment": "record field",
+      "name": "meta.field.record.yel",
+      "match": "([a-z][a-z0-9-]*)\\s*(:)\\s*([^,}]+)",
+      "captures": {
+        "1": { "name": "variable.other.member.yel" },
+        "2": { "name": "punctuation.separator.colon.yel" },
+        "3": { "patterns": [{ "include": "#types" }] }
+      }
+    },
+    "enum-declaration": {
+      "comment": "enum type declaration",
+      "name": "meta.declaration.enum.yel",
+      "begin": "\\b(enum)\\s+([a-zA-Z][a-zA-Z0-9-]*)\\s*(\\{)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": { "name": "keyword.declaration.enum.yel storage.type.yel" },
+        "2": { "name": "entity.name.type.enum.yel" },
+        "3": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        {
+          "comment": "enum case",
+          "name": "variable.other.enummember.yel",
+          "match": "[a-z][a-z0-9-]*"
+        },
+        { "include": "#punctuation" }
+      ]
+    },
+    "variant-declaration": {
+      "comment": "variant type declaration",
+      "name": "meta.declaration.variant.yel",
+      "begin": "\\b(variant)\\s+([a-zA-Z][a-zA-Z0-9-]*)\\s*(\\{)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": { "name": "keyword.declaration.variant.yel storage.type.yel" },
+        "2": { "name": "entity.name.type.variant.yel" },
+        "3": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#variant-case" }
+      ]
+    },
+    "variant-case": {
+      "comment": "variant case with optional payload",
+      "name": "meta.variant-case.yel",
+      "begin": "([a-z][a-z0-9-]*)\\s*(\\()?",
+      "end": "(\\))?\\s*(,|(?=\\}))",
+      "beginCaptures": {
+        "1": { "name": "variable.other.enummember.yel" },
+        "2": { "name": "punctuation.brackets.round.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.round.yel" },
+        "2": { "name": "punctuation.separator.comma.yel" }
+      },
+      "patterns": [
+        { "include": "#types" }
+      ]
+    },
+    "component-declaration": {
+      "comment": "component declaration",
+      "name": "meta.declaration.component.yel",
+      "begin": "\\b(component)\\s+([A-Z][a-zA-Z0-9]*)\\s*(\\{)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": { "name": "keyword.declaration.component.yel storage.type.yel" },
+        "2": { "name": "entity.name.type.component.yel" },
+        "3": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#export-function" },
+        { "include": "#property-declaration" },
+        { "include": "#element" },
+        { "include": "#control-flow" }
+      ]
+    },
+    "export-function": {
+      "comment": "exported function declaration",
+      "name": "meta.function.export.yel",
+      "begin": "\\b(export)\\s+([a-z][a-z0-9-]*)\\s*(:)\\s*(func)\\s*(\\()",
+      "end": "(;)",
+      "beginCaptures": {
+        "1": { "name": "keyword.declaration.export.yel" },
+        "2": { "name": "entity.name.function.yel" },
+        "3": { "name": "punctuation.separator.colon.yel" },
+        "4": { "name": "keyword.declaration.func.yel storage.type.yel" },
+        "5": { "name": "punctuation.brackets.round.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.terminator.semicolon.yel" }
+      },
+      "patterns": [
+        { "include": "#function-parameters" },
+        { "include": "#function-return-type" }
+      ]
+    },
+    "function-parameters": {
+      "comment": "function parameters",
+      "begin": "(?<=\\()",
+      "end": "(\\))",
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.round.yel" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        {
+          "match": "([a-z][a-z0-9-]*)\\s*(:)",
+          "captures": {
+            "1": { "name": "variable.parameter.yel" },
+            "2": { "name": "punctuation.separator.colon.yel" }
+          }
+        },
+        { "include": "#types" },
+        { "include": "#punctuation" }
+      ]
+    },
+    "function-return-type": {
+      "comment": "function return type",
+      "match": "(->)\\s*([a-zA-Z][a-zA-Z0-9-]*)",
+      "captures": {
+        "1": { "name": "keyword.operator.arrow.skinny.yel" },
+        "2": { "patterns": [{ "include": "#types" }] }
+      }
+    },
+    "property-declaration": {
+      "comment": "property declaration",
+      "name": "meta.property.declaration.yel",
+      "begin": "([a-z][a-z0-9-]*)\\s*(:)\\s*(?=[a-zA-Z<])",
+      "end": "(;)",
+      "beginCaptures": {
+        "1": { "name": "variable.other.property.yel" },
+        "2": { "name": "punctuation.separator.colon.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.terminator.semicolon.yel" }
+      },
+      "patterns": [
+        { "include": "#types" },
+        {
+          "match": "(=)",
+          "captures": {
+            "1": { "name": "keyword.operator.assignment.yel" }
+          }
+        },
+        { "include": "#expressions" }
+      ]
+    },
+    "element": {
+      "comment": "element instantiation",
+      "name": "meta.element.yel",
+      "begin": "\\b([A-Z][a-zA-Z0-9]*)\\s*(\\{)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": { "name": "entity.name.tag.yel" },
+        "2": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#event-handler" },
+        { "include": "#attribute" },
+        { "include": "#element" },
+        { "include": "#control-flow" },
+        { "include": "#strings" }
+      ]
+    },
+    "attribute": {
+      "comment": "element attribute binding",
+      "name": "meta.attribute.yel",
+      "begin": "([a-zA-Z_][a-zA-Z0-9_-]*)\\s*(:)(?!:)",
+      "end": "(,)|(?=\\}(?!\\s*[,;]))|(?=[a-z][a-z0-9-]*\\s*:)|(?=[A-Z])",
+      "beginCaptures": {
+        "1": { "name": "entity.other.attribute-name.yel" },
+        "2": { "name": "punctuation.separator.colon.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.separator.comma.yel" }
+      },
+      "patterns": [
+        { "include": "#handler-block" },
+        { "include": "#record-literal" },
+        { "include": "#expressions" }
+      ]
+    },
+    "event-handler": {
+      "comment": "event handler with fat arrow",
+      "name": "meta.handler.yel",
+      "begin": "\\b([a-z][a-z0-9-]*)\\s*(=>)\\s*(\\{)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": { "name": "entity.name.function.handler.yel" },
+        "2": { "name": "keyword.operator.arrow.fat.yel" },
+        "3": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "patterns": [
+        { "include": "#statements" }
+      ]
+    },
+    "handler-block": {
+      "patterns": [
+        { "include": "#closure-with-params" },
+        { "include": "#closure-no-params" }
+      ]
+    },
+    "closure-with-params": {
+      "comment": "closure with typed parameters: { param: type -> statements }",
+      "name": "meta.closure.yel",
+      "begin": "(\\{)\\s*([a-z][a-z0-9-]*)\\s*(:)\\s*([a-zA-Z][a-zA-Z0-9-]*)\\s*(->)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" },
+        "2": { "name": "variable.parameter.yel" },
+        "3": { "name": "punctuation.separator.colon.yel" },
+        "4": { "name": "entity.name.type.yel" },
+        "5": { "name": "keyword.operator.arrow.skinny.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#if-statement-stmt" },
+        { "include": "#function-call" },
+        { "include": "#assignment" },
+        { "include": "#expressions" },
+        { "include": "#punctuation" }
+      ]
+    },
+    "closure-no-params": {
+      "comment": "closure without parameters: { statements }",
+      "name": "meta.closure.yel",
+      "begin": "(\\{)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#if-statement-stmt" },
+        { "include": "#function-call" },
+        { "include": "#assignment" },
+        { "include": "#expressions" },
+        { "include": "#punctuation" }
+      ]
+    },
+    "control-flow": {
+      "patterns": [
+        { "include": "#if-statement" },
+        { "include": "#for-statement" }
+      ]
+    },
+    "if-statement": {
+      "comment": "if statement",
+      "name": "meta.control.if.yel",
+      "begin": "\\b(if)\\b",
+      "end": "(?<=\\})",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.if.yel" }
+      },
+      "patterns": [
+        {
+          "name": "keyword.control.else.yel",
+          "match": "\\b(else)\\b"
+        },
+        { "include": "#block" },
+        { "include": "#expressions" }
+      ]
+    },
+    "for-statement": {
+      "comment": "for loop",
+      "name": "meta.control.for.yel",
+      "begin": "\\b(for)\\s+([a-z][a-z0-9-]*)\\s+(in)\\b",
+      "end": "(?<=\\})",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.for.yel" },
+        "2": { "name": "variable.other.loop.yel" },
+        "3": { "name": "keyword.control.in.yel" }
+      },
+      "patterns": [
+        {
+          "comment": "key clause",
+          "begin": "\\b(key)\\s*(\\()",
+          "end": "(\\))",
+          "beginCaptures": {
+            "1": { "name": "support.function.builtin.yel" },
+            "2": { "name": "punctuation.brackets.round.yel" }
+          },
+          "endCaptures": {
+            "1": { "name": "punctuation.brackets.round.yel" }
+          },
+          "patterns": [
+            { "include": "#expressions" }
+          ]
+        },
+        { "include": "#block" },
+        { "include": "#expressions" }
+      ]
+    },
+    "block": {
+      "comment": "curly brace block",
+      "name": "meta.block.yel",
+      "begin": "(\\{)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#element" },
+        { "include": "#control-flow" },
+        { "include": "#expressions" }
+      ]
+    },
+    "statements": {
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#if-statement-stmt" },
+        { "include": "#function-call" },
+        { "include": "#assignment" },
+        { "include": "#expressions" },
+        { "include": "#punctuation" }
+      ]
+    },
+    "if-statement-stmt": {
+      "comment": "if statement in handler",
+      "name": "meta.control.if.statement.yel",
+      "begin": "\\b(if)\\b",
+      "end": "(?<=\\})",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.if.yel" }
+      },
+      "patterns": [
+        {
+          "name": "keyword.control.else.yel",
+          "match": "\\b(else)\\b"
+        },
+        { "include": "#statement-block" },
+        { "include": "#expressions" }
+      ]
+    },
+    "statement-block": {
+      "comment": "statement block",
+      "begin": "(\\{)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "patterns": [
+        { "include": "#statements" }
+      ]
+    },
+    "function-call": {
+      "comment": "function call",
+      "name": "meta.function-call.yel",
+      "begin": "\\b([a-z][a-z0-9_-]*)\\s*(\\()",
+      "end": "(\\))",
+      "beginCaptures": {
+        "1": { "name": "entity.name.function.yel" },
+        "2": { "name": "punctuation.brackets.round.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.round.yel" }
+      },
+      "patterns": [
+        { "include": "#expressions" },
+        { "include": "#punctuation" }
+      ]
+    },
+    "assignment": {
+      "comment": "assignment statement",
+      "match": "([a-z][a-z0-9-]*)\\s*(\\+=|-=|\\*=|/=|=)",
+      "captures": {
+        "1": { "name": "variable.other.yel" },
+        "2": { "name": "keyword.operator.assignment.yel" }
+      }
+    },
+    "expressions": {
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#strings" },
+        { "include": "#constants" },
+        { "include": "#variant-constructor" },
+        { "include": "#record-literal" },
+        { "include": "#list-literal" },
+        { "include": "#tuple-literal" },
+        { "include": "#member-access" },
+        { "include": "#operators" },
+        { "include": "#identifiers" },
+        { "include": "#punctuation" }
+      ]
+    },
+    "variant-constructor": {
+      "comment": "variant constructor like some(...) or rgba(...)",
+      "name": "meta.variant-constructor.yel",
+      "begin": "\\b([a-z][a-z0-9-]*)\\s*(\\()(?=[^)]*[,{}\\[]|[^)]*\\))",
+      "end": "(\\))",
+      "beginCaptures": {
+        "1": { "name": "variable.other.enummember.yel" },
+        "2": { "name": "punctuation.brackets.round.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.round.yel" }
+      },
+      "patterns": [
+        { "include": "#record-literal" },
+        { "include": "#tuple-literal" },
+        { "include": "#expressions" }
+      ]
+    },
+    "record-literal": {
+      "comment": "record literal { field: value, ... }",
+      "name": "meta.record-literal.yel",
+      "begin": "(\\{)(?=\\s*[a-zA-Z_][a-zA-Z0-9_-]*\\s*:)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.curly.yel" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#record-literal-field" }
+      ]
+    },
+    "record-literal-field": {
+      "comment": "record literal field",
+      "begin": "([a-zA-Z_][a-zA-Z0-9_-]*)\\s*(:)",
+      "end": "(,|(?=\\}))",
+      "beginCaptures": {
+        "1": { "name": "variable.other.member.yel" },
+        "2": { "name": "punctuation.separator.colon.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.separator.comma.yel" }
+      },
+      "patterns": [
+        { "include": "#expressions" }
+      ]
+    },
+    "list-literal": {
+      "comment": "list literal [...]",
+      "name": "meta.list-literal.yel",
+      "begin": "(\\[)",
+      "end": "(\\])",
+      "beginCaptures": {
+        "1": { "name": "punctuation.brackets.square.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.square.yel" }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#expressions" }
+      ]
+    },
+    "tuple-literal": {
+      "comment": "tuple literal (a, b, ...)",
+      "name": "meta.tuple-literal.yel",
+      "begin": "(\\()(?=[^)]*,)",
+      "end": "(\\))",
+      "beginCaptures": {
+        "1": { "name": "punctuation.brackets.round.yel" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.brackets.round.yel" }
+      },
+      "patterns": [
+        { "include": "#expressions" }
+      ]
+    },
+    "member-access": {
+      "comment": "member access expr.field",
+      "match": "([a-z][a-z0-9-]*)(\\.)",
+      "captures": {
+        "1": { "name": "variable.other.yel" },
+        "2": { "name": "punctuation.accessor.dot.yel" }
+      }
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "comment": "enum/variant cases (lowercase with hyphens)",
+          "name": "variable.other.enummember.yel",
+          "match": "\\b(none|some|ok|err)\\b"
+        },
+        {
+          "comment": "type names (PascalCase)",
+          "name": "entity.name.type.yel",
+          "match": "\\b[A-Z][a-zA-Z0-9]*\\b"
+        },
+        {
+          "comment": "variables and identifiers",
+          "name": "variable.other.yel",
+          "match": "\\b[a-z][a-z0-9-]*\\b"
+        }
+      ]
+    }
+  }
+}

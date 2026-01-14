@@ -1,0 +1,5 @@
+// File with syntax error for testing diagnostics
+
+component Broken {
+    property missing_type: bool;
+}

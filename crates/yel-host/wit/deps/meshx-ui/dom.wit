@@ -1,0 +1,111 @@
+package yel:ui@0.1.0;
+
+interface dom {
+    // Variant for attribute values - allows host to do type conversion
+    variant attribute-value {
+        %str(string),
+        %bool(bool),
+        %s8(s8),
+        %s16(s16),
+        %s32(s32),
+        %s64(s64),
+        %u8(u8),
+        %u16(u16),
+        %u32(u32),
+        %u64(u64),
+        %f32(f32),
+        %f64(f64),
+        %char(char),
+    }
+
+    // Node creation
+    create-element: func(tag: string) -> u32;
+    create-text: func(content: string) -> u32;
+    create-comment: func(content: string) -> u32;
+
+    // Node manipulation
+    set-attribute: func(node: u32, name: string, value: attribute-value);
+    remove-attribute: func(node: u32, name: string);
+    set-text-content: func(node: u32, content: string);
+    set-style: func(node: u32, property: string, value: string);
+    set-class: func(node: u32, class-name: string);
+
+    // Tree operations
+    append-child: func(parent: u32, child: u32);
+    insert-before: func(parent: u32, node: u32, reference: u32);
+    insert-after: func(parent: u32, node: u32, anchor: u32);
+    remove-child: func(parent: u32, child: u32);
+    remove: func(node: u32);
+
+    // Navigation (returns 0 if none)
+    get-parent: func(node: u32) -> u32;
+    get-next-sibling: func(node: u32) -> u32;
+
+    // Events
+    add-event-listener: func(node: u32, event: string, handler-id: u32);
+    remove-event-listener: func(node: u32, event: string, handler-id: u32);
+}
+
+// Counter/checkerboard component interface
+interface counter-component {
+    resource counter {
+        constructor();
+
+        // Lifecycle
+        mount: func(root: u32);
+        unmount: func();
+
+        // Event dispatch
+        dispatch: func(handler-id: u32);
+
+        // Properties (checkerboard uses rows/cols)
+        get-rows: func() -> list<u32>;
+        set-rows: func(value: list<u32>);
+        get-cols: func() -> list<u32>;
+        set-cols: func(value: list<u32>);
+    }
+}
+
+// Nested parent component interface
+interface nested-parent-component {
+    // Item record with nested subitems list
+    record item {
+        name: string,
+        subitems: list<string>,
+    }
+
+    resource nested-parent {
+        constructor();
+
+        // Lifecycle
+        mount: func(root: u32);
+        unmount: func();
+
+        // Event dispatch
+        dispatch: func(handler-id: u32);
+
+        // Properties
+        get-items: func() -> list<item>;
+        set-items: func(value: list<item>);
+    }
+}
+
+// Temperature converter component interface
+interface temp-converter-component {
+    resource temp-converter {
+        constructor();
+
+        // Lifecycle
+        mount: func(root: u32);
+        unmount: func();
+
+        // Event dispatch
+        dispatch: func(handler-id: u32);
+
+        // Properties
+        get-celsius: func() -> f32;
+        set-celsius: func(value: f32);
+        get-fahrenheit: func() -> f32;
+        set-fahrenheit: func(value: f32);
+    }
+}

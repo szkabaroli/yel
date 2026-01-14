@@ -2,9 +2,8 @@
 members = [
   "crates/yelc",
   "crates/yel-core",
-  #"crates/yel-dsl-cli",
-  #"crates/yel-dsl-example",
-  #"crates/yel-host",
-  #"crates/yel-smith",
+  "crates/yel-host",
+  "crates/yel-smith",
+  "crates/yel-wasm-codegen",
 ]
 resolver = "2"
