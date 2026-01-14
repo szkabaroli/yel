@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Generated compiler files (built during CI)
+src/lib/compiler/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
