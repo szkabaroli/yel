@@ -6,9 +6,24 @@ use std::fs;
 use std::path::PathBuf;
 use yel_core::{Compiler, codegen, syntax::ast::PackageId};
 
+// Build info from shadow-rs
+shadow_rs::shadow!(build);
+
+/// Get long version string with git info
+fn long_version() -> &'static str {
+    shadow_rs::formatcp!(
+        "{} ({} {})\nbuilt: {}\nrustc: {}",
+        build::PKG_VERSION,
+        build::SHORT_COMMIT,
+        build::COMMIT_DATE,
+        build::BUILD_TIME,
+        build::RUST_VERSION
+    )
+}
+
 #[derive(Parser)]
-#[command(name = "yel")]
-#[command(author, version, about = "Yel Compiler", long_about = None)]
+#[command(name = "yelc")]
+#[command(author, version = build::PKG_VERSION, long_version = long_version(), about = "Yel Compiler", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

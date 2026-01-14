@@ -59,6 +59,9 @@ libfuzzer-sys = "0.4"
 # Testing
 pretty_assertions = "1.4"
 
+# Build info
+shadow-rs = "0.37"
+
 [profile.release]
 codegen-units = 1
 lto = true

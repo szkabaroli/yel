@@ -4,6 +4,7 @@ version.workspace = true
 edition = "2024"
 description = "CLI for the Yel DSL compiler"
 license.workspace = true
+build = "build.rs"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -22,6 +23,10 @@ serde_json.workspace = true
 wasmprinter.workspace = true
 yel-core.workspace = true
 yel-wasm-codegen.workspace = true
+shadow-rs.workspace = true
+
+[build-dependencies]
+shadow-rs.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wit-bindgen.workspace = true

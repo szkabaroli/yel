@@ -41,6 +41,9 @@
 //! }
 //! ```
 
+// Build info from shadow-rs
+shadow_rs::shadow!(build);
+
 #[cfg(target_arch = "wasm32")]
 mod wasi_impl {
     use yel_core::{Compiler, codegen};
@@ -53,8 +56,10 @@ mod wasi_impl {
     });
 
     use exports::yel::compiler::compiler::{
-        CompileOutcome, CompileResult, Diagnostic, Guest, OutputFormat,
+        CompileOutcome, CompileResult, Diagnostic, Guest, OutputFormat, VersionInfo,
     };
+
+    use super::build;
 
     /// Convert internal diagnostics to WIT diagnostics.
     fn convert_diagnostics(compiler: &Compiler) -> Vec<Diagnostic> {
@@ -95,6 +100,16 @@ mod wasi_impl {
     struct YelCompiler;
 
     impl Guest for YelCompiler {
+        fn version() -> VersionInfo {
+            VersionInfo {
+                version: build::PKG_VERSION.to_string(),
+                commit: build::SHORT_COMMIT.to_string(),
+                commit_date: build::COMMIT_DATE.to_string(),
+                build_time: build::BUILD_TIME.to_string(),
+                rust_version: build::RUST_VERSION.to_string(),
+            }
+        }
+
         fn compile(
             filename: String,
             source: String,

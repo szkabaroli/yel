@@ -2,6 +2,23 @@ package yel:compiler@0.1.0;
 
 /// Yel Compiler interface
 interface compiler {
+    /// Version information about the compiler.
+    record version-info {
+        /// Package version (e.g., "0.1.0")
+        version: string,
+        /// Git commit hash (short)
+        commit: string,
+        /// Git commit date
+        commit-date: string,
+        /// Build timestamp
+        build-time: string,
+        /// Rust version used to build
+        rust-version: string,
+    }
+
+    /// Get compiler version information.
+    version: func() -> version-info;
+
     /// Output format for compilation.
     enum output-format {
         /// Generated Rust source code
