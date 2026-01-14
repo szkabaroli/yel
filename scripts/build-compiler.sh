@@ -8,9 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 OUTPUT_DIR="$ROOT_DIR/yel-viewer/src/lib/compiler"
 
-echo "🔨 Building yelc in release mode for wasm32-wasip2..."
+echo "🔨 Building yelc library in release mode for wasm32-wasip2..."
 cd "$ROOT_DIR"
-cargo build -p yelc --release --target wasm32-wasip2
+cargo build --lib -p yelc --release --target wasm32-wasip2
 
 WASM_PATH="$ROOT_DIR/target/wasm32-wasip2/release/yelc.wasm"
 
