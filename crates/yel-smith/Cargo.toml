@@ -1,17 +1,18 @@
 [package]
 name = "yel-smith"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "Random Yel source code generator for fuzzing"
-
-[dependencies]
-arbitrary = { version = "1.3", features = ["derive"] }
-anyhow = "1.0"
-yel-core = { path = "../yel-core" }
-
-[dev-dependencies]
-libfuzzer-sys = "0.4"
+license.workspace = true
 
 [[bin]]
 name = "yel-smith"
 path = "src/main.rs"
+
+[dependencies]
+arbitrary.workspace = true
+anyhow.workspace = true
+yel-core.workspace = true
+
+[dev-dependencies]
+libfuzzer-sys.workspace = true

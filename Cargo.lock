@@ -2144,17 +2144,6 @@ dependencies = [
 
 [[package]]
 name = "wasmparser"
-version = "0.227.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f51cad774fb3c9461ab9bccc9c62dfb7388397b5deda31bf40e8108ccd678b2"
-dependencies = [
- "bitflags",
- "indexmap",
- "semver",
-]
-
-[[package]]
-name = "wasmparser"
 version = "0.243.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6d8db401b0528ec316dfbe579e6ab4152d61739cfe076706d2009127970159d"
@@ -2187,17 +2176,6 @@ dependencies = [
  "anyhow",
  "termcolor",
  "wasmparser 0.225.0",
-]
-
-[[package]]
-name = "wasmprinter"
-version = "0.227.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32475a0459db5639e989206dd8833fb07110ec092a7cb3468c82341989cac4d3"
-dependencies = [
- "anyhow",
- "termcolor",
- "wasmparser 0.227.1",
 ]
 
 [[package]]
@@ -3130,7 +3108,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
- "wasmprinter 0.227.1",
+ "wasmprinter 0.225.0",
  "wit-bindgen 0.51.0",
  "yel-core",
  "yel-wasm-codegen",

@@ -1,15 +1,16 @@
 [package]
 name = "yel-host"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Host runtime for testing Yel components"
+license.workspace = true
 
 [[bin]]
 name = "yel-host"
 path = "src/main.rs"
 
 [dependencies]
-wasmtime = { version = "40", features = ["component-model"] }
-wasmtime-wasi = "40"
-anyhow = "1.0"
-clap = { version = "4", features = ["derive"] }
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+anyhow.workspace = true
+clap.workspace = true

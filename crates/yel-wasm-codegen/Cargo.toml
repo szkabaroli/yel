@@ -1,29 +1,29 @@
 [package]
 name = "yel-wasm-codegen"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "Yel WebAssembly code generator"
-license = "Apache-2.0"
+license.workspace = true
 
 [dependencies]
-yel-core = { path = "../yel-core" }
+yel-core.workspace = true
 
 # Error handling
-thiserror = "1.0"
-anyhow = "1"
+thiserror.workspace = true
+anyhow.workspace = true
 
 # Code generation
-wasm-encoder = "0.225"
-wasmprinter = "0.225"
-wit-parser = "0.225"
-wit-component = "0.225"
-wasm-metadata = "0.225"
-wit-encoder = { version = "0.225", features = ["from-parser"] }
-semver = "1.0"
+wasm-encoder.workspace = true
+wasmprinter.workspace = true
+wit-parser.workspace = true
+wit-component.workspace = true
+wasm-metadata.workspace = true
+wit-encoder.workspace = true
+semver.workspace = true
 
 # Utilities
-indexmap = "2.0"
-parking_lot = "0.12"
+indexmap.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
-pretty_assertions = "1.4"
+pretty_assertions.workspace = true
