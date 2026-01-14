@@ -1,14 +1,13 @@
 #!/bin/bash
 set -e
 
-# Source cargo env
-. $HOME/.cargo/env
+# Source cargo
+. "$HOME/.cargo/env"
 
 # Build yelc compiler
-cd ..
 cargo build -p yelc --release --target wasm32-wasip2
 
-# Transpile to JS
+# Transpile WASM to JS
 cd yel-viewer
 pnpm exec jco transpile \
     ../target/wasm32-wasip2/release/yelc.wasm \

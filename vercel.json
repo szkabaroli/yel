@@ -1,9 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "vite",
+  "framework": null,
   "installCommand": "bash scripts/vercel-install.sh",
   "buildCommand": "bash scripts/vercel-build.sh",
-  "outputDirectory": "dist",
+  "outputDirectory": "yel-viewer/dist",
   "headers": [
     {
       "source": "/(.*)\\.wasm",
