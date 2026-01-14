@@ -9,7 +9,7 @@ cargo build -p yelc --release --target wasm32-wasip2
 
 # Transpile WASM to JS
 cd yel-viewer
-pnpm exec jco transpile \
+npx jco transpile \
     ../target/wasm32-wasip2/release/yelc.wasm \
     --name yelc \
     --out-dir src/lib/compiler \
@@ -18,4 +18,4 @@ pnpm exec jco transpile \
     --no-nodejs-compat
 
 # Build Vite app
-pnpm build
+npm run build

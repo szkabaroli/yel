@@ -6,10 +6,6 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --defaul
 . "$HOME/.cargo/env"
 rustup target add wasm32-wasip2
 
-# Enable corepack for pnpm
-corepack enable
-corepack prepare pnpm@latest --activate
-
-# Install Node dependencies
+# Install Node dependencies (using npm for Vercel compatibility)
 cd yel-viewer
-pnpm install
+npm install
