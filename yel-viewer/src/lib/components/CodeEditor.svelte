@@ -97,25 +97,10 @@
       "&": {
         height: "100%",
         fontSize: "14px",
-        backgroundColor: "#000000",
       },
       ".cm-scroller": {
         overflow: "auto",
         fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-      },
-      ".cm-content": {
-        caretColor: "#fafafa",
-      },
-      ".cm-gutters": {
-        backgroundColor: "#000000",
-        color: "#52525b",
-        borderRight: "1px solid #27272a",
-      },
-      ".cm-activeLineGutter": {
-        backgroundColor: "#09090b",
-      },
-      ".cm-activeLine": {
-        backgroundColor: "#09090b",
       },
       ".cm-highlight": {
         backgroundColor: "rgba(250, 204, 21, 0.25)",
@@ -130,22 +115,7 @@
         content: '"●"',
         color: "#eab308",
       },
-      // Diagnostic underlines
-      ".cm-lintRange-error": {
-       
-      },
-      ".cm-lintRange-warning": {
-        
-        
-      },
-      // Tooltip panel
-      ".cm-tooltip-lint": {
-        backgroundColor: "black",
-        border: "1px solid #27272a",
-        padding: "8px 12px",
-        fontSize: "12px",
-      },
-    }, { dark: true }));
+    }));
 
     const state = EditorState.create({
       doc: code,
@@ -229,6 +199,33 @@
 
   .editor-container :global(.cm-editor) {
     height: 100%;
+    background-color: var(--color-background);
+  }
+
+  .editor-container :global(.cm-content) {
+    caret-color: var(--color-foreground);
+  }
+
+  .editor-container :global(.cm-gutters) {
+    background-color: var(--color-card);
+    color: var(--color-muted-foreground);
+    border-right: 1px solid var(--color-border);
+  }
+
+  .editor-container :global(.cm-activeLineGutter) {
+    background-color: var(--color-secondary);
+  }
+
+  .editor-container :global(.cm-activeLine) {
+    background-color: var(--color-secondary);
+  }
+
+  .editor-container :global(.cm-tooltip-lint) {
+    background-color: var(--color-popover);
+    border: 1px solid var(--color-border);
+    color: var(--color-popover-foreground);
+    padding: 8px 12px;
+    font-size: 12px;
   }
 
   /* Match ScrollArea scrollbar styling */
@@ -242,7 +239,7 @@
   }
 
   .editor-container :global(.cm-scroller::-webkit-scrollbar-thumb) {
-    background: #27272a;
+    background: var(--color-border);
     border-radius: 9999px;
     border: 4px solid transparent;
     background-clip: content-box;

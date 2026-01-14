@@ -3,6 +3,28 @@
 
 import { compiler } from './compiler/yelc.js';
 
+export interface VersionInfo {
+  version: string;
+  commit: string;
+  commitDate: string;
+  buildTime: string;
+  rustVersion: string;
+}
+
+/**
+ * Get compiler version information.
+ */
+export function getVersion(): VersionInfo {
+  const info = compiler.version();
+  return {
+    version: info.version,
+    commit: info.commit,
+    commitDate: info.commitDate,
+    buildTime: info.buildTime,
+    rustVersion: info.rustVersion,
+  };
+}
+
 export interface Diagnostic {
   /** Plain error message for UIs and LSPs */
   message: string;

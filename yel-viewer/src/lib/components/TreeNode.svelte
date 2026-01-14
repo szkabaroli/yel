@@ -48,94 +48,88 @@
     onHover?.(null);
   }
 
-  // Color palette matching yelLanguage.ts (GitHub Dark theme)
-  // Keywords: #ff7b72 (red) - control flow
-  // Types/Records: #ffa657 (orange) - type definitions
-  // Elements: #7ee787 (green) - UI elements
-  // Properties/Fields: #79c0ff (blue)
-  // Functions/Handlers: #d2a8ff (purple)
-  // Strings/Text: #a5d6ff (light blue)
-  // Variables/Default: #c9d1d9 (gray)
-  function getKindColor(kind: string): string {
-    const colors: Record<string, string> = {
-      // Root/Structure
-      File: "#79c0ff",
-      HIR: "#79c0ff",
-      THIR: "#79c0ff",
-      Package: "#ffa657",
+  // Color class mapping for syntax highlighting
+  // Uses CSS classes that switch colors based on color scheme
+  function getKindColorClass(kind: string): string {
+    const classMap: Record<string, string> = {
+      // Root/Structure (blue)
+      File: "kind-blue",
+      HIR: "kind-blue",
+      THIR: "kind-blue",
+      Package: "kind-orange",
 
       // Type definitions (orange)
-      Component: "#ffa657",
-      Record: "#ffa657",
-      Enum: "#ffa657",
-      Variant: "#ffa657",
-      RecordLit: "#ffa657",
-      VariantCtor: "#ffa657",
+      Component: "kind-orange",
+      Record: "kind-orange",
+      Enum: "kind-orange",
+      Variant: "kind-orange",
+      RecordLit: "kind-orange",
+      VariantCtor: "kind-orange",
 
       // Properties and fields (blue)
-      Property: "#79c0ff",
-      Field: "#79c0ff",
-      Binding: "#79c0ff",
-      EnumCase: "#79c0ff",
-      VariantCase: "#79c0ff",
+      Property: "kind-blue",
+      Field: "kind-blue",
+      Binding: "kind-blue",
+      EnumCase: "kind-blue",
+      VariantCase: "kind-blue",
 
       // Functions (purple)
-      Function: "#d2a8ff",
-      Callback: "#d2a8ff",
-      Call: "#d2a8ff",
-      MethodCall: "#d2a8ff",
-      Handler: "#d2a8ff",
-      Closure: "#d2a8ff",
+      Function: "kind-purple",
+      Callback: "kind-purple",
+      Call: "kind-purple",
+      MethodCall: "kind-purple",
+      Handler: "kind-purple",
+      Closure: "kind-purple",
 
       // UI Elements (green)
-      Element: "#7ee787",
+      Element: "kind-green",
 
       // Control flow (red)
-      If: "#ff7b72",
-      IfBranch: "#ff7b72",
-      ElseIfBranch: "#ff7b72",
-      ElseBranch: "#ff7b72",
-      For: "#ff7b72",
-      Match: "#ff7b72",
-      MatchArm: "#ff7b72",
-      Guard: "#ff7b72",
-      Ternary: "#ff7b72",
-      Range: "#ff7b72",
+      If: "kind-red",
+      IfBranch: "kind-red",
+      ElseIfBranch: "kind-red",
+      ElseBranch: "kind-red",
+      For: "kind-red",
+      Match: "kind-red",
+      MatchArm: "kind-red",
+      Guard: "kind-red",
+      Ternary: "kind-red",
+      Range: "kind-red",
 
-      // Text/Strings (light blue)
-      Text: "#a5d6ff",
-      Literal: "#a5d6ff",
-      Interpolation: "#a5d6ff",
+      // Text/Strings (cyan)
+      Text: "kind-cyan",
+      Literal: "kind-cyan",
+      Interpolation: "kind-cyan",
 
-      // Variables/Expressions (gray)
-      Var: "#c9d1d9",
-      Ident: "#c9d1d9",
-      Binary: "#c9d1d9",
-      Unary: "#c9d1d9",
-      Index: "#c9d1d9",
-      Member: "#c9d1d9",
-      OptionalMember: "#c9d1d9",
-      OptionalChain: "#c9d1d9",
-      Tuple: "#c9d1d9",
-      List: "#c9d1d9",
+      // Variables/Expressions (default)
+      Var: "kind-default",
+      Ident: "kind-default",
+      Binary: "kind-default",
+      Unary: "kind-default",
+      Index: "kind-default",
+      Member: "kind-default",
+      OptionalMember: "kind-default",
+      OptionalChain: "kind-default",
+      Tuple: "kind-default",
+      List: "kind-default",
 
-      // Statements (gray)
-      ExprStmt: "#c9d1d9",
-      Assign: "#c9d1d9",
-      CompoundAssign: "#c9d1d9",
-      IfStmt: "#ff7b72",
+      // Statements (default)
+      ExprStmt: "kind-default",
+      Assign: "kind-default",
+      CompoundAssign: "kind-default",
+      IfStmt: "kind-red",
 
       // Coercion/Type ops (orange)
-      Coerce: "#ffa657",
+      Coerce: "kind-orange",
 
       // Symbols (purple - like functions)
-      Symbol: "#d2a8ff",
-      SymbolTable: "#d2a8ff",
+      Symbol: "kind-purple",
+      SymbolTable: "kind-purple",
 
       // Errors (red)
-      Error: "#ff7b72",
+      Error: "kind-red",
     };
-    return colors[kind] || "#c9d1d9";
+    return classMap[kind] || "kind-default";
   }
 </script>
 
@@ -156,7 +150,7 @@
     }
   }}
 >
-  <div class="node-content flex items-center gap-1.5 py-1 px-2 rounded cursor-pointer transition-colors hover:bg-white/5"
+  <div class="node-content flex items-center gap-1.5 py-1 px-2 rounded cursor-pointer transition-colors hover:bg-secondary/50"
        class:selected-content={isSelected}
        style:padding-left="calc(8px + var(--depth, 0) * 16px)">
     {#if hasChildren}
@@ -171,7 +165,7 @@
       <span class="w-4 shrink-0"></span>
     {/if}
 
-    <span class="font-medium shrink-0" style:color={getKindColor(node.kind)}>
+    <span class="font-medium shrink-0 {getKindColorClass(node.kind)}">
       {node.kind}
     </span>
 
@@ -205,5 +199,24 @@
   .selected-content {
     background-color: rgba(250, 204, 21, 0.15);
     outline: 1px solid rgba(250, 204, 21, 0.4);
+  }
+
+  /* Light mode colors */
+  .kind-red { color: #cf222e; }
+  .kind-orange { color: #bc4c00; }
+  .kind-green { color: #116329; }
+  .kind-blue { color: #0969da; }
+  .kind-purple { color: #8250df; }
+  .kind-cyan { color: #0284c7; }
+  .kind-default { color: var(--color-foreground); }
+
+  /* Dark mode colors */
+  @media (prefers-color-scheme: dark) {
+    .kind-red { color: #ff7b72; }
+    .kind-orange { color: #ffa657; }
+    .kind-green { color: #7ee787; }
+    .kind-blue { color: #79c0ff; }
+    .kind-purple { color: #d2a8ff; }
+    .kind-cyan { color: #a5d6ff; }
   }
 </style>

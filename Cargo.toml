@@ -59,8 +59,8 @@ libfuzzer-sys = "0.4"
 # Testing
 pretty_assertions = "1.4"
 
-# Build info
-shadow-rs = "0.37"
+# Build info (default-features = false to avoid git2/libgit2 for WASM compat)
+shadow-rs = { version = "0.37", default-features = false }
 
 [profile.release]
 codegen-units = 1

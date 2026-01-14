@@ -3,8 +3,8 @@
     import { EditorView, lineNumbers } from '@codemirror/view'
     import { EditorState } from '@codemirror/state'
     import { StreamLanguage } from '@codemirror/language'
-    import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
-    import { tags } from '@lezer/highlight'
+    import { syntaxHighlighting } from '@codemirror/language'
+    import { tags, tagHighlighter } from '@lezer/highlight'
 
     interface Props {
         code: string
@@ -181,34 +181,21 @@
         },
     })
 
-    // WAST highlight style based on TextMate grammar scopes
-    const wastHighlightStyle = HighlightStyle.define([
-        // storage.type.wat - module elements
-        { tag: tags.keyword, color: '#ff7b72' }, // Red for module keywords
-        // entity.name.type.wat - type names
-        { tag: tags.typeName, color: '#79c0ff' }, // Blue for types
-        // keyword.operator.word.wat - instructions
-        { tag: tags.operator, color: '#e4e4e7' }, // White for instructions
-        // keyword.control.wat - control flow
-        { tag: tags.controlKeyword, color: '#d2a8ff' }, // Purple for control flow
-        // variable.other.wat / entity.name.function.wat
-        { tag: tags.variableName, color: '#ffa657' }, // Orange for $variables
-        // string.quoted.double.wat
-        { tag: tags.string, color: '#a5d6ff' }, // Light blue for strings
-        // constant.numeric.wat
-        { tag: tags.number, color: '#79c0ff' }, // Blue for numbers
-        // comment.wat
-        { tag: tags.comment, color: '#8b949e' }, // Gray for comments
-        // annotations
-        { tag: tags.meta, color: '#ff7b72' }, // Red for annotations (same as keywords)
-        // brackets
-        { tag: tags.bracket, color: '#8b949e' }, // Gray for brackets
-        // catch-all names
-        { tag: tags.name, color: '#7ee787' }, // Green for names/identifiers
-        // storage.modifier.wat - mut, shared, passive
-        { tag: tags.modifier, color: '#ff7b72' }, // Red for modifiers
-        // entity.other.attribute-name.wat - offset=, align=, string-encoding=
-        { tag: tags.attributeName, color: '#ff7b72' }, // Reddish orange for attributes
+    // WAST tag highlighter - colors defined in CSS
+    const wastHighlighter = tagHighlighter([
+        { tag: tags.keyword, class: 'wast-keyword' },
+        { tag: tags.typeName, class: 'wast-type' },
+        { tag: tags.operator, class: 'wast-operator' },
+        { tag: tags.controlKeyword, class: 'wast-control' },
+        { tag: tags.variableName, class: 'wast-variable' },
+        { tag: tags.string, class: 'wast-string' },
+        { tag: tags.number, class: 'wast-number' },
+        { tag: tags.comment, class: 'wast-comment' },
+        { tag: tags.meta, class: 'wast-meta' },
+        { tag: tags.bracket, class: 'wast-bracket' },
+        { tag: tags.name, class: 'wast-name' },
+        { tag: tags.modifier, class: 'wast-modifier' },
+        { tag: tags.attributeName, class: 'wast-attr' },
     ])
 
     onMount(() => {
@@ -219,36 +206,18 @@
                 EditorState.readOnly.of(true),
                 lineNumbers(),
                 wastLanguage,
-                syntaxHighlighting(wastHighlightStyle),
-                EditorView.theme(
-                    {
-                        '&': {
-                            height: '100%',
-                            fontSize: '14px',
-                            backgroundColor: '#000000',
-                        },
-                        '.cm-scroller': {
-                            overflow: 'auto',
-                            fontFamily:
-                                "'JetBrains Mono', 'Fira Code', monospace",
-                        },
-                        '.cm-content': {
-                            caretColor: '#fafafa',
-                        },
-                        '.cm-gutters': {
-                            backgroundColor: '#000000',
-                            color: '#52525b',
-                            borderRight: '1px solid #27272a',
-                        },
-                        '.cm-activeLineGutter': {
-                            backgroundColor: '#09090b',
-                        },
-                        '.cm-activeLine': {
-                            backgroundColor: '#09090b',
-                        },
+                syntaxHighlighting(wastHighlighter),
+                EditorView.theme({
+                    '&': {
+                        height: '100%',
+                        fontSize: '14px',
                     },
-                    { dark: true }
-                ),
+                    '.cm-scroller': {
+                        overflow: 'auto',
+                        fontFamily:
+                            "'JetBrains Mono', 'Fira Code', monospace",
+                    },
+                }),
             ],
         })
 
@@ -301,6 +270,25 @@
 
     .editor-container :global(.cm-editor) {
         height: 100%;
+        background-color: var(--color-background);
+    }
+
+    .editor-container :global(.cm-content) {
+        caret-color: var(--color-foreground);
+    }
+
+    .editor-container :global(.cm-gutters) {
+        background-color: var(--color-card);
+        color: var(--color-muted-foreground);
+        border-right: 1px solid var(--color-border);
+    }
+
+    .editor-container :global(.cm-activeLineGutter) {
+        background-color: var(--color-secondary);
+    }
+
+    .editor-container :global(.cm-activeLine) {
+        background-color: var(--color-secondary);
     }
 
     /* Match ScrollArea scrollbar styling */
@@ -314,7 +302,7 @@
     }
 
     .editor-container :global(.cm-scroller::-webkit-scrollbar-thumb) {
-        background: #27272a;
+        background: var(--color-border);
         border-radius: 9999px;
         border: 4px solid transparent;
         background-clip: content-box;

@@ -17,9 +17,9 @@
   );
 </script>
 
-<div class="flex flex-col h-full bg-black text-xs">
+<div class="flex flex-col h-full bg-background text-xs">
   <header
-    class="flex items-center gap-3 h-9 shrink-0 px-3 bg-zinc-950 border-b border-zinc-800 select-none text-neutral-300"
+    class="flex items-center gap-3 h-9 shrink-0 px-3 bg-card border-b border-border select-none text-muted-foreground"
   >
     <span>Problems</span>
     <div class="flex items-center gap-2">
@@ -36,7 +36,7 @@
     {#each diagnostics as diagnostic}
       <button
         type="button"
-        class="flex items-center gap-3 w-full text-left px-3 py-1 hover:bg-neutral-900 focus:bg-neutral-800 focus:outline-none"
+        class="flex items-center gap-3 w-full text-left px-3 py-1 hover:bg-secondary focus:bg-accent focus:outline-none"
         onclick={() => onClickDiagnostic?.(diagnostic)}
       >
         <Badge
@@ -46,10 +46,10 @@
         >
           {diagnostic.severity}
         </Badge>
-        <span class="shrink-0 text-neutral-500 tabular-nums text-right">
+        <span class="shrink-0 text-muted-foreground tabular-nums text-right">
           {diagnostic.line}:{diagnostic.column}
         </span>
-        <span class="flex-1 text-neutral-200 truncate"
+        <span class="flex-1 text-foreground truncate"
           >{diagnostic.message}</span
         >
       </button>

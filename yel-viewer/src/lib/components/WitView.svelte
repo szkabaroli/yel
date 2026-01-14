@@ -3,8 +3,8 @@
   import { EditorView, lineNumbers } from "@codemirror/view";
   import { EditorState } from "@codemirror/state";
   import { StreamLanguage } from "@codemirror/language";
-  import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
-  import { tags } from "@lezer/highlight";
+  import { syntaxHighlighting } from "@codemirror/language";
+  import { tags, tagHighlighter } from "@lezer/highlight";
 
   interface Props {
     code: string;
@@ -104,19 +104,19 @@
     },
   });
 
-  // WIT highlight style
-  const witHighlightStyle = HighlightStyle.define([
-    { tag: tags.keyword, color: "#ff7b72" },      // Red for keywords
-    { tag: tags.typeName, color: "#79c0ff" },     // Blue for types
-    { tag: tags.function(tags.variableName), color: "#d2a8ff" }, // Purple for functions
-    { tag: tags.variableName, color: "#ffa657" }, // Orange for variables
-    { tag: tags.string, color: "#a5d6ff" },       // Light blue for strings
-    { tag: tags.comment, color: "#8b949e" },      // Gray for comments
-    { tag: tags.meta, color: "#7ee787" },         // Green for version annotations
-    { tag: tags.bracket, color: "#8b949e" },      // Gray for brackets
-    { tag: tags.operator, color: "#ff7b72" },     // Red for arrows
-    { tag: tags.punctuation, color: "#8b949e" },  // Gray for punctuation
-    { tag: tags.namespace, color: "#ffa657" },    // Orange for namespaces (matches Yel source)
+  // WIT tag highlighter - colors defined in CSS
+  const witHighlighter = tagHighlighter([
+    { tag: tags.keyword, class: "wit-keyword" },
+    { tag: tags.typeName, class: "wit-type" },
+    { tag: tags.function(tags.variableName), class: "wit-function" },
+    { tag: tags.variableName, class: "wit-variable" },
+    { tag: tags.string, class: "wit-string" },
+    { tag: tags.comment, class: "wit-comment" },
+    { tag: tags.meta, class: "wit-meta" },
+    { tag: tags.bracket, class: "wit-bracket" },
+    { tag: tags.operator, class: "wit-operator" },
+    { tag: tags.punctuation, class: "wit-punctuation" },
+    { tag: tags.namespace, class: "wit-namespace" },
   ]);
 
   onMount(() => {
@@ -127,32 +127,17 @@
         EditorState.readOnly.of(true),
         lineNumbers(),
         witLanguage,
-        syntaxHighlighting(witHighlightStyle),
+        syntaxHighlighting(witHighlighter),
         EditorView.theme({
           "&": {
             height: "100%",
             fontSize: "14px",
-            backgroundColor: "#000000",
           },
           ".cm-scroller": {
             overflow: "auto",
             fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
           },
-          ".cm-content": {
-            caretColor: "#fafafa",
-          },
-          ".cm-gutters": {
-            backgroundColor: "#000000",
-            color: "#52525b",
-            borderRight: "1px solid #27272a",
-          },
-          ".cm-activeLineGutter": {
-            backgroundColor: "#09090b",
-          },
-          ".cm-activeLine": {
-            backgroundColor: "#09090b",
-          },
-        }, { dark: true }),
+        }),
       ],
     });
 
@@ -201,6 +186,25 @@
 
   .editor-container :global(.cm-editor) {
     height: 100%;
+    background-color: var(--color-background);
+  }
+
+  .editor-container :global(.cm-content) {
+    caret-color: var(--color-foreground);
+  }
+
+  .editor-container :global(.cm-gutters) {
+    background-color: var(--color-card);
+    color: var(--color-muted-foreground);
+    border-right: 1px solid var(--color-border);
+  }
+
+  .editor-container :global(.cm-activeLineGutter) {
+    background-color: var(--color-secondary);
+  }
+
+  .editor-container :global(.cm-activeLine) {
+    background-color: var(--color-secondary);
   }
 
   /* Match ScrollArea scrollbar styling */
@@ -214,7 +218,7 @@
   }
 
   .editor-container :global(.cm-scroller::-webkit-scrollbar-thumb) {
-    background: #27272a;
+    background: var(--color-border);
     border-radius: 9999px;
     border: 4px solid transparent;
     background-clip: content-box;

@@ -1,38 +1,77 @@
 @import "tailwindcss";
 
-@theme {
-  /* shadcn-svelte dark theme using Tailwind v4 theme references */
-  --color-background: #000000;
-  --color-foreground: var(--color-zinc-50);
-
-  --color-card: var(--color-zinc-950);
-  --color-card-foreground: var(--color-zinc-50);
-
-  --color-popover: var(--color-zinc-900);
-  --color-popover-foreground: var(--color-zinc-50);
-
-  --color-primary: var(--color-zinc-50);
-  --color-primary-foreground: var(--color-zinc-900);
-
-  --color-secondary: var(--color-zinc-800);
-  --color-secondary-foreground: var(--color-zinc-50);
-
-  --color-muted: var(--color-zinc-800);
-  --color-muted-foreground: var(--color-zinc-400);
-
-  --color-accent: var(--color-zinc-800);
-  --color-accent-foreground: var(--color-zinc-50);
-
-  --color-destructive: var(--color-red-500);
-
-  --color-border: var(--color-zinc-800);
-  --color-input: var(--color-zinc-800);
-  --color-ring: var(--color-zinc-400);
-
+@theme inline {
+  /* Radii */
   --radius-sm: 0.25rem;
   --radius-md: 0.375rem;
   --radius-lg: 0.5rem;
   --radius-xl: 0.75rem;
+
+  /* Colors reference CSS custom properties */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+/* Light mode (default) */
+:root {
+  --background: #ffffff;
+  --foreground: #18181b;
+  --card: #f9fafb;
+  --card-foreground: #18181b;
+  --popover: #f3f4f6;
+  --popover-foreground: #18181b;
+  --primary: #18181b;
+  --primary-foreground: #fafafa;
+  --secondary: #e5e7eb;
+  --secondary-foreground: #18181b;
+  --muted: #e5e7eb;
+  --muted-foreground: #6b7280;
+  --accent: #f3f4f6;
+  --accent-foreground: #18181b;
+  --destructive: #ef4444;
+  --border: #d1d5db;
+  --input: #d1d5db;
+  --ring: #6b7280;
+}
+
+/* Dark mode */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #000000;
+    --foreground: #fafafa;
+    --card: #09090b;
+    --card-foreground: #fafafa;
+    --popover: #18181b;
+    --popover-foreground: #fafafa;
+    --primary: #fafafa;
+    --primary-foreground: #18181b;
+    --secondary: #27272a;
+    --secondary-foreground: #fafafa;
+    --muted: #27272a;
+    --muted-foreground: #a1a1aa;
+    --accent: #27272a;
+    --accent-foreground: #fafafa;
+    --destructive: #ef4444;
+    --border: #27272a;
+    --input: #27272a;
+    --ring: #a1a1aa;
+  }
 }
 
 html,
@@ -47,10 +86,24 @@ body {
   color: var(--color-foreground);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
     Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
-  color-scheme: dark;
+  color-scheme: light dark;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Tab trigger styling - light mode: double shadow, no border */
+.tabs-trigger[data-state="active"] {
+  box-shadow:  0 0 0 1px var(--border), 0 1px 3px rgba(0, 0, 0, 0.1);
+  border-color: transparent;
+}
+
+/* Tab trigger styling - dark mode: 1px shadow border (no blur) */
+@media (prefers-color-scheme: dark) {
+  .tabs-trigger[data-state="active"] {
+    box-shadow: 0 0 0 1px var(--border);
+    border-color: transparent;
+  }
 }
 
 #app {
@@ -58,4 +111,105 @@ body {
   height: 100vh;
   margin: 0;
   padding: 0;
+}
+
+/* Syntax highlighting - Light mode (GitHub Light) */
+.cmt-keyword { color: #cf222e; }
+.cmt-typeName { color: #953800; }
+.cmt-className { color: #953800; }
+.cmt-propertyName { color: #0550ae; }
+.cmt-variableName { color: #24292f; }
+.cmt-string { color: #0a3069; }
+.cmt-number { color: #0550ae; }
+.cmt-comment { color: #6e7781; font-style: italic; }
+.cmt-operator { color: #cf222e; }
+.cmt-punctuation { color: #24292f; }
+.cmt-brace { color: #24292f; }
+.cmt-function { color: #8250df; }
+.cmt-unit { color: #0550ae; }
+.cmt-color { color: #0550ae; }
+.cmt-interpolation { color: #24292f; }
+.cmt-handler { color: #8250df; }
+.cmt-package { color: #953800; }
+.cmt-element { color: #116329; }
+.cmt-enum { color: #0550ae; }
+
+/* WAST syntax highlighting - Light mode */
+.wast-keyword { color: #cf222e; }
+.wast-type { color: #0550ae; }
+.wast-operator { color: #24292f; }
+.wast-control { color: #8250df; }
+.wast-variable { color: #953800; }
+.wast-string { color: #0a3069; }
+.wast-number { color: #0550ae; }
+.wast-comment { color: #6e7781; }
+.wast-meta { color: #cf222e; }
+.wast-bracket { color: #6e7781; }
+.wast-name { color: #116329; }
+.wast-modifier { color: #cf222e; }
+.wast-attr { color: #cf222e; }
+
+/* WIT syntax highlighting - Light mode */
+.wit-keyword { color: #cf222e; }
+.wit-type { color: #0550ae; }
+.wit-function { color: #8250df; }
+.wit-variable { color: #953800; }
+.wit-string { color: #0a3069; }
+.wit-comment { color: #6e7781; }
+.wit-meta { color: #116329; }
+.wit-bracket { color: #6e7781; }
+.wit-operator { color: #cf222e; }
+.wit-punctuation { color: #6e7781; }
+.wit-namespace { color: #953800; }
+
+/* Syntax highlighting - Dark mode (GitHub Dark) */
+@media (prefers-color-scheme: dark) {
+  /* Yel */
+  .cmt-keyword { color: #ff7b72; }
+  .cmt-typeName { color: #ffa657; }
+  .cmt-className { color: #ffa657; }
+  .cmt-propertyName { color: #79c0ff; }
+  .cmt-variableName { color: #c9d1d9; }
+  .cmt-string { color: #a5d6ff; }
+  .cmt-number { color: #79c0ff; }
+  .cmt-comment { color: #8b949e; }
+  .cmt-operator { color: #ff7b72; }
+  .cmt-punctuation { color: #c9d1d9; }
+  .cmt-brace { color: #c9d1d9; }
+  .cmt-function { color: #d2a8ff; }
+  .cmt-unit { color: #79c0ff; }
+  .cmt-color { color: #79c0ff; }
+  .cmt-interpolation { color: #c9d1d9; }
+  .cmt-handler { color: #d2a8ff; }
+  .cmt-package { color: #ffa657; }
+  .cmt-element { color: #7ee787; }
+  .cmt-enum { color: #79c0ff; }
+
+  /* WAST */
+  .wast-keyword { color: #ff7b72; }
+  .wast-type { color: #79c0ff; }
+  .wast-operator { color: #e4e4e7; }
+  .wast-control { color: #d2a8ff; }
+  .wast-variable { color: #ffa657; }
+  .wast-string { color: #a5d6ff; }
+  .wast-number { color: #79c0ff; }
+  .wast-comment { color: #8b949e; }
+  .wast-meta { color: #ff7b72; }
+  .wast-bracket { color: #8b949e; }
+  .wast-name { color: #7ee787; }
+  .wast-modifier { color: #ff7b72; }
+  .wast-attr { color: #ff7b72; }
+
+  /* WIT */
+  .wit-keyword { color: #ff7b72; }
+  .wit-type { color: #79c0ff; }
+  .wit-function { color: #d2a8ff; }
+  .wit-variable { color: #ffa657; }
+  .wit-string { color: #a5d6ff; }
+  .wit-comment { color: #8b949e; }
+  .wit-meta { color: #7ee787; }
+  .wit-bracket { color: #8b949e; }
+  .wit-operator { color: #ff7b72; }
+  .wit-punctuation { color: #8b949e; }
+  .wit-namespace { color: #ffa657; }
 }

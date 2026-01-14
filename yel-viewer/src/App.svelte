@@ -18,7 +18,9 @@
         compileToHir,
         compileToThir,
         compileToWasm,
+        getVersion,
         type Diagnostic,
+        type VersionInfo,
     } from './lib/compiler'
     import type {
         TreeNode,
@@ -34,24 +36,22 @@
 
     type ViewType =
         | 'preview'
-        | 'wasm-preview'
         | 'ast'
         | 'hir'
         | 'hir-json'
         | 'thir'
         | 'lir'
-        | 'wast'
+        | 'wasm'
         | 'wit'
 
     const views: { id: ViewType; label: string }[] = [
         { id: 'preview', label: 'Preview' },
-        { id: 'wasm-preview', label: 'WASM' },
         { id: 'ast', label: 'AST' },
         { id: 'hir', label: 'HIR' },
         { id: 'hir-json', label: 'HIR JSON' },
         { id: 'thir', label: 'THIR' },
         { id: 'lir', label: 'LIR' },
-        { id: 'wast', label: 'WAST' },
+        { id: 'wasm', label: 'WASM' },
         { id: 'wit', label: 'WIT' },
     ]
 
@@ -186,7 +186,7 @@
 
     // Get the span to highlight (selected takes priority over hovered)
     const highlightSpan = $derived.by<Span | null>(() => {
-        if (currentView === 'preview' || currentView === 'wasm-preview') {
+        if (currentView === 'preview') {
             return selectedSpan ?? hoveredSpan ?? null
         }
         return selectedNode?.span ?? hoveredNode?.span ?? null
@@ -227,6 +227,16 @@
     // Track code pane height for calculating console panel minSize
     let codePaneHeight = $state(0)
     const consoleMinSize = $derived((36 / codePaneHeight) * 100)
+
+    // Compiler version info
+    let versionInfo = $state<VersionInfo | null>(null)
+    $effect(() => {
+        try {
+            versionInfo = getVersion()
+        } catch (e) {
+            console.error('Failed to get version info:', e)
+        }
+    })
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -236,7 +246,13 @@
     <header
         class="flex items-center gap-5 px-5 py-1.5 bg-card border-b border-border"
     >
-        <h1 class="text-sm font-semibold text-foreground">Yel Viewer</h1>
+        <div class="flex items-center gap-2">
+            <picture>
+                <source media="(prefers-color-scheme: dark)" srcset="/yel_logo_dark.svg" />
+                <img src="/yel_logo_light.svg" alt="Yel" class="h-6 w-6" />
+            </picture>
+            <h1 class="text-sm font-bold text-foreground" style="font-family: 'Red Hat Display', sans-serif;">Yel Viewer</h1>
+        </div>
 
         <Select.Root
             type="single"
@@ -268,6 +284,28 @@
                 {/each}
             </Tabs.List>
         </Tabs.Root>
+
+        <!-- Spacer to push version to right -->
+        <div class="flex-1"></div>
+
+        <!-- Version Info -->
+        {#if versionInfo}
+            <div class="flex items-center gap-2 text-xs text-muted-foreground">
+                <span class="font-mono">
+                    v{versionInfo.version}
+                </span>
+                <span class="text-muted-foreground/60">•</span>
+                <a
+                    href="https://github.com/szkabaroli/yel/commit/{versionInfo.commit}"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="font-mono hover:text-foreground transition-colors"
+                    title="View commit on GitHub"
+                >
+                    {versionInfo.commit.slice(0, 7)}
+                </a>
+            </div>
+        {/if}
     </header>
 
     <!-- Main Content -->
@@ -289,7 +327,7 @@
                                 <span>Source Code</span>
                                 <div class="flex items-center gap-3">
                                     {#if compiledWasm}
-                                        <span class="text-zinc-400 font-normal">
+                                        <span class="text-muted-foreground font-normal">
                                             Compiled size: {(
                                                 compiledWasm.byteLength / 1024
                                             ).toFixed(1)} KB
@@ -324,13 +362,13 @@
         <!-- Tree/Preview Pane -->
         <Resizable.Pane defaultSize={50} minSize={20}>
             <div class="flex flex-col h-full">
-                {#if currentView === 'wasm-preview'}
+                {#if currentView === 'preview'}
                     <WasmPreview
                         wasmBytes={compiledWasm}
                         onError={(err) =>
                             console.error('[App] WASM Preview error:', err)}
                     />
-                {:else if currentView === 'wast'}
+                {:else if currentView === 'wasm'}
                     <WastView code={compiledWast} />
                 {:else if currentView === 'wit'}
                     <WitView code={compiledWit} />

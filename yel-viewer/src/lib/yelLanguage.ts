@@ -1,6 +1,6 @@
 import { StreamLanguage, StringStream } from "@codemirror/language";
-import { Tag, tags } from "@lezer/highlight";
-import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { Tag, tags, tagHighlighter } from "@lezer/highlight";
+import { syntaxHighlighting } from "@codemirror/language";
 
 // Define custom tags for Yel-specific tokens
 export const yelTags = {
@@ -312,31 +312,28 @@ export const yelLanguage = StreamLanguage.define({
   tokenTable,
 });
 
-// GitHub Dark theme colors for Yel
-// Following Rust token styling from GitHub
-export const yelHighlightStyle = HighlightStyle.define([
-  // Standard tokens (GitHub Dark palette - Rust style)
-  { tag: tags.keyword, color: "#ff7b72" },          // Keywords - red
-  { tag: tags.typeName, color: "#ffa657" },         // Types (structs/enums) - orange
-  { tag: tags.className, color: "#ffa657" },        // Components (like structs) - orange
-  { tag: tags.propertyName, color: "#79c0ff" },     // Properties/fields - blue
-  { tag: tags.variableName, color: "#c9d1d9" },     // Variables - default text
-  { tag: tags.string, color: "#a5d6ff" },           // Strings - light blue
-  { tag: tags.number, color: "#79c0ff" },           // Numbers - blue
-  { tag: tags.lineComment, color: "#8b949e", fontStyle: "italic" }, // Comments - gray
-  { tag: tags.operator, color: "#ff7b72" },         // Operators - red
-  { tag: tags.punctuation, color: "#c9d1d9" },      // Punctuation - default text
-  { tag: tags.brace, color: "#c9d1d9" },            // Braces - default text
-
-  // Custom Yel tokens
-  { tag: yelTags.functionCall, color: "#d2a8ff" }, // Function calls - purple
-  { tag: yelTags.unit, color: "#79c0ff" },         // Units (8px, 100ms) - blue
-  { tag: yelTags.colorLiteral, color: "#79c0ff" }, // Color literals - blue
-  { tag: yelTags.interpolation, color: "#c9d1d9" }, // Interpolation braces
-  { tag: yelTags.handler, color: "#d2a8ff" },      // Event handlers - purple
-  { tag: yelTags.packageName, color: "#ffa657" },  // Package names - orange
-  { tag: yelTags.element, color: "#7ee787" },      // UI elements - green
-  { tag: yelTags.enumCase, color: "#79c0ff" },     // Enum cases - blue (like WIT types)
+// Tag highlighter that adds CSS classes for styling
+// Colors are defined in app.css with light/dark mode support
+export const yelHighlighter = tagHighlighter([
+  { tag: tags.keyword, class: "cmt-keyword" },
+  { tag: tags.typeName, class: "cmt-typeName" },
+  { tag: tags.className, class: "cmt-className" },
+  { tag: tags.propertyName, class: "cmt-propertyName" },
+  { tag: tags.variableName, class: "cmt-variableName" },
+  { tag: tags.string, class: "cmt-string" },
+  { tag: tags.number, class: "cmt-number" },
+  { tag: tags.lineComment, class: "cmt-comment" },
+  { tag: tags.operator, class: "cmt-operator" },
+  { tag: tags.punctuation, class: "cmt-punctuation" },
+  { tag: tags.brace, class: "cmt-brace" },
+  { tag: yelTags.functionCall, class: "cmt-function" },
+  { tag: yelTags.unit, class: "cmt-unit" },
+  { tag: yelTags.colorLiteral, class: "cmt-color" },
+  { tag: yelTags.interpolation, class: "cmt-interpolation" },
+  { tag: yelTags.handler, class: "cmt-handler" },
+  { tag: yelTags.packageName, class: "cmt-package" },
+  { tag: yelTags.element, class: "cmt-element" },
+  { tag: yelTags.enumCase, class: "cmt-enum" },
 ]);
 
-export const yelSyntax = [yelLanguage, syntaxHighlighting(yelHighlightStyle)];
+export const yelSyntax = [yelLanguage, syntaxHighlighting(yelHighlighter)];
