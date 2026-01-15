@@ -1,0 +1,26 @@
+[package]
+name = "yel-lsp"
+version = "0.1.0"
+edition = "2024"
+description = "Language Server Protocol implementation for Yel language"
+license.workspace = true
+
+[[bin]]
+name = "yel-lsp"
+path = "src/main.rs"
+
+[dependencies]
+# LSP framework
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["full"] }
+
+# Yel language integration
+yel-core = { path = "../yel-core" }
+
+# Utilities
+dashmap = "6"
+ropey = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -3,6 +3,7 @@ members = [
   "crates/yelc",
   "crates/yel-core",
   "crates/yel-host",
+  "crates/yel-lsp",
   "crates/yel-smith",
   "crates/yel-wasm-codegen",
 ]
