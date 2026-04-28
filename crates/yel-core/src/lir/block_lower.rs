@@ -1341,10 +1341,17 @@ impl<'a> BlockLowering<'a> {
 
     /// Find a signal's type by its DefId.
     fn find_signal_type(&self, signal_def_id: DefId) -> Option<Ty> {
-        self.tree_signals
+        if let Some(s) = self
+            .tree_signals
             .iter()
             .find(|s| s.def_id == signal_def_id)
-            .map(|s| s.ty)
+        {
+            return Some(s.ty);
+        }
+        // Phase 6: globals — fall back to the property's type from defs.
+        // SignalWrite to a global-block property needs the right slot
+        // val-type just like component signals do.
+        self.ctx.defs.type_of(signal_def_id)
     }
 
     /// Convert a Ty to SlotValType for WASM local declaration.
@@ -2582,6 +2589,28 @@ impl<'a> BlockLowering<'a> {
                 self.is_scalar_list_ty(iterable.ty)
                     && !elem_is_string
                     && self.tree_signals.iter().any(|s| s.def_id == *def_id)
+            }
+            // Phase 5e.6: only list literals (`for x in [a, b, c]`) and
+            // field reads on DTR records (`for x in item.subitems`)
+            // produce a typed GC array — those iterate via the GC path.
+            // Global-property reads, stdlib calls, etc. still produce
+            // canonical (ptr, len) and use the legacy memory walk.
+            // String-element lists keep legacy memory iteration since
+            // the body expects (ptr, len) per element.
+            IterableKind::Expr { .. } => {
+                if !self.is_scalar_list_ty(iterable.ty) || elem_is_string {
+                    false
+                } else {
+                    match &iterable.kind {
+                        LirExprKind::ListConstruct { .. }
+                        | LirExprKind::ListStatic { .. } => true,
+                        LirExprKind::Field { base, .. } => {
+                            let mut seen = HashSet::new();
+                            self.is_dtr_record_ty(base.ty, &mut seen)
+                        }
+                        _ => false,
+                    }
+                }
             }
             _ => false,
         };

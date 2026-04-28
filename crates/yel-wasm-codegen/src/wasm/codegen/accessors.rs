@@ -117,6 +117,17 @@ impl<'a> WasmPackageBuilder<'a> {
                                         matches!(vt, ValType::I32))
                             }
                     );
+                    // Phase 5e.6: nested-list element — element is itself
+                    // a typed GC array ref. Recursively call the inner
+                    // materializer to lower it to (ptr, len) for
+                    // canonical memory.
+                    let elem_is_nested_list = matches!(
+                        self.ctx.ty_kind(elem_ty),
+                        InternedTyKind::List(_)
+                    ) && self
+                        .record_gc_types
+                        .list_array_type_idx
+                        .contains_key(&elem_ty);
                     // Locals: 1=self_ref, 2=scratch_ptr, 3=arr_ref, 4=len, 5=data_ptr, 6=idx
                     // For record / string elements: 7=elem_addr, 8=elem_ref (typed record ref / fat_value ref)
                     let self_ref_local: u32 = 1;
@@ -164,6 +175,10 @@ impl<'a> WasmPackageBuilder<'a> {
                         local_decls.push((1, ValType::I32)); // mat_len
                     } else if elem_is_string {
                         local_decls.push((1, ValType::I32)); // elem_addr
+                    } else if elem_is_nested_list {
+                        local_decls.push((1, ValType::I32)); // elem_addr
+                        local_decls.push((1, ValType::I32)); // inner_ptr
+                        local_decls.push((1, ValType::I32)); // inner_len
                     }
                     let mut func = Function::new(local_decls);
                     self.emit_registry_lookup(&mut func, ci, 0, self_ref_local)?;
@@ -259,6 +274,45 @@ impl<'a> WasmPackageBuilder<'a> {
                             struct_type_index: fv,
                             field_index: 1,
                         });
+                        func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+                    } else if elem_is_nested_list {
+                        let inner_arr_idx = self
+                            .record_gc_types
+                            .list_array_type_idx[&elem_ty];
+                        let inner_mat_fn = *self
+                            .gc_list_materializer_fn_indices
+                            .get(&inner_arr_idx)
+                            .ok_or_else(|| CodegenError::InvalidIR(format!(
+                                "GC list getter (nested): missing inner materializer for arr_type_idx={}",
+                                inner_arr_idx
+                            )))?;
+                        // Locals appended after elem_addr_local (=7):
+                        //   8 = inner_ptr, 9 = inner_len
+                        let inner_ptr_local = elem_addr_local + 1;
+                        let inner_len_local = elem_addr_local + 2;
+                        // elem_addr = data_ptr + idx * 8
+                        func.instruction(&Instruction::LocalGet(data_ptr_local));
+                        func.instruction(&Instruction::LocalGet(idx_local));
+                        func.instruction(&Instruction::I32Const(8));
+                        func.instruction(&Instruction::I32Mul);
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalSet(elem_addr_local));
+                        // (inner_ptr, inner_len) = $inner_mat(arr.get(idx))
+                        func.instruction(&Instruction::LocalGet(arr_ref_local));
+                        func.instruction(&Instruction::LocalGet(idx_local));
+                        func.instruction(&Instruction::ArrayGet(arr_type_idx));
+                        func.instruction(&Instruction::Call(inner_mat_fn));
+                        func.instruction(&Instruction::LocalSet(inner_len_local));
+                        func.instruction(&Instruction::LocalSet(inner_ptr_local));
+                        // store inner_ptr at elem_addr+0
+                        func.instruction(&Instruction::LocalGet(elem_addr_local));
+                        func.instruction(&Instruction::LocalGet(inner_ptr_local));
+                        func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+                        // store inner_len at elem_addr+4
+                        func.instruction(&Instruction::LocalGet(elem_addr_local));
+                        func.instruction(&Instruction::I32Const(4));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::LocalGet(inner_len_local));
                         func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
                     } else {
                         // destination address
@@ -935,7 +989,14 @@ impl<'a> WasmPackageBuilder<'a> {
                     })),
                     (1, ValType::I32), // idx
                 ];
-                if elem_record_def.is_some() || elem_is_string {
+                let elem_is_nested_list_setter = matches!(
+                    self.ctx.ty_kind(elem_ty),
+                    InternedTyKind::List(_)
+                ) && self
+                    .record_gc_types
+                    .list_array_type_idx
+                    .contains_key(&elem_ty);
+                if elem_record_def.is_some() || elem_is_string || elem_is_nested_list_setter {
                     local_decls.push((1, ValType::I32)); // elem_addr
                 }
                 let mut func = Function::new(local_decls);
@@ -1002,6 +1063,46 @@ impl<'a> WasmPackageBuilder<'a> {
                     // box into $fat_value
                     func.instruction(&Instruction::StructNew(fv));
                     // array.set
+                    func.instruction(&Instruction::ArraySet(arr_type_idx));
+                } else if matches!(
+                    self.ctx.ty_kind(elem_ty),
+                    InternedTyKind::List(_)
+                ) && self
+                    .record_gc_types
+                    .list_array_type_idx
+                    .contains_key(&elem_ty)
+                {
+                    // Phase 5e.6: nested-list element — call the inner
+                    // un-materializer to lift canonical (ptr, len) into
+                    // a typed GC array, then array.set.
+                    let inner_arr_idx = self
+                        .record_gc_types
+                        .list_array_type_idx[&elem_ty];
+                    let inner_unmat_fn = *self
+                        .gc_list_unmaterializer_fn_indices
+                        .get(&inner_arr_idx)
+                        .ok_or_else(|| CodegenError::InvalidIR(format!(
+                            "GC list setter (nested): missing inner un-materializer for arr_type_idx={}",
+                            inner_arr_idx
+                        )))?;
+                    // arr_ref, idx for array.set
+                    func.instruction(&Instruction::LocalGet(arr_ref_local));
+                    func.instruction(&Instruction::LocalGet(idx_local));
+                    // elem_addr = ptr + idx * 8
+                    func.instruction(&Instruction::LocalGet(1));
+                    func.instruction(&Instruction::LocalGet(idx_local));
+                    func.instruction(&Instruction::I32Const(8));
+                    func.instruction(&Instruction::I32Mul);
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::LocalSet(elem_addr_local));
+                    // call $inner_unmat(load(elem_addr), load(elem_addr+4))
+                    func.instruction(&Instruction::LocalGet(elem_addr_local));
+                    func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
+                    func.instruction(&Instruction::LocalGet(elem_addr_local));
+                    func.instruction(&Instruction::I32Const(4));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
+                    func.instruction(&Instruction::Call(inner_unmat_fn));
                     func.instruction(&Instruction::ArraySet(arr_type_idx));
                 } else {
                     // Scalar element: load primitive and array.set.
@@ -1609,6 +1710,103 @@ impl<'a> WasmPackageBuilder<'a> {
                 struct_type_index: fat_value_idx,
                 field_index: 1,
             });
+            func.instruction(&wasm_encoder::Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+            // idx++
+            func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));
+            func.instruction(&wasm_encoder::Instruction::I32Const(1));
+            func.instruction(&wasm_encoder::Instruction::I32Add);
+            func.instruction(&wasm_encoder::Instruction::LocalSet(idx_local));
+            func.instruction(&wasm_encoder::Instruction::Br(0));
+            func.instruction(&wasm_encoder::Instruction::End);
+            func.instruction(&wasm_encoder::Instruction::End);
+            func.instruction(&wasm_encoder::Instruction::LocalGet(data_ptr_local));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(len_local));
+            func.instruction(&wasm_encoder::Instruction::End);
+            return Ok(func);
+        }
+        // Phase 5e.6: nested-list element — each elem is itself a typed
+        // GC array ref. Recursively call its materializer to produce
+        // (inner_ptr, inner_len), then store the pair at the canonical
+        // 8-byte slot.
+        if matches!(self.ctx.ty_kind(elem_ty), yel_core::types::InternedTyKind::List(_)) {
+            let inner_arr_idx = self
+                .record_gc_types
+                .list_array_type_idx
+                .get(&elem_ty)
+                .copied()
+                .ok_or_else(|| CodegenError::InvalidIR(
+                    "gc_list_materializer: nested list element has no typed array idx".into(),
+                ))?;
+            let inner_mat_fn = self
+                .gc_list_materializer_fn_indices
+                .get(&inner_arr_idx)
+                .copied()
+                .ok_or_else(|| CodegenError::InvalidIR(format!(
+                    "gc_list_materializer: missing inner materializer for arr_type_idx={}",
+                    inner_arr_idx
+                )))?;
+            let elem_size: u32 = 8; // canonical (ptr, len)
+            let elem_align: u32 = 4;
+            let mut func = Function::new([
+                (1, ValType::I32), // len
+                (1, ValType::I32), // data_ptr
+                (1, ValType::I32), // idx
+                (1, ValType::I32), // elem_addr
+                (1, ValType::I32), // inner_ptr scratch
+                (1, ValType::I32), // inner_len scratch
+            ]);
+            let arr_local: u32 = 0;
+            let len_local: u32 = 1;
+            let data_ptr_local: u32 = 2;
+            let idx_local: u32 = 3;
+            let elem_addr_local: u32 = 4;
+            let inner_ptr_local: u32 = 5;
+            let inner_len_local: u32 = 6;
+            // len = array.len(arr)
+            func.instruction(&wasm_encoder::Instruction::LocalGet(arr_local));
+            func.instruction(&wasm_encoder::Instruction::ArrayLen);
+            func.instruction(&wasm_encoder::Instruction::LocalSet(len_local));
+            // data_ptr = cabi_realloc(0, 0, 4, len * 8)
+            func.instruction(&wasm_encoder::Instruction::I32Const(0));
+            func.instruction(&wasm_encoder::Instruction::I32Const(0));
+            func.instruction(&wasm_encoder::Instruction::I32Const(elem_align as i32));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(len_local));
+            func.instruction(&wasm_encoder::Instruction::I32Const(elem_size as i32));
+            func.instruction(&wasm_encoder::Instruction::I32Mul);
+            func.instruction(&wasm_encoder::Instruction::Call(cabi_realloc));
+            func.instruction(&wasm_encoder::Instruction::LocalSet(data_ptr_local));
+            // idx = 0
+            func.instruction(&wasm_encoder::Instruction::I32Const(0));
+            func.instruction(&wasm_encoder::Instruction::LocalSet(idx_local));
+            func.instruction(&wasm_encoder::Instruction::Block(wasm_encoder::BlockType::Empty));
+            func.instruction(&wasm_encoder::Instruction::Loop(wasm_encoder::BlockType::Empty));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(len_local));
+            func.instruction(&wasm_encoder::Instruction::I32GeU);
+            func.instruction(&wasm_encoder::Instruction::BrIf(1));
+            // elem_addr = data_ptr + idx * 8
+            func.instruction(&wasm_encoder::Instruction::LocalGet(data_ptr_local));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));
+            func.instruction(&wasm_encoder::Instruction::I32Const(elem_size as i32));
+            func.instruction(&wasm_encoder::Instruction::I32Mul);
+            func.instruction(&wasm_encoder::Instruction::I32Add);
+            func.instruction(&wasm_encoder::Instruction::LocalSet(elem_addr_local));
+            // (inner_ptr, inner_len) = $inner_mat(arr.get(idx))
+            func.instruction(&wasm_encoder::Instruction::LocalGet(arr_local));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));
+            func.instruction(&wasm_encoder::Instruction::ArrayGet(arr_type_idx));
+            func.instruction(&wasm_encoder::Instruction::Call(inner_mat_fn));
+            func.instruction(&wasm_encoder::Instruction::LocalSet(inner_len_local));
+            func.instruction(&wasm_encoder::Instruction::LocalSet(inner_ptr_local));
+            // *elem_addr = inner_ptr
+            func.instruction(&wasm_encoder::Instruction::LocalGet(elem_addr_local));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(inner_ptr_local));
+            func.instruction(&wasm_encoder::Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+            // *(elem_addr + 4) = inner_len
+            func.instruction(&wasm_encoder::Instruction::LocalGet(elem_addr_local));
+            func.instruction(&wasm_encoder::Instruction::I32Const(4));
+            func.instruction(&wasm_encoder::Instruction::I32Add);
+            func.instruction(&wasm_encoder::Instruction::LocalGet(inner_len_local));
             func.instruction(&wasm_encoder::Instruction::I32Store(super::scratch::mem_arg(0, 2)));
             // idx++
             func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));

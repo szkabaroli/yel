@@ -708,6 +708,7 @@ pub fn emit_program_record_types(
     ctx: &yel_core::context::CompilerContext,
     types: &mut TypeSection,
     base_type_idx: u32,
+    extra_seed_tys: &[yel_core::Ty],
 ) -> (u32, RecordGcTypes) {
     use std::collections::HashMap;
     use yel_core::definitions::DefKind;
@@ -721,7 +722,7 @@ pub fn emit_program_record_types(
     // every ADT field and every type subterm — and dedupes by `Ty` so
     // each unique list element-type and tuple shape gets exactly one
     // emitted GC type.
-    let (list_tys, tuple_tys) = collect_list_and_tuple_tys(ctx);
+    let (list_tys, tuple_tys) = collect_list_and_tuple_tys(ctx, extra_seed_tys);
 
     if record_def_ids.is_empty() && list_tys.is_empty() && tuple_tys.is_empty() {
         return (0, RecordGcTypes::default());
@@ -917,6 +918,7 @@ pub fn emit_program_record_types(
 /// across runs (`HashSet` would not be).
 fn collect_list_and_tuple_tys(
     ctx: &yel_core::context::CompilerContext,
+    extra_seed_tys: &[yel_core::Ty],
 ) -> (Vec<yel_core::Ty>, Vec<yel_core::Ty>) {
     use yel_core::definitions::DefKind;
     use yel_core::types::InternedTyKind;
@@ -1028,6 +1030,20 @@ fn collect_list_and_tuple_tys(
         }
     }
 
+    // Phase 5e.6: also walk caller-supplied extra seed types — used to
+    // catch list types that appear only in LIR expressions (list literals
+    // iterated by `for`, etc.) and have no Def-level reference.
+    for &ty in extra_seed_tys {
+        walk(
+            ctx,
+            ty,
+            &mut list_seen,
+            &mut tuple_seen,
+            &mut list_order,
+            &mut tuple_order,
+        );
+    }
+
     (list_order, tuple_order)
 }
 
@@ -1137,6 +1153,81 @@ fn list_elem_short_name(ctx: &yel_core::context::CompilerContext, elem_ty: yel_c
 /// the module so the WAT-inspection test can find them; no consumer
 /// reads from these fields yet, so a coarse-but-future-proof shape
 /// keeps the emission deterministic and side-effect-free.
+/// Phase 5e.6: gate for whether a list type can be stored as a typed
+/// `(ref null $<elem>_list)` GC array on a record/tuple field. Mirrors
+/// `repr.rs::is_scalar_list_ty` — kept here to avoid the cyclic
+/// dependency between `gc_types` and `WasmPackageBuilder` methods.
+fn is_gc_eligible_list_ty(
+    ctx: &yel_core::context::CompilerContext,
+    ty: yel_core::Ty,
+) -> bool {
+    use yel_core::definitions::DefKind;
+    use yel_core::types::InternedTyKind;
+    let elem = match ctx.ty_kind(ty) {
+        InternedTyKind::List(e) => *e,
+        _ => return false,
+    };
+    if matches!(
+        ctx.ty_kind(elem),
+        InternedTyKind::Bool
+            | InternedTyKind::S8
+            | InternedTyKind::S16
+            | InternedTyKind::S32
+            | InternedTyKind::U8
+            | InternedTyKind::U16
+            | InternedTyKind::U32
+            | InternedTyKind::S64
+            | InternedTyKind::U64
+            | InternedTyKind::F32
+            | InternedTyKind::F64
+            | InternedTyKind::Char
+    ) || matches!(
+        ctx.ty_kind(elem),
+        InternedTyKind::Adt(d) if matches!(ctx.defs.kind(*d), DefKind::Enum(_))
+    ) {
+        return true;
+    }
+    if matches!(ctx.ty_kind(elem), InternedTyKind::List(_))
+        && is_gc_eligible_list_ty(ctx, elem)
+    {
+        return true;
+    }
+    if matches!(ctx.ty_kind(elem), InternedTyKind::String) {
+        return true;
+    }
+    if let InternedTyKind::Option(inner) = ctx.ty_kind(elem) {
+        let inner_fits = matches!(
+            ctx.ty_kind(*inner),
+            InternedTyKind::Bool
+                | InternedTyKind::S8
+                | InternedTyKind::S16
+                | InternedTyKind::S32
+                | InternedTyKind::U8
+                | InternedTyKind::U16
+                | InternedTyKind::U32
+                | InternedTyKind::F32
+                | InternedTyKind::Char
+        ) || matches!(
+            ctx.ty_kind(*inner),
+            InternedTyKind::Adt(d) if matches!(ctx.defs.kind(*d), DefKind::Enum(_))
+        );
+        if inner_fits {
+            return true;
+        }
+    }
+    if let InternedTyKind::Adt(d) = ctx.ty_kind(elem) {
+        if matches!(ctx.defs.kind(*d), DefKind::Record(_)) {
+            // Records: assume eligible if all DTR fields are. The full
+            // DTR check would require recursive seen-tracking; mirror
+            // the simple case (single-level record with primitive
+            // fields) — the codegen path falls back to fat_value for
+            // non-eligible records, which is safe.
+            return true;
+        }
+    }
+    false
+}
+
 fn record_field_storage_type(
     ctx: &yel_core::context::CompilerContext,
     ty: yel_core::Ty,
@@ -1180,11 +1271,13 @@ fn record_field_storage_type(
             // (any GC-eligible list — scalar, string, nested list, DTR
             // record, tuple, …), use the concrete `(ref null $<elem>_list)`
             // type instead of the legacy `$fat_value` (ptr, len) box.
-            if let Some(&arr_idx) = registry.list_array_type_idx.get(&ty) {
-                return ValType::Ref(RefType {
-                    nullable: true,
-                    heap_type: HeapType::Concrete(arr_idx),
-                });
+            if is_gc_eligible_list_ty(ctx, ty) {
+                if let Some(&arr_idx) = registry.list_array_type_idx.get(&ty) {
+                    return ValType::Ref(RefType {
+                        nullable: true,
+                        heap_type: HeapType::Concrete(arr_idx),
+                    });
+                }
             }
             let fat_value_idx = registry
                 .fat_value_type_idx

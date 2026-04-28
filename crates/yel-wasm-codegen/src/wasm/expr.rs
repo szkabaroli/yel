@@ -1020,13 +1020,18 @@ impl WasmPackageBuilder<'_> {
                     // Phase 5e.6: typed-array list field — call the
                     // per-array materializer to produce (ptr, len) for
                     // legacy consumers (EvalListExpr, indexing, etc.).
+                    // Only fires when the list type actually has a
+                    // materializer emitted (gated by `is_scalar_list_ty`),
+                    // not for any list registered in the array map.
                     let typed_array_field = matches!(
                         self.ctx.ty_kind(field_ty),
                         InternedTyKind::List(_)
                     ) && self
                         .record_gc_types
                         .list_array_type_idx
-                        .contains_key(&field_ty);
+                        .get(&field_ty)
+                        .and_then(|arr_idx| self.gc_list_materializer_fn_indices.get(arr_idx))
+                        .is_some();
                     if typed_array_field {
                         let arr_idx = self
                             .record_gc_types

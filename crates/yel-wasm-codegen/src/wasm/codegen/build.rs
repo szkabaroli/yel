@@ -421,8 +421,34 @@ impl<'a> WasmPackageBuilder<'a> {
         // path through Phase 1. The types exist for the WAT-inspection
         // test (`gc_record_type_emitted`) and as a foundation for
         // Phase 2's signal-storage switch.
+        // Phase 5e.6: seed list/tuple type collection with LIR
+        // expression types that emit typed arrays directly — list
+        // literals (`array.new_fixed`) and chained typed-array Field
+        // reads. This ensures the GC array type is registered even
+        // when no signal/record references the literal type.
+        //
+        // Phase 6: globals migrate alongside components — global-block
+        // property list types route through the same typed GC array
+        // path, so we no longer need to exclude them.
+        let mut extra_seed_tys: Vec<yel_core::Ty> = Vec::new();
+        for component in self.components.iter() {
+            for expr in &component.exprs {
+                if matches!(
+                    expr.kind,
+                    yel_core::lir::LirExprKind::ListConstruct { .. }
+                        | yel_core::lir::LirExprKind::ListStatic { .. }
+                ) {
+                    extra_seed_tys.push(expr.ty);
+                }
+            }
+        }
         let (record_types_count, record_gc_types) =
-            super::super::gc_types::emit_program_record_types(self.ctx, &mut types, cursor);
+            super::super::gc_types::emit_program_record_types(
+                self.ctx,
+                &mut types,
+                cursor,
+                &extra_seed_tys,
+            );
         cursor += record_types_count;
         self.record_gc_types = record_gc_types;
 

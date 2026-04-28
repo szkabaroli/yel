@@ -483,10 +483,15 @@ impl<'a> WasmPackageBuilder<'a> {
                     // No value on stack to store
                 } else {
                     // Check if expression type is a "fat pointer" (list or string)
-                    // Fat pointers return (ptr, len) on stack and need two consecutive slots
+                    // Fat pointers return (ptr, len) on stack and need two consecutive slots.
+                    // Phase 5b-v.3+: GC-eligible lists (typed array refs) push a
+                    // single ref instead of (ptr, len), so they spill to one slot.
                     let is_fat_ptr = matches!(
                         self.ctx.ty_kind(lir_expr.ty),
                         InternedTyKind::List(_) | InternedTyKind::String
+                    ) && !matches!(
+                        self.internal_repr(lir_expr.ty),
+                        super::super::repr::InternalRepr::GcArrayRef(_)
                     );
                     // Check if expression type is Option (returns discriminant, value)
                     let is_option =
@@ -1546,6 +1551,35 @@ impl<'a> WasmPackageBuilder<'a> {
                     ));
                 } else if self.ctx.defs.owning_global_block(*signal).is_some() {
                     if self.global_in_struct(*signal) {
+                        // Phase 6: typed-array global property — call the
+                        // per-array materializer to get (ptr, len), then
+                        // store into result locals. Mirrors the component
+                        // GC-array-signal path above.
+                        let signal_ty = self
+                            .ctx
+                            .defs
+                            .type_of(*signal)
+                            .unwrap_or(yel_core::types::Ty::ERROR);
+                        if let super::super::repr::InternalRepr::GcArrayRef(arr_idx) =
+                            self.internal_repr(signal_ty)
+                        {
+                            let mat_fn = *self
+                                .gc_list_materializer_fn_indices
+                                .get(&arr_idx)
+                                .ok_or_else(|| CodegenError::InvalidIR(
+                                    "LoadList (global): missing materializer for GC list".into(),
+                                ))?;
+                            self.emit_global_struct_read(func, *signal)?;
+                            func.instruction(&Instruction::Call(mat_fn));
+                            func.instruction(&Instruction::LocalSet(
+                                slot_local(component, *len_result) + local_offset,
+                            ));
+                            func.instruction(&Instruction::LocalSet(
+                                slot_local(component, *ptr_result) + local_offset,
+                            ));
+                            return Ok(());
+                        }
+                        // 2-slot fat-pointer in struct (legacy migrated).
                         self.emit_global_struct_read(func, *signal)?;
                         func.instruction(&Instruction::LocalSet(
                             slot_local(component, *len_result) + local_offset,

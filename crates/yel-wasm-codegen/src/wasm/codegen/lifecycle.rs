@@ -210,7 +210,11 @@ impl<'a> WasmPackageBuilder<'a> {
                         .record_gc_types
                         .list_array_type_idx
                         .get(&list_ty)
-                        .expect("lifecycle local: missing list_array_type_idx");
+                        .unwrap_or_else(|| panic!(
+                            "lifecycle local: missing list_array_type_idx for ty {:?} kind={:?}",
+                            list_ty,
+                            self.ctx.ty_kind(list_ty)
+                        ));
                     ValType::Ref(wasm_encoder::RefType {
                         nullable: true,
                         heap_type: wasm_encoder::HeapType::Concrete(ty_idx),
