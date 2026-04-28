@@ -1,8 +1,8 @@
 //! Document state management.
 
-use yel_core::Compiler;
 use ropey::Rope;
 use tower_lsp::lsp_types::*;
+use yel_core::Compiler;
 
 use crate::diagnostics::{convert_compile_error, convert_yel_diagnostic};
 
@@ -70,11 +70,12 @@ impl Document {
                 for hir in &hir_components {
                     let _thir = compiler.type_check(hir);
                 }
+                compiler.type_check_globals();
 
                 // Collect diagnostics from the compiler context
                 let mut diagnostics = Vec::new();
                 let source_id = yel_core::SourceId(0);
-                
+
                 for diag in compiler.context().diagnostics.iter() {
                     diagnostics.extend(convert_yel_diagnostic(diag, source_id, &self.rope));
                 }
@@ -85,7 +86,13 @@ impl Document {
             Err(err) => {
                 tracing::debug!("Parse error: {}", err);
                 let source_id = yel_core::SourceId(0);
-                let diagnostics = convert_compile_error(&err, source_id, &self.rope);
+                let mut diagnostics = Vec::new();
+                for diag in compiler.context().diagnostics.iter() {
+                    diagnostics.extend(convert_yel_diagnostic(diag, source_id, &self.rope));
+                }
+                if diagnostics.is_empty() {
+                    diagnostics.extend(convert_compile_error(&err, source_id, &self.rope));
+                }
                 tracing::debug!("Converted to {} diagnostics", diagnostics.len());
                 diagnostics
             }
@@ -100,11 +107,7 @@ impl Document {
         }
 
         let line_start = self.rope.line_to_char(line);
-        let line_len = self
-            .rope
-            .line(line)
-            .len_chars()
-            .saturating_sub(1); // Don't count newline
+        let line_len = self.rope.line(line).len_chars().saturating_sub(1); // Don't count newline
 
         let col = (pos.character as usize).min(line_len);
         line_start + col
@@ -255,7 +258,8 @@ impl Document {
         }
 
         let color = &content[start..end];
-        if color.len() >= 4 { // #rgb minimum
+        if color.len() >= 4 {
+            // #rgb minimum
             Some(color.to_string())
         } else {
             None

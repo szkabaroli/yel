@@ -1,0 +1,17 @@
+package yel:globinout@0.1.0;
+
+// Exercises a global `in-out` property — readable and writable from both
+// the host and components. Without this the in-out direction codegen path
+// (bidirectional property descriptor + setter stub) is unexercised.
+export global Session {
+    in-out user-name: string;
+}
+
+export component App {
+    VStack {
+        HStack {
+            Text { "hello {Session.user-name}" }
+            Button { "reset" clicked: { Session.user-name = "guest"; } }
+        }
+    }
+}

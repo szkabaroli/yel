@@ -1,0 +1,16 @@
+package yel:interps64@0.1.0;
+
+// Known gap in `emit_expr_as_string`: the s64 / u64 type-dispatch branch is
+// still `todo!()`; we need an `s64_to_string` / `u64_to_string` runtime
+// helper wired through the interpolation path. The symptom is a WASM
+// validation failure — an i64 scalar is left on the stack where the
+// surrounding Text-content concat expects (i32, i32) fat-pointer halves.
+//
+// The companion list<string>-indexing gap was fixed by the $list_get_fat
+// runtime helper; that portion graduated to positive/list_string_index.yel.
+export component App {
+    big: s64 = 1;
+    VStack {
+        Text { "big: {big}" }
+    }
+}

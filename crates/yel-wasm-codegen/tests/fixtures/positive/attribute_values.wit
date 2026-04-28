@@ -1,0 +1,23 @@
+package yel:attrvals@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-flag: func() -> bool;
+    set-flag: func(value: bool);
+    get-count: func() -> s32;
+    set-count: func(value: s32);
+    get-label: func() -> string;
+    set-label: func(value: string);
+    get-ratio: func() -> f32;
+    set-ratio: func(value: f32);
+  }
+}
+
+world attrvals {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

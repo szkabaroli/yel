@@ -1,0 +1,114 @@
+package meshx:mail@0.1.0;
+
+// ============================================================================
+// Host-provided widget schemas
+//
+// Everything the Svelte source drew through @meshx-org/components is declared
+// here so Yel can type-check property names and attribute bindings. The host
+// runtime (JS / Rust) implements them; Yel only knows their surface.
+// ============================================================================
+
+element Icon {
+    name: string;
+    variant: string;   // "regular" | "fill"
+    size: s32;
+    tint: color;
+}
+
+element Avatar {
+    src: string;
+    label: string;
+    size: length;
+    shape: string;     // "circle" | "square"
+}
+
+element Tooltip {
+    label: string;
+    side: string;      // "top" | "right" | "bottom" | "left"
+}
+
+element Dialog {
+    open: bool;
+    title: string;
+    max-width: length;
+}
+
+element DropdownMenu {
+    align: string;         // "start" | "end"
+    min-width: length;
+    trigger-label: string;
+    trigger-icon: string;
+    trigger-variant: string;
+}
+
+element DropdownItem {
+    label: string;
+    icon: string;
+    active: bool;
+    dangerous: bool;
+}
+
+element DropdownLabel {
+    text: string;
+}
+
+element DropdownSeparator {}
+
+// Editor composer — body is a plain string buffer the backend binds to.
+element ComposeBox {
+    placeholder: string;
+    value: string;
+    submit-label: string;
+    submit-icon: string;
+    submit-variant: string;
+    borderless: bool;
+}
+
+// Full message render — the backend owns formatting (HTML sanitizer, quoted
+// text, inline images). Yel only needs an id.
+element MessageView {
+    message-id: string;
+    my-email: string;
+    compact: bool;
+}
+
+// Smart card renderer — the backend owns the JSON-LD → layout mapping per
+// SmartCardKind. Yel just passes the handle through.
+element SmartCardView {
+    handle: s32;
+    compact: bool;
+    my-email: string;
+}
+
+// Scroll surface with a bindable "ref" the backend reads for compose anchoring.
+element ScrollArea {
+    anchor-id: string;
+}
+
+// Unread / storage indicators lifted from the sidebar.
+element StorageMeter {
+    percent: s32;
+    used-display: string;
+    total-display: string;
+}
+
+// Keyboard binding registration — declaring the action IDs the backend
+// dispatches to when the global shortcut fires. The backend wires shortcuts
+// via its own keybinding system; this element only registers intent.
+element KeybindingAction {
+    action: string;   // e.g. "DESELECT:meshx://mail"
+}
+
+// Labelled color dot used in the label-picker and thread headers.
+element LabelDot {
+    color: LabelColor;
+    size: length;
+}
+
+// Named label pill (dot + text + background tint).
+element LabelPill {
+    label-id: string;
+    name: string;
+    color: LabelColor;
+    compact: bool;
+}

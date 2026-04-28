@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
 use std::path::PathBuf;
-use yel_core::{Compiler, codegen, syntax::ast::PackageId};
+use yel_core::{Compiler, syntax::ast::PackageId};
+use yel_wasm_codegen as codegen;
 
 // Build info from shadow-rs
 shadow_rs::shadow!(build);
@@ -38,7 +39,7 @@ enum Commands {
         files: Vec<PathBuf>,
 
         /// Output format
-        #[arg(short, long, value_enum, default_value = "rust")]
+        #[arg(short, long, value_enum, default_value = "wasm")]
         output: OutputFormat,
 
         /// Package name for generated code
@@ -64,6 +65,14 @@ enum Commands {
     Ir {
         /// Input file to analyze
         file: PathBuf,
+
+        /// Pretty print
+        #[arg(short, long)]
+        pretty: bool,
+
+        /// Output as JSON
+        #[arg(short, long)]
+        json: bool,
     },
 
     /// Check source files for errors
@@ -83,6 +92,8 @@ enum OutputFormat {
     Wit,
     /// WebAssembly component
     Wasm,
+    /// Graphviz DOT: signal/effect dependency graph
+    Dot,
 }
 
 fn main() -> Result<()> {
@@ -95,7 +106,7 @@ fn main() -> Result<()> {
             package,
         } => compile(files, output, package),
         Commands::Ast { file, pretty, json } => dump_ast(file, pretty, json),
-        Commands::Ir { file } => dump_ir(file),
+        Commands::Ir { file, pretty, json } => dump_lir(file, pretty, json),
         Commands::Check { files } => check(files),
     }
 }
@@ -140,6 +151,23 @@ fn compile(files: Vec<PathBuf>, output: OutputFormat, _package: String) -> Resul
         }
     }
 
+    // Type-check and lower global-singleton property defaults once, after all
+    // components. The module start function seeds these slots at load time.
+    let thir_globals = compiler.type_check_globals();
+    if compiler.has_errors() {
+        eprintln!("{}", compiler.render_diagnostics());
+        return Err(anyhow::anyhow!("Type checking failed"));
+    }
+    let lir_globals = compiler.lower_globals_to_lir(&thir_globals);
+
+    // Assemble the module — one compilation unit holding every component and
+    // module-scope artifact (global defaults, package header).
+    let module = yel_core::lir::LirModule {
+        components: lir_components.clone(),
+        global_defaults: lir_globals.clone(),
+        package: package_info.clone(),
+    };
+
     // Generate output for each component
     let ctx = compiler.context();
 
@@ -166,15 +194,11 @@ fn compile(files: Vec<PathBuf>, output: OutputFormat, _package: String) -> Resul
             println!("// Rust codegen not available - use WASM output instead");
         }
         OutputFormat::Wit => {
-            // Use the AST-based generator for cleaner output
-            // It uses wit-parser + wit-encoder for proper WIT formatting
-            if let Some(first_component) = lir_components.iter().find(|c| c.is_export) {
-                let wit_code = codegen::generate_wit(first_component, ctx, &wit_options)
-                    .map_err(|e| anyhow::anyhow!("WIT generation error: {}", e))?;
-                println!("{}", wit_code);
-            } else {
-                eprintln!("No exported component found");
-            }
+            // Unified path: library files (no exports) get a well-formed
+            // package + library world from the same builder.
+            let wit_code = codegen::generate_wit(&lir_components, ctx, &wit_options)
+                .map_err(|e| anyhow::anyhow!("WIT generation error: {}", e))?;
+            println!("{}", wit_code);
         }
         OutputFormat::Wasm => {
             use std::io::Write;
@@ -183,13 +207,19 @@ fn compile(files: Vec<PathBuf>, output: OutputFormat, _package: String) -> Resul
                 namespace: wit_options.namespace.clone(),
                 name: wit_options.name.clone(),
                 version: wit_options.version.clone(),
+                global_defaults: lir_globals.clone(),
             };
-            let wasm_bytes = codegen::generate_wasm_with_wit(&lir_components, ctx, &wasm_options)
+            let wasm_bytes = codegen::generate_wasm_module(&module, ctx, &wasm_options)
                 .map_err(|e| anyhow::anyhow!("WASM generation error: {}", e))?;
 
             std::io::stdout()
                 .write_all(&wasm_bytes)
                 .context("Failed to write WASM output")?;
+        }
+        OutputFormat::Dot => {
+            let dot = codegen::generate_dot(&lir_components, ctx, &codegen::DotOptions::new())
+                .map_err(|e| anyhow::anyhow!("DOT generation error: {}", e))?;
+            print!("{}", dot);
         }
     }
 
@@ -226,7 +256,7 @@ fn dump_ast(file: PathBuf, pretty: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn dump_ir(file: PathBuf) -> Result<()> {
+fn dump_lir(file: PathBuf, pretty: bool, json: bool) -> Result<()> {
     let source = fs::read_to_string(&file)
         .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
@@ -258,93 +288,64 @@ fn dump_ir(file: PathBuf) -> Result<()> {
         lir_components.push(lir);
     }
 
-    // Now we can borrow context for printing
-    let ctx = compiler.context();
-
-    for lir in &lir_components {
-        // Print LIR summary
-        let name = ctx.str(lir.name);
-        println!("=== Component: {} ===\n", name);
-
-        println!("Signals ({}):", lir.signals.len());
-        for s in &lir.signals {
-            let sig_name = ctx.str(ctx.defs.name(s.def_id));
-            println!("  {} : {:?} = {:?}", sig_name, ctx.ty_kind(s.ty), s.default);
-        }
-
-        println!("\nEffects ({}):", lir.effects.len());
-        for e in &lir.effects {
+    if json {
+        if pretty {
             println!(
-                "  update_block={:?} deps={:?}",
-                e.update_block, e.dependencies
+                "{}",
+                serde_json::to_string_pretty(&lir_components)
+                    .context("Failed to serialize LIR to JSON")?
+            );
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string(&lir_components)
+                    .context("Failed to serialize LIR to JSON")?
             );
         }
+    } else {
+        // Now we can borrow context for printing
+        let ctx = compiler.context();
 
-        println!("\nBlocks ({}):", lir.blocks.len());
-        for (i, block) in lir.blocks.iter().enumerate() {
-            let mount_marker = if lir.mount_block.0 as usize == i {
-                " (mount)"
-            } else {
-                ""
-            };
-            println!("  Block {:?}{}:", block.id, mount_marker);
-            for op in &block.ops {
-                println!("    {:?}", op);
+        for lir in &lir_components {
+            // Print LIR summary
+            let name = ctx.str(lir.name);
+            println!("=== Component: {} ===\n", name);
+
+            println!("Signals ({}):", lir.signals.len());
+            for s in &lir.signals {
+                let sig_name = ctx.str(ctx.defs.name(s.def_id));
+                println!("  {} : {:?} = {:?}", sig_name, ctx.ty_kind(s.ty), s.default);
             }
-        }
 
-        println!("\nStrings ({}):", lir.strings.len());
-        for (i, s) in lir.strings.iter().enumerate() {
-            println!("  [{}] \"{}\"", i, s);
+            println!("\nEffects ({}):", lir.effects.len());
+            for e in &lir.effects {
+                println!(
+                    "  update_block={:?} deps={:?}",
+                    e.update_block, e.dependencies
+                );
+            }
+
+            println!("\nBlocks ({}):", lir.blocks.len());
+            for (i, block) in lir.blocks.iter().enumerate() {
+                let mount_marker = if lir.mount_block.0 as usize == i {
+                    " (mount)"
+                } else {
+                    ""
+                };
+                println!("  Block {:?}{}:", block.id, mount_marker);
+                for op in &block.ops {
+                    println!("    {:?}", op);
+                }
+            }
+
+            println!("\nStrings ({}):", lir.strings.len());
+            for (i, s) in lir.strings.iter().enumerate() {
+                println!("  [{}] \"{}\"", i, s);
+            }
         }
     }
 
     Ok(())
-}
-
-fn print_nodes(
-    nodes: &[yel_core::lir::LirNode],
-    indent: usize,
-    ctx: &yel_core::CompilerContext,
-) {
-    use yel_core::lir::LirNodeKind;
-
-    let pad = "  ".repeat(indent);
-    for node in nodes {
-        match &node.kind {
-            LirNodeKind::Element { tag, children, .. } => {
-                println!("{}[{:?}] Element({})", pad, node.id, tag);
-                print_nodes(children, indent + 1, ctx);
-            }
-            LirNodeKind::StaticText(text) => {
-                println!("{}[{:?}] StaticText(\"{}\")", pad, node.id, text);
-            }
-            LirNodeKind::DynamicText { effect_id } => {
-                println!("{}[{:?}] DynamicText(effect={})", pad, node.id, effect_id);
-            }
-            LirNodeKind::If {
-                then_branch,
-                else_if_branches,
-                else_branch,
-                ..
-            } => {
-                println!("{}[{:?}] If", pad, node.id);
-                print_nodes(then_branch, indent + 1, ctx);
-                for (_, branch) in else_if_branches {
-                    println!("{}  else if:", pad);
-                    print_nodes(branch, indent + 1, ctx);
-                }
-                if let Some(else_nodes) = else_branch {
-                    println!("{}  else:", pad);
-                    print_nodes(else_nodes, indent + 1, ctx);
-                }
-            }
-            LirNodeKind::For { body, .. } => {
-                println!("{}[{:?}] For", pad, node.id);
-                print_nodes(body, indent + 1, ctx);
-            }
-        }
-    }
 }
 
 fn check(files: Vec<PathBuf>) -> Result<()> {

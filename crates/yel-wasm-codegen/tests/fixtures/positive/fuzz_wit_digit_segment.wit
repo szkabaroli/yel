@@ -1,0 +1,25 @@
+package yel:app@0.1.0;
+
+interface shared-types {
+  record rec {
+    field-n0: s32,
+  }
+}
+
+interface component1-component {
+  use shared-types.{ rec };
+  resource component1 {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-v: func() -> rec;
+    set-v: func(value: rec);
+  }
+}
+
+world app {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export component1-component;
+  export yel:ui/dispatch@0.1.0;
+}

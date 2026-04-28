@@ -1,0 +1,15 @@
+package yel:vwp@0.1.0;
+
+// Canonical-ABI width promotion: variant V has cases A(s32) and B(f32).
+// The joined flat shape promotes slot 0 (i32 vs f32) to i64. The ctor for
+// V.a(42) originally failed with "variant ctor slot width mismatch" because
+// the payload pushed an i32 while the joined shape expected an i64.
+variant V {
+    a(s32),
+    b(f32),
+}
+
+export component App {
+    v: V = a(42);
+    "x"
+}

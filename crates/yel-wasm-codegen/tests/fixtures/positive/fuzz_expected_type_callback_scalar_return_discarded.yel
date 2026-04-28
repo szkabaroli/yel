@@ -1,0 +1,16 @@
+// Minimized from fuzzer seeds 69, 219, 253 (class: "expected a type but
+// nothing on stack"). Variant of the stack-underflow bug: a sibling
+// exported component A exposes `on-change: func()` with no return, while
+// a non-exported component B's `on-change: func() -> f32` is invoked as a
+// standalone statement in an element handler.
+// Root-cause hypothesis: callback-dispatch picks A's void-return ABI when
+// emitting B's discard, causing validation to expect a typed value at the
+// block/function boundary that was never produced — "expected a type but
+// nothing on stack".
+export component A {
+    export on-change: func();
+}
+component B {
+    on-change: func() -> f32;
+    Text { pressed: { on-change(); }, }
+}

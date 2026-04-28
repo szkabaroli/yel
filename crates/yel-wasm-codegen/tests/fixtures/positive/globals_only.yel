@@ -1,0 +1,6 @@
+package yel:libonly@0.1.0;
+
+global CounterStore {
+    count: s32 = 42;
+    label: string = "Hello";
+}

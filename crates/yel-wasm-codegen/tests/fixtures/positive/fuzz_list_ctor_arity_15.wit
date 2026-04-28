@@ -1,0 +1,17 @@
+package yel:fb@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-big: func() -> list<s32>;
+    set-big: func(value: list<s32>);
+  }
+}
+
+world fb {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

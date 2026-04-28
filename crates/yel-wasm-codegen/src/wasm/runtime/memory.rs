@@ -286,7 +286,7 @@ pub fn emit_free(globals: &AllocatorGlobals) -> Function {
     func.instruction(&Instruction::LocalGet(1)); // size
     func.instruction(&Instruction::I32Const(7));
     func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::I32Const(-8i32 as i32));
+    func.instruction(&Instruction::I32Const(-8_i32));
     func.instruction(&Instruction::I32And);
     func.instruction(&Instruction::LocalSet(2)); // aligned_size
 
@@ -604,6 +604,62 @@ pub fn emit_pack_fat_ptr_to_i64() -> Function {
 
     // Pass len through as i32
     func.instruction(&Instruction::LocalGet(1)); // len
+
+    func.instruction(&Instruction::End);
+    func
+}
+
+/// Generate store_option function.
+///
+/// Signature: (addr: i32, discriminant: i32, value: i32) -> ()
+///
+/// Stores an option value to memory:
+/// - discriminant (1 byte) at addr
+/// - value (4 bytes) at addr+4
+pub fn emit_store_option() -> Function {
+    // params: addr(0), discriminant(1), value(2)
+    let mut func = Function::new([]);
+
+    // Store discriminant (1 byte) at addr
+    func.instruction(&Instruction::LocalGet(0)); // addr
+    func.instruction(&Instruction::LocalGet(1)); // discriminant
+    func.instruction(&Instruction::I32Store8(MemArg { offset: 0, align: 0, memory_index: 0 }));
+
+    // Store value at addr+4
+    func.instruction(&Instruction::LocalGet(0)); // addr
+    func.instruction(&Instruction::LocalGet(2)); // value
+    func.instruction(&Instruction::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
+
+    func.instruction(&Instruction::End);
+    func
+}
+
+/// Generate store_result function.
+///
+/// Signature: (addr: i32, discriminant: i32, payload1: i32, payload2: i32) -> ()
+///
+/// Stores a result value to memory:
+/// - discriminant (1 byte) at addr
+/// - payload1 (4 bytes) at addr+4
+/// - payload2 (4 bytes) at addr+8
+pub fn emit_store_result() -> Function {
+    // params: addr(0), discriminant(1), payload1(2), payload2(3)
+    let mut func = Function::new([]);
+
+    // Store discriminant (1 byte) at addr
+    func.instruction(&Instruction::LocalGet(0)); // addr
+    func.instruction(&Instruction::LocalGet(1)); // discriminant
+    func.instruction(&Instruction::I32Store8(MemArg { offset: 0, align: 0, memory_index: 0 }));
+
+    // Store payload1 at addr+4
+    func.instruction(&Instruction::LocalGet(0)); // addr
+    func.instruction(&Instruction::LocalGet(2)); // payload1
+    func.instruction(&Instruction::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
+
+    // Store payload2 at addr+8
+    func.instruction(&Instruction::LocalGet(0)); // addr
+    func.instruction(&Instruction::LocalGet(3)); // payload2
+    func.instruction(&Instruction::I32Store(MemArg { offset: 8, align: 2, memory_index: 0 }));
 
     func.instruction(&Instruction::End);
     func

@@ -1,0 +1,166 @@
+package meshx:mail@0.1.0;
+
+// ============================================================================
+// Shared types (mirror WIT; Rust backend uses the generated bindings)
+// ============================================================================
+
+record Account {
+    email: string,
+    name: string,
+    avatar: string,
+}
+
+record Address {
+    email: string,
+    name: string,
+    avatar: string,
+}
+
+enum Mailbox {
+    inbox,
+    flagged,
+    sent,
+    drafts,
+    archive,
+    spam,
+    trash,
+}
+
+enum Filter {
+    all,
+    unread,
+    flagged,
+    attachments,
+    mentions-me,
+    to-me,
+}
+
+enum Sort {
+    date,
+    sender,
+    subject,
+}
+
+enum ReplyMode {
+    none,
+    reply,
+    reply-all,
+    forward,
+}
+
+enum LabelColor {
+    violet,
+    pink,
+    amber,
+    emerald,
+    blue,
+    rose,
+    zinc,
+}
+
+record Label {
+    id: string,
+    name: string,
+    color: LabelColor,
+}
+
+// Smart card payloads are heterogeneous. We keep the *kind* in Yel for
+// layout/icon selection; the Rust side renders the body via SmartCardView.
+enum SmartCardKind {
+    none,
+    flight,
+    train,
+    bus,
+    boat,
+    hotel,
+    restaurant,
+    event,
+    package-track,
+    invoice,
+    rental-car,
+    taxi,
+    reservation-package,
+    calendar,
+    action,
+}
+
+record SmartCardRef {
+    kind: SmartCardKind,
+    // Backend-issued handle; SmartCardView renders the full body.
+    handle: s32,
+}
+
+record Message {
+    id: string,
+    thread-id: string,
+    mailbox: Mailbox,
+    from: Address,
+    to: list<Address>,
+    subject: string,
+    preview: string,
+    body: string,
+    body-loading: bool,
+    // Pre-formatted on the Rust side — Yel has no Intl.
+    date-display: string,
+    date-full: string,
+    read: bool,
+    flagged: bool,
+    has-attachments: bool,
+    labels: list<string>,
+    smart-card: SmartCardRef,
+}
+
+record Thread {
+    thread-id: string,
+    latest: Message,
+    messages: list<Message>,
+    count: s32,
+    has-unread: bool,
+}
+
+// Flattened row for the virtualized list — the Rust side computes
+// expansion/threading/tint in one pass and hands back an already-flat list.
+record FlatRow {
+    msg: Message,
+    thread-id: string,
+    thread-count: s32,
+    is-expanded: bool,
+    is-first: bool,
+    is-last: bool,
+    is-thread-header: bool,
+    // 0 = normal, 1 = thread-member tint, 2 = thread-header tint, 3 = selected
+    tint: s32,
+    // Whether a divider is drawn above this row.
+    show-divider: bool,
+    // Rounding hints from the adjacency pass: top/bottom/both/none
+    round-top: bool,
+    round-bottom: bool,
+    // Unread indicator (derived from expanded/thread state on the backend).
+    unread-dot: bool,
+}
+
+record MailboxUnread {
+    mailbox: Mailbox,
+    unread: s32,
+}
+
+record SmartCardEntry {
+    card: SmartCardRef,
+    msg-id: string,
+}
+
+// A single move target emitted by the backend with its label + icon
+// so Yel doesn't need a string→icon map.
+record MoveTarget {
+    mailbox: Mailbox,
+    label: string,
+    icon: string,
+}
+
+record StorageQuota {
+    used: s64,
+    total: s64,
+    percent: s32,
+    used-display: string,
+    total-display: string,
+}

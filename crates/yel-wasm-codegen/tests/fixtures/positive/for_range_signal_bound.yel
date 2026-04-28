@@ -1,0 +1,13 @@
+package yel:forrngsig@0.1.0;
+
+// `for i in 0..count` where the end bound is a signal. The for-effect
+// must register `reads: [count]` so writes re-evaluate the range and
+// mount/unmount the iteration count delta.
+export component App {
+    count: s32 = 3;
+    VStack {
+        for i in 0..count {
+            Text { "tick" }
+        }
+    }
+}

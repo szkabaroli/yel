@@ -21,8 +21,11 @@ fi
 
 echo "📦 WASM size: $(du -h "$WASM_PATH" | cut -f1)"
 
-# Optional: Run wasm-opt for additional size reduction
-if command -v wasm-opt &> /dev/null; then
+# Optional: Run wasm-opt for additional size reduction.
+# Skipped until binaryen adds full component-model support
+# (see https://github.com/WebAssembly/binaryen/issues/6728). jco will still
+# split the component into optimized core modules internally.
+if [ "${ENABLE_WASM_OPT:-0}" = "1" ] && command -v wasm-opt &> /dev/null; then
     echo "🔧 Running wasm-opt for additional optimization..."
     wasm-opt -Oz "$WASM_PATH" -o "$WASM_PATH.opt"
     mv "$WASM_PATH.opt" "$WASM_PATH"

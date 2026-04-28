@@ -1,0 +1,18 @@
+// Minimized from fuzzer seeds 12, 16, 18 (class: "expected i32 but nothing
+// on stack"). A non-exported component B has a callback returning a scalar
+// (u32/s32/f32 — i.e. a 1-slot return) invoked as a standalone statement
+// inside an element handler, while a sibling earlier exported component A
+// exposes a callback with a composite (result<T,E>) return whose shape
+// mismatches B's callback return ABI.
+// Root-cause hypothesis: the statement-level discard path emits N drops
+// based on A's registered composite ABI for the callback name, but B's
+// implementation only leaves a single slot on the stack — the extra drops
+// underflow the operand stack and validation reports "expected i32 but
+// nothing on stack" at the handler block boundary.
+export component A {
+    on-change: func() -> result<string, string>;
+}
+component B {
+    on-change: func() -> u32;
+    Text { pressed: { on-change(); }, }
+}

@@ -1,0 +1,20 @@
+// Getter return signature for a record signal whose canonical-ABI flat
+// shape has exactly one slot (e.g. `record R { a: f32 }` flattens to
+// `[F32]`). Canonical ABI says that fits in MAX_FLAT_RESULTS=1, so the
+// direct WIT return type should be `f32`, not a pointer. Our codegen
+// always returns `i32` for record getters (pointer-convention), so
+// wit-component rejects the core module with:
+//   type mismatch for function `[method]app.get-r`:
+//   expected `[I32] -> [F32]` but found `[I32] -> [I32]`
+//
+// Root cause: getter signature dispatch in `core_module.rs` needs the
+// same canonical-ABI flatten check that other composite getters already
+// do: if `flatten_core_valtypes(ty).len() == 1`, return that flat type
+// directly instead of the pointer convention. Also applies to single-
+// field tuples and possibly other 1-slot composites.
+package yel:fb@0.1.0;
+record R { a: f32, }
+export component App {
+    r: R = { a: 1.0 };
+    Text { "x" }
+}

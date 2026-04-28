@@ -1,0 +1,14 @@
+package yel:globout@0.1.0;
+
+// Exercises a global `out` property — exposed out of the component tree
+// without a host setter. globals.yel covers `in` (host pushes); this covers
+// the complementary `out` direction.
+export global Status {
+    out ready: bool;
+}
+
+export component App {
+    VStack {
+        Text { "ready" }
+    }
+}

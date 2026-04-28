@@ -1,0 +1,9 @@
+package yel:sloterr@0.1.0;
+
+component Card {
+    VStack { Text { "hi" } }
+}
+
+export component App {
+    Card { Text { "body" } }
+}

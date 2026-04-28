@@ -51,6 +51,12 @@ pub enum DefKind {
     Parameter(ParameterDef),
     /// A local variable.
     Local,
+    /// An intrinsic element type (e.g., HStack, VStack, Text).
+    Element(ElementDef),
+    /// An imported external component.
+    ImportComponent(ImportComponentDef),
+    /// A singleton namespace shared across components.
+    Global(GlobalDef),
 }
 
 /// Namespace for name resolution.
@@ -62,6 +68,8 @@ pub enum Namespace {
     Value,
     /// UI Components.
     Component,
+    /// Global singletons.
+    Global,
 }
 
 /// Component definition.
@@ -77,6 +85,11 @@ pub struct ComponentDef {
     pub callbacks: Vec<DefId>,
     /// Whether exported.
     pub is_export: bool,
+    /// `true` if the component's body contains a `@children` slot, making
+    /// it a container component — callers may pass child nodes that splice
+    /// in at that position, and the component's `mount` returns a u32
+    /// children-root node id.
+    pub has_children_slot: bool,
 }
 
 /// Record definition.
@@ -173,6 +186,79 @@ pub struct ParameterDef {
     pub idx: u32,
 }
 
+/// Intrinsic element type definition.
+/// Elements are primitive UI building blocks provided by the runtime.
+#[derive(Clone, Debug)]
+pub struct ElementDef {
+    /// DefId of this element.
+    pub def_id: DefId,
+    /// Element name.
+    pub name: Name,
+    /// Property DefIds (in order).
+    pub properties: Vec<DefId>,
+}
+
+/// Imported component definition.
+/// Imported components are external components provided by the host or other modules.
+#[derive(Clone, Debug)]
+pub struct ImportComponentDef {
+    /// DefId of this imported component.
+    pub def_id: DefId,
+    /// Component name.
+    pub name: Name,
+    /// Property DefIds (in order).
+    pub properties: Vec<DefId>,
+    /// Method DefIds.
+    pub methods: Vec<DefId>,
+    /// `true` when the declaration includes `@children;`. Module callers
+    /// may pass child nodes inside `X { ... }`; the host's mount returns a
+    /// u32 children-root id where those children attach.
+    pub has_children_slot: bool,
+}
+
+/// Direction of a global property — what crosses the host boundary.
+///
+/// Kept here instead of on `FieldDef` to avoid churning the record/field
+/// infrastructure. Aligned 1:1 with `GlobalDef::properties`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlobalPropDirection {
+    /// No host involvement — pure in-tree shared state.
+    Inline,
+    /// Host pushes via imported setter.
+    In,
+    /// Component writes; host is notified via imported change func.
+    Out,
+    /// Both.
+    InOut,
+}
+
+/// Global singleton definition.
+///
+/// Properties are stored as `DefKind::Field` (with this global as owner);
+/// callbacks as `DefKind::Function` with `is_export = false` (host
+/// implements → component imports).
+///
+/// `is_export` on the global itself governs whether its WIT interface is
+/// published for other packages to import. Pure in-tree shared state (no
+/// direction, no callbacks) emits no WIT regardless of `is_export`.
+#[derive(Clone, Debug)]
+pub struct GlobalDef {
+    pub def_id: DefId,
+    pub name: Name,
+    /// Whether published for cross-package import.
+    pub is_export: bool,
+    /// Property DefIds (backed by `FieldDef` entries).
+    pub properties: Vec<DefId>,
+    /// Direction per property, aligned with `properties`.
+    pub property_directions: Vec<GlobalPropDirection>,
+    /// HIR-lowered default expression per property, aligned with `properties`.
+    /// Populated for `Inline` direction — the module's start function uses
+    /// these to seed each property's backing memory slot.
+    pub property_defaults: Vec<Option<crate::hir::HirExpr>>,
+    /// Callback DefIds (imported from host).
+    pub callbacks: Vec<DefId>,
+}
+
 impl Default for Definitions {
     fn default() -> Self {
         Self::new()
@@ -194,8 +280,14 @@ impl Definitions {
     }
 
     /// Register a name in a namespace.
-    pub fn register_name(&mut self, name: Name, ns: Namespace, def_id: DefId) {
-        self.names.insert((name, ns), def_id);
+    /// Returns `Some(existing_def_id)` if the name was already registered, `None` if successful.
+    pub fn register_name(&mut self, name: Name, ns: Namespace, def_id: DefId) -> Option<DefId> {
+        if let Some(&existing) = self.names.get(&(name, ns)) {
+            Some(existing)
+        } else {
+            self.names.insert((name, ns), def_id);
+            None
+        }
     }
 
     /// Look up a definition by name and namespace.
@@ -435,6 +527,173 @@ impl Definitions {
     /// Check if empty.
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// Get as an element.
+    pub fn as_element(&self, def_id: DefId) -> Option<&ElementDef> {
+        match &self.items[def_id].kind {
+            DefKind::Element(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Get as a mutable element.
+    pub fn as_element_mut(&mut self, def_id: DefId) -> Option<&mut ElementDef> {
+        match &mut self.items[def_id].kind {
+            DefKind::Element(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Get as an import component.
+    pub fn as_import_component(&self, def_id: DefId) -> Option<&ImportComponentDef> {
+        match &self.items[def_id].kind {
+            DefKind::ImportComponent(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Get as a mutable import component.
+    pub fn as_import_component_mut(&mut self, def_id: DefId) -> Option<&mut ImportComponentDef> {
+        match &mut self.items[def_id].kind {
+            DefKind::ImportComponent(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Get all element DefIds.
+    pub fn elements(&self) -> impl Iterator<Item = DefId> + '_ {
+        self.items
+            .iter_enumerated()
+            .filter_map(|(id, item)| match &item.kind {
+                DefKind::Element(_) => Some(id),
+                _ => None,
+            })
+    }
+
+    /// Get all import component DefIds.
+    pub fn import_components(&self) -> impl Iterator<Item = DefId> + '_ {
+        self.items
+            .iter_enumerated()
+            .filter_map(|(id, item)| match &item.kind {
+                DefKind::ImportComponent(_) => Some(id),
+                _ => None,
+            })
+    }
+
+    /// Find element property by name.
+    pub fn find_element_property(&self, owner: DefId, prop_name: Name) -> Option<(FieldIdx, DefId)> {
+        let props = match self.kind(owner) {
+            DefKind::Element(e) => &e.properties,
+            _ => return None,
+        };
+
+        for (idx, &prop_def_id) in props.iter().enumerate() {
+            if self.items[prop_def_id].name == prop_name {
+                return Some((FieldIdx::new(idx as u32), prop_def_id));
+            }
+        }
+        None
+    }
+
+    /// Find import component property by name.
+    pub fn find_import_component_property(&self, owner: DefId, prop_name: Name) -> Option<(FieldIdx, DefId)> {
+        let props = match self.kind(owner) {
+            DefKind::ImportComponent(c) => &c.properties,
+            _ => return None,
+        };
+
+        for (idx, &prop_def_id) in props.iter().enumerate() {
+            if self.items[prop_def_id].name == prop_name {
+                return Some((FieldIdx::new(idx as u32), prop_def_id));
+            }
+        }
+        None
+    }
+
+    /// Find import component method by name.
+    pub fn find_import_component_method(&self, owner: DefId, method_name: Name) -> Option<DefId> {
+        let methods = match self.kind(owner) {
+            DefKind::ImportComponent(c) => &c.methods,
+            _ => return None,
+        };
+
+        methods
+            .iter()
+            .copied()
+            .find(|&method_def_id| self.items[method_def_id].name == method_name)
+    }
+
+    /// Get as a global.
+    pub fn as_global(&self, def_id: DefId) -> Option<&GlobalDef> {
+        match &self.items[def_id].kind {
+            DefKind::Global(g) => Some(g),
+            _ => None,
+        }
+    }
+
+    /// Get as a mutable global.
+    pub fn as_global_mut(&mut self, def_id: DefId) -> Option<&mut GlobalDef> {
+        match &mut self.items[def_id].kind {
+            DefKind::Global(g) => Some(g),
+            _ => None,
+        }
+    }
+
+    /// Get all global DefIds.
+    pub fn globals(&self) -> impl Iterator<Item = DefId> + '_ {
+        self.items
+            .iter_enumerated()
+            .filter_map(|(id, item)| match &item.kind {
+                DefKind::Global(_) => Some(id),
+                _ => None,
+            })
+    }
+
+    /// Returns the DefId of the global block that owns this property,
+    /// or None if `prop_def_id` is not a global-block property.
+    /// O(N*M) walk over all globals — only called at codegen time
+    /// against the small set of global blocks; not cached.
+    pub fn owning_global_block(&self, prop_def_id: DefId) -> Option<DefId> {
+        for block_id in self.globals() {
+            if let Some(g) = self.as_global(block_id) {
+                if g.properties.contains(&prop_def_id) {
+                    return Some(block_id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Find global property by name. Returns (index, def_id).
+    pub fn find_global_property(
+        &self,
+        owner: DefId,
+        prop_name: Name,
+    ) -> Option<(FieldIdx, DefId)> {
+        let props = match self.kind(owner) {
+            DefKind::Global(g) => &g.properties,
+            _ => return None,
+        };
+        for (idx, &prop_def_id) in props.iter().enumerate() {
+            if self.items[prop_def_id].name == prop_name {
+                return Some((FieldIdx::new(idx as u32), prop_def_id));
+            }
+        }
+        None
+    }
+
+    /// Find global callback by name. Returns the function DefId.
+    /// Called via `GlobalName.callback(args)` in expressions.
+    pub fn find_global_function(&self, owner: DefId, fn_name: Name) -> Option<DefId> {
+        let g = match self.kind(owner) {
+            DefKind::Global(g) => g,
+            _ => return None,
+        };
+        g.callbacks
+            .iter()
+            .copied()
+            .find(|&fn_id| self.items[fn_id].name == fn_name)
     }
 }
 

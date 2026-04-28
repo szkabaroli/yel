@@ -1,0 +1,12 @@
+// Derived signal with multiple source deps: `total = price * quantity`.
+// Writing either `price` or `quantity` must recompute `total`.
+package yel:derived-multi@0.1.0;
+
+export component App {
+    price: s32 = 10;
+    quantity: s32 = 3;
+    total: s32 = price * quantity;
+    VStack {
+        Text { "total: {total}" }
+    }
+}

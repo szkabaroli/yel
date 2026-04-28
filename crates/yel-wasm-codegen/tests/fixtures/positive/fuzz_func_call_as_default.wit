@@ -1,0 +1,24 @@
+package yel:fb@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-x: func() -> s32;
+    set-x: func(value: s32);
+  }
+}
+
+interface app-callbacks {
+  use app-component.{ app };
+  cb: func(self: borrow<app>) -> s32;
+}
+
+world fb {
+  import app-callbacks;
+  import app-component;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

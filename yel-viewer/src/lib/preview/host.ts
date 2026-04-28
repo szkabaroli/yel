@@ -6,21 +6,34 @@
  */
 
 // @ts-ignore - jco types may not be available
+// The bare `@bytecodealliance/jco` specifier is pinned to the top-
+// level 1.18.1 install's `src/browser.js` via a vite resolve.alias in
+// vite.config.ts — that's the wasm-bindgen-generated `generate`
+// wrapper whose bundled wasmparser 0.245.1 accepts our GC rec-group
+// type declarations. Without the alias, vite can follow a transitive
+// 1.15.4 resolution whose older wasmparser rejects rec groups.
 import { transpile } from "@bytecodealliance/jco";
 import * as dom from "./dom";
+import type { EventValue } from "./dom";
 
 export interface ComponentInstance {
   mount(rootId: number): void;
   unmount(): void;
-  dispatch(handlerId: number): void;
+  dispatch(handlerId: number, event: EventValue): void;
   getProperty(name: string): any;
   setProperty(name: string, value: any): void;
+  /**
+   * Property names discoverable on this component — every `getFoo()`
+   * method on the underlying resource becomes `foo` here. Mirrors what
+   * the generated WIT getter/setter pairs expose to the host.
+   */
+  listProperties(): string[];
 }
 
 export interface HostedComponent {
   instance: ComponentInstance | null;
   componentClass: any;
-  dispatch: ((handlerId: number) => void) | null;
+  dispatch: ((handlerId: number, event: EventValue) => void) | null;
 }
 
 /**
@@ -28,7 +41,7 @@ export interface HostedComponent {
  */
 export interface InstantiateOptions {
   callbacks?: Record<string, () => void>;
-  onDispatch?: (handlerId: number) => void;
+  onDispatch?: (handlerId: number, event: EventValue) => void;
 }
 
 export async function instantiateComponent(
@@ -47,6 +60,11 @@ export async function instantiateComponent(
     // This generates an instantiate() function that accepts imports
     const result = await transpile(wasmBytes, {
       name: "component",
+      // The "browser" export of jco (`src/browser.js`) aliases
+      // `transpile` to the raw underlying `generate` function, which
+      // expects the pre-wrapped variant form `{ tag: 'async' }`.
+      // The node/CLI `transpile` wraps a plain string — different
+      // entrypoint, different API. We're in the browser path here.
       instantiation: { tag: "async" },
     });
 
@@ -122,14 +140,15 @@ export async function instantiateComponent(
     console.log("[Preview] Module imported:", Object.keys(componentModule));
 
     // Set up dispatch callback for DOM events
-    let dispatchFn: ((handlerId: number) => void) | null = null;
-    dom.setDispatchCallback((handlerId) => {
-      console.log("[Preview] DOM Dispatch:", handlerId);
+    let dispatchFn: ((handlerId: number, event: EventValue) => void) | null =
+      null;
+    dom.setDispatchCallback((handlerId, event) => {
+      console.log("[Preview] DOM Dispatch:", handlerId, event);
       if (dispatchFn) {
-        dispatchFn(handlerId);
+        dispatchFn(handlerId, event);
       }
       // Notify caller that dispatch happened (for state updates)
-      onDispatch?.(handlerId);
+      onDispatch?.(handlerId, event);
     });
 
     // Create the imports object for instantiation
@@ -139,6 +158,7 @@ export async function instantiateComponent(
       createElement: dom.createElement,
       createText: dom.createText,
       createComment: dom.createComment,
+      createFragment: dom.createFragment,
       setAttribute: dom.setAttribute,
       removeAttribute: dom.removeAttribute,
       setTextContent: dom.setTextContent,
@@ -175,16 +195,70 @@ export async function instantiateComponent(
       }
     });
 
-    // Create a proxy that handles any callback interface
+    // Extract the raw u32 handle from whatever jco hands our callback. The
+    // WIT declares `self: borrow<resource>`, so jco lifts the u32 coming
+    // from the core module into a resource instance (stored on a private
+    // `Symbol('handle')`). We reach into the symbol bag to recover the id
+    // without depending on jco module internals.
+    const unwrapHandle = (value: unknown): number | undefined => {
+      if (typeof value === 'number') return value;
+      if (value && typeof value === 'object') {
+        for (const sym of Object.getOwnPropertySymbols(value)) {
+          if (sym.description === 'handle') {
+            const h = (value as Record<symbol, unknown>)[sym];
+            if (typeof h === 'number') return h;
+          }
+        }
+      }
+      return undefined;
+    };
+
+    // Registry of handle → live component instance. Populated right after
+    // `new ComponentClass()` below so callbacks fired from inside the
+    // WASM have full access to the exported resource methods (mount,
+    // unmount, getters/setters) without the host having to keep a
+    // separate side table. One entry per `[resource-new]` call.
+    const componentByHandle = new Map<number, Record<string, any>>();
+
+    // Create a proxy that handles any callback interface. Every callback
+    // takes the invoking component's resource handle as its first param so
+    // the host can route the call back to the live component instance.
     const callbacksProxy = new Proxy({}, {
       get(target, prop) {
-        return () => {
-          console.log(`[Preview] Callback: ${String(prop)}`);
-          if (callbacks && typeof callbacks[String(prop)] === 'function') {
-            callbacks[String(prop)]();
+        return (selfArg: unknown, ...rest: unknown[]) => {
+          const selfHandle = unwrapHandle(selfArg);
+          const owner = selfHandle !== undefined
+            ? componentByHandle.get(selfHandle)
+            : undefined;
+          console.log(
+            `[Preview] Callback: ${String(prop)} handle=${selfHandle} owner=`,
+            owner
+          );
+          const userCb = callbacks && callbacks[String(prop)];
+          if (typeof userCb === 'function') {
+            // Hand user code the rich component instance if we have one,
+            // otherwise fall back to the raw handle.
+            const firstArg = owner ?? selfHandle;
+            (userCb as (...args: unknown[]) => void)(firstArg, ...rest);
           }
         };
       }
+    });
+
+    // Stub for `{component}-component` interfaces that appear as world
+    // imports purely to satisfy wit-component's encoder ordering (so
+    // callbacks' `use {component}-component.{resource}` can resolve). The
+    // component actually EXPORTS these interfaces; the import is a
+    // forward-declaration and nothing on it is ever called at runtime.
+    // jco still destructures the resource class out of the object at
+    // instantiate time, so return an object with a dummy constructor.
+    const componentImportStub = new Proxy({}, {
+      get() {
+        return class StubResource {};
+      },
+      has() {
+        return true;
+      },
     });
 
     // Try different key formats that jco might expect
@@ -205,12 +279,22 @@ export async function instantiateComponent(
           console.log(`[Preview] Providing callbacks for: ${key}`);
           return callbacksProxy;
         }
+        // `{component}-component` interfaces appear as both imports and
+        // exports in the generated world — the import side is just for
+        // wit-component's type-resolution and never invoked at runtime.
+        if (key.endsWith('-component') || key.includes('-component@')) {
+          console.log(`[Preview] Providing component-interface stub for: ${key}`);
+          return componentImportStub;
+        }
         console.log(`[Preview] Unknown import requested: ${key}`);
         return undefined;
       },
       has(target, prop) {
         const key = String(prop);
-        return key in target || key.includes('callbacks');
+        return key in target
+          || key.includes('callbacks')
+          || key.endsWith('-component')
+          || key.includes('-component@');
       }
     });
 
@@ -236,28 +320,61 @@ export async function instantiateComponent(
       wasmBlobUrls.forEach(url => URL.revokeObjectURL(url));
     }, 5000);
 
-    // Find the component class from the instance exports
+    // Find the component class and freestanding dispatch from the instance exports.
+    // The exported interface contains a resource class (constructor) and a
+    // freestanding `dispatch` function.
     let ComponentClass: any = null;
     let componentName: string | null = null;
 
     for (const [key, value] of Object.entries(instance)) {
       console.log("[Preview] Instance export:", key, typeof value);
       if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-        // Find the component class (resource constructor)
-        for (const [className, classValue] of Object.entries(value as object)) {
-          if (typeof classValue === "function") {
-            ComponentClass = classValue;
-            componentName = className;
-            console.log("[Preview] Found component class:", className);
-            break;
+        const iface = value as Record<string, unknown>;
+        for (const [memberName, memberValue] of Object.entries(iface)) {
+          if (typeof memberValue === "function" && memberName !== "dispatch") {
+            ComponentClass = memberValue;
+            componentName = memberName;
+            console.log("[Preview] Found component class:", memberName);
+          }
+          if (memberName === "dispatch" && typeof memberValue === "function") {
+            dispatchFn = memberValue as (
+              handlerId: number,
+              event: EventValue,
+            ) => void;
+            console.log("[Preview] Found freestanding dispatch function");
           }
         }
       }
     }
 
     if (!ComponentClass) {
-      console.error("[Preview] Instance exports:", instance);
-      throw new Error("No component class found in instantiated module");
+      // The component has no exported resource to instantiate. This is a
+      // valid state for libraries, globals-only files, and in-progress
+      // code. Render a placeholder instead of erroring so the preview tab
+      // stays usable while the user edits.
+      console.log(
+        "[Preview] No component class to instantiate; rendering empty placeholder.",
+      );
+      rootElement.textContent = "";
+      const empty = document.createElement("div");
+      empty.style.cssText =
+        "padding: 1rem; color: var(--color-muted-foreground, #888); font-size: 0.875rem; text-align: center;";
+      empty.textContent =
+        "No exported component to preview. Add `export` before a component declaration.";
+      rootElement.appendChild(empty);
+      
+      return {
+        instance: {
+          mount() {},
+          unmount() {},
+          dispatch(_handlerId: number, _event: EventValue) {},
+          getProperty: () => undefined,
+          setProperty: () => undefined,
+          listProperties: () => [],
+        },
+        componentClass: null,
+        dispatch: null,
+      };
     }
 
     // Create component instance
@@ -266,12 +383,13 @@ export async function instantiateComponent(
     console.log("[Preview] Component instance created:", componentInstance);
     console.log("[Preview] Component instance methods:", Object.getOwnPropertyNames(Object.getPrototypeOf(componentInstance)));
 
-    // dispatch is now a method on the resource instance, not a separate interface
-    if (typeof componentInstance.dispatch === "function") {
-      dispatchFn = (handlerId: number) => componentInstance.dispatch(handlerId);
-      console.log("[Preview] Found dispatch method on component instance");
-    } else {
-      console.warn("[Preview] No dispatch method found on component instance");
+    // Register the instance under its resource handle so callbacks fired
+    // from inside the WASM can look up the live JS component (with its
+    // full getter/setter surface) via `self: borrow<resource>`.
+    const instanceHandle = unwrapHandle(componentInstance);
+    if (instanceHandle !== undefined) {
+      componentByHandle.set(instanceHandle, componentInstance);
+      console.log(`[Preview] Registered component handle=${instanceHandle}`);
     }
 
     // Create wrapper
@@ -287,9 +405,9 @@ export async function instantiateComponent(
           componentInstance.unmount();
         }
       },
-      dispatch(handlerId: number) {
+      dispatch(handlerId: number, event: EventValue) {
         if (dispatchFn) {
-          dispatchFn(handlerId);
+          dispatchFn(handlerId, event);
         }
       },
       getProperty(name: string) {
@@ -304,6 +422,25 @@ export async function instantiateComponent(
         if (setter) {
           setter.call(componentInstance, value);
         }
+      },
+      listProperties() {
+        // jco camel-cases WIT kebab names: `get-count` → `getCount`,
+        // `set-dark-mode` → `setDarkMode`. A property is any `getFoo`
+        // method whose sibling `setFoo` also exists.
+        const proto = Object.getPrototypeOf(componentInstance);
+        if (!proto) return [];
+        const names = new Set<string>();
+        for (const key of Object.getOwnPropertyNames(proto)) {
+          if (!key.startsWith('get') || key.length <= 3) continue;
+          if (typeof (componentInstance as any)[key] !== 'function') continue;
+          const base = key[3].toLowerCase() + key.slice(4);
+          // Skip things like `getCurrentFoo` unless there's a paired setter.
+          const setter = 'set' + key.slice(3);
+          if (typeof (componentInstance as any)[setter] === 'function') {
+            names.add(base);
+          }
+        }
+        return [...names];
       },
     };
 
@@ -385,8 +522,11 @@ export class YelPreviewHost {
     }
   }
 
-  dispatch(handlerId: number): void {
-    this.component?.instance?.dispatch(handlerId);
+  dispatch(
+    handlerId: number,
+    event: EventValue = { tag: "none" },
+  ): void {
+    this.component?.instance?.dispatch(handlerId, event);
   }
 
   getProperty(name: string): any {
@@ -395,6 +535,10 @@ export class YelPreviewHost {
 
   setProperty(name: string, value: any): void {
     this.component?.instance?.setProperty(name, value);
+  }
+
+  listProperties(): string[] {
+    return this.component?.instance?.listProperties() ?? [];
   }
 
   isLoaded(): boolean {

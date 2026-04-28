@@ -1,0 +1,30 @@
+package test:stackdrift-sigread-variant@0.1.0;
+
+interface shared-types {
+  variant m {
+    kind-a(option<string>),
+    kind-b(string),
+    kind-c(result<s32, string>),
+    kind-d,
+  }
+}
+
+interface app-component {
+  use shared-types.{ m };
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-visible: func() -> m;
+    set-visible: func(value: m);
+    get-selected: func() -> m;
+    set-selected: func(value: m);
+  }
+}
+
+world stackdrift-sigread-variant {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

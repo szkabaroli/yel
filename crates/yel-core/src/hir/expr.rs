@@ -3,7 +3,7 @@
 use crate::ids::{DefId, LocalId};
 use crate::source::Span;
 use crate::types::Ty;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 
 /// A HIR expression.
 #[derive(Debug, Clone, Serialize)]
@@ -59,6 +59,12 @@ pub enum HirExprKind {
         member: String,
         args: Vec<HirExpr>,
     },
+    /// Method call (e.g., `list.filter(closure)` or `string.starts-with(prefix)`).
+    MethodCall {
+        receiver: Box<HirExpr>,
+        method: String,
+        args: Vec<HirExpr>,
+    },
     /// Range expression.
     Range {
         start: Box<HirExpr>,
@@ -97,8 +103,6 @@ pub enum HirLiteral {
     Bool(bool),
     /// Value with unit: (value, unit) e.g., (8.0, "px")
     Unit(f64, String),
-    /// Color in hex: #rrggbb or #rrggbbaa
-    Color(String),
     /// List literal.
     List(Vec<HirExpr>),
     /// Tuple literal.
@@ -108,7 +112,7 @@ pub enum HirLiteral {
 }
 
 /// Binary operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinOp {
     // Arithmetic
     Add,
@@ -133,7 +137,7 @@ pub enum BinOp {
 }
 
 impl BinOp {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "+" => Some(BinOp::Add),
             "-" => Some(BinOp::Sub),
@@ -157,14 +161,14 @@ impl BinOp {
 }
 
 /// Unary operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnaryOp {
     Neg,
     Not,
 }
 
 impl UnaryOp {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "-" => Some(UnaryOp::Neg),
             "!" => Some(UnaryOp::Not),
@@ -186,6 +190,12 @@ pub enum HirStatement {
         condition: HirExpr,
         then_branch: Vec<HirStatement>,
         else_branch: Option<Vec<HirStatement>>,
+    },
+    /// Let binding: `let name: type = value;`
+    Let {
+        name: String,
+        ty: Option<Ty>,
+        value: HirExpr,
     },
 }
 

@@ -1,0 +1,11 @@
+package yel:floattest@0.1.0;
+
+// Exercises the `f32_to_string` runtime helper + reactive interpolation of
+// an f32 signal. Without this fixture the float-to-string path and f32
+// SignalRead path are entirely un-exercised.
+export component App {
+    progress: f32 = 0.5;
+    VStack {
+        Text { "progress: {progress}" }
+    }
+}

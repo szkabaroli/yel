@@ -77,6 +77,10 @@ pub enum HirNodeKind {
         /// Loop body.
         body: Vec<HirNode>,
     },
+    /// Caller-children slot marker (`@children`). When the enclosing
+    /// component is used at a call site, the caller's child nodes splice
+    /// in at this position.
+    ChildrenSlot,
 }
 
 /// A property binding with optional getter (value) and setter.

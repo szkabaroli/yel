@@ -195,6 +195,12 @@ impl yel::ui::dom::Host for HostState {
         id
     }
 
+    fn create_fragment(&mut self) -> u32 {
+        let id = self.alloc_node("yel-frag");
+        println!("[DOM] create_fragment() -> {}", id);
+        id
+    }
+
     fn set_attribute(&mut self, node: u32, name: String, value: yel::ui::dom::AttributeValue) {
         let str_value = attribute_value_to_string(&value);
         println!("[DOM] set_attribute({}, {:?}, {:?})", node, name, str_value);

@@ -14,6 +14,7 @@ anyhow.workspace = true
 
 # Code generation
 wasm-encoder.workspace = true
+wasmparser.workspace = true
 wasmprinter.workspace = true
 wit-parser.workspace = true
 wit-component.workspace = true
@@ -27,3 +28,10 @@ parking_lot.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+# Execution-driven integration tests instantiate compiled components
+# with Wasmtime, wire up recording mocks for `yel:ui/dom`, drive
+# mount/dispatch/setters, and assert on the observed DOM-op trace.
+# This is what catches "signal A changes → reactive effect fires →
+# set-text-content issued with the correct new value" — behaviour that
+# neither WIT snapshots nor `wasmparser` structural inspection can see.
+wasmtime.workspace = true

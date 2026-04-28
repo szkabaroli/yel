@@ -1,0 +1,17 @@
+package yel:floattest@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-progress: func() -> f32;
+    set-progress: func(value: f32);
+  }
+}
+
+world floattest {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

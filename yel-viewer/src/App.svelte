@@ -2,37 +2,37 @@
     import CodeEditor from './lib/components/CodeEditor.svelte'
     import TreeView from './lib/components/TreeView.svelte'
     import JsonTreeView from './lib/components/JsonTreeView.svelte'
-    //import UIPreview from "./lib/components/UIPreview.svelte";
     import WasmPreview from './lib/components/WasmPreview.svelte'
     import WastView from './lib/components/WastView.svelte'
     import WitView from './lib/components/WitView.svelte'
+    import SignalGraphView from './lib/components/SignalGraphView.svelte'
     import ConsolePanel from './lib/components/ConsolePanel.svelte'
     import { sampleCode, examples } from './lib/sampleData'
-    import { convertHirToTree, resetHirIdCounter } from './lib/hirToTree'
-    import { convertThirToTree } from './lib/thirToTree'
-    import { createLirTree } from './lib/lirData'
+    import { convertHirToTree } from './lib/hirToTree'
     import {
         compile,
         check,
         parseToJson,
         compileToHir,
-        compileToThir,
+        compileToDot,
         compileToWasm,
         getVersion,
         type Diagnostic,
         type VersionInfo,
+        compileToLir,
     } from './lib/compiler'
     import type {
         TreeNode,
         Span,
         AstFile,
         HirOutput,
-        ThirOutput,
+        LirOutput,
     } from './lib/types'
 
     import * as Tabs from '$lib/components/ui/tabs'
     import * as Select from '$lib/components/ui/select'
     import * as Resizable from '$lib/components/ui/resizable'
+    import { Button } from '$lib/components/ui/button'
 
     type ViewType =
         | 'preview'
@@ -40,7 +40,8 @@
         | 'hir'
         | 'hir-json'
         | 'thir'
-        | 'lir'
+        | 'lir-json'
+        | 'signal-graph'
         | 'wasm'
         | 'wit'
 
@@ -50,7 +51,8 @@
         { id: 'hir', label: 'HIR' },
         { id: 'hir-json', label: 'HIR JSON' },
         { id: 'thir', label: 'THIR' },
-        { id: 'lir', label: 'LIR' },
+        { id: 'lir-json', label: 'LIR JSON' },
+        { id: 'signal-graph', label: 'Signal Graph' },
         { id: 'wasm', label: 'WASM' },
         { id: 'wit', label: 'WIT' },
     ]
@@ -118,6 +120,7 @@
     let thirTree = $state<TreeNode | null>(null)
     let rawAstData = $state<AstFile | null>(null)
     let rawHirData = $state<HirOutput | null>(null)
+    let rawLirData = $state<LirOutput | null>(null)
 
     $effect(() => {
         // Parse AST
@@ -149,22 +152,28 @@
             rawHirData = null
         }
 
-        // Compile to THIR
-        const thirResult = compileToThir('source.yel', sourceCode)
-        if (thirResult.ok) {
+        // Compile to LIR
+        const lirResult = compileToLir('source.yel', sourceCode)
+        if (lirResult.ok) {
             try {
-                const thir: ThirOutput = JSON.parse(thirResult.value)
-                thirTree = convertThirToTree(thir)
+                const lir: LirOutput = JSON.parse(lirResult.value)
+                rawLirData = lir
             } catch (e) {
-                thirTree = null
+                rawLirData = null
             }
         } else {
-            thirTree = null
+            rawLirData = null
         }
     })
 
-    // Static tree for LIR (not yet implemented with real data)
-    const lirTree = createLirTree()
+    // DOT graph from compiler
+    let signalDot = $state<string>('')
+    $effect(() => {
+        const dotResult = compileToDot('source.yel', sourceCode)
+        signalDot = dotResult.ok
+            ? dotResult.value
+            : `// Errors:\n// ${dotResult.error}`
+    })
 
     const currentTree = $derived.by<TreeNode | null>(() => {
         switch (currentView) {
@@ -172,8 +181,6 @@
                 return hirTree
             case 'thir':
                 return thirTree
-            case 'lir':
-                return lirTree
             default:
                 return null
         }
@@ -248,10 +255,18 @@
     >
         <div class="flex items-center gap-2">
             <picture>
-                <source media="(prefers-color-scheme: dark)" srcset="/yel_logo_dark.svg" />
+                <source
+                    media="(prefers-color-scheme: dark)"
+                    srcset="/yel_logo_dark.svg"
+                />
                 <img src="/yel_logo_light.svg" alt="Yel" class="h-6 w-6" />
             </picture>
-            <h1 class="text-sm font-bold text-foreground" style="font-family: 'Red Hat Display', sans-serif;">Yel Viewer</h1>
+            <h1
+                class="text-sm font-bold text-foreground"
+                style="font-family: 'Red Hat Display', sans-serif;"
+            >
+                Yel Playground
+            </h1>
         </div>
 
         <Select.Root
@@ -259,7 +274,7 @@
             value={selectedExample}
             onValueChange={(v) => v && handleExampleChange(v)}
         >
-            <Select.Trigger class="w-[180px] h-8 text-xs">
+            <Select.Trigger size="sm" class="text-xs font-medium">
                 {examples.find((e) => e.id === selectedExample)?.name ??
                     'Select example'}
             </Select.Trigger>
@@ -322,18 +337,11 @@
                     <Resizable.Pane defaultSize={70} minSize={20}>
                         <div class="flex flex-col h-full">
                             <div
-                                class="flex items-center justify-between h-12 shrink-0 px-4 bg-card border-b border-border text-xs font-semibold text-muted-foreground"
+                                class="flex items-center gap-1.5 h-12 shrink-0 px-5 bg-card border-b border-border text-xs font-semibold text-muted-foreground"
                             >
-                                <span>Source Code</span>
-                                <div class="flex items-center gap-3">
-                                    {#if compiledWasm}
-                                        <span class="text-muted-foreground font-normal">
-                                            Compiled size: {(
-                                                compiledWasm.byteLength / 1024
-                                            ).toFixed(1)} KB
-                                        </span>
-                                    {/if}
-                                </div>
+                                <Button size="sm" variant="outline"
+                                    >main.yel</Button
+                                >
                             </div>
                             <div class="flex-1 overflow-hidden">
                                 <CodeEditor
@@ -376,6 +384,10 @@
                     <JsonTreeView data={rawAstData} label="AST" />
                 {:else if currentView === 'hir-json' && rawHirData}
                     <JsonTreeView data={rawHirData} label="HIR" />
+                {:else if currentView === 'lir-json' && rawLirData}
+                    <JsonTreeView data={rawLirData} label="LIR" />
+                {:else if currentView === 'signal-graph'}
+                    <SignalGraphView dot={signalDot} />
                 {:else if currentTree}
                     <TreeView
                         tree={currentTree}

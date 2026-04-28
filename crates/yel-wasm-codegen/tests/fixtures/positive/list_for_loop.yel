@@ -1,0 +1,13 @@
+package yel:listloop@0.1.0;
+
+// Exercises for-loop over list<string>, keyed diffing, and list element
+// memory access. Without this the loop scaffolding (GeU/IncrSlot/
+// ComputeItemPtr/CallBlock2) has no fixture coverage.
+export component App {
+    items: list<string> = ["a", "b", "c"];
+    VStack {
+        for item in items key(item) {
+            Text { "{item}" }
+        }
+    }
+}

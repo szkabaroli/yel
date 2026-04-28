@@ -22,6 +22,11 @@ interface dom {
     create-element: func(tag: string) -> u32;
     create-text: func(content: string) -> u32;
     create-comment: func(content: string) -> u32;
+    // Layout-neutral wrapper element used by `for` iterations and `if`
+    // branches to group their content under a single DOM root, so a
+    // single `remove` cascades on teardown. Hosts typically map this
+    // to a custom element with `display: contents` semantics.
+    create-fragment: func() -> u32;
 
     // Node manipulation
     set-attribute: func(node: u32, name: string, value: attribute-value);

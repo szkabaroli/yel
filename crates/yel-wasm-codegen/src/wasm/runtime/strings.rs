@@ -292,6 +292,148 @@ pub fn emit_s32_to_string() -> Function {
     func
 }
 
+/// Generate s64_to_string function.
+///
+/// Signature: (value: i64) -> (ptr: i32, len: i32)
+///
+/// Converts a signed 64-bit integer to a string.
+/// Uses a fixed buffer at address 0 (first 16 bytes reserved — enough for
+/// i64::MIN's 20-character decimal representation plus sign).
+///
+/// NOTE: treats the value as signed. When routed through this helper for
+/// u64, values above i64::MAX print as negative — matches the existing
+/// s32_to_string behaviour for u32.
+pub fn emit_s64_to_string() -> Function {
+    // Locals: three i32 (is_negative, digit_count, write_ptr) then
+    // two i64 (abs_value, temp). Declaration order: i32 first, then i64.
+    let mut func = Function::new([(3, ValType::I32), (2, ValType::I64)]);
+
+    const BUFFER_PTR: i32 = 0;
+
+    // is_negative = value < 0
+    func.instruction(&Instruction::LocalGet(0)); // value (i64)
+    func.instruction(&Instruction::I64Const(0));
+    func.instruction(&Instruction::I64LtS);
+    func.instruction(&Instruction::LocalSet(1)); // is_negative (i32)
+
+    // abs_value = is_negative ? -value : value
+    func.instruction(&Instruction::LocalGet(1)); // is_negative (i32)
+    func.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+    func.instruction(&Instruction::I64Const(0));
+    func.instruction(&Instruction::LocalGet(0));
+    func.instruction(&Instruction::I64Sub);
+    func.instruction(&Instruction::Else);
+    func.instruction(&Instruction::LocalGet(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalSet(4)); // abs_value (i64)
+
+    // digit_count = 0
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(2));
+
+    // Zero special-case
+    func.instruction(&Instruction::LocalGet(4));
+    func.instruction(&Instruction::I64Eqz);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::I32Const(BUFFER_PTR));
+    func.instruction(&Instruction::I32Const(48)); // '0'
+    func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
+    func.instruction(&Instruction::I32Const(BUFFER_PTR));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::Return);
+    func.instruction(&Instruction::End);
+
+    // Count digits
+    func.instruction(&Instruction::LocalGet(4)); // abs_value
+    func.instruction(&Instruction::LocalSet(5)); // temp = abs_value
+    func.instruction(&Instruction::Block(BlockType::Empty));
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+    // digit_count++
+    func.instruction(&Instruction::LocalGet(2));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalSet(2));
+    // temp /= 10 (unsigned — temp is positive)
+    func.instruction(&Instruction::LocalGet(5));
+    func.instruction(&Instruction::I64Const(10));
+    func.instruction(&Instruction::I64DivU);
+    func.instruction(&Instruction::LocalTee(5));
+    // continue if temp > 0
+    func.instruction(&Instruction::I64Const(0));
+    func.instruction(&Instruction::I64GtU);
+    func.instruction(&Instruction::BrIf(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::End);
+
+    // If negative, write '-' at buffer[0]
+    func.instruction(&Instruction::LocalGet(1));
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::I32Const(BUFFER_PTR));
+    func.instruction(&Instruction::I32Const(45)); // '-'
+    func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
+    func.instruction(&Instruction::End);
+
+    // write_ptr = buffer + is_negative + digit_count - 1
+    func.instruction(&Instruction::I32Const(BUFFER_PTR));
+    func.instruction(&Instruction::LocalGet(1));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalGet(2));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalSet(3));
+
+    // Reset abs_value for writing
+    func.instruction(&Instruction::LocalGet(1));
+    func.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+    func.instruction(&Instruction::I64Const(0));
+    func.instruction(&Instruction::LocalGet(0));
+    func.instruction(&Instruction::I64Sub);
+    func.instruction(&Instruction::Else);
+    func.instruction(&Instruction::LocalGet(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::LocalSet(4));
+
+    // Write digits in reverse
+    func.instruction(&Instruction::Block(BlockType::Empty));
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+    // *write_ptr = '0' + (abs_value % 10)
+    func.instruction(&Instruction::LocalGet(3));
+    func.instruction(&Instruction::LocalGet(4));
+    func.instruction(&Instruction::I64Const(10));
+    func.instruction(&Instruction::I64RemU);
+    func.instruction(&Instruction::I32WrapI64); // (% 10) < 10, fits in i32
+    func.instruction(&Instruction::I32Const(48)); // '0'
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
+    // abs_value /= 10
+    func.instruction(&Instruction::LocalGet(4));
+    func.instruction(&Instruction::I64Const(10));
+    func.instruction(&Instruction::I64DivU);
+    func.instruction(&Instruction::LocalSet(4));
+    // write_ptr--
+    func.instruction(&Instruction::LocalGet(3));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Sub);
+    func.instruction(&Instruction::LocalSet(3));
+    // continue if abs_value > 0
+    func.instruction(&Instruction::LocalGet(4));
+    func.instruction(&Instruction::I64Const(0));
+    func.instruction(&Instruction::I64GtU);
+    func.instruction(&Instruction::BrIf(0));
+    func.instruction(&Instruction::End);
+    func.instruction(&Instruction::End);
+
+    // Return (BUFFER_PTR, is_negative + digit_count)
+    func.instruction(&Instruction::I32Const(BUFFER_PTR));
+    func.instruction(&Instruction::LocalGet(1));
+    func.instruction(&Instruction::LocalGet(2));
+    func.instruction(&Instruction::I32Add);
+
+    func.instruction(&Instruction::End);
+    func
+}
+
 /// Generate bool_to_string function.
 ///
 /// Signature: (b: i32) -> (ptr: i32, len: i32)
@@ -526,6 +668,84 @@ pub fn emit_f32_to_string() -> Function {
     func
 }
 
+/// Generate starts_with function.
+///
+/// Signature: (str_ptr: i32, str_len: i32, prefix_ptr: i32, prefix_len: i32) -> bool: i32
+///
+/// Returns 1 if string starts with prefix, 0 otherwise.
+pub fn emit_starts_with() -> Function {
+    // params: str_ptr(0), str_len(1), prefix_ptr(2), prefix_len(3)
+    // locals: i(4)
+    let mut func = Function::new([(1, ValType::I32)]);
+
+    // If prefix_len > str_len, return 0
+    func.instruction(&Instruction::LocalGet(3)); // prefix_len
+    func.instruction(&Instruction::LocalGet(1)); // str_len
+    func.instruction(&Instruction::I32GtU);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::Return);
+    func.instruction(&Instruction::End);
+
+    // If prefix_len == 0, return 1 (empty prefix matches everything)
+    func.instruction(&Instruction::LocalGet(3)); // prefix_len
+    func.instruction(&Instruction::I32Eqz);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::Return);
+    func.instruction(&Instruction::End);
+
+    // i = 0
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::LocalSet(4));
+
+    // Loop: compare bytes
+    func.instruction(&Instruction::Block(BlockType::Empty)); // outer block for break
+    func.instruction(&Instruction::Loop(BlockType::Empty));
+
+    // if i >= prefix_len, break (success - all bytes matched)
+    func.instruction(&Instruction::LocalGet(4)); // i
+    func.instruction(&Instruction::LocalGet(3)); // prefix_len
+    func.instruction(&Instruction::I32GeU);
+    func.instruction(&Instruction::BrIf(1)); // break outer block
+
+    // Compare str[i] vs prefix[i]
+    // Load str[str_ptr + i]
+    func.instruction(&Instruction::LocalGet(0)); // str_ptr
+    func.instruction(&Instruction::LocalGet(4)); // i
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Load8U(mem_arg(0, 0)));
+
+    // Load prefix[prefix_ptr + i]
+    func.instruction(&Instruction::LocalGet(2)); // prefix_ptr
+    func.instruction(&Instruction::LocalGet(4)); // i
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Load8U(mem_arg(0, 0)));
+
+    // If not equal, return 0
+    func.instruction(&Instruction::I32Ne);
+    func.instruction(&Instruction::If(BlockType::Empty));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::Return);
+    func.instruction(&Instruction::End);
+
+    // i++
+    func.instruction(&Instruction::LocalGet(4));
+    func.instruction(&Instruction::I32Const(1));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::LocalSet(4));
+
+    // Continue loop
+    func.instruction(&Instruction::Br(0));
+    func.instruction(&Instruction::End); // end loop
+    func.instruction(&Instruction::End); // end block
+
+    // All bytes matched, return 1
+    func.instruction(&Instruction::I32Const(1));
+
+    func.instruction(&Instruction::End);
+    func
+}
 #[cfg(test)]
 mod tests {
     use super::*;

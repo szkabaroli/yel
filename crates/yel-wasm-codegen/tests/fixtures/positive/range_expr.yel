@@ -1,0 +1,11 @@
+package yel:rangetest@0.1.0;
+
+// Exercises `LirExprKind::Range` — for-loop over an inline 0..N range.
+// Without this fixture the Range emission path has zero coverage.
+export component App {
+    VStack {
+        for i in 0..5 {
+            Text { "row {i}" }
+        }
+    }
+}

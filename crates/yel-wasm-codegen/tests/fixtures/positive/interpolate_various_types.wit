@@ -1,0 +1,43 @@
+package yel:interpvarious@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-flag: func() -> bool;
+    set-flag: func(value: bool);
+    get-si: func() -> s32;
+    set-si: func(value: s32);
+    get-ui: func() -> u32;
+    set-ui: func(value: u32);
+    get-f: func() -> f32;
+    set-f: func(value: f32);
+    get-d: func() -> f64;
+    set-d: func(value: f64);
+    get-s: func() -> string;
+    set-s: func(value: string);
+    get-c: func() -> char;
+    set-c: func(value: char);
+    get-flags: func() -> list<bool>;
+    set-flags: func(value: list<bool>);
+    get-sis: func() -> list<s32>;
+    set-sis: func(value: list<s32>);
+    get-uis: func() -> list<u32>;
+    set-uis: func(value: list<u32>);
+    get-fs: func() -> list<f32>;
+    set-fs: func(value: list<f32>);
+    get-ds: func() -> list<f64>;
+    set-ds: func(value: list<f64>);
+    get-ss: func() -> list<string>;
+    set-ss: func(value: list<string>);
+    get-cs: func() -> list<char>;
+    set-cs: func(value: list<char>);
+  }
+}
+
+world interpvarious {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

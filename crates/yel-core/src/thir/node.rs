@@ -1,5 +1,7 @@
 //! THIR UI node types.
 
+use std::collections::HashMap;
+
 use crate::ids::{DefId, LocalId, NodeId};
 use crate::interner::Name;
 use crate::source::Span;
@@ -20,6 +22,9 @@ pub struct ThirComponent {
     pub is_export: bool,
     /// Local variables (including property/signal mappings).
     pub locals: crate::hir::local_scope::LocalScope,
+    /// Type-checked signal default expressions.
+    /// Maps signal DefId to its type-checked default ThirExpr.
+    pub signal_defaults: HashMap<DefId, ThirExpr>,
     /// UI tree body.
     pub body: Vec<ThirNode>,
 }
@@ -80,6 +85,9 @@ pub enum ThirNodeKind {
         /// Loop body.
         body: Vec<ThirNode>,
     },
+    /// Slot marker — caller's child nodes splice in at this position when
+    /// the enclosing component is instantiated at a call site.
+    ChildrenSlot,
 }
 
 /// A typed property binding with optional getter (value) and setter.

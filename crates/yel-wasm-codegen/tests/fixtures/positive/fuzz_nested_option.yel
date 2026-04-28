@@ -1,0 +1,11 @@
+// Nested `option<option<T>>` signal. The inner Option payload isn't lowered
+// through the canonical-ABI flatten path correctly, so the setter body pushes
+// an extra value that no consumer pops -> "values remaining on stack at end
+// of block" during core validation.
+// Root cause: option<option<T>> isn't flattened recursively in signal
+// storage / emit_signal_store.
+package yel:fb@0.1.0;
+export component App {
+    maybe: option<option<s32>> = some(some(5));
+    Text { "x" }
+}

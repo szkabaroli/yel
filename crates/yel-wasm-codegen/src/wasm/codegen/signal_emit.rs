@@ -1,0 +1,1436 @@
+//! Signal storage helpers (struct.get/set, flat-slot stores), registry
+//! allocate/lookup, effect-trigger fan-out, and the per-global-signal
+//! fanout helper. All methods live on `WasmPackageBuilder<'a>` via an
+//! additional impl block.
+
+use wasm_encoder::{Function, Instruction, ValType};
+use yel_core::DefId;
+use yel_core::ids::BlockId;
+use yel_core::lir::{LirComponent, LirExpr, LirExprKind};
+use yel_core::types::InternedTyKind;
+
+use super::super::CodegenError;
+use super::super::{MemoryLayout, WasmPackageBuilder};
+use super::scratch::{compute_slot_locals, mem_arg, slot_local};
+
+impl<'a> WasmPackageBuilder<'a> {
+    pub(super) fn emit_signal_store(
+        &mut self,
+        func: &mut Function,
+        addr: i32,
+        expr: &LirExpr,
+        component: &LirComponent,
+        layout: &MemoryLayout,
+        scratch: crate::wasm::FlatScratchBases,
+    ) -> Result<(), CodegenError> {
+        let temp_local_start = scratch.i32_base;
+        match self.ctx.ty_kind(expr.ty) {
+            InternedTyKind::String | InternedTyKind::List(_) => {
+                // String and List signals store (ptr, len) at addr and addr+4
+                // Emit expression - pushes (ptr, len) onto stack
+                self.emit_expr(func, expr, component, layout)?;
+                // Stack: [ptr, len] with len on top
+                func.instruction(&Instruction::LocalSet(temp_local_start + 1)); // save len
+                func.instruction(&Instruction::LocalSet(temp_local_start)); // save ptr
+                // Store ptr at addr
+                func.instruction(&Instruction::I32Const(addr));
+                func.instruction(&Instruction::LocalGet(temp_local_start));
+                func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
+                // Store len at addr+4
+                func.instruction(&Instruction::I32Const(addr + 4));
+                func.instruction(&Instruction::LocalGet(temp_local_start + 1));
+                func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
+            }
+            InternedTyKind::F32 => {
+                func.instruction(&Instruction::I32Const(addr));
+                self.emit_expr(func, expr, component, layout)?;
+                func.instruction(&Instruction::F32Store(mem_arg(0, 2)));
+            }
+            InternedTyKind::F64 => {
+                func.instruction(&Instruction::I32Const(addr));
+                self.emit_expr(func, expr, component, layout)?;
+                func.instruction(&Instruction::F64Store(mem_arg(0, 3)));
+            }
+            InternedTyKind::S64 | InternedTyKind::U64 => {
+                func.instruction(&Instruction::I32Const(addr));
+                self.emit_expr(func, expr, component, layout)?;
+                func.instruction(&Instruction::I64Store(mem_arg(0, 3)));
+            }
+            InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
+                self.emit_flat_slot_store(func, addr, expr, component, layout, scratch)?;
+            }
+            InternedTyKind::Adt(def_id) => {
+                if self.ctx.defs.as_variant(*def_id).is_some() {
+                    self.emit_flat_slot_store(func, addr, expr, component, layout, scratch)?;
+                } else {
+                    // Enum (no payloads) or Record: just store discriminant
+                    // as i32 (enum) or store the returned pointer (record).
+                    func.instruction(&Instruction::I32Const(addr));
+                    self.emit_expr(func, expr, component, layout)?;
+                    func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
+                }
+            }
+            // Narrow types: 1- or 2-byte wide stores so packed signals
+            // don't overwrite each other.
+            InternedTyKind::Bool
+            | InternedTyKind::U8
+            | InternedTyKind::S8
+            | InternedTyKind::Char => {
+                func.instruction(&Instruction::I32Const(addr));
+                self.emit_expr(func, expr, component, layout)?;
+                func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
+            }
+            InternedTyKind::U16 | InternedTyKind::S16 => {
+                func.instruction(&Instruction::I32Const(addr));
+                self.emit_expr(func, expr, component, layout)?;
+                func.instruction(&Instruction::I32Store16(mem_arg(0, 1)));
+            }
+            _ => {
+                func.instruction(&Instruction::I32Const(addr));
+                self.emit_expr(func, expr, component, layout)?;
+                func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
+            }
+        }
+        Ok(())
+    }
+
+    /// Store a composite (Option/Result/Variant) value into memory using its
+    /// canonical-ABI flat-slot layout. The value is emitted onto the stack
+    /// and popped slot-by-slot in reverse into typed scratch locals, then
+    /// stored to (addr + slot.offset) using each slot's natural store width.
+    ///
+    /// Scratch locals are partitioned per-valtype: i32[i32_count], i64[..],
+    /// f32[..], f64[..]. Each slot maps to a local at `base_of(valtype) +
+    /// index_among_same_valtype_slots`. The caller pre-reserves enough
+    /// locals for the widest composite it might store.
+    pub(super) fn emit_flat_slot_store(
+        &mut self,
+        func: &mut Function,
+        addr: i32,
+        expr: &LirExpr,
+        component: &LirComponent,
+        layout: &MemoryLayout,
+        scratch: crate::wasm::FlatScratchBases,
+    ) -> Result<(), CodegenError> {
+        // Shortcut: a `none` or payload-less user-variant constructor only
+        // pushes a single i32 discriminant, not the full joined shape. Write
+        // just the discriminant byte and leave the payload slots at their
+        // existing (zero-initialized) values.
+        if let LirExprKind::VariantCtor {
+            payload: None,
+            case_idx,
+            ..
+        } = &expr.kind
+        {
+            func.instruction(&Instruction::I32Const(addr));
+            func.instruction(&Instruction::I32Const(*case_idx as i32));
+            func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
+            return Ok(());
+        }
+
+        let flat = self.canonical_flat_valtypes(expr.ty);
+        let slots = self.flatten_core_slots(expr.ty);
+        if slots.len() != flat.len() {
+            return Err(CodegenError::InvalidIR(format!(
+                "emit_flat_slot_store: flat valtypes ({}) disagree with flat slots ({}) for type {:?}",
+                flat.len(),
+                slots.len(),
+                expr.ty
+            )));
+        }
+
+        // Map each slot index -> absolute local index, partitioned by valtype.
+        let slot_locals = compute_slot_locals(&slots, &scratch)?;
+
+        // Emit the expression: pushes `flat.len()` values onto the stack in
+        // declaration order (slot 0 first, last on top).
+        self.emit_expr(func, expr, component, layout)?;
+
+        // Pop each slot into its typed scratch local, in reverse order
+        // (top-of-stack is the last slot).
+        for i in (0..slots.len()).rev() {
+            func.instruction(&Instruction::LocalSet(slot_locals[i]));
+        }
+
+        // Store each slot to its offset in ascending order.
+        for (i, slot) in slots.iter().enumerate() {
+            func.instruction(&Instruction::I32Const(addr + slot.offset as i32));
+            func.instruction(&Instruction::LocalGet(slot_locals[i]));
+            slot.store.emit_store(func);
+        }
+
+        Ok(())
+    }
+
+    /// Map a sequence of slot ValTypes to absolute scratch local
+    /// indices, using `scratch`'s per-valtype base/count regions.
+    /// Returns one local index per slot, in input order.
+    pub(super) fn signal_struct_slot_locals(
+        slot_valtypes: &[wasm_encoder::ValType],
+        scratch: &crate::wasm::FlatScratchBases,
+    ) -> Result<Vec<u32>, CodegenError> {
+        use wasm_encoder::ValType;
+        let mut out = Vec::with_capacity(slot_valtypes.len());
+        let (mut u_i32, mut u_i64, mut u_f32, mut u_f64) = (0u32, 0u32, 0u32, 0u32);
+        for vt in slot_valtypes {
+            let (base, used, cap) = match vt {
+                ValType::I32 => (scratch.i32_base, &mut u_i32, scratch.i32_count),
+                ValType::I64 => (scratch.i64_base, &mut u_i64, scratch.i64_count),
+                ValType::F32 => (scratch.f32_base, &mut u_f32, scratch.f32_count),
+                ValType::F64 => (scratch.f64_base, &mut u_f64, scratch.f64_count),
+                other => {
+                    return Err(CodegenError::InvalidIR(format!(
+                        "signal_struct_slot_locals: unsupported scratch valtype {:?}",
+                        other
+                    )));
+                }
+            };
+            if *used >= cap {
+                return Err(CodegenError::InvalidIR(format!(
+                    "signal_struct_slot_locals: scratch capacity for valtype {:?} exhausted (cap={}, used={})",
+                    vt, cap, *used
+                )));
+            }
+            out.push(base + *used);
+            *used += 1;
+        }
+        Ok(out)
+    }
+
+    /// Resolve the destination for one `MountComponent` retention
+    /// store. Returns `Some((target_struct_type_idx, target_struct_local,
+    /// field_idx))` describing where to `struct.set` the fresh child
+    /// ref so the GC keeps it alive. Returns `None` only when the
+    /// caller is outside any retention scope (e.g. globals init) — in
+    /// practice every `MountComponent` site is inside a body that has
+    /// a retention target, but we tolerate `None` rather than panicing
+    /// to make incremental migration safe.
+    ///
+    /// Retention always lives on the surrounding component's
+    /// `$Comp_<comp_idx>`, with `current_self_local` pointing at the
+    /// parent ref.
+    pub(super) fn next_mount_retention_target(
+        &mut self,
+        comp_idx: usize,
+    ) -> Result<Option<(u32, u32, u32)>, CodegenError> {
+        // Parent-component retention.
+        let gc = &self.gc_layouts[comp_idx];
+        let cap = gc.parent_retention_count;
+        let base = match gc.parent_retention_field_base {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let struct_ty = gc.component_struct_type_idx.ok_or_else(|| {
+            CodegenError::InvalidIR(
+                "next_mount_retention_target: component has no struct type".into(),
+            )
+        })?;
+        let parent_local = match (self.current_self_local, self.current_self_comp_idx) {
+            (Some(l), Some(ci)) if ci == comp_idx => l,
+            _ => return Ok(None),
+        };
+        let cursor = self.parent_retention_cursor.entry(comp_idx).or_insert(0);
+        if *cursor >= cap {
+            return Err(CodegenError::InvalidIR(format!(
+                "next_mount_retention_target: ran out of parent-retention \
+                 fields on $Comp_<{}> (cap={}, used={})",
+                comp_idx, cap, *cursor
+            )));
+        }
+        let field_idx = base + *cursor;
+        *cursor += 1;
+        Ok(Some((struct_ty, parent_local, field_idx)))
+    }
+
+    /// Push the current function's `(ref $Comp_<i>)` self ref onto
+    /// the WASM stack. Sources from `current_self_local` — the
+    /// per-instance, ref-typed entry-point convention.
+    ///
+    /// Strict: there is no singleton fallback. Every emit site must
+    /// have entered with `current_self_local` set to a local of the
+    /// matching component; mismatches and missing locals are hard
+    /// errors so callers can't accidentally route to the wrong
+    /// instance.
+    pub(super) fn emit_self_ref(
+        &self,
+        func: &mut Function,
+        comp_idx: usize,
+    ) -> Result<(), CodegenError> {
+        let local_idx = self.current_self_local.ok_or_else(|| {
+            CodegenError::InvalidIR(format!(
+                "emit_self_ref: no current_self_local in scope for component {} — \
+                 every emit site must establish the per-instance self ref before \
+                 calling helpers that need it (no singleton fallback exists)",
+                comp_idx
+            ))
+        })?;
+        let self_ci = self.current_self_comp_idx.ok_or_else(|| {
+            CodegenError::InvalidIR(format!(
+                "emit_self_ref: current_self_local set but no current_self_comp_idx — \
+                 emitter must record both consistently for component {}",
+                comp_idx
+            ))
+        })?;
+        if self_ci != comp_idx {
+            return Err(CodegenError::InvalidIR(format!(
+                "emit_self_ref: comp_idx mismatch — current self is for component {}, \
+                 requested {}. Cross-component access must go through the registry \
+                 (e.g. global-signal fanout helpers), not via emit_self_ref.",
+                self_ci, comp_idx
+            )));
+        }
+        func.instruction(&Instruction::LocalGet(local_idx));
+        Ok(())
+    }
+
+    /// Push the boundary struct ref for `boundary_id` onto the stack.
+    /// Strict resolution — no runtime tree walk. Order:
+    ///
+    /// 1. **In-scope local fast path**: if the function received the
+    ///    boundary as a typed parameter (recorded in
+    ///    `current_boundary_locals` at function entry), emit
+    ///    `local.get <local>`. This is the dominant path: every inner
+    ///    function (branch mount, iter mount, update block, fan-out
+    ///    callback) takes its operative boundary as a function param,
+    ///    so reads/writes inside that function are O(1).
+    /// 2. **Root boundary**: read `$self.tree` directly. Component
+    ///    constructor pre-populates the root and never replaces it.
+    ///
+    /// Inner boundaries (if-anchor, if-branch, for-anchor) NOT in
+    /// scope are a hard error — the model is "callers compute and
+    /// pass the boundary as a param", not "callees fetch it". Callers
+    /// chain `struct.get`s once at the call site to produce the typed
+    /// ref, then thread it through.
+    ///
+    /// `ForIterBody` is the same — only ever reachable via fan-out
+    /// callback param.
+    pub(crate) fn emit_boundary_ref(
+        &self,
+        func: &mut Function,
+        comp_idx: usize,
+        boundary_id: yel_core::ids::TreeBoundaryId,
+    ) -> Result<(), CodegenError> {
+        // Fast path: boundary in scope as a function parameter or
+        // mount-scope alloc.
+        if let Some(&local) = self.current_boundary_locals.get(&boundary_id) {
+            func.instruction(&Instruction::LocalGet(local));
+            return Ok(());
+        }
+
+        let gc = &self.gc_layouts[comp_idx];
+        let component = &self.components[comp_idx];
+
+        // Root: load $self.tree.
+        if boundary_id.0 == component.tree_shape.root_idx {
+            let comp_struct_ty = gc.component_struct_type_idx.ok_or_else(|| {
+                CodegenError::InvalidIR(
+                    "emit_boundary_ref: missing component_struct_type_idx".into(),
+                )
+            })?;
+            let tree_field = gc.tree_root_field_idx.ok_or_else(|| {
+                CodegenError::InvalidIR(
+                    "emit_boundary_ref (root): component has no tree-root \
+                     field — body_tree was empty when types were emitted"
+                        .into(),
+                )
+            })?;
+            self.emit_self_ref(func, comp_idx)?;
+            func.instruction(&Instruction::StructGet {
+                struct_type_index: comp_struct_ty,
+                field_index: tree_field,
+            });
+            return Ok(());
+        }
+
+        // Inner boundary not in scope. The CALLER (this is most often
+        // a trigger fan-out helper or a mount-block CallBlock site)
+        // must compute the ref by chaining `struct.get`s through
+        // `parent_link`. This is bounded compile-time emission — we
+        // walk the parent chain once at the call site, NOT per slot
+        // access. The callee receives the ref as a function param and
+        // accesses fields via `local.get` thereafter (O(1)).
+        let component = &self.components[comp_idx];
+        let boundary = &component.tree_shape.boundaries[boundary_id.index()];
+        let (parent_id, field_idx) = boundary.parent_link.ok_or_else(|| {
+            CodegenError::InvalidIR(format!(
+                "emit_boundary_ref: boundary {} has no parent_link and is not in \
+                 scope. ForIterBody can only be reached via a fan-out callback \
+                 that supplies the iter-body ref via `current_boundary_locals`.",
+                boundary_id
+            ))
+        })?;
+        // Recurse to push parent ref, then read this boundary's
+        // SubBoundary field on the parent.
+        self.emit_boundary_ref(func, comp_idx, parent_id)?;
+        func.instruction(&Instruction::RefAsNonNull);
+        let parent_struct_ty = *gc.tree_struct_type_idx.get(&parent_id).ok_or_else(|| {
+            CodegenError::InvalidIR(format!(
+                "emit_boundary_ref: missing tree struct type for parent {}",
+                parent_id
+            ))
+        })?;
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: parent_struct_ty,
+            field_index: field_idx,
+        });
+        Ok(())
+    }
+
+    /// Emit `struct.get` of `field_idx` on the boundary's struct ref,
+    /// leaving the field's value on the stack. The boundary ref is
+    /// fetched via `emit_boundary_ref` (root → `$self.tree`; inner →
+    /// in-scope local).
+    #[allow(dead_code)]
+    pub(crate) fn emit_boundary_field_load(
+        &self,
+        func: &mut Function,
+        comp_idx: usize,
+        boundary_id: yel_core::ids::TreeBoundaryId,
+        field_idx: u32,
+    ) -> Result<(), CodegenError> {
+        self.emit_boundary_ref(func, comp_idx, boundary_id)?;
+        func.instruction(&Instruction::RefAsNonNull);
+        let struct_ty = *self.gc_layouts[comp_idx]
+            .tree_struct_type_idx
+            .get(&boundary_id)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "emit_boundary_field_load: no struct idx for boundary {}",
+                    boundary_id
+                ))
+            })?;
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: struct_ty,
+            field_index: field_idx,
+        });
+        Ok(())
+    }
+
+    /// Emit `struct.set` of `field_idx` on the boundary's struct ref,
+    /// reading the value to store from `value_local`. We stage the
+    /// boundary ref BEFORE pushing the value because `struct.set` is
+    /// `(ref, val) -> ()` — boundary first, value second.
+    #[allow(dead_code)]
+    pub(crate) fn emit_boundary_field_store(
+        &self,
+        func: &mut Function,
+        comp_idx: usize,
+        boundary_id: yel_core::ids::TreeBoundaryId,
+        field_idx: u32,
+        value_local: u32,
+    ) -> Result<(), CodegenError> {
+        self.emit_boundary_ref(func, comp_idx, boundary_id)?;
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::LocalGet(value_local));
+        let struct_ty = *self.gc_layouts[comp_idx]
+            .tree_struct_type_idx
+            .get(&boundary_id)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "emit_boundary_field_store: no struct idx for boundary {}",
+                    boundary_id
+                ))
+            })?;
+        func.instruction(&Instruction::StructSet {
+            struct_type_index: struct_ty,
+            field_index: field_idx,
+        });
+        Ok(())
+    }
+
+    /// Push the host's WIT resource handle (the i32 returned by
+    /// `[resource-new]X`) for `component`'s current instance onto the
+    /// stack. Sources it from the trailing `$self_handle` field on
+    /// `$Comp_<Name>` via the in-scope self ref. Used by callback
+    /// emit sites to pass `borrow<Self>` back to the host.
+    pub(crate) fn emit_self_handle_load(
+        &self,
+        func: &mut Function,
+        component: &yel_core::lir::LirComponent,
+    ) -> Result<(), CodegenError> {
+        let comp_idx = self.comp_idx_of(component).ok_or_else(|| {
+            CodegenError::InvalidIR(
+                "emit_self_handle_load: component is not in self.components — \
+                 callback emit sites must run inside a real component context"
+                    .into(),
+            )
+        })?;
+        let gc = &self.gc_layouts[comp_idx];
+        let struct_ty = gc.component_struct_type_idx.ok_or_else(|| {
+            CodegenError::InvalidIR(
+                "emit_self_handle_load: missing component_struct_type_idx".into(),
+            )
+        })?;
+        let field_idx = gc.self_handle_field_idx.ok_or_else(|| {
+            CodegenError::InvalidIR("emit_self_handle_load: missing self_handle_field_idx".into())
+        })?;
+        self.emit_self_ref(func, comp_idx)?;
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: struct_ty,
+            field_index: field_idx,
+        });
+        Ok(())
+    }
+
+    /// Inline the registry-allocation sequence for component `comp_idx`.
+    /// Reads from `instance_local` (must hold a `(ref $Comp_<i>)`),
+    /// pops nothing, and **pushes** the freshly allocated handle index
+    /// (i32) onto the stack.
+    ///
+    /// Algorithm:
+    ///   1. If `free_head ≥ 0`: pop the free chain, reuse that handle.
+    ///   2. Else: ensure the registry array exists and has capacity
+    ///      (lazily allocate at len 8, double to grow). Append a new
+    ///      `$CompHandle` at index `len`, bump `len`.
+    ///
+    /// `scratch_idx_local` and `scratch_arr_local` must be reserved
+    /// by the caller and have types `i32` and `(ref null
+    /// $CompHandleArr_<i>)` respectively. They're scratch — content
+    /// before this call is irrelevant.
+    ///
+    /// TODO: wire `[resource-drop]` so freed handles return to the
+    /// free chain (the reuse path above already supports it). Today
+    /// the registry only grows — slot reuse becomes important when
+    /// long-lived hosts unmount components without recycling. The
+    /// drop sequence is small (null `arr[h].inst`, link onto
+    /// free_head); add it back when needed.
+    pub(super) fn emit_registry_alloc(
+        &self,
+        func: &mut Function,
+        comp_idx: usize,
+        instance_local: u32,
+        scratch_idx_local: u32,
+        scratch_arr_local: u32,
+    ) -> Result<(), CodegenError> {
+        let gc = &self.gc_layouts[comp_idx];
+        let handle_struct_ty = self.shared_handle_type_idx.ok_or_else(|| {
+            CodegenError::InvalidIR("registry alloc: shared $handle type not emitted".into())
+        })?;
+        let handle_arr_ty = self.shared_handle_arr_type_idx.ok_or_else(|| {
+            CodegenError::InvalidIR("registry alloc: shared $handle-array type not emitted".into())
+        })?;
+        let registry_g = gc
+            .registry_global
+            .ok_or_else(|| CodegenError::InvalidIR("registry alloc: no registry global".into()))?;
+        let len_g = gc
+            .registry_len_global
+            .ok_or_else(|| CodegenError::InvalidIR("registry alloc: no len global".into()))?;
+        let free_head_g = gc
+            .registry_free_head_global
+            .ok_or_else(|| CodegenError::InvalidIR("registry alloc: no free_head global".into()))?;
+
+        // `if (free_head != -1) { reuse } else { grow-or-append }`
+        // Both arms leave the new handle index on the stack.
+        func.instruction(&Instruction::GlobalGet(free_head_g));
+        func.instruction(&Instruction::I32Const(-1));
+        func.instruction(&Instruction::I32Ne);
+        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
+            wasm_encoder::ValType::I32,
+        )));
+
+        // ---- Reuse path ----
+        // idx = free_head
+        func.instruction(&Instruction::GlobalGet(free_head_g));
+        func.instruction(&Instruction::LocalSet(scratch_idx_local));
+        // free_head = arr[idx].next
+        func.instruction(&Instruction::GlobalGet(registry_g));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::LocalGet(scratch_idx_local));
+        func.instruction(&Instruction::ArrayGet(handle_arr_ty));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: handle_struct_ty,
+            field_index: 1,
+        });
+        func.instruction(&Instruction::GlobalSet(free_head_g));
+        // arr[idx].inst = instance
+        func.instruction(&Instruction::GlobalGet(registry_g));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::LocalGet(scratch_idx_local));
+        func.instruction(&Instruction::ArrayGet(handle_arr_ty));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::LocalGet(instance_local));
+        func.instruction(&Instruction::StructSet {
+            struct_type_index: handle_struct_ty,
+            field_index: 0,
+        });
+        // arr[idx].next = -1 (alive marker; tidies the chain)
+        func.instruction(&Instruction::GlobalGet(registry_g));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::LocalGet(scratch_idx_local));
+        func.instruction(&Instruction::ArrayGet(handle_arr_ty));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::I32Const(-1));
+        func.instruction(&Instruction::StructSet {
+            struct_type_index: handle_struct_ty,
+            field_index: 1,
+        });
+        // push idx
+        func.instruction(&Instruction::LocalGet(scratch_idx_local));
+
+        func.instruction(&Instruction::Else);
+
+        // ---- Grow-or-append path ----
+        // If registry is null, allocate fresh array of len 8.
+        func.instruction(&Instruction::GlobalGet(registry_g));
+        func.instruction(&Instruction::RefIsNull);
+        func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        func.instruction(&Instruction::RefNull(wasm_encoder::HeapType::Concrete(
+            handle_struct_ty,
+        )));
+        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::ArrayNew(handle_arr_ty));
+        func.instruction(&Instruction::GlobalSet(registry_g));
+        func.instruction(&Instruction::End);
+
+        // If len >= cap, grow: alloc new (cap*2 or +8) array and copy.
+        func.instruction(&Instruction::GlobalGet(registry_g));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::LocalSet(scratch_idx_local)); // reuse as $cap
+        func.instruction(&Instruction::GlobalGet(len_g));
+        func.instruction(&Instruction::LocalGet(scratch_idx_local));
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        // new_arr = array.new (ref.null, cap*2)
+        func.instruction(&Instruction::RefNull(wasm_encoder::HeapType::Concrete(
+            handle_struct_ty,
+        )));
+        func.instruction(&Instruction::LocalGet(scratch_idx_local)); // $cap
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Shl);
+        func.instruction(&Instruction::ArrayNew(handle_arr_ty));
+        func.instruction(&Instruction::LocalSet(scratch_arr_local));
+        // array.copy(new_arr, 0, old_arr, 0, cap)
+        func.instruction(&Instruction::LocalGet(scratch_arr_local));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::GlobalGet(registry_g));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalGet(scratch_idx_local));
+        func.instruction(&Instruction::ArrayCopy {
+            array_type_index_dst: handle_arr_ty,
+            array_type_index_src: handle_arr_ty,
+        });
+        // registry = new_arr
+        func.instruction(&Instruction::LocalGet(scratch_arr_local));
+        func.instruction(&Instruction::GlobalSet(registry_g));
+        func.instruction(&Instruction::End);
+
+        // idx = len; len += 1
+        func.instruction(&Instruction::GlobalGet(len_g));
+        func.instruction(&Instruction::LocalSet(scratch_idx_local));
+        func.instruction(&Instruction::GlobalGet(len_g));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::GlobalSet(len_g));
+
+        // arr[idx] = struct.new $CompHandle (instance, -1)
+        func.instruction(&Instruction::GlobalGet(registry_g));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::LocalGet(scratch_idx_local));
+        func.instruction(&Instruction::LocalGet(instance_local));
+        func.instruction(&Instruction::I32Const(-1));
+        func.instruction(&Instruction::StructNew(handle_struct_ty));
+        func.instruction(&Instruction::ArraySet(handle_arr_ty));
+
+        // push idx
+        func.instruction(&Instruction::LocalGet(scratch_idx_local));
+
+        func.instruction(&Instruction::End); // end if/else
+
+        Ok(())
+    }
+
+    /// Inline the registry-lookup sequence: read `arr[handle_local]`
+    /// and store the resolved `(ref $Comp_<i>)` into `result_local`.
+    /// Traps if the handle is out of range or has been freed (via
+    /// `ref.as_non_null` on a null `$inst`).
+    pub(super) fn emit_registry_lookup(
+        &self,
+        func: &mut Function,
+        comp_idx: usize,
+        handle_local: u32,
+        result_local: u32,
+    ) -> Result<(), CodegenError> {
+        let gc = &self.gc_layouts[comp_idx];
+        let handle_struct_ty = self.shared_handle_type_idx.ok_or_else(|| {
+            CodegenError::InvalidIR("registry lookup: shared $handle type not emitted".into())
+        })?;
+        let handle_arr_ty = self.shared_handle_arr_type_idx.ok_or_else(|| {
+            CodegenError::InvalidIR("registry lookup: shared $handle-array type not emitted".into())
+        })?;
+        let comp_struct_ty = gc.component_struct_type_idx.ok_or_else(|| {
+            CodegenError::InvalidIR("registry lookup: missing component struct type idx".into())
+        })?;
+        let registry_g = gc
+            .registry_global
+            .ok_or_else(|| CodegenError::InvalidIR("registry lookup: no registry global".into()))?;
+
+        func.instruction(&Instruction::GlobalGet(registry_g));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::LocalGet(handle_local));
+        func.instruction(&Instruction::ArrayGet(handle_arr_ty));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: handle_struct_ty,
+            field_index: 0,
+        });
+        func.instruction(&Instruction::RefAsNonNull);
+        // Shared `$handle.$inst` is anyref; recover the typed component
+        // ref via ref.cast. Traps on mismatch (same correctness as the
+        // pre-unification null-trap from a per-component-typed handle).
+        func.instruction(&Instruction::RefCastNonNull(
+            wasm_encoder::HeapType::Concrete(comp_struct_ty),
+        ));
+        func.instruction(&Instruction::LocalSet(result_local));
+        Ok(())
+    }
+
+    /// Emit code that evaluates `expr` and stores its value into the
+    /// component's `$Comp_<i>` GC struct fields backing the signal at
+    /// `signal_idx`. Mirrors `emit_signal_store` semantically but
+    /// targets struct fields via the current self-ref (see
+    /// `emit_self_ref`); no `i32.const addr; store` path.
+    // Args mix the WASM Function being emitted into, component/signal indices,
+    // the source expression, and codegen context (component/layout/scratch).
+    // They don't cluster into a coherent group; a wrapper struct would just
+    // rename each parameter.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn emit_signal_struct_store_from_expr(
+        &mut self,
+        func: &mut Function,
+        comp_idx: usize,
+        signal_idx: usize,
+        expr: &LirExpr,
+        component: &LirComponent,
+        layout: &MemoryLayout,
+        scratch: crate::wasm::FlatScratchBases,
+    ) -> Result<(), CodegenError> {
+        let gc_layout = &self.gc_layouts[comp_idx];
+        let struct_ty = gc_layout.component_struct_type_idx.ok_or_else(|| {
+            CodegenError::InvalidIR(
+                "emit_signal_struct_store_from_expr: missing component struct type idx".into(),
+            )
+        })?;
+        let field_path: Vec<u32> = gc_layout
+            .signal_field_paths
+            .get(signal_idx)
+            .cloned()
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "emit_signal_struct_store_from_expr: no field path for signal {}",
+                    signal_idx
+                ))
+            })?;
+        let slot_valtypes = self.signal_storage_valtypes(expr.ty);
+        if slot_valtypes.len() != field_path.len() {
+            return Err(CodegenError::InvalidIR(format!(
+                "emit_signal_struct_store_from_expr: storage valtypes ({}) disagree with field path ({}) for signal {}",
+                slot_valtypes.len(),
+                field_path.len(),
+                signal_idx
+            )));
+        }
+
+        // No-slot signal (Unit etc.) — emit expression for side
+        // effects and discard its zero stack values. Currently no
+        // signal has Unit type, but be defensive.
+        if slot_valtypes.is_empty() {
+            self.emit_expr(func, expr, component, layout)?;
+            return Ok(());
+        }
+
+        // Single-slot fast path: push self, emit expr (1 value), set.
+        if slot_valtypes.len() == 1 {
+            self.emit_self_ref(func, comp_idx)?;
+            self.emit_expr(func, expr, component, layout)?;
+            func.instruction(&Instruction::StructSet {
+                struct_type_index: struct_ty,
+                field_index: field_path[0],
+            });
+            return Ok(());
+        }
+
+        // Multi-slot: emit pushes N values (slot 0 first, slot N-1 on
+        // top). Pop in reverse into typed scratch locals, then set
+        // each field in ascending order.
+        self.emit_expr(func, expr, component, layout)?;
+        let locals = Self::signal_struct_slot_locals(&slot_valtypes, &scratch)?;
+        for i in (0..slot_valtypes.len()).rev() {
+            func.instruction(&Instruction::LocalSet(locals[i]));
+        }
+        for i in 0..slot_valtypes.len() {
+            self.emit_self_ref(func, comp_idx)?;
+            func.instruction(&Instruction::LocalGet(locals[i]));
+            func.instruction(&Instruction::StructSet {
+                struct_type_index: struct_ty,
+                field_index: field_path[i],
+            });
+        }
+        Ok(())
+    }
+
+    /// Same as `emit_signal_struct_store_from_expr` but the value is
+    /// already materialised in consecutive WASM locals starting at the
+    /// local index of `value_slot`. Used by `LirOp::SignalWrite`,
+    /// where the caller produced the value into a slot's locals in
+    /// canonical-ABI order.
+    pub(super) fn emit_signal_struct_store_from_slot(
+        &self,
+        func: &mut Function,
+        comp_idx: usize,
+        signal_idx: usize,
+        component: &LirComponent,
+        value_slot: yel_core::lir::block::LirSlotId,
+        local_offset: u32,
+    ) -> Result<(), CodegenError> {
+        let gc_layout = &self.gc_layouts[comp_idx];
+        let struct_ty = gc_layout.component_struct_type_idx.ok_or_else(|| {
+            CodegenError::InvalidIR(
+                "emit_signal_struct_store_from_slot: missing component struct type idx".into(),
+            )
+        })?;
+        let field_path: Vec<u32> = gc_layout
+            .signal_field_paths
+            .get(signal_idx)
+            .cloned()
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "emit_signal_struct_store_from_slot: no field path for signal {}",
+                    signal_idx
+                ))
+            })?;
+        let base_local = slot_local(component, value_slot) + local_offset;
+        for (i, &field_idx) in field_path.iter().enumerate() {
+            self.emit_self_ref(func, comp_idx)?;
+            func.instruction(&Instruction::LocalGet(base_local + i as u32));
+            func.instruction(&Instruction::StructSet {
+                struct_type_index: struct_ty,
+                field_index: field_idx,
+            });
+        }
+        Ok(())
+    }
+
+    /// Emit code that loads a component-local signal's value onto the
+    /// stack via `<self_ref>; struct.get $T $f` per ABI slot, where
+    /// `<self_ref>` is sourced from the current self-local (see
+    /// `emit_self_ref`). Pushes `field_path.len()` values in order
+    /// (slot 0 first, last on top).
+    pub(crate) fn emit_signal_struct_read(
+        &self,
+        func: &mut Function,
+        comp_idx: usize,
+        signal_idx: usize,
+    ) -> Result<(), CodegenError> {
+        let gc_layout = &self.gc_layouts[comp_idx];
+        let struct_ty = gc_layout.component_struct_type_idx.ok_or_else(|| {
+            CodegenError::InvalidIR(
+                "emit_signal_struct_read: missing component struct type idx".into(),
+            )
+        })?;
+        let field_path: Vec<u32> = gc_layout
+            .signal_field_paths
+            .get(signal_idx)
+            .cloned()
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "emit_signal_struct_read: no field path for signal {}",
+                    signal_idx
+                ))
+            })?;
+        for &field_idx in &field_path {
+            self.emit_self_ref(func, comp_idx)?;
+            func.instruction(&Instruction::StructGet {
+                struct_type_index: struct_ty,
+                field_index: field_idx,
+            });
+        }
+        Ok(())
+    }
+
+    /// Resolve a migrated global property to `(struct_type_idx,
+    /// self_global_idx, field_path)` — the inputs every per-block
+    /// emit helper needs. Returns `Err` if the property is not a
+    /// migrated global-block property (caller should fall back to the
+    /// legacy linear-memory path or surface an error).
+    fn resolve_global_struct_target(
+        &self,
+        prop_def_id: DefId,
+    ) -> Result<(u32, u32, Vec<u32>), CodegenError> {
+        let block_id = self
+            .ctx
+            .defs
+            .owning_global_block(prop_def_id)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "global struct emit: DefId {:?} is not a global-block property",
+                    prop_def_id
+                ))
+            })?;
+        let &layout_idx = self.global_block_def_to_idx.get(&block_id).ok_or_else(|| {
+            CodegenError::InvalidIR(format!(
+                "global struct emit: no globals layout for block {:?}",
+                block_id
+            ))
+        })?;
+        let layout = &self.globals_layouts[layout_idx];
+        let block = self.ctx.defs.as_global(block_id).ok_or_else(|| {
+            CodegenError::InvalidIR(format!(
+                "global struct emit: block {:?} is not a GlobalDef",
+                block_id
+            ))
+        })?;
+        let prop_pos = block
+            .properties
+            .iter()
+            .position(|&p| p == prop_def_id)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "global struct emit: property {:?} not found in block {:?}",
+                    prop_def_id, block_id
+                ))
+            })?;
+        let field_path = layout
+            .property_field_paths
+            .get(prop_pos)
+            .cloned()
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "global struct emit: no field path for property {:?} (pos {})",
+                    prop_def_id, prop_pos
+                ))
+            })?;
+        if field_path.is_empty() {
+            return Err(CodegenError::InvalidIR(format!(
+                "global struct emit: property {:?} is pointer-typed (legacy memory path); \
+                 callers must dispatch on global_in_struct before invoking struct helpers",
+                prop_def_id
+            )));
+        }
+        Ok((layout.struct_type_idx, layout.self_global_idx, field_path))
+    }
+
+    /// Push every ABI slot of a migrated global property onto the
+    /// WASM stack via `global.get $globals_<block>_self; struct.get
+    /// $globals_<block> $field` per slot. Pushes one stack value per
+    /// slot in canonical order (slot 0 first, last on top).
+    pub(crate) fn emit_global_struct_read(
+        &self,
+        func: &mut Function,
+        prop_def_id: DefId,
+    ) -> Result<(), CodegenError> {
+        let (struct_ty, self_global, field_path) =
+            self.resolve_global_struct_target(prop_def_id)?;
+        for &field_idx in &field_path {
+            func.instruction(&Instruction::GlobalGet(self_global));
+            func.instruction(&Instruction::RefAsNonNull);
+            func.instruction(&Instruction::StructGet {
+                struct_type_index: struct_ty,
+                field_index: field_idx,
+            });
+        }
+        Ok(())
+    }
+
+    /// Evaluate `expr` and store its value into the migrated global
+    /// property's struct fields. Mirrors
+    /// `emit_signal_struct_store_from_expr` but sources the self ref
+    /// from the per-block `(mut (ref null $globals_<i>))` global
+    /// instead of `current_self_local`.
+    pub(crate) fn emit_global_struct_store_from_expr(
+        &mut self,
+        func: &mut Function,
+        prop_def_id: DefId,
+        expr: &LirExpr,
+        component: &LirComponent,
+        layout: &MemoryLayout,
+        scratch: crate::wasm::FlatScratchBases,
+    ) -> Result<(), CodegenError> {
+        let (struct_ty, self_global, field_path) =
+            self.resolve_global_struct_target(prop_def_id)?;
+        let slot_valtypes = self.signal_storage_valtypes(expr.ty);
+        if slot_valtypes.len() != field_path.len() {
+            return Err(CodegenError::InvalidIR(format!(
+                "emit_global_struct_store_from_expr: storage valtypes ({}) disagree with field path ({}) for property {:?}",
+                slot_valtypes.len(),
+                field_path.len(),
+                prop_def_id,
+            )));
+        }
+        if slot_valtypes.is_empty() {
+            // Defensive: nothing to write. emit expr for side effects.
+            self.emit_expr(func, expr, component, layout)?;
+            return Ok(());
+        }
+        if slot_valtypes.len() == 1 {
+            func.instruction(&Instruction::GlobalGet(self_global));
+            func.instruction(&Instruction::RefAsNonNull);
+            self.emit_expr(func, expr, component, layout)?;
+            func.instruction(&Instruction::StructSet {
+                struct_type_index: struct_ty,
+                field_index: field_path[0],
+            });
+            return Ok(());
+        }
+        // Multi-slot: emit pushes N values; spill to typed scratch
+        // locals; replay one struct.set per slot in ascending order.
+        self.emit_expr(func, expr, component, layout)?;
+        let locals = Self::signal_struct_slot_locals(&slot_valtypes, &scratch)?;
+        for i in (0..slot_valtypes.len()).rev() {
+            func.instruction(&Instruction::LocalSet(locals[i]));
+        }
+        for i in 0..slot_valtypes.len() {
+            func.instruction(&Instruction::GlobalGet(self_global));
+            func.instruction(&Instruction::RefAsNonNull);
+            func.instruction(&Instruction::LocalGet(locals[i]));
+            func.instruction(&Instruction::StructSet {
+                struct_type_index: struct_ty,
+                field_index: field_path[i],
+            });
+        }
+        Ok(())
+    }
+
+    /// Same as `emit_global_struct_store_from_expr` but the value is
+    /// already in consecutive WASM locals starting at
+    /// `slot_local(component, value_slot) + local_offset`.
+    pub(crate) fn emit_global_struct_store_from_slot(
+        &self,
+        func: &mut Function,
+        prop_def_id: DefId,
+        component: &LirComponent,
+        value_slot: yel_core::lir::block::LirSlotId,
+        local_offset: u32,
+    ) -> Result<(), CodegenError> {
+        let (struct_ty, self_global, field_path) =
+            self.resolve_global_struct_target(prop_def_id)?;
+        let base_local = slot_local(component, value_slot) + local_offset;
+        for (i, &field_idx) in field_path.iter().enumerate() {
+            func.instruction(&Instruction::GlobalGet(self_global));
+            func.instruction(&Instruction::RefAsNonNull);
+            func.instruction(&Instruction::LocalGet(base_local + i as u32));
+            func.instruction(&Instruction::StructSet {
+                struct_type_index: struct_ty,
+                field_index: field_idx,
+            });
+        }
+        Ok(())
+    }
+
+    /// Emit calls to every effect-update block whose dependency set
+    /// includes `signal`. Handles both:
+    ///   - global signals: scan *all* components' effects
+    ///   - local signals:  scan only `local_comp_idx`'s effects
+    ///
+    /// Each update block takes one i32 param (unused for effects; a
+    /// dummy `0` is passed as the parent slot).
+    pub(super) fn emit_trigger_effects(
+        &self,
+        func: &mut Function,
+        signal: DefId,
+        local_comp_idx: usize,
+    ) -> Result<(), CodegenError> {
+        let is_global = self.ctx.defs.owning_global_block(signal).is_some();
+        if is_global {
+            // Cross-component fan-out runs in a dedicated helper so the
+            // call site needs no scratch locals. The helper walks every
+            // observing component's registry array and calls each live
+            // instance's effect block with its typed self ref. If no
+            // helper was registered, the global has no observers and
+            // the trigger is a no-op.
+            if let Some(&fanout_idx) = self.global_fanout_func_idx.get(&signal) {
+                func.instruction(&Instruction::Call(fanout_idx));
+            }
+        } else {
+            let component = &self.components[local_comp_idx];
+            if let Some(effect_ids) = component.effects_by_signal.get(&signal) {
+                for &eid in effect_ids {
+                    if let Some(effect) = component.effects.iter().find(|e| e.id == eid)
+                        && let Some(&fi) = self
+                            .block_func_indices
+                            .get(&(local_comp_idx, effect.update_block))
+                    {
+                        // Caller-side: assemble the call's args to
+                        // match the callee's actual signature.
+                        //
+                        // - `self_ref` always (every block takes it).
+                        // - One i32 per `block.params` slot. Update
+                        //   blocks today have an empty `params` Vec
+                        //   (they read parent from memory inside);
+                        //   for those, no i32 is pushed.
+                        // - One ref per `block.boundary_params`,
+                        //   computed via `emit_boundary_ref` (chain
+                        //   of `struct.get`s from `$self.tree`).
+                        self.emit_self_ref(func, local_comp_idx)?;
+                        let update_block = component
+                            .blocks
+                            .iter()
+                            .find(|b| b.id == effect.update_block);
+                        // Match block_fn.rs's lir_param_count
+                        // logic: empty params + empty
+                        // boundary_params → fixed `block_1param`
+                        // signature with 1 implicit i32 parent;
+                        // otherwise the dynamic shape uses
+                        // exactly `params.len()` i32 args.
+                        let (n_i32_args, boundary_refs): (u32, &[_]) = match update_block {
+                            Some(b) if !b.params.is_empty() => {
+                                (b.params.len() as u32, b.boundary_params.as_slice())
+                            }
+                            Some(b) if !b.boundary_params.is_empty() => {
+                                (0, b.boundary_params.as_slice())
+                            }
+                            _ => (1, &[]),
+                        };
+                        for _ in 0..n_i32_args {
+                            func.instruction(&Instruction::I32Const(0));
+                        }
+                        for &b_id in boundary_refs {
+                            self.emit_boundary_ref(func, local_comp_idx, b_id)?;
+                        }
+                        func.instruction(&Instruction::Call(fi));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit the body of `$global_fanout_<signal>` — the per-global-signal
+    /// helper that walks each observing component's registry array and
+    /// calls every live instance's effect block. Signature is `() -> ()`.
+    ///
+    /// For each (component, effect) where `effect.dependencies` contains
+    /// `signal`, emit:
+    ///
+    /// ```wat
+    /// i32.const 0
+    /// local.set $idx
+    /// block $break
+    ///   loop $L
+    ///     ;; if $idx >= len, break
+    ///     local.get $idx
+    ///     global.get $registry_len_<comp>
+    ///     i32.ge_u
+    ///     br_if $break
+    ///     ;; if registry array is null, break (no instances ever allocated)
+    ///     global.get $registry_<comp>
+    ///     ref.is_null
+    ///     br_if $break
+    ///     ;; entry = arr[idx]
+    ///     global.get $registry_<comp>
+    ///     ref.as_non_null
+    ///     local.get $idx
+    ///     array.get $CompHandleArr_<comp>
+    ///     ;; if entry is null (shouldn't happen), skip
+    ///     ref.is_null
+    ///     if
+    ///       ;; nothing
+    ///     else
+    ///       ;; inst = entry.inst (load the ref)
+    ///       global.get $registry_<comp>
+    ///       ref.as_non_null
+    ///       local.get $idx
+    ///       array.get $CompHandleArr_<comp>
+    ///       ref.as_non_null
+    ///       struct.get $CompHandle_<comp> $inst
+    ///       ;; if inst is null (freed slot), skip
+    ///       ref.is_null
+    ///       if
+    ///       else
+    ///         ;; call effect(inst, 0)
+    ///         <re-load inst>
+    ///         i32.const 0
+    ///         call $effect_<i>
+    ///       end
+    ///     end
+    ///     ;; idx += 1; continue
+    ///     local.get $idx
+    ///     i32.const 1
+    ///     i32.add
+    ///     local.set $idx
+    ///     br $L
+    ///   end
+    /// end
+    /// ```
+    /// Inline emission of the parent-link chain to fetch a boundary
+    /// ref inside the global-fanout helper, where neither
+    /// `current_self_local` nor `current_boundary_locals` is
+    /// established. Re-loads the typed self ref from the registry
+    /// array entry on each call (matching the rest of the helper's
+    /// per-effect re-load pattern), then chains `struct.get`s through
+    /// `parent_link` to reach `boundary_id`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_boundary_chain_from_self_inline(
+        &self,
+        func: &mut Function,
+        comp_idx: usize,
+        boundary_id: yel_core::ids::TreeBoundaryId,
+        registry_g: u32,
+        idx_local: u32,
+        handle_arr_ty: u32,
+        handle_struct_ty: u32,
+        comp_struct_ty: u32,
+    ) -> Result<(), CodegenError> {
+        let component = &self.components[comp_idx];
+        let gc = &self.gc_layouts[comp_idx];
+
+        // Build the chain of (boundary, parent_field_idx) walks from
+        // boundary_id back up to root.
+        let mut chain: Vec<(yel_core::ids::TreeBoundaryId, u32)> = Vec::new();
+        let mut cur = boundary_id;
+        while let Some((parent, field_idx)) =
+            component.tree_shape.boundaries[cur.index()].parent_link
+        {
+            chain.push((cur, field_idx));
+            cur = parent;
+        }
+        // `cur` is now the root.
+
+        // Push typed self ref by re-loading from registry[idx].
+        func.instruction(&Instruction::GlobalGet(registry_g));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::LocalGet(idx_local));
+        func.instruction(&Instruction::ArrayGet(handle_arr_ty));
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: handle_struct_ty,
+            field_index: 0,
+        });
+        func.instruction(&Instruction::RefAsNonNull);
+        func.instruction(&Instruction::RefCastNonNull(
+            wasm_encoder::HeapType::Concrete(comp_struct_ty),
+        ));
+
+        // self.tree → root struct ref.
+        let tree_field = gc.tree_root_field_idx.ok_or_else(|| {
+            CodegenError::InvalidIR(
+                "global fanout boundary chain: comp has no tree-root field".into(),
+            )
+        })?;
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: comp_struct_ty,
+            field_index: tree_field,
+        });
+
+        // Walk down: chain is [innermost, ..., outermost]. Reverse to
+        // step from root toward boundary_id.
+        for (b, fidx) in chain.iter().rev() {
+            // We just pushed the parent-of-`b` ref. Fetch `b`'s ref
+            // from that parent's SubBoundary field.
+            let parent_link = component.tree_shape.boundaries[b.index()].parent_link;
+            let (parent_id, _) = parent_link.ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "global fanout boundary chain: missing parent_link for {}",
+                    b
+                ))
+            })?;
+            let parent_struct = *gc.tree_struct_type_idx.get(&parent_id).ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "global fanout: missing tree struct type for {}",
+                    parent_id
+                ))
+            })?;
+            func.instruction(&Instruction::RefAsNonNull);
+            func.instruction(&Instruction::StructGet {
+                struct_type_index: parent_struct,
+                field_index: *fidx,
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn generate_global_fanout_for(
+        &self,
+        signal: DefId,
+    ) -> Result<Function, CodegenError> {
+        // One i32 scratch local for the loop counter.
+        let mut func = Function::new([(1, ValType::I32)]);
+        let idx_local: u32 = 0;
+
+        for (ci, comp) in self.components.iter().enumerate() {
+            // Collect this component's effects that depend on the signal,
+            // via the precomputed inverted dep index. Each entry pairs
+            // the effect's WASM function index with the LIR `BlockId`
+            // so we can look up its `boundary_params` and emit the
+            // right call shape.
+            let observing_effects: Vec<(u32, BlockId)> = comp
+                .effects_by_signal
+                .get(&signal)
+                .map(|ids| ids.as_slice())
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|eid| {
+                    let effect = comp.effects.iter().find(|e| e.id == *eid)?;
+                    let fi = self.block_func_indices.get(&(ci, effect.update_block))?;
+                    Some((*fi, effect.update_block))
+                })
+                .collect();
+            if observing_effects.is_empty() {
+                continue;
+            }
+            let gc = &self.gc_layouts[ci];
+            let registry_g = gc.registry_global.ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "global fanout: component {} has no registry global",
+                    ci
+                ))
+            })?;
+            let len_g = gc.registry_len_global.ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "global fanout: component {} has no registry_len global",
+                    ci
+                ))
+            })?;
+            let handle_struct_ty = self.shared_handle_type_idx.ok_or_else(|| {
+                CodegenError::InvalidIR("global fanout: shared $handle type not emitted".into())
+            })?;
+            let handle_arr_ty = self.shared_handle_arr_type_idx.ok_or_else(|| {
+                CodegenError::InvalidIR(
+                    "global fanout: shared $handle-array type not emitted".into(),
+                )
+            })?;
+            let comp_struct_ty = gc.component_struct_type_idx.ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "global fanout: component {} has no component struct type",
+                    ci
+                ))
+            })?;
+
+            // Reset idx = 0
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::LocalSet(idx_local));
+
+            // Outer block as break target, inner loop for iteration.
+            func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+            func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+
+            // if registry_<ci> is null → break (no array allocated yet)
+            func.instruction(&Instruction::GlobalGet(registry_g));
+            func.instruction(&Instruction::RefIsNull);
+            func.instruction(&Instruction::BrIf(1));
+
+            // if idx >= len → break
+            func.instruction(&Instruction::LocalGet(idx_local));
+            func.instruction(&Instruction::GlobalGet(len_g));
+            func.instruction(&Instruction::I32GeU);
+            func.instruction(&Instruction::BrIf(1));
+
+            // entry = arr[idx]; if entry is null → skip
+            func.instruction(&Instruction::GlobalGet(registry_g));
+            func.instruction(&Instruction::RefAsNonNull);
+            func.instruction(&Instruction::LocalGet(idx_local));
+            func.instruction(&Instruction::ArrayGet(handle_arr_ty));
+            func.instruction(&Instruction::RefIsNull);
+            func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+            // null entry — fall through to increment
+            func.instruction(&Instruction::Else);
+
+            // inst = entry.inst (re-fetch for the load); if null → skip
+            func.instruction(&Instruction::GlobalGet(registry_g));
+            func.instruction(&Instruction::RefAsNonNull);
+            func.instruction(&Instruction::LocalGet(idx_local));
+            func.instruction(&Instruction::ArrayGet(handle_arr_ty));
+            func.instruction(&Instruction::RefAsNonNull);
+            func.instruction(&Instruction::StructGet {
+                struct_type_index: handle_struct_ty,
+                field_index: 0,
+            });
+            func.instruction(&Instruction::RefIsNull);
+            func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+            // freed slot — skip
+            func.instruction(&Instruction::Else);
+
+            // For each observing effect, push the typed self-ref then
+            // call args matching the block's signature: legacy blocks
+            // get `(self, 0_i32)`; dynamic-typed blocks get `(self,
+            // <0 per LIR i32 param>, <boundary_ref per
+            // boundary_params>)`. Reload inst per effect (cheaper
+            // than reserving a typed per-component scratch local in
+            // this multi-comp fanout). To resolve boundary refs we
+            // temporarily set the self-local context so
+            // `emit_boundary_ref` can chain `struct.get`s from the
+            // freshly cast typed self ref.
+            //
+            // The typed self ref must already be in a WASM local
+            // before `emit_boundary_ref` runs — we reserve a
+            // function-scratch local lazily on first use.
+            for (effect_func_idx, block_id) in &observing_effects {
+                let block = comp.blocks.iter().find(|b| b.id == *block_id);
+                let (n_i32_args, boundary_refs): (u32, &[_]) = match block {
+                    Some(b) if !b.params.is_empty() => {
+                        (b.params.len() as u32, b.boundary_params.as_slice())
+                    }
+                    Some(b) if !b.boundary_params.is_empty() => (0, b.boundary_params.as_slice()),
+                    _ => (1, &[]),
+                };
+
+                // Push self ref.
+                func.instruction(&Instruction::GlobalGet(registry_g));
+                func.instruction(&Instruction::RefAsNonNull);
+                func.instruction(&Instruction::LocalGet(idx_local));
+                func.instruction(&Instruction::ArrayGet(handle_arr_ty));
+                func.instruction(&Instruction::RefAsNonNull);
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: handle_struct_ty,
+                    field_index: 0,
+                });
+                func.instruction(&Instruction::RefAsNonNull);
+                func.instruction(&Instruction::RefCastNonNull(
+                    wasm_encoder::HeapType::Concrete(comp_struct_ty),
+                ));
+
+                // i32 LIR args (parent placeholders).
+                for _ in 0..n_i32_args {
+                    func.instruction(&Instruction::I32Const(0));
+                }
+
+                // Boundary refs: re-fetch from $self via the chain.
+                // We don't have `current_self_local` set here because
+                // this helper runs outside any per-component emit
+                // scope, so we inline the chain manually.
+                for &b_id in boundary_refs {
+                    self.emit_boundary_chain_from_self_inline(
+                        &mut func,
+                        ci,
+                        b_id,
+                        registry_g,
+                        idx_local,
+                        handle_arr_ty,
+                        handle_struct_ty,
+                        comp_struct_ty,
+                    )?;
+                }
+
+                func.instruction(&Instruction::Call(*effect_func_idx));
+            }
+
+            // end inner-if (inst non-null arm)
+            func.instruction(&Instruction::End);
+            // end outer-if (entry non-null arm)
+            func.instruction(&Instruction::End);
+
+            // idx += 1; continue loop.
+            func.instruction(&Instruction::LocalGet(idx_local));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalSet(idx_local));
+            func.instruction(&Instruction::Br(0)); // continue loop $L
+
+            // end loop
+            func.instruction(&Instruction::End);
+            // end block (break target)
+            func.instruction(&Instruction::End);
+
+            // Suppress the unused warning on `comp_struct_ty` —
+            // referenced in the WAT comment but not used by the
+            // hand-emitted bytecode (struct_type_index is enough).
+            let _ = comp_struct_ty;
+        }
+
+        func.instruction(&Instruction::End);
+        Ok(func)
+    }
+}

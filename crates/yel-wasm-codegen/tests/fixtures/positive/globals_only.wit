@@ -1,0 +1,5 @@
+package yel:libonly@0.1.0;
+
+world libonly {
+  import yel:ui/dom@0.1.0;
+}

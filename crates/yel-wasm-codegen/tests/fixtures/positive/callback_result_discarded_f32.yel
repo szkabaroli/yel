@@ -1,0 +1,9 @@
+// Callback f32 return dropped: LirStatement::Expr lowers to DropExpr so the stack stays balanced.
+package test:cb-drop-f32@0.1.0;
+
+export component App {
+    export on-click: func() -> f32;
+    Button {
+        clicked: { on-click(); }
+    }
+}

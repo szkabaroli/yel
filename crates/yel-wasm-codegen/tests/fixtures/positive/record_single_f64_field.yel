@@ -1,0 +1,12 @@
+// 1-slot composite getter — f64 path. Canonical ABI says a record that
+// flattens to `[F64]` must be returned directly from the core export
+// as `f64`, not through a pointer. Companion to
+// `fuzz_record_getter_single_flat_slot` (the f32 case) and
+// `record_single_s32_field` (the accidentally-working i32 case where
+// pointer-vs-value alias on i32).
+package yel:r1f64@0.1.0;
+record R { a: f64, }
+export component App {
+    r: R = { a: 1.5 };
+    Text { "x" }
+}

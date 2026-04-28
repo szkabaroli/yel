@@ -42,17 +42,14 @@ pub mod hir;
 pub mod lir;
 pub mod thir;
 
-// Codegen module
-pub mod codegen;
-
 // Re-exports
 pub use compiler::{CompileError, CompileResult, Compiler};
-pub use context::CompilerContext;
+pub use context::{BlockDebugName, CompilerContext};
 pub use definitions::{DefKind, Definitions, Namespace};
 pub use diagnostic::{Diagnostic, Diagnostics, Severity};
 pub use ids::{DefId, ExprId, FieldIdx, LocalId, NodeId, VariantIdx};
 pub use index_vec::{Idx, IndexVec};
-pub use interner::{Interner, Name};
+pub use interner::{ArcStr, Interner, Name};
 pub use source::{Source, SourceId, SourceMap, Span};
 pub use syntax::{parse, ParseError};
 pub use types::{InternedTyKind, Ty, TypeInterner};

@@ -24,6 +24,12 @@ export default defineConfig({
   resolve: {
     alias: {
       $lib: path.resolve('./src/lib'),
+      // Pin @bytecodealliance/jco to the top-level 1.18.1 install —
+      // the transitive `componentize-js@0.20.0` pulls in jco@1.15.4
+      // inside its pnpm store, and vite would otherwise resolve to it
+      // in some import paths. 1.15.4's bundled wasmparser rejects
+      // WASM GC's `rec` groups, which our backend now emits.
+      '@bytecodealliance/jco': path.resolve('./node_modules/@bytecodealliance/jco/src/browser.js'),
     },
   },
   optimizeDeps: {

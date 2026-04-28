@@ -1,0 +1,205 @@
+// Frozen yel-smith seed 48 reproducer (not hand-minimized — the failure
+// survives across many nested-for/if removals and the root cause isn't
+// obvious from the source). Compilation fails WASM validation with
+// "expected i32 but nothing on stack". Likely a stack-balance issue in
+// a rarely-hit emit path (keyed for-loop + composite list body +
+// interpolation mix). Minimize further when we fix this.
+package ns70:pkg42@10.2.3;
+
+record Record1 {
+    field-a: f32,
+    field-b: char,
+    field-c: char,
+    field-d: string,
+    field-e: u32,
+}
+
+enum Status2 {
+    case-a,
+    case-b,
+}
+
+enum Status3 {
+    case-a,
+    case-b,
+    case-c,
+    case-d,
+    case-e,
+}
+
+enum Status4 {
+    case-a,
+    case-b,
+    case-c,
+}
+
+export component Component5 {
+    count: list<result<string, string>>;
+    value: string;
+    label: result<result<s32, string>, string>;
+    enabled: s32;
+    visible: Status2;
+    on-click: func();
+    if ((-37) > 70) {
+        ZStack {
+            Box {
+                changed: { enabled *= 13; count = count; },
+                if true {
+                    "{ value }"
+                } else if ([-28, 32, -95, -94][2] != (-35)) {
+                    "data hello"
+                    "{ value }"
+                } else if true {
+                    "hello"
+                },
+                if true {
+                    "{ value }"
+                    "{ value }"
+                } else if (enabled >= (62 % 4)) {
+                    "data"
+                    "Value: {value}"
+                }
+            },
+            for item-5 in count {
+                "{ value }"
+                if (!false) {
+                    "{ value }"
+                }
+            },
+            for item-6 in 3..=6 {
+                for item-7 in 5..9 key(item-7) {
+                    "{ value }"
+                    "item hello test"
+                }
+                "{ ["test", "test"][0] }"
+            },
+            Text {
+                clicked: { enabled -= [89, 48, -40][0]; },
+                if true {
+                    "{ value }"
+                    "{ value }"
+                },
+                HStack {
+                    clicked: { on-click(); count = count; },
+                    "{ value }",
+                    "{ value }",
+                    "{ value }",
+                    "{ value }"
+                },
+                for item-8 in count {
+                    "{ value }"
+                    "Value: {value}"
+                },
+                Button {
+                    changed: { count = count; },
+                    "{ value }",
+                    "test data",
+                    "{ value }"
+                },
+                ZStack {
+                    "{ value }",
+                    "{ value }",
+                    "{ value }"
+                }
+            }
+        }
+        for item-9 in [1, 2, 3] {
+            if ([-69, -80, -48, -50][2] >= enabled) {
+                for item-10 in [1, 2, 3] {
+                    "{ value }"
+                }
+            } else if true {
+                "Value: {value}"
+                "{ ["test", "test"][1] }"
+            }
+        }
+    } else {
+        Text {
+            clicked: { count = count; enabled -= -85; },
+            for item-11 in 2..=4 key(item-11) {
+                for item-12 in count {
+                    "{ value }"
+                    "{ value }"
+                }
+            },
+            for item-13 in 0..10 {
+                if [true, false, false][0] {
+                    "Value: {value}"
+                    "{ value }"
+                } else {
+                    "{ value }"
+                    "Value: {value}"
+                }
+            }
+        }
+        Box {
+            hovered: { if [true, true, false][1] { count = [ok("world world"), err(value), ok(value), ok("Value: {value}")]; } },
+            for item-14 in 2..=12 {
+                "Value: {value}"
+                if [false, true, false][0] {
+                    "test data"
+                    "{ value }"
+                } else if [true, false, true, false][0] {
+                    "{ value }"
+                    "{ value }"
+                } else if true {
+                    "{ value }"
+                    "Value: {value}"
+                } else {
+                    "Value: {value}"
+                    "world"
+                }
+            },
+            ZStack {
+                "world test test",
+                ZStack {
+                    clicked: { count = [err("Value: {value}"), err("item hello"), count[0]]; if true { enabled *= -60; count = count; } },
+                    "{ ["test", "test"][1] }",
+                    "Value: {value}",
+                    "value"
+                },
+                for item-15 in count {
+                    "{ value }"
+                    "hello"
+                }
+            }
+        }
+    }
+    for item-16 in count {
+        "Value: {value}"
+    }
+}
+
+
+component Component18 {
+    count: string = "test value";
+    value: Status2 = Status2.case-b;
+    label: list<list<string>>;
+    enabled: string = count;
+    visible: Record1;
+    selected: Record1;
+    items: Status2;
+    data: option<result<s32, string>> = some(err(count));
+    name: Record1;
+    title: string = count;
+    "world data item"
+}
+
+
+component Component19 {
+    count: bool;
+    value: result<bool, string>;
+    label: result<result<s32, string>, string> = err("hello");
+    enabled: Record1 = { field-a: 0.00, field-b: ['x', 'x', 'x', 'x'][2], field-c: '1', field-d: "world data", field-e: [23, 8, 32, 88][3] };
+    visible: option<list<s32>> = some([]);
+    selected: f32;
+    items: result<f32, string>;
+    data: string = "test";
+    ZStack {
+        pressed: { count = true; count = count; },
+        "{ data }",
+        "{ data }"
+    }
+}
+
+

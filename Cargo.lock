@@ -2570,6 +2570,7 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
+ "serde",
 ]
 
 [[package]]
@@ -3352,6 +3353,7 @@ dependencies = [
  "wasm-encoder 0.225.0",
  "wasm-metadata 0.225.0",
  "wasmparser 0.225.0",
+ "wat",
  "wit-parser 0.225.0",
 ]
 
@@ -3524,6 +3526,7 @@ dependencies = [
  "arbitrary",
  "libfuzzer-sys",
  "yel-core",
+ "yel-wasm-codegen",
 ]
 
 [[package]]
@@ -3538,7 +3541,9 @@ dependencies = [
  "thiserror 1.0.69",
  "wasm-encoder 0.225.0",
  "wasm-metadata 0.225.0",
+ "wasmparser 0.225.0",
  "wasmprinter 0.225.0",
+ "wasmtime",
  "wit-component 0.225.0",
  "wit-encoder",
  "wit-parser 0.225.0",

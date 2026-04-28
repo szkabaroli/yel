@@ -1,25 +1,8 @@
 //! Abstract Syntax Tree definitions for the Yel.
 
 use crate::source::Span;
+use crate::syntax::NodeId;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU32, Ordering};
-
-/// Unique identifier for AST nodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub struct NodeId(pub u32);
-
-impl NodeId {
-    /// Create a new unique node ID.
-    pub fn new() -> Self {
-        static NEXT_ID: AtomicU32 = AtomicU32::new(0);
-        NodeId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
-    }
-
-    /// Create a dummy node ID (for testing).
-    pub fn dummy() -> Self {
-        NodeId(u32::MAX)
-    }
-}
 
 /// A node with source location information.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -95,6 +78,12 @@ pub struct File {
     pub enums: Vec<Spanned<Enum>>,
     /// Variant type definitions.
     pub variants: Vec<Spanned<Variant>>,
+    /// Intrinsic element type definitions.
+    pub elements: Vec<Spanned<Element>>,
+    /// Imported component declarations.
+    pub import_components: Vec<Spanned<ImportComponent>>,
+    /// Global singleton declarations.
+    pub globals: Vec<Spanned<Global>>,
     /// Component definitions.
     pub components: Vec<Spanned<Component>>,
 }
@@ -578,6 +567,11 @@ pub enum Node {
     If(IfNode),
     /// List rendering.
     For(ForNode),
+    /// Slot marker (`@children`) — when the enclosing component is used at
+    /// a call site, the caller's child nodes splice in at this position.
+    /// Exactly one `@children` per component body; zero means the component
+    /// rejects caller-supplied children at type-check time.
+    Children,
 }
 
 /// An element or component node.
@@ -609,6 +603,9 @@ pub enum PropModifier {
     None,
     /// `set` modifier - handler called when property changes from outside (e.g., user input).
     Set,
+    /// `bind` modifier - two-way binding: value is the target signal, and a
+    /// synthetic auto-sync input-event handler is generated (no user body).
+    Bind,
 }
 
 /// A property binding (kept separate in AST, merged in HIR).
@@ -686,6 +683,13 @@ pub enum Expr {
     Member(Box<Spanned<Expr>>, String),
     /// Optional member access (e.g., `obj?.field`).
     OptionalMember(Box<Spanned<Expr>>, String),
+    /// Method call (e.g., `list.filter(closure)`).
+    MethodCall {
+        receiver: Box<Spanned<Expr>>,
+        method: String,
+        method_span: Span,
+        args: Vec<Spanned<Expr>>,
+    },
     /// Index access (e.g., `arr[0]`).
     Index(Box<Spanned<Expr>>, Box<Spanned<Expr>>),
     /// String interpolation: "Hello {name}!"
@@ -755,6 +759,13 @@ pub enum Statement {
         condition: Spanned<Expr>,
         then_branch: Vec<Spanned<Statement>>,
         else_branch: Option<Vec<Spanned<Statement>>>,
+    },
+    /// Let binding: `let name: type = value;`
+    Let {
+        name: String,
+        name_span: Span,
+        ty: Option<Ty>,
+        value: Spanned<Expr>,
     },
 }
 
@@ -843,4 +854,86 @@ pub struct VariantCase {
     pub name: String,
     /// Optional payload type.
     pub payload: Option<Ty>,
+}
+
+/// An intrinsic element type declaration: `element HStack { alignment: option<Alignment>; }`
+/// Elements are primitive UI building blocks provided by the runtime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Element {
+    /// Element name (PascalCase).
+    pub name: String,
+    /// Span of the name.
+    pub name_span: Span,
+    /// Element properties (including function-typed callbacks).
+    pub properties: Vec<Spanned<Property>>,
+}
+
+/// An imported component declaration: `import component Dialog { name: string; func show(); }`
+/// Imported components are external components provided by the host or other modules.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportComponent {
+    /// Component name (PascalCase).
+    pub name: String,
+    /// Span of the name.
+    pub name_span: Span,
+    /// Component properties (including function-typed callbacks).
+    pub properties: Vec<Spanned<Property>>,
+    /// Methods that can be called on the component instance.
+    pub methods: Vec<Spanned<FunctionDecl>>,
+    /// `true` when the declaration body includes `@children;`. Signals to
+    /// the module type-checker that callers may pass child nodes inside
+    /// `X { ... }` and that the host's `mount` returns a children-root id.
+    pub has_children_slot: bool,
+}
+
+/// A global property declaration: `in-out name: type = default;`
+///
+/// Direction semantics:
+/// - No direction (with optional default): pure in-tree shared state. The
+///   component owns the slot; writes re-render every reader. No WIT emission.
+/// - `In`: host pushes via imported setter.
+/// - `Out`: component writes; host is notified.
+/// - `InOut`: both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GlobalProperty {
+    /// Direction (defaults to `In`).
+    pub direction: PropertyDirection,
+    /// Property name.
+    pub name: String,
+    /// Span of the name.
+    pub name_span: Span,
+    /// Property type.
+    pub ty: Ty,
+    /// Optional default value.
+    pub default: Option<Spanned<Expr>>,
+}
+
+/// A global singleton declaration.
+///
+/// ```text
+/// // Pure in-tree shared state — no WIT emission.
+/// global AppState {
+///     count: s32 = 0;
+/// }
+///
+/// // Host-boundary interface — emits a WIT interface.
+/// export global Theme {
+///     in dark-mode: bool;
+///     callback toggle-dark-mode();
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Global {
+    /// Global name (PascalCase by convention).
+    pub name: String,
+    /// Span of the name.
+    pub name_span: Span,
+    /// Whether this global's WIT interface is published for other packages
+    /// to import. Not a gate on WIT emission itself — that depends on
+    /// whether any member crosses the host boundary.
+    pub is_export: bool,
+    /// Properties.
+    pub properties: Vec<Spanned<GlobalProperty>>,
+    /// Callbacks (host implements).
+    pub callbacks: Vec<Spanned<FunctionDecl>>,
 }

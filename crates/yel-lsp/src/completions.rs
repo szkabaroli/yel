@@ -1,83 +1,52 @@
 //! Completion provider for Yel DSL.
 
-use yel_core::syntax::ast::TyKind;
 use tower_lsp::lsp_types::*;
+use yel_core::syntax::ast::TyKind;
 
+use crate::builtins_catalog;
 use crate::document::Document;
 
-// Stub module for removed stdlib functionality
-mod stdlib {
-    pub struct BuiltinEnum {
-        pub name: String,
-        pub cases: Vec<String>,
-    }
-
-    pub struct BuiltinVariant {
-        pub name: String,
-        pub cases: Vec<BuiltinVariantCase>,
-    }
-
-    pub struct BuiltinVariantCase {
-        pub name: String,
-        pub payload: Option<yel_core::syntax::ast::TyKind>,
-    }
-
-    pub struct BuiltinElement {
-        pub name: String,
-        pub properties: Vec<BuiltinProperty>,
-    }
-
-    pub struct BuiltinProperty {
-        pub name: String,
-        pub ty: yel_core::syntax::ast::TyKind,
-    }
-
-    pub fn get_builtin(_name: &str) -> Option<BuiltinElement> {
-        None
-    }
-
-    pub fn get_builtin_enum(_name: &str) -> Option<BuiltinEnum> {
-        None
-    }
-
-    pub fn get_builtin_variant(_name: &str) -> Option<BuiltinVariant> {
-        None
-    }
-
-    pub fn builtin_enums() -> Vec<BuiltinEnum> {
-        vec![]
-    }
-
-    pub fn builtin_variants() -> Vec<BuiltinVariant> {
-        vec![]
-    }
-
-    pub fn builtin_components() -> Vec<BuiltinElement> {
-        vec![]
-    }
-}
-
-/// Keywords in Yel DSL.
+/// Keywords in Yel DSL (aligned with `grammar.pest`).
 const KEYWORDS: &[(&str, &str)] = &[
-    ("component", "Define a new component"),
+    ("package", "Package declaration (namespace:name@version)"),
+    ("export", "Export a component or global interface"),
+    ("global", "Global singleton declaration"),
+    ("record", "Record type definition"),
+    ("enum", "Enum type definition"),
+    ("variant", "Variant (sum) type definition"),
+    ("element", "Intrinsic element type definition"),
+    ("import", "Import or import component"),
+    ("component", "Component definition"),
     ("property", "Declare a component property"),
     ("callback", "Declare a callback"),
-    ("import", "Import a component from another file"),
-    ("from", "Specify import source"),
+    ("func", "Function / callback type"),
+    ("from", "Import source path"),
     ("if", "Conditional rendering or statement"),
     ("else", "Alternative branch"),
     ("for", "List rendering loop"),
     ("as", "Bind loop item"),
-    ("in", "Input property direction"),
+    ("in", "Input property direction (globals)"),
     ("out", "Output property direction"),
-    ("inout", "Bidirectional property direction"),
+    ("in-out", "Bidirectional property direction"),
+    ("let", "Local binding"),
     ("true", "Boolean true"),
     ("false", "Boolean false"),
 ];
 
-/// Built-in types.
+/// Built-in and common primitive types.
 const TYPES: &[(&str, &str)] = &[
     ("bool", "Boolean type"),
+    ("s8", "8-bit signed integer"),
+    ("s16", "16-bit signed integer"),
+    ("s32", "32-bit signed integer"),
+    ("s64", "64-bit signed integer"),
+    ("u8", "8-bit unsigned integer"),
+    ("u16", "16-bit unsigned integer"),
+    ("u32", "32-bit unsigned integer"),
+    ("u64", "64-bit unsigned integer"),
+    ("f32", "32-bit float"),
+    ("f64", "64-bit float"),
+    ("char", "Unicode character"),
     ("string", "String type"),
     ("int", "Integer type"),
     ("float", "Floating point type"),
@@ -92,6 +61,8 @@ const TYPES: &[(&str, &str)] = &[
     ("image", "Image reference"),
     ("easing", "Animation easing function"),
     ("list", "List container"),
+    ("option", "Optional type"),
+    ("result", "Result type"),
 ];
 
 /// Provide completions at the given position.
@@ -125,8 +96,8 @@ pub fn provide_completions(doc: &Document, position: Position) -> Vec<Completion
         });
     }
 
-    // Add built-in elements from stdlib
-    for builtin in stdlib::builtin_components() {
+    // Add built-in elements from compiler catalog
+    for builtin in builtins_catalog::builtin_components() {
         completions.push(CompletionItem {
             label: builtin.name.to_string(),
             kind: Some(CompletionItemKind::CLASS),
@@ -187,7 +158,10 @@ fn get_contextual_completions(doc: &Document, position: Position) -> Option<Vec<
     let parsed = parse_result.as_ref().map(|r| &r.file);
 
     // Get the text before cursor on the current line
-    let line_start = content_str[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_start = content_str[..offset]
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
     let line_text = &content_str[line_start..offset];
 
     // Check for dot-completion (member access)
@@ -224,7 +198,8 @@ fn get_contextual_completions(doc: &Document, position: Position) -> Option<Vec<
     }
 
     // Check if we're just typing an identifier that might be an enum case
-    let word_start = line_text.rfind(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+    let word_start = line_text
+        .rfind(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
         .map(|i| i + 1)
         .unwrap_or(0);
     let current_word = &line_text[word_start..];
@@ -233,12 +208,12 @@ fn get_contextual_completions(doc: &Document, position: Position) -> Option<Vec<
         // Suggest matching enum/variant cases from all types (builtin + user-defined)
         let mut type_completions = Vec::new();
 
-        // Builtin enums (stub - always empty)
-        for builtin_enum in stdlib::builtin_enums() {
-            for case in &builtin_enum.cases {
+        // Builtin enums from catalog
+        for builtin_enum in builtins_catalog::builtin_enums() {
+            for case in builtin_enum.cases {
                 if case.starts_with(current_word) {
                     type_completions.push(CompletionItem {
-                        label: case.clone(),
+                        label: case.to_string(),
                         kind: Some(CompletionItemKind::ENUM_MEMBER),
                         detail: Some(format!("{} enum case", builtin_enum.name)),
                         ..Default::default()
@@ -247,8 +222,8 @@ fn get_contextual_completions(doc: &Document, position: Position) -> Option<Vec<
             }
         }
 
-        // Builtin variants (stub - always empty)
-        for builtin_variant in stdlib::builtin_variants() {
+        // Builtin variants from catalog
+        for builtin_variant in builtins_catalog::builtin_variants() {
             for case in &builtin_variant.cases {
                 if case.name.starts_with(current_word) {
                     let has_payload = case.payload.is_some();
@@ -343,7 +318,8 @@ fn parse_property_context(content: &str, offset: usize) -> Option<(String, Strin
 
     // Find the property name before the colon
     let before_colon = &before_cursor[..colon_pos];
-    let prop_start = before_colon.rfind(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+    let prop_start = before_colon
+        .rfind(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
         .map(|i| i + 1)
         .unwrap_or(0);
     let prop_name = before_colon[prop_start..].trim().to_string();
@@ -376,7 +352,8 @@ fn find_enclosing_element(text: &str) -> Option<String> {
             if depth == 0 {
                 // This is our opening brace, find the name before it
                 let before_brace = text[..i].trim_end();
-                let name_start = before_brace.rfind(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+                let name_start = before_brace
+                    .rfind(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
                     .map(|i| i + 1)
                     .unwrap_or(0);
                 let name = before_brace[name_start..].trim();
@@ -394,19 +371,25 @@ fn find_enclosing_element(text: &str) -> Option<String> {
 }
 
 /// Get the type of a property on an element.
-fn get_property_type(element: &str, property: &str, parsed: Option<&yel_core::syntax::ast::File>) -> Option<TyKind> {
-    // Check builtin components (stub - always returns None)
-    if let Some(comp) = stdlib::get_builtin(element) {
-        if let Some(prop) = comp.properties.iter().find(|p| p.name == property) {
-            return Some(prop.ty.clone());
-        }
+fn get_property_type(
+    element: &str,
+    property: &str,
+    parsed: Option<&yel_core::syntax::ast::File>,
+) -> Option<TyKind> {
+    if let Some(ty) = builtins_catalog::get_prop_type(element, property) {
+        return Some(ty);
     }
 
     // Check user-defined components
     if let Some(file) = parsed {
         for comp in &file.components {
             if comp.node.name == element {
-                if let Some(prop) = comp.node.properties.iter().find(|p| p.node.name == property) {
+                if let Some(prop) = comp
+                    .node
+                    .properties
+                    .iter()
+                    .find(|p| p.node.name == property)
+                {
                     return Some(prop.node.ty.kind.clone());
                 }
             }
@@ -417,14 +400,17 @@ fn get_property_type(element: &str, property: &str, parsed: Option<&yel_core::sy
 }
 
 /// Get completions for enum or variant cases.
-fn get_type_value_completions(type_name: &str, parsed: Option<&yel_core::syntax::ast::File>) -> Vec<CompletionItem> {
+fn get_type_value_completions(
+    type_name: &str,
+    parsed: Option<&yel_core::syntax::ast::File>,
+) -> Vec<CompletionItem> {
     let mut completions = Vec::new();
 
-    // Check builtin enums (stub - always returns None)
-    if let Some(enum_def) = stdlib::get_builtin_enum(type_name) {
-        for case in &enum_def.cases {
+    // Check builtin enums
+    if let Some(enum_def) = builtins_catalog::get_builtin_enum(type_name) {
+        for case in enum_def.cases {
             completions.push(CompletionItem {
-                label: case.clone(),
+                label: case.to_string(),
                 kind: Some(CompletionItemKind::ENUM_MEMBER),
                 detail: Some(format!("{} value", type_name)),
                 ..Default::default()
@@ -433,8 +419,8 @@ fn get_type_value_completions(type_name: &str, parsed: Option<&yel_core::syntax:
         return completions;
     }
 
-    // Check builtin variants (stub - always returns None)
-    if let Some(variant_def) = stdlib::get_builtin_variant(type_name) {
+    // Check builtin variants
+    if let Some(variant_def) = builtins_catalog::get_builtin_variant(type_name) {
         for case in &variant_def.cases {
             let has_payload = case.payload.is_some();
             completions.push(CompletionItem {
@@ -516,7 +502,9 @@ fn get_dot_completions(
 
     // Make sure there's no special characters between dot and cursor (allow partial identifier)
     let after_dot = &before[dot_pos + 1..];
-    if after_dot.contains(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == '{' || c == '}' || c == ';' || c == ':') {
+    if after_dot.contains(|c: char| {
+        c.is_whitespace() || c == '(' || c == ')' || c == '{' || c == '}' || c == ';' || c == ':'
+    }) {
         return None;
     }
 
@@ -600,7 +588,10 @@ fn get_completions_for_type(
             completions.push(CompletionItem {
                 label: "unwrap".to_string(),
                 kind: Some(CompletionItemKind::METHOD),
-                detail: Some(format!("{} - Returns the value (panics if none)", format_type(&inner.kind))),
+                detail: Some(format!(
+                    "{} - Returns the value (panics if none)",
+                    format_type(&inner.kind)
+                )),
                 ..Default::default()
             });
             // Also add fields from inner type for convenience (optional chaining style)
@@ -611,7 +602,11 @@ fn get_completions_for_type(
                             completions.push(CompletionItem {
                                 label: field.node.name.clone(),
                                 kind: Some(CompletionItemKind::FIELD),
-                                detail: Some(format!("{} - Field of {} (requires unwrap)", format_type(&field.node.ty.kind), type_name)),
+                                detail: Some(format!(
+                                    "{} - Field of {} (requires unwrap)",
+                                    format_type(&field.node.ty.kind),
+                                    type_name
+                                )),
                                 ..Default::default()
                             });
                         }
@@ -636,13 +631,19 @@ fn get_completions_for_type(
             completions.push(CompletionItem {
                 label: "first".to_string(),
                 kind: Some(CompletionItemKind::METHOD),
-                detail: Some(format!("option<{}> - Returns the first element", format_type(&inner.kind))),
+                detail: Some(format!(
+                    "option<{}> - Returns the first element",
+                    format_type(&inner.kind)
+                )),
                 ..Default::default()
             });
             completions.push(CompletionItem {
                 label: "last".to_string(),
                 kind: Some(CompletionItemKind::METHOD),
-                detail: Some(format!("option<{}> - Returns the last element", format_type(&inner.kind))),
+                detail: Some(format!(
+                    "option<{}> - Returns the last element",
+                    format_type(&inner.kind)
+                )),
                 ..Default::default()
             });
         }
@@ -668,7 +669,11 @@ fn get_completions_for_type(
                         completions.push(CompletionItem {
                             label: field.node.name.clone(),
                             kind: Some(CompletionItemKind::FIELD),
-                            detail: Some(format!("{} - Field of {}", format_type(&field.node.ty.kind), type_name)),
+                            detail: Some(format!(
+                                "{} - Field of {}",
+                                format_type(&field.node.ty.kind),
+                                type_name
+                            )),
                             ..Default::default()
                         });
                     }

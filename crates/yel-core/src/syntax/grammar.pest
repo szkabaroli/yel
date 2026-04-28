@@ -20,8 +20,8 @@ BLOCK_LEVEL_CATCH_ALL = @{ !("}" | NL) ~ (!NL ~ ANY)+ ~ NL? }
 // Entry point - with error recovery
 file = { SOI ~ package_decl? ~ (top_level_item | CATCH_ALL)* ~ EOI }
 
-// Top-level items: records, enums, variants and components
-top_level_item = _{ record_decl | enum_decl | variant_decl | component }
+// Top-level items: records, enums, variants, elements, imports, globals, and components
+top_level_item = _{ record_decl | enum_decl | variant_decl | element_decl | import_component | global_decl | component }
 
 // Record type declaration: record Name { field: type, ... }
 record_decl = {
@@ -68,6 +68,80 @@ variant_case = {
 
 // Variant case names use kebab-case (lowercase with hyphens)
 variant_case_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
+
+// Element type declaration: element HStack { alignment: option<Alignment>; }
+// Elements are intrinsic UI primitives provided by the runtime.
+element_decl = {
+    "element" ~ identifier ~ "{" ~
+        element_property* ~
+    "}"
+}
+
+// Element property: name: type;
+element_property = {
+    identifier ~ ":" ~ type_annotation ~ ";"
+}
+
+// Imported component declaration: import component Dialog { name: string; func show(); }
+// Imported components are external components provided by the host or other modules.
+import_component = {
+    "import" ~ "component" ~ identifier ~ "{" ~
+        import_component_member* ~
+    "}"
+}
+
+import_component_member = _{
+    import_method | import_property | children_node
+}
+
+// Imported component property: name: type;
+import_property = {
+    identifier ~ ":" ~ type_annotation ~ ";"
+}
+
+// Imported component method: func name(params) -> ret;
+import_method = {
+    "func" ~ identifier ~ "(" ~ func_params? ~ ")" ~ func_return? ~ ";"
+}
+
+// Global declaration: a singleton object with properties and functions.
+// Two modes, driven by member shape:
+//   1. Pure in-tree shared state — plain property with a default value.
+//      The component owns the slot; writes re-render all readers.
+//      No WIT emission.
+//   2. Host-boundary interface — `in`/`out`/`in-out` properties or
+//      func-typed members. Emits a WIT interface.
+//
+// `export global` additionally publishes the WIT interface for other
+// packages to import (not a gate on emission — just visibility).
+//
+//   global AppState {
+//       count: s32 = 0;               // pure in-tree, shared across components
+//       theme: string = "light";
+//   }
+//
+//   export global Theme {
+//       in dark-mode: bool;           // host pushes
+//       toggle-dark-mode: func();     // host implements
+//   }
+global_decl = {
+    export_modifier? ~ "global" ~ identifier ~ "{" ~
+        global_member* ~
+    "}"
+}
+
+global_member = _{ function_decl | global_callback | global_property | BLOCK_LEVEL_CATCH_ALL }
+
+global_property = {
+    property_direction? ~ identifier ~ ":" ~ type_annotation ~ ("=" ~ expr)? ~ ";"
+}
+
+property_direction = { "in-out" | "in" | "out" }
+
+// Legacy syntax — prefer `name: func(params);` instead.
+global_callback = {
+    "callback" ~ identifier ~ "(" ~ func_params? ~ ")" ~ func_return? ~ ";"
+}
 
 // Package declaration: package namespace:name@version;
 package_decl = {
@@ -125,14 +199,13 @@ property_decl = {
 }
 
 // Type annotations - aligned with WIT specification
-// Note: func_type is NOT included here to avoid conflicts with function_decl.
-// Function types are declared via function_decl (e.g., on-click: func())
 type_annotation = {
     primitive_type
     | list_type
     | option_type
     | result_type
     | tuple_type
+    | func_type
     | named_type
 }
 
@@ -172,9 +245,14 @@ named_type = { identifier }
 node = _{
     if_node
     | for_node
+    | children_node
     | element_node
     | string_node
 }
+
+// Slot marker inside a component body: caller's children splice in here.
+// A component with `@children` becomes a container component.
+children_node = { "@children" ~ ";"? }
 
 // Bare string as content: "Hello {name}"
 string_node = { string_expr }
@@ -206,7 +284,7 @@ named_prop = {
 }
 
 // Property modifiers for special bindings
-prop_modifier = { "set" }
+prop_modifier = { "set" | "bind" }
 
 // Attribute names use kebab-case (lowercase with hyphens)
 attr_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
@@ -239,9 +317,15 @@ for_body = { (node ~ ","?)* }
 
 // Statements (inside handlers)
 statement = {
-    if_statement
+    let_statement
+    | if_statement
     | assign_statement
     | expr_statement
+}
+
+// Let binding: let name: type = value; or let name = value;
+let_statement = {
+    "let" ~ identifier ~ (":" ~ type_annotation)? ~ "=" ~ expr ~ ";"
 }
 
 if_statement = {
@@ -292,9 +376,10 @@ index           =  { "[" ~ expr ~ "]" }
 args = { expr ~ ("," ~ expr)* }
 
 primary = _{
-    closure_with_params   // { param: type -> body } - must be first (has ->)
-    | record_literal      // { field: value, ... } - requires at least one field
-    | closure_no_params   // { body } - closure without params (catches empty {} too)
+    closure_with_params        // { param: type -> body } - must be first (has ->)
+    | closure_inferred_params  // { param -> body } - closure with inferred types (has ->)
+    | record_literal           // { field: value, ... } - requires at least one field
+    | closure_no_params        // { body } - closure without params (catches empty {} too)
     | tuple_literal
     | "(" ~ expr ~ ")"
     | literal
@@ -321,6 +406,16 @@ closure_param_list = {
 
 closure_param = {
     identifier ~ ":" ~ type_annotation
+}
+
+// Closure with inferred parameter types: { p -> body } or { p, q -> body }
+// Type is inferred from context (e.g., list.filter({ p -> ... }))
+closure_inferred_params = {
+    "{" ~ closure_inferred_param_list ~ "->" ~ closure_body ~ "}"
+}
+
+closure_inferred_param_list = {
+    identifier ~ ("," ~ identifier)*
 }
 
 // Closure without parameters: { body }
@@ -408,7 +503,8 @@ string_part = _{
     interpolation
     | string_text
 }
-interpolation = { "{" ~ expr ~ "}" }
+// Use non-atomic to allow whitespace inside interpolation expressions
+interpolation = !{ "{" ~ expr ~ "}" }
 string_text = @{ (!("\"" | "{") ~ ANY)+ }
 
 // Identifiers - support kebab-case (lowercase with hyphens)

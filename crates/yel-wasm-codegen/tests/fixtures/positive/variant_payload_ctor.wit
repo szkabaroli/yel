@@ -1,0 +1,31 @@
+package yel:varctor@0.1.0;
+
+interface shared-types {
+  variant v {
+    a,
+    b(s32),
+    c(string),
+  }
+}
+
+interface app-component {
+  use shared-types.{ v };
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-first: func() -> v;
+    set-first: func(value: v);
+    get-second: func() -> v;
+    set-second: func(value: v);
+    get-third: func() -> v;
+    set-third: func(value: v);
+  }
+}
+
+world varctor {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

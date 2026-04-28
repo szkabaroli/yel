@@ -4,6 +4,7 @@
   import { ScrollArea } from "$lib/components/ui/scroll-area";
   import * as Resizable from "$lib/components/ui/resizable";
   import { Input } from "$lib/components/ui/input";
+  import CopyButton from "./CopyButton.svelte";
 
   interface Props {
     tree: TreeNode;
@@ -52,12 +53,23 @@
 
   const matchingNodes = $derived(findMatches(tree, searchQuery));
   const matchCount = $derived(matchingNodes.size);
+
+  const treeText = $derived(
+    (() => {
+      try {
+        return JSON.stringify(tree, null, 2);
+      } catch {
+        return String(tree);
+      }
+    })()
+  );
 </script>
 
 <div class="flex flex-col h-full bg-background text-foreground">
   <!-- Header -->
   <div class="flex items-center justify-between h-12 shrink-0 px-4 border-b border-border bg-card">
     <h3 class="text-xs font-semibold text-muted-foreground">AST</h3>
+    <CopyButton text={treeText} title="Copy tree as JSON" />
   </div>
 
   <Resizable.PaneGroup direction="vertical" class="flex-1">

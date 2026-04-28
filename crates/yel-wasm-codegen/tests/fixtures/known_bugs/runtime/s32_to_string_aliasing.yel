@@ -1,0 +1,46 @@
+// KNOWN RUNTIME BUG — see ../README.md "Runtime bugs" section.
+//
+// `s32_to_string` (and its u32 alias) writes the decimal representation
+// of an integer into a single shared static buffer in linear memory and
+// returns `(ptr, len)` pointing into that buffer. Two consecutive calls
+// in the same expression — typical when concatenating multiple integer
+// interpolations into one string — both end up returning pointers to
+// the SAME buffer location. Whichever call ran last "wins": the buffer
+// holds the final value's text, but the (ptr, len) pair from the first
+// call still has the first value's *length*. `concat<N>` then reads
+// `len_first` bytes from the shared address, producing a truncated
+// prefix of the second value rather than the first value's text.
+//
+// Concretely, for two globals Alpha=7, Beta=11 read in one Text:
+//
+//     "alpha={Alpha.x} beta={Beta.y}"
+//
+//   - s32_to_string(7)  → buffer="7",  ptr=X, len=1
+//   - s32_to_string(11) → buffer="11", ptr=X, len=2  (overwrites)
+//   - concat reads (X, 1) for first, (X, 2) for second:
+//       "alpha=" + "1" (first byte of "11") + " beta=" + "11"
+//       = "alpha=1 beta=11"  ← wrong; expected "alpha=7 beta=11"
+//
+// The bug also bites repeated reads of the SAME signal in one string
+// (the second call overwrites the first), and `bool_to_string`
+// likewise.
+//
+// Fix shape: each `s32_to_string` / `bool_to_string` call must allocate
+// its own buffer (e.g., via `cabi_realloc`) and return a stable pointer,
+// or the caller must spill (ptr, len) pairs into per-call locals before
+// the next stringify runs. The sibling `f32_to_string` / `f64_to_string`
+// already use the realloc path; this fixture exists to track when the
+// integer paths get the same treatment.
+//
+// When fixed: rename to `s32_to_string_independent.yel`, move to
+// `tests/fixtures/positive/`, drop the runtime test that asserts the
+// buggy output.
+
+package yel:s32-alias-bug@0.1.0;
+
+global Alpha { x: s32 = 7; }
+global Beta  { y: s32 = 11; }
+
+export component App {
+    Text { "alpha={Alpha.x} beta={Beta.y}" }
+}

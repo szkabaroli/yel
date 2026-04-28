@@ -135,6 +135,29 @@ pub enum ThirExprKind {
         elements: Vec<ThirExpr>,
     },
 
+    /// Read a property from a global singleton: `MailStore.items`.
+    /// Codegen lowers this to a read of the host-pushed backing slot.
+    GlobalRead {
+        /// Global DefId.
+        global: DefId,
+        /// Field index within the global's properties.
+        field: FieldIdx,
+        /// The field's DefId (for type/name lookup).
+        prop: DefId,
+    },
+
+    /// Call a function on a global singleton: `Global.fn-to-call(id)`.
+    /// `function` is a `DefKind::Function` with `is_export` set by direction
+    /// (false = callback/host-implements, true = public func/component-implements).
+    GlobalCall {
+        /// Global DefId.
+        global: DefId,
+        /// Function DefId.
+        function: DefId,
+        /// Arguments (already type-checked).
+        args: Vec<ThirExpr>,
+    },
+
     /// Error recovery.
     Error,
 }
@@ -151,6 +174,13 @@ pub enum ThirStatement {
         condition: ThirExpr,
         then_branch: Vec<ThirStatement>,
         else_branch: Option<Vec<ThirStatement>>,
+    },
+    /// Let binding: `let name: type = value;`
+    Let {
+        local_id: LocalId,
+        name: String,
+        ty: Ty,
+        value: ThirExpr,
     },
 }
 

@@ -1,8 +1,8 @@
 //! Diagnostic conversion from yel-core to LSP.
 
-use yel_core::{CompileError, Severity, SourceId, Span};
 use ropey::Rope;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use yel_core::{CompileError, ParseError, Severity, SourceId, Span};
 
 /// Convert an yel-core Diagnostic directly to LSP Diagnostics.
 pub fn convert_yel_diagnostic(
@@ -55,7 +55,7 @@ pub fn convert_yel_diagnostic(
     }]
 }
 
-/// Convert a byte offset to an LSP Position using the rope.
+/// Convert a character offset to an LSP Position using the rope.
 fn offset_to_position(offset: usize, rope: &Rope) -> Position {
     let offset = offset.min(rope.len_chars());
     let line = rope.char_to_line(offset);
@@ -64,10 +64,18 @@ fn offset_to_position(offset: usize, rope: &Rope) -> Position {
     Position::new(line as u32, character as u32)
 }
 
-/// Convert an yel-core Span to an LSP Range.
+/// Convert an yel-core Span (UTF-8 byte offsets) to an LSP Range.
 fn span_to_range(span: &Span, rope: &Rope) -> Range {
-    let start = offset_to_position(span.start, rope);
-    let end = offset_to_position(span.end, rope);
+    let len_bytes = rope.len_bytes();
+    let start_b = span.start.min(len_bytes);
+    let end_b = span.end.min(len_bytes);
+    let start_char = rope.try_byte_to_char(start_b).unwrap_or(0);
+    let end_char = rope
+        .try_byte_to_char(end_b)
+        .unwrap_or(start_char)
+        .max(start_char);
+    let start = offset_to_position(start_char, rope);
+    let end = offset_to_position(end_char, rope);
     Range::new(start, end)
 }
 
@@ -80,20 +88,20 @@ fn convert_severity(severity: Severity) -> DiagnosticSeverity {
     }
 }
 
-/// Convert a CompileError to LSP Diagnostics.
+/// Convert a CompileError to LSP Diagnostics (fallback when context diagnostics are unavailable).
 pub fn convert_compile_error(
     error: &CompileError,
-    _expected_source: SourceId,
-    _rope: &Rope,
+    expected_source: SourceId,
+    rope: &Rope,
 ) -> Vec<Diagnostic> {
-    // CompileError doesn't have a to_diagnostic method in the current API
-    // Just create a simple diagnostic from the error message
     let message = error.to_string();
 
     tracing::debug!("Converting compile error: {}", message);
 
-    // Use the first line as the range since we don't have span info
-    let range = Range::new(Position::new(0, 0), Position::new(0, 1));
+    let range = match error {
+        CompileError::Parse(pe) => parse_error_range(pe, expected_source, rope),
+        _ => Range::new(Position::new(0, 0), Position::new(0, 1)),
+    };
 
     vec![Diagnostic {
         range,
@@ -106,4 +114,13 @@ pub fn convert_compile_error(
         code_description: None,
         data: None,
     }]
+}
+
+fn parse_error_range(pe: &ParseError, expected_source: SourceId, rope: &Rope) -> Range {
+    if let Some(span) = pe.span() {
+        if span.source == expected_source {
+            return span_to_range(&span, rope);
+        }
+    }
+    Range::new(Position::new(0, 0), Position::new(0, 1))
 }

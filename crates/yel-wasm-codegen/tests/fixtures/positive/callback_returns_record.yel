@@ -1,0 +1,7 @@
+package yel:crb@0.1.0;
+record Point { x: s32, y: s32, }
+export component App {
+    get-point: func() -> Point;
+    p: Point = get-point();
+    "x"
+}

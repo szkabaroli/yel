@@ -1,0 +1,12 @@
+package yel:optctor@0.1.0;
+
+// Exercises `VariantCtor` for the builtin Option<T> — `some(42)` and `none`.
+// This is the constructor-side companion to option_signal (which only
+// exercises default-initialized option storage).
+export component App {
+    maybe-count: option<s32> = some(42);
+    empty: option<s32> = none;
+    VStack {
+        Text { "has value" }
+    }
+}

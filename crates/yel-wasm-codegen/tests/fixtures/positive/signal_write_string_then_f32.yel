@@ -1,0 +1,19 @@
+// Writing a string signal followed by an f32 signal in the same effect
+// block used to fail WASM validation: the string's EvalExpr stored its
+// fat-pointer len into `slot+1` but the LIR slot allocator only reserved
+// one slot per `SignalWrite`, so `slot+1` was actually the next signal's
+// local — typed f32, rejecting the i32 store.
+//
+// Fix: reserve a companion slot in the fat-pointer path so the len
+// store has a real home. Before the fix, the bug was latent when the
+// next slot happened to be i32 (silent corruption), surfaced only when
+// the next slot was typed differently (f32/f64/i64).
+package yel:fb@0.1.0;
+export component App {
+    count: string;
+    label: f32;
+    VStack {
+        clicked: { count = "x"; label = 0.0; }
+        Text { "x" }
+    }
+}

@@ -1,0 +1,41 @@
+package ns70:pkg42@10.2.3;
+
+interface shared-types {
+  enum status2 {
+    case-a,
+    case-b,
+  }
+}
+
+interface component5-component {
+  use shared-types.{ status2 };
+  resource component5 {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-count: func() -> list<result<string, string>>;
+    set-count: func(value: list<result<string, string>>);
+    get-value: func() -> string;
+    set-value: func(value: string);
+    get-label: func() -> result<result<s32, string>, string>;
+    set-label: func(value: result<result<s32, string>, string>);
+    get-enabled: func() -> s32;
+    set-enabled: func(value: s32);
+    get-visible: func() -> status2;
+    set-visible: func(value: status2);
+  }
+}
+
+interface component5-callbacks {
+  use component5-component.{ component5 };
+  on-click: func(self: borrow<component5>);
+}
+
+world pkg42 {
+  import component5-callbacks;
+  import component5-component;
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export component5-component;
+  export yel:ui/dispatch@0.1.0;
+}

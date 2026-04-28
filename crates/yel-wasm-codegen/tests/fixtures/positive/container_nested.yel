@@ -1,0 +1,12 @@
+package yel:slotok@0.1.0;
+
+component Card {
+    VStack {
+        Text { "hi" }
+        @children
+    }
+}
+
+export component App {
+    Card { Text { "body" } }
+}

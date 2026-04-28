@@ -1,0 +1,19 @@
+// Originally: SignalRead of a composite variant signal was a single i32
+// load while emit_flat_slot_store expected the flat-slot shape, causing
+// "expected i32 but nothing on stack" at the variant signal's init site.
+// The stack-shape bug is now fixed (task #40); what remains is a separate
+// component-type custom-section encoding mismatch downstream.
+package test:stackdrift-sigread-variant@0.1.0;
+
+variant M {
+    kind-a(option<string>),
+    kind-b(string),
+    kind-c(result<s32, string>),
+    kind-d,
+}
+
+export component App {
+    visible: M = M.kind-a(some("test"));
+    selected: M = visible;
+    Text { "hi" }
+}

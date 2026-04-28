@@ -1,0 +1,12 @@
+// Reading a composite-typed field (option/result/variant) from a record
+// panics codegen at `expr.rs:1451` — the record field-load path has a `_ => todo!("load field: {:?}")`
+// arm that only handles primitive, f32, and f64 field types.
+// Root cause: field-load dispatch in LirExprKind::FieldAccess doesn't
+// flat-slot-load composite fields. Mirror the SignalRead extension from
+// task #40 (flatten_core_slots-driven load) for record-field access.
+package yel:fb@0.1.0;
+record Rec { fa: option<s32>, fb: s32, }
+export component App {
+    r: Rec = { fa: some(1), fb: 2 };
+    Text { "v: {r.fa}" }
+}

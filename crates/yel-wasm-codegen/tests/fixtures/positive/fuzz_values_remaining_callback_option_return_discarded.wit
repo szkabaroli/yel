@@ -1,0 +1,28 @@
+package yel:app@0.1.0;
+
+interface a-component {
+  resource a {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+  }
+}
+
+interface a-callbacks {
+  use a-component.{ a };
+  on-submit: func(self: borrow<a>);
+}
+
+interface b-callbacks {
+  use a-component.{ a };
+  on-submit: func(self: borrow<a>) -> option<s32>;
+}
+
+world app {
+  import a-callbacks;
+  import a-component;
+  import b-callbacks;
+  import yel:ui/dom@0.1.0;
+  export a-component;
+  export yel:ui/dispatch@0.1.0;
+}

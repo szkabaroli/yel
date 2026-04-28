@@ -158,6 +158,7 @@ impl<'ctx> RustCodegen<'ctx> {
             UpdateKind::TextContent => "text content".to_string(),
             UpdateKind::Class(name) => format!("class \"{}\"", name),
             UpdateKind::Style(name) => format!("style \"{}\"", name),
+            UpdateKind::DerivedSignal(def_id) => format!("derived signal {:?}", def_id),
         };
 
         self.emit_line(&format!("/// Update {} on node {:?}", update_kind_str, effect.target_node));
@@ -406,22 +407,6 @@ impl<'ctx> RustCodegen<'ctx> {
                     "ms" => format!("{}f32", value),
                     "s" => format!("{}f32 * 1000.0", value),
                     _ => format!("{}f32 /* {} */", value, unit),
-                }
-            }
-            HirLiteral::Color(hex) => {
-                // Parse #rrggbb or #rrggbbaa
-                if hex.len() >= 7 {
-                    let r = u8::from_str_radix(&hex[1..3], 16).unwrap_or(0);
-                    let g = u8::from_str_radix(&hex[3..5], 16).unwrap_or(0);
-                    let b = u8::from_str_radix(&hex[5..7], 16).unwrap_or(0);
-                    let a = if hex.len() >= 9 {
-                        u8::from_str_radix(&hex[7..9], 16).unwrap_or(255)
-                    } else {
-                        255
-                    };
-                    format!("0x{:02x}{:02x}{:02x}{:02x}u32", a, r, g, b)
-                } else {
-                    format!("0x00000000u32 /* invalid color: {} */", hex)
                 }
             }
             HirLiteral::List(items) => {

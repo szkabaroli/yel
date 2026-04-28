@@ -1,0 +1,97 @@
+// Fixture exercising every signal / effect / handler shape so the DOT
+// renderer has each branch covered. Kept intentionally verbose — the
+// .dot snapshot is the visual reference for what the graph emitter
+// produces.
+//
+// Coverage:
+//   * Primitive local signals (s32, bool, string, f32)
+//   * Composite local signals: option, result, list, record, enum
+//   * Global signals grouped by owner (two globals, multiple properties)
+//   * Cross-component global reads + writes
+//   * Reactive effects on text content AND attribute
+//   * Event handlers: clicked, changed, pressed, hovered
+//   * Handler writing local signal + writing global signal
+//   * Callback-typed property (handler invokes it)
+//   * for-loop iterating a list signal
+//   * if-branch gating rendering on a bool signal
+package yel:dotdemo@0.1.0;
+
+record Point { x: s32, y: s32, }
+
+enum Status { idle, running, done, }
+
+global Store {
+    counter: s32 = 0;
+    last-event: string = "none";
+}
+
+global Prefs {
+    theme: string = "light";
+}
+
+component Counter {
+    label: string = "Counter";
+    VStack {
+        Text { "{label}: {Store.counter}" }
+        Button {
+            clicked: { Store.counter = Store.counter + 1; Store.last-event = "inc"; }
+            "+1"
+        }
+    }
+}
+
+export component App {
+    // Primitive locals.
+    count: s32 = 0;
+    ratio: f32 = 0.5;
+    flag: bool = true;
+    name: string = "hello";
+
+    // Composite locals.
+    maybe: option<s32> = some(1);
+    status: Status = Status.idle;
+    point: Point = { x: 1, y: 2 };
+    tags: list<string> = ["a", "b", "c"];
+    outcome: result<s32, string> = ok(42);
+
+    // Callback-typed property.
+    on-reset: func();
+
+    VStack {
+        // Effect: text content with multiple deps (local + global).
+        Text { "name: {name}, count: {count}, theme: {Prefs.theme}" }
+
+        // Effect: bool attribute binding.
+        Text {
+            visible: flag,
+            "status"
+        }
+
+        // if branch gating on a local signal.
+        if flag {
+            Text { "flag is on" }
+        } else {
+            Text { "flag is off" }
+        }
+
+        // for-loop iterating a list signal.
+        for tag in tags {
+            Text { "tag: {tag}" }
+        }
+
+        // Handlers: every standard event kind, writing mix of local + global.
+        Button {
+            clicked: { count = count + 1; Store.counter = count; }
+            changed: { name = "changed"; }
+            pressed: { status = Status.running; }
+            hovered: { Store.last-event = "hover"; }
+            "multi-handler"
+        }
+
+        // Handler invoking a callback.
+        Button {
+            clicked: { on-reset(); count = 0; }
+            "reset"
+        }
+    }
+}

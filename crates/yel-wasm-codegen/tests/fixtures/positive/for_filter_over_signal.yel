@@ -1,0 +1,14 @@
+package yel:forfilt@0.1.0;
+
+// `for x in items.filter({ v -> v > threshold })` — both `items` (a list
+// signal) and `threshold` (captured in the predicate closure) feed the
+// iterable. Writing either must re-run the filter and re-diff the list.
+export component App {
+    items: list<s32> = [1, 2, 3, 4, 5];
+    threshold: s32 = 2;
+    VStack {
+        for x in items.filter({ v -> v > threshold }) {
+            Text { "big" }
+        }
+    }
+}

@@ -1,0 +1,19 @@
+package yel:optctor@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-maybe-count: func() -> option<s32>;
+    set-maybe-count: func(value: option<s32>);
+    get-empty: func() -> option<s32>;
+    set-empty: func(value: option<s32>);
+  }
+}
+
+world optctor {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

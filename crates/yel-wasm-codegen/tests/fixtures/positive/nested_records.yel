@@ -1,0 +1,21 @@
+package yel:nestedrec@0.1.0;
+
+// Nested record field access: Address → Person → App. Exercises
+// record ctor helpers, multi-level field offset arithmetic, and the
+// record-in-signal storage path.
+record Address {
+    city: string,
+    zip: string,
+}
+
+record Person {
+    name: string,
+    addr: Address,
+}
+
+export component App {
+    me: Person;
+    VStack {
+        Text { "{me.name} @ {me.addr.city}" }
+    }
+}

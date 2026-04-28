@@ -1,0 +1,22 @@
+package yel:cbargs@0.1.0;
+
+interface widget-component {
+  resource widget {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+  }
+}
+
+interface widget-callbacks {
+  use widget-component.{ widget };
+  on-select: func(self: borrow<widget>, item: s32);
+}
+
+world cbargs {
+  import widget-callbacks;
+  import widget-component;
+  import yel:ui/dom@0.1.0;
+  export widget-component;
+  export yel:ui/dispatch@0.1.0;
+}

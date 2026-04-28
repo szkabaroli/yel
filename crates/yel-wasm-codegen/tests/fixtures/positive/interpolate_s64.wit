@@ -1,0 +1,17 @@
+package yel:interps64@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-big: func() -> s64;
+    set-big: func(value: s64);
+  }
+}
+
+world interps64 {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

@@ -39,9 +39,10 @@ prettyplease = "0.2"
 
 # WebAssembly
 wasm-encoder = "0.225"
+wasmparser = "0.225"
 wasmprinter = "0.225"
 wit-parser = "0.225"
-wit-component = "0.225"
+wit-component = { version = "0.225", features = ["dummy-module"] }
 wasm-metadata = "0.225"
 wit-encoder = { version = "0.225", features = ["from-parser"] }
 wit-bindgen = "0.51"

@@ -10,6 +10,7 @@
 
 use crate::context::CompilerContext;
 use crate::definitions::{DefKind, Namespace};
+use crate::diagnostic::Diagnostic;
 use crate::hir::expr::{BinOp, HirExpr, HirExprKind, HirInterpolationPart, HirLiteral, HirStatement, UnaryOp};
 use crate::interner::Name;
 use crate::hir::local_scope::LocalScope;
@@ -110,6 +111,92 @@ pub fn type_check_with_map(
     }
 }
 
+/// Free-function type pretty-printer (doesn't require a TypeChecker).
+#[allow(dead_code)]
+fn ty_to_string(ctx: &CompilerContext, ty: Ty) -> String {
+    match ctx.ty_kind(ty) {
+        InternedTyKind::Bool => "bool".to_string(),
+        InternedTyKind::S8 => "s8".to_string(),
+        InternedTyKind::S16 => "s16".to_string(),
+        InternedTyKind::S32 => "s32".to_string(),
+        InternedTyKind::S64 => "s64".to_string(),
+        InternedTyKind::U8 => "u8".to_string(),
+        InternedTyKind::U16 => "u16".to_string(),
+        InternedTyKind::U32 => "u32".to_string(),
+        InternedTyKind::U64 => "u64".to_string(),
+        InternedTyKind::F32 => "f32".to_string(),
+        InternedTyKind::F64 => "f64".to_string(),
+        InternedTyKind::Char => "char".to_string(),
+        InternedTyKind::String => "string".to_string(),
+        InternedTyKind::List(elem) => format!("list<{}>", ty_to_string(ctx, *elem)),
+        InternedTyKind::Option(inner) => format!("option<{}>", ty_to_string(ctx, *inner)),
+        InternedTyKind::Tuple(elems) => {
+            let inner: Vec<_> = elems.iter().map(|e| ty_to_string(ctx, *e)).collect();
+            format!("({})", inner.join(", "))
+        }
+        InternedTyKind::Adt(def_id) => {
+            let name = ctx.defs.name(*def_id);
+            ctx.str(name).to_string()
+        }
+        InternedTyKind::Func { params, ret } => {
+            let param_strs: Vec<_> = params.iter().map(|p| ty_to_string(ctx, *p)).collect();
+            let ret_str = ret.map(|r| ty_to_string(ctx, r)).unwrap_or_else(|| "()".to_string());
+            format!("func({}) -> {}", param_strs.join(", "), ret_str)
+        }
+        InternedTyKind::Length => "length".to_string(),
+        InternedTyKind::PhysicalLength => "physical-length".to_string(),
+        InternedTyKind::Angle => "angle".to_string(),
+        InternedTyKind::Duration => "duration".to_string(),
+        InternedTyKind::Percent => "percent".to_string(),
+        InternedTyKind::RelativeFontSize => "relative-font-size".to_string(),
+        InternedTyKind::Color => "color".to_string(),
+        InternedTyKind::Brush => "brush".to_string(),
+        InternedTyKind::Image => "image".to_string(),
+        InternedTyKind::Easing => "easing".to_string(),
+        InternedTyKind::Result { ok, err } => {
+            let ok_str = ok.map(|t| ty_to_string(ctx, t)).unwrap_or_else(|| "_".to_string());
+            let err_str = err.map(|t| ty_to_string(ctx, t)).unwrap_or_else(|| "_".to_string());
+            format!("result<{}, {}>", ok_str, err_str)
+        }
+        InternedTyKind::Error => "<error>".to_string(),
+        InternedTyKind::Unknown => "<unknown>".to_string(),
+        InternedTyKind::Unit => "()".to_string(),
+    }
+}
+
+/// Type check all global-singleton property defaults.
+///
+/// Globals aren't owned by any component, so their defaults are checked in
+/// their own pass. Returns a map from property DefId to the type-checked
+/// default expression.
+pub fn type_check_globals(
+    ctx: &mut CompilerContext,
+) -> std::collections::HashMap<DefId, ThirExpr> {
+    use std::collections::HashMap;
+
+    let mut checker = TypeChecker::new(ctx);
+    let mut out: HashMap<DefId, ThirExpr> = HashMap::new();
+
+    let global_ids: Vec<DefId> = checker.ctx.defs.globals().collect();
+    for gid in global_ids {
+        let (prop_ids, defaults) = match checker.ctx.defs.as_global(gid) {
+            Some(g) => (g.properties.clone(), g.property_defaults.clone()),
+            None => continue,
+        };
+        for (prop_id, default) in prop_ids.into_iter().zip(defaults.into_iter()) {
+            let Some(default_hir) = default else { continue };
+            let prop_ty = checker
+                .ctx
+                .defs
+                .type_of(prop_id)
+                .unwrap_or(crate::types::Ty::ERROR);
+            let thir = checker.type_check_expr(&default_hir, Mode::Check(prop_ty));
+            out.insert(prop_id, thir);
+        }
+    }
+    out
+}
+
 /// Type checker state.
 struct TypeChecker<'ctx> {
     ctx: &'ctx mut CompilerContext,
@@ -154,23 +241,44 @@ impl<'ctx> TypeChecker<'ctx> {
     // ========================================================================
 
     fn check_component(&mut self, component: &HirComponent) -> ThirComponent {
+        use std::collections::HashMap;
+
         self.current_component = component.def_id;
         self.locals = LocalScope::new();
 
-        // Add component properties to local scope (with their def_ids for signal tracking)
-        // and type check their default values
-        if let Some(comp_def) = self.ctx.defs.as_component(component.def_id) {
-            for &prop_id in &comp_def.properties.clone() {
+        // Store type-checked signal defaults
+        let mut signal_defaults: HashMap<DefId, ThirExpr> = HashMap::new();
+
+        // Phase 1: Add ALL component properties to local scope first
+        // This matches HIR lowering order, ensuring LocalIds are consistent
+        let prop_ids = if let Some(comp_def) = self.ctx.defs.as_component(component.def_id) {
+            let ids = comp_def.properties.clone();
+            for &prop_id in &ids {
                 let prop_name = self.ctx.defs.name(prop_id);
                 let prop_ty = self.ctx.defs.type_of(prop_id).unwrap_or(Ty::ERROR);
                 let prop_span = self.ctx.defs.span(prop_id);
                 self.locals.define_with_def_id(prop_name, prop_ty, prop_span, Some(prop_id));
+            }
+            // Also add callbacks to local scope so they can be called
+            // This matches HIR lowering which also adds callbacks to locals
+            for &cb_id in &comp_def.callbacks {
+                let cb_name = self.ctx.defs.name(cb_id);
+                let cb_ty = self.ctx.defs.type_of(cb_id).unwrap_or(Ty::ERROR);
+                let cb_span = self.ctx.defs.span(cb_id);
+                self.locals.define_with_def_id(cb_name, cb_ty, cb_span, Some(cb_id));
+            }
+            ids
+        } else {
+            vec![]
+        };
 
-                // Type check default value against declared type
-                if let Some(signal_def) = self.ctx.defs.as_signal(prop_id) {
-                    if let Some(ref default_expr) = signal_def.default.clone() {
-                        let _ = self.type_check_expr(default_expr, Mode::Check(prop_ty));
-                    }
+        // Phase 2: Type check default values (after all properties are in scope)
+        for &prop_id in &prop_ids {
+            let prop_ty = self.ctx.defs.type_of(prop_id).unwrap_or(Ty::ERROR);
+            if let Some(signal_def) = self.ctx.defs.as_signal(prop_id) {
+                if let Some(ref default_expr) = signal_def.default.clone() {
+                    let thir_default = self.type_check_expr(default_expr, Mode::Check(prop_ty));
+                    signal_defaults.insert(prop_id, thir_default);
                 }
             }
         }
@@ -188,6 +296,7 @@ impl<'ctx> TypeChecker<'ctx> {
             span: component.span,
             is_export: component.is_export,
             locals: std::mem::take(&mut self.locals),
+            signal_defaults,
             body,
         }
     }
@@ -206,16 +315,58 @@ impl<'ctx> TypeChecker<'ctx> {
                 children,
             } => {
                 // Resolve component if uppercase name
-                let component_def = if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                let component_def = if name.chars().next().is_some_and(|c| c.is_uppercase()) {
                     let name_interned = self.ctx.intern(name);
                     self.ctx.defs.lookup(name_interned, Namespace::Component)
                 } else {
                     None
                 };
 
+                // Check for recursive component instantiation (component using itself)
+                if let Some(def_id) = component_def {
+                    if def_id == self.current_component && !self.ctx.known.elements.is_builtin(def_id) {
+                        self.ctx.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "recursive component instantiation: '{}' cannot use itself",
+                                name
+                            ))
+                            .with_span(node.span),
+                        );
+                    }
+                }
+
                 let thir_bindings = bindings.iter().map(|b| self.check_binding(b, component_def)).collect();
                 let thir_handlers = handlers.iter().map(|h| self.check_handler(h)).collect();
                 let thir_children = children.iter().map(|n| self.check_node(n)).collect();
+
+                // Container-component contract: if the caller passes child
+                // nodes and the target is a user-defined component, it must
+                // declare a `@children` slot. Built-in elements (Text,
+                // VStack, Button, …) and non-component names route through
+                // the DOM child-propagation path unchanged.
+                if let Some(def_id) = component_def {
+                    if !children.is_empty() && !self.ctx.known.elements.is_builtin(def_id) {
+                        let accepts = match self.ctx.defs.kind(def_id) {
+                            DefKind::Component(c) => c.has_children_slot,
+                            DefKind::ImportComponent(ic) => ic.has_children_slot,
+                            _ => false,
+                        };
+                        if !accepts {
+                            self.ctx.diagnostics.push(
+                                Diagnostic::error(format!(
+                                    "component `{}` does not declare `@children`; \
+                                     cannot accept caller-supplied child nodes",
+                                    name
+                                ))
+                                .with_span(node.span)
+                                .with_note(
+                                    "add `@children` inside the component body to make it a container"
+                                        .to_string(),
+                                ),
+                            );
+                        }
+                    }
+                }
 
                 ThirNodeKind::Element {
                     component: component_def,
@@ -273,6 +424,14 @@ impl<'ctx> TypeChecker<'ctx> {
                 key,
                 body,
             } => {
+                // Push scope and define the loop variable BEFORE lowering the
+                // iterable so LocalId allocation matches HIR lowering order
+                // (HIR defines `item` before lowering the iterable; any
+                // closures inside the iterable will reference LocalIds that
+                // assume `item` has already been defined here).
+                self.locals.push_scope();
+                let new_item = self.locals.define(*item_name, Ty::ERROR, *item_span);
+
                 // Infer iterable type and extract element type
                 let thir_iterable = self.type_check_expr(iterable, Mode::Infer);
 
@@ -290,9 +449,8 @@ impl<'ctx> TypeChecker<'ctx> {
                     }
                 };
 
-                // Push scope for loop body and define the loop variable
-                self.locals.push_scope();
-                let new_item = self.locals.define(*item_name, item_ty, *item_span);
+                // Patch the loop variable's type now that we know the element type.
+                self.locals.set_ty(new_item, item_ty);
 
                 let thir_key = key.as_ref().map(|k| self.type_check_expr(k, Mode::Infer));
                 let thir_body = body.iter().map(|n| self.check_node(n)).collect();
@@ -308,6 +466,14 @@ impl<'ctx> TypeChecker<'ctx> {
                     key: thir_key,
                     body: thir_body,
                 }
+            }
+            HirNodeKind::ChildrenSlot => {
+                // No validation at this node — the `@children` marker is
+                // meaningful only inside a component body. HIR registration
+                // is where we bump `ComponentDef::has_children_slot`.
+                // Duplicate-slot detection + "children passed to slot-less
+                // component" diagnostics land in Phase 2.
+                ThirNodeKind::ChildrenSlot
             }
         };
 
@@ -413,6 +579,28 @@ impl<'ctx> TypeChecker<'ctx> {
                     else_branch: thir_else,
                 }
             }
+
+            HirStatement::Let { name, ty, value } => {
+                // Determine the type: use explicit annotation if provided, otherwise infer
+                let mode = if let Some(expected_ty) = ty {
+                    Mode::Check(*expected_ty)
+                } else {
+                    Mode::Infer
+                };
+                let thir_value = self.type_check_expr(value, mode);
+                let actual_ty = ty.unwrap_or(thir_value.ty);
+
+                // Create a new local for this let binding and add to scope
+                let name_interned = self.ctx.intern(name);
+                let local_id = self.locals.define(name_interned, actual_ty, thir_value.span);
+
+                ThirStatement::Let {
+                    local_id,
+                    name: name.clone(),
+                    ty: actual_ty,
+                    value: thir_value,
+                }
+            }
         }
     }
 
@@ -483,7 +671,7 @@ impl<'ctx> TypeChecker<'ctx> {
                         if let Some(field) = field {
                             let field_name = self.ctx.str(field.name);
                             // Find the corresponding field in the literal
-                            if let Some((_, expr)) = fields.iter().find(|(name, _)| name == &field_name) {
+                            if let Some((_, expr)) = fields.iter().find(|(name, _)| name.as_str() == *field_name) {
                                 let thir_expr = self.type_check_expr(expr, Mode::Check(field.ty));
                                 thir_fields.push(thir_expr);
                             } else {
@@ -505,9 +693,15 @@ impl<'ctx> TypeChecker<'ctx> {
                 }
             }
 
-            // Integer literal - polymorphic
+            // Integer literal - polymorphic over all numeric types (int and
+            // float). A bare `2` in f32 context is valid (matches Rust /
+            // Swift / Go semantics for untyped numeric literals). LIR
+            // lowering handles the int→float cast when the target is f32/f64.
+            // This applies only to literals; variables of a different
+            // numeric type still require an explicit conversion (enforced
+            // by the mixed-numeric-types diagnostic in the Infer Binary arm).
             (HirExprKind::Literal(lit @ HirLiteral::Int(_)), _)
-                if self.is_integer_type(expected) =>
+                if self.is_numeric_type(expected) =>
             {
                 (ThirExprKind::Literal(lit.clone()), expected)
             }
@@ -606,6 +800,43 @@ impl<'ctx> TypeChecker<'ctx> {
                 (kind, expected)
             }
 
+            // Closure checked against function type - infer parameter types
+            (HirExprKind::Closure { params, body }, InternedTyKind::Func { params: expected_params, ret: _ }) => {
+                let expected_params = expected_params.clone();
+
+                self.locals.push_scope();
+
+                let mut thir_params = Vec::new();
+                for (i, (name, ty)) in params.iter().enumerate() {
+                    let name_interned = self.ctx.intern(name);
+                    // Use expected param type if available, otherwise use declared type
+                    let param_ty = if matches!(self.ctx.ty_kind(*ty), InternedTyKind::Unknown) {
+                        // Infer from expected type
+                        expected_params.get(i).copied().unwrap_or(Ty::ERROR)
+                    } else {
+                        *ty
+                    };
+                    let local_id = self.locals.define(name_interned, param_ty, span);
+                    thir_params.push((local_id, param_ty));
+                }
+
+                let thir_body: Vec<_> = body.iter().map(|s| self.check_stmt(s)).collect();
+
+                self.locals.pop_scope();
+
+                // TODO: capture analysis
+                let captures = vec![];
+
+                (
+                    ThirExprKind::Closure {
+                        params: thir_params,
+                        body: thir_body,
+                        captures,
+                    },
+                    expected,
+                )
+            }
+
             // Default: infer then check compatibility
             _ => {
                 let (kind, inferred) = self.infer_expr(expr);
@@ -685,8 +916,74 @@ impl<'ctx> TypeChecker<'ctx> {
             }
 
             HirExprKind::Binary { op, lhs, rhs } => {
-                let lhs_thir = self.type_check_expr(lhs, Mode::Infer);
-                let rhs_thir = self.type_check_expr(rhs, Mode::Infer);
+                // Untyped integer / float literals are polymorphic — they
+                // can take any numeric type their context needs. In
+                // inference mode, if one operand is a bare numeric
+                // literal and the other resolves to a concrete numeric
+                // type, re-check the literal against that type so
+                // `i == 0` typechecks cleanly when `i: u32`. Without
+                // this, every `u32 == integer-literal` (or modulo, etc.)
+                // would hit the mixed-numeric diagnostic below even
+                // though the user wrote code whose intent is obvious.
+                let lhs_is_num_lit = matches!(
+                    &lhs.kind,
+                    HirExprKind::Literal(HirLiteral::Int(_))
+                        | HirExprKind::Literal(HirLiteral::Float(_))
+                );
+                let rhs_is_num_lit = matches!(
+                    &rhs.kind,
+                    HirExprKind::Literal(HirLiteral::Int(_))
+                        | HirExprKind::Literal(HirLiteral::Float(_))
+                );
+
+                let (lhs_thir, rhs_thir) = match (lhs_is_num_lit, rhs_is_num_lit) {
+                    (true, false) => {
+                        let rhs_thir = self.type_check_expr(rhs, Mode::Infer);
+                        let lhs_thir = if self.is_numeric_type(rhs_thir.ty) {
+                            self.type_check_expr(lhs, Mode::Check(rhs_thir.ty))
+                        } else {
+                            self.type_check_expr(lhs, Mode::Infer)
+                        };
+                        (lhs_thir, rhs_thir)
+                    }
+                    (false, true) => {
+                        let lhs_thir = self.type_check_expr(lhs, Mode::Infer);
+                        let rhs_thir = if self.is_numeric_type(lhs_thir.ty) {
+                            self.type_check_expr(rhs, Mode::Check(lhs_thir.ty))
+                        } else {
+                            self.type_check_expr(rhs, Mode::Infer)
+                        };
+                        (lhs_thir, rhs_thir)
+                    }
+                    _ => {
+                        let lhs_thir = self.type_check_expr(lhs, Mode::Infer);
+                        let rhs_thir = self.type_check_expr(rhs, Mode::Infer);
+                        (lhs_thir, rhs_thir)
+                    }
+                };
+
+                // After literal polymorphism, reject any remaining mixed
+                // numeric types. Non-literal `u32 == s32` still needs
+                // an explicit conversion — matches Rust / Swift / Go
+                // semantics exactly: literals are polymorphic, variables
+                // are not.
+                if lhs_thir.ty != Ty::ERROR
+                    && rhs_thir.ty != Ty::ERROR
+                    && self.is_numeric_type(lhs_thir.ty)
+                    && self.is_numeric_type(rhs_thir.ty)
+                    && lhs_thir.ty != rhs_thir.ty
+                {
+                    self.ctx.diagnostics.error(
+                        expr.span,
+                        format!(
+                            "mixed numeric types in binary `{:?}`: `{}` and `{}` \
+                             have no implicit coercion — convert one side explicitly",
+                            op,
+                            self.type_to_string(lhs_thir.ty),
+                            self.type_to_string(rhs_thir.ty),
+                        ),
+                    );
+                }
 
                 let result_ty = if op.is_comparison() || op.is_logical() {
                     Ty::BOOL
@@ -841,6 +1138,35 @@ impl<'ctx> TypeChecker<'ctx> {
                     );
                 }
 
+                // Check if it's a local variable of function type (e.g., callback property)
+                if let Some(local_id) = self.locals.lookup(func_name) {
+                    let local_info = self.locals.get(local_id);
+                    let local_ty = local_info.ty;
+
+                    if let InternedTyKind::Func { params, ret } = self.ctx.ty_kind(local_ty) {
+                        // Properties have a DefId - use regular Call
+                        if let Some(def_id) = local_info.def_id {
+                            let param_tys = params.clone();
+                            let ret_ty = ret.unwrap_or(Ty::UNIT);
+
+                            let thir_args: Vec<_> = args
+                                .iter()
+                                .zip(param_tys.iter().chain(std::iter::repeat(&Ty::ERROR)))
+                                .map(|(arg, &param_ty)| self.type_check_expr(arg, Mode::Check(param_ty)))
+                                .collect();
+
+                            return (
+                                ThirExprKind::Call {
+                                    func: def_id,
+                                    args: thir_args,
+                                },
+                                ret_ty,
+                            );
+                        }
+                        // Local without DefId (e.g., let binding of function type) - not supported
+                    }
+                }
+
                 // Unknown function - emit error
                 self.ctx.diagnostics.error(
                     expr.span,
@@ -958,6 +1284,61 @@ impl<'ctx> TypeChecker<'ctx> {
                     }
                 }
 
+                // Global function call: MailStore.mark-read(id)
+                if let Some(global_id) = self.ctx.defs.lookup(base_name, Namespace::Global) {
+                    if let Some(fn_id) =
+                        self.ctx.defs.find_global_function(global_id, member_name)
+                    {
+                        let (param_tys, ret_ty) =
+                            if let Some(fdef) = self.ctx.defs.as_function(fn_id) {
+                                let params: Vec<Ty> = fdef
+                                    .params
+                                    .iter()
+                                    .map(|pid| {
+                                        self.ctx.defs.type_of(*pid).unwrap_or(Ty::ERROR)
+                                    })
+                                    .collect();
+                                (params, fdef.ret_ty)
+                            } else {
+                                (Vec::new(), Ty::ERROR)
+                            };
+
+                        if args.len() != param_tys.len() {
+                            self.ctx.diagnostics.error(
+                                expr.span,
+                                format!(
+                                    "`{}.{}` expects {} argument(s), found {}",
+                                    base,
+                                    member,
+                                    param_tys.len(),
+                                    args.len()
+                                ),
+                            );
+                            return (ThirExprKind::Error, Ty::ERROR);
+                        }
+
+                        let thir_args: Vec<ThirExpr> = args
+                            .iter()
+                            .zip(param_tys.iter())
+                            .map(|(arg, &pty)| self.type_check_expr(arg, Mode::Check(pty)))
+                            .collect();
+
+                        return (
+                            ThirExprKind::GlobalCall {
+                                global: global_id,
+                                function: fn_id,
+                                args: thir_args,
+                            },
+                            ret_ty,
+                        );
+                    }
+                    self.ctx.diagnostics.error(
+                        expr.span,
+                        format!("no function `{}` on global `{}`", member, base),
+                    );
+                    return (ThirExprKind::Error, Ty::ERROR);
+                }
+
                 // Not a variable - try type lookup for variant constructor
                 if let Some(type_def) = self.ctx.defs.lookup(base_name, Namespace::Type) {
                     // Check if it's a variant
@@ -1024,10 +1405,49 @@ impl<'ctx> TypeChecker<'ctx> {
                 end,
                 inclusive,
             } => {
-                let start_thir = self.type_check_expr(start, Mode::Check(Ty::S32));
-                let end_thir = self.type_check_expr(end, Mode::Check(Ty::S32));
+                // Infer range element type from whichever side isn't a
+                // bare integer literal. Both sides literal → default to
+                // s32. This lets `for i in 0..rows` typecheck when
+                // `rows: u32` — the literal `0` widens to u32.
+                let start_is_num_lit = matches!(
+                    &start.kind,
+                    HirExprKind::Literal(HirLiteral::Int(_))
+                        | HirExprKind::Literal(HirLiteral::Float(_))
+                );
+                let end_is_num_lit = matches!(
+                    &end.kind,
+                    HirExprKind::Literal(HirLiteral::Int(_))
+                        | HirExprKind::Literal(HirLiteral::Float(_))
+                );
+                let (start_thir, end_thir, elem_ty) = match (start_is_num_lit, end_is_num_lit) {
+                    (true, false) => {
+                        let end_thir = self.type_check_expr(end, Mode::Infer);
+                        let elem_ty = if self.is_integer_type(end_thir.ty) {
+                            end_thir.ty
+                        } else {
+                            Ty::S32
+                        };
+                        let start_thir = self.type_check_expr(start, Mode::Check(elem_ty));
+                        (start_thir, end_thir, elem_ty)
+                    }
+                    (false, true) => {
+                        let start_thir = self.type_check_expr(start, Mode::Infer);
+                        let elem_ty = if self.is_integer_type(start_thir.ty) {
+                            start_thir.ty
+                        } else {
+                            Ty::S32
+                        };
+                        let end_thir = self.type_check_expr(end, Mode::Check(elem_ty));
+                        (start_thir, end_thir, elem_ty)
+                    }
+                    _ => {
+                        let start_thir = self.type_check_expr(start, Mode::Check(Ty::S32));
+                        let end_thir = self.type_check_expr(end, Mode::Check(Ty::S32));
+                        (start_thir, end_thir, Ty::S32)
+                    }
+                };
 
-                let list_ty = self.ctx.mk_list(Ty::S32);
+                let list_ty = self.ctx.mk_list(elem_ty);
 
                 (
                     ThirExprKind::Range {
@@ -1105,12 +1525,42 @@ impl<'ctx> TypeChecker<'ctx> {
             }
 
             HirExprKind::Path { segments } => {
-                // Path should be Type.case format (2 segments)
+                // Path should be Type.case or Global.property format (2 segments)
                 if segments.len() == 2 {
                     let type_name = &segments[0];
                     let case_name = &segments[1];
                     let type_name_interned = self.ctx.intern(type_name);
                     let case_name_interned = self.ctx.intern(case_name);
+
+                    // Global property read: Global.property -> FieldRead
+                    if let Some(global_id) =
+                        self.ctx.defs.lookup(type_name_interned, Namespace::Global)
+                    {
+                        if let Some((field_idx, prop_id)) =
+                            self.ctx.defs.find_global_property(global_id, case_name_interned)
+                        {
+                            let prop_ty =
+                                self.ctx.defs.type_of(prop_id).unwrap_or(Ty::ERROR);
+                            // Reuse the existing Def reference shape — property
+                            // reads at THIR level lookups the type by DefId.
+                            return (
+                                ThirExprKind::GlobalRead {
+                                    global: global_id,
+                                    field: field_idx,
+                                    prop: prop_id,
+                                },
+                                prop_ty,
+                            );
+                        }
+                        self.ctx.diagnostics.error(
+                            expr.span,
+                            format!(
+                                "no property `{}` on global `{}`",
+                                case_name, type_name
+                            ),
+                        );
+                        return (ThirExprKind::Error, Ty::ERROR);
+                    }
 
                     if let Some(def_id) = self.ctx.defs.lookup(type_name_interned, Namespace::Type) {
                         // Check if it's an enum
@@ -1164,6 +1614,111 @@ impl<'ctx> TypeChecker<'ctx> {
                     );
                 }
                 (ThirExprKind::Error, Ty::ERROR)
+            }
+
+            HirExprKind::MethodCall { receiver, method, args } => {
+                // Type check the receiver
+                let receiver_thir = self.type_check_expr(receiver, Mode::Infer);
+                let receiver_ty = receiver_thir.ty;
+
+                // Dispatch based on method name and receiver type
+                let ty_kind = self.ctx.ty_kind(receiver_ty);
+                match (method.as_str(), ty_kind) {
+                    ("len", InternedTyKind::List(_)) | ("len", InternedTyKind::String) => {
+                        // list.len() or string.len() -> s32
+                        if !args.is_empty() {
+                            self.ctx.diagnostics.error(
+                                expr.span,
+                                "len() takes no arguments".to_string(),
+                            );
+                        }
+                        let len_func = self.ctx.known.functions.len();
+                        (
+                            ThirExprKind::Call {
+                                func: len_func,
+                                args: vec![receiver_thir],
+                            },
+                            Ty::S32,
+                        )
+                    }
+                    ("get", InternedTyKind::List(element_ty)) => {
+                        // list.get(idx) -> option<T>
+                        let element_ty = *element_ty;
+                        if args.len() != 1 {
+                            self.ctx.diagnostics.error(
+                                expr.span,
+                                "get() takes exactly one argument (index)".to_string(),
+                            );
+                            return (ThirExprKind::Error, Ty::ERROR);
+                        }
+                        let index_expr = self.type_check_expr(&args[0], Mode::Check(Ty::S32));
+                        let list_get_func = self.ctx.known.functions.list_get();
+                        let option_ty = self.ctx.types.intern(InternedTyKind::Option(element_ty));
+                        (
+                            ThirExprKind::Call {
+                                func: list_get_func,
+                                args: vec![receiver_thir, index_expr],
+                            },
+                            option_ty,
+                        )
+                    }
+                    ("filter", InternedTyKind::List(element_ty)) => {
+                        // list.filter({ p -> bool }) -> list<T>
+                        let element_ty = *element_ty;
+                        if args.len() != 1 {
+                            self.ctx.diagnostics.error(
+                                expr.span,
+                                "filter() takes exactly one argument (predicate closure)".to_string(),
+                            );
+                            return (ThirExprKind::Error, Ty::ERROR);
+                        }
+                        // The closure should be: func(element_ty) -> bool
+                        let closure_ty = self.ctx.types.intern(InternedTyKind::Func {
+                            params: vec![element_ty],
+                            ret: Some(Ty::BOOL),
+                        });
+                        let predicate_expr = self.type_check_expr(&args[0], Mode::Check(closure_ty));
+                        let filter_func = self.ctx.known.functions.filter();
+                        let result_ty = self.ctx.mk_list(element_ty);
+                        (
+                            ThirExprKind::Call {
+                                func: filter_func,
+                                args: vec![receiver_thir, predicate_expr],
+                            },
+                            result_ty,
+                        )
+                    }
+                    ("starts-with", InternedTyKind::String) => {
+                        // string.starts-with(prefix) -> bool
+                        if args.len() != 1 {
+                            self.ctx.diagnostics.error(
+                                expr.span,
+                                "starts-with() takes exactly one argument (prefix)".to_string(),
+                            );
+                            return (ThirExprKind::Error, Ty::ERROR);
+                        }
+                        let prefix_expr = self.type_check_expr(&args[0], Mode::Check(Ty::STRING));
+                        let starts_with_func = self.ctx.known.functions.starts_with();
+                        (
+                            ThirExprKind::Call {
+                                func: starts_with_func,
+                                args: vec![receiver_thir, prefix_expr],
+                            },
+                            Ty::BOOL,
+                        )
+                    }
+                    _ => {
+                        self.ctx.diagnostics.error(
+                            expr.span,
+                            format!(
+                                "unknown method `{}` on type `{}`",
+                                method,
+                                self.type_to_string(receiver_ty)
+                            ),
+                        );
+                        (ThirExprKind::Error, Ty::ERROR)
+                    }
+                }
             }
 
             HirExprKind::Error => (ThirExprKind::Error, Ty::ERROR),
@@ -1637,7 +2192,6 @@ impl<'ctx> TypeChecker<'ctx> {
                 "%" => self.ctx.types.intern(InternedTyKind::Percent),
                 _ => Ty::ERROR,
             },
-            HirLiteral::Color(_) => self.ctx.types.intern(InternedTyKind::Color),
             HirLiteral::List(elems) => {
                 let elem_ty = elems
                     .first()
@@ -1808,7 +2362,7 @@ impl<'ctx> TypeChecker<'ctx> {
             }
             InternedTyKind::Adt(def_id) => {
                 let name = self.ctx.defs.name(*def_id);
-                self.ctx.str(name)
+                self.ctx.str(name).to_string()
             }
             InternedTyKind::Func { params, ret } => {
                 let param_strs: Vec<_> = params.iter().map(|p| self.type_to_string(*p)).collect();
@@ -1891,11 +2445,12 @@ impl<'ctx> TypeChecker<'ctx> {
                     }
                 }
             }
-            ThirExprKind::VariantCtor { payload, .. } => {
-                if let Some(p) = payload {
-                    self.collect_expr_reads(p, reads);
-                }
+            ThirExprKind::VariantCtor {
+                payload: Some(p), ..
+            } => {
+                self.collect_expr_reads(p, reads);
             }
+            ThirExprKind::VariantCtor { payload: None, .. } => {}
             ThirExprKind::ListLiteral { elements, .. } => {
                 for e in elements {
                     self.collect_expr_reads(e, reads);
@@ -1944,6 +2499,9 @@ impl<'ctx> TypeChecker<'ctx> {
                     }
                 }
                 ThirStatement::Expr(_) => {}
+                ThirStatement::Let { .. } => {
+                    // Let bindings don't write to signals directly
+                }
             }
         }
     }

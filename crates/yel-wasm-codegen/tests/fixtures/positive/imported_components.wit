@@ -1,0 +1,43 @@
+package yel:embed@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-showing: func() -> bool;
+    set-showing: func(value: bool);
+    get-title: func() -> string;
+    set-title: func(value: string);
+  }
+}
+
+interface dialog-component {
+  resource dialog {
+    constructor();
+    get-title: func() -> string;
+    set-title: func(value: string);
+    get-open: func() -> bool;
+    set-open: func(value: bool);
+    show: func();
+    hide: func();
+  }
+}
+
+interface icon-component {
+  resource icon {
+    constructor();
+    get-name: func() -> string;
+    set-name: func(value: string);
+    get-size: func() -> s32;
+    set-size: func(value: s32);
+  }
+}
+
+world embed {
+  import dialog-component;
+  import icon-component;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

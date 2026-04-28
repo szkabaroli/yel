@@ -1,0 +1,6 @@
+digraph yel_signal_graph {
+  rankdir=LR;
+  compound=true;
+  node [fontname="Helvetica", fontsize=10];
+  edge [fontname="Helvetica", fontsize=9];
+}

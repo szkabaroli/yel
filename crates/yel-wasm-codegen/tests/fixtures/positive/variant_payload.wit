@@ -1,0 +1,27 @@
+package yel:varpl@0.1.0;
+
+interface shared-types {
+  variant message {
+    ping,
+    text(string),
+    tagged(u32),
+  }
+}
+
+interface app-component {
+  use shared-types.{ message };
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-last: func() -> message;
+    set-last: func(value: message);
+  }
+}
+
+world varpl {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

@@ -1,0 +1,15 @@
+package yel:optfield@0.1.0;
+
+// Exercises a record with an `option<...>` field — the option layout inside
+// a record, plus read-through field access to the option-valued field.
+record Profile {
+    name: string,
+    nickname: option<string>,
+}
+
+export component App {
+    me: Profile = { name: "a", nickname: some("b") };
+    VStack {
+        Text { "{me.name}" }
+    }
+}

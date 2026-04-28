@@ -1,0 +1,25 @@
+package yel:forgloblist@0.1.0;
+
+// `for x in Store.items` where `Store.items` is a global list signal.
+// The for-effect must register `reads: [Store.items]` so writes to the
+// global (from a handler) re-render the list. Two buttons give the
+// execution test two distinct dispatch ids to drive writes.
+global Store {
+    items: list<s32> = [1];
+}
+
+export component App {
+    VStack {
+        for x in Store.items {
+            Text { "item" }
+        }
+        Button {
+            "set-five"
+            clicked: { Store.items = [1, 2, 3, 4, 5]; }
+        }
+        Button {
+            "set-two"
+            clicked: { Store.items = [10, 20]; }
+        }
+    }
+}

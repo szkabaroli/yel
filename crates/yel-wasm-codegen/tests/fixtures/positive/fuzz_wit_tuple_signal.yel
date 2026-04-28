@@ -1,0 +1,16 @@
+// Minimal repro: a component signal typed as a tuple. The WIT side
+// declares `tuple<f32, bool, char>` which per the canonical ABI flattens
+// into (f32, i32, i32) on the method setter, but the core module emits
+// the setter as (self, value_ptr: i32) — treating the tuple as a single
+// in-memory pointer. wit-component catches the width mismatch and fails
+// to decode the world from the module.
+//
+// Fix direction: either (a) flatten tuples in the core-module setter
+// signature and reassemble into memory inside the setter body, matching
+// the variant/record path; or (b) emit the WIT setter as a record /
+// pointer-wrapped type so both sides agree on the pointer shape.
+
+export component Component1 {
+    items: tuple<f32, bool, char>;
+    "x"
+}

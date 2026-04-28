@@ -1,0 +1,10 @@
+package yel:idxaccess@0.1.0;
+
+// Exercises `LirExprKind::Index` — `list[expr]` indexing in a body context.
+// Without this the indexing codegen branch has no fixture coverage.
+export component App {
+    items: list<s32> = [10, 20, 30];
+    VStack {
+        Text { "first: {items[0]}" }
+    }
+}

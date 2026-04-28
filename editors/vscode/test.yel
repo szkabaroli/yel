@@ -3,7 +3,7 @@
 component Counter {
     in property initial: int = 0;
     out property count: int = initial;
-    callback incremented();
+    incremented: func();
 
     VStack {
         Text {

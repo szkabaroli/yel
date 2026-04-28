@@ -21,7 +21,7 @@
   <header
     class="flex items-center gap-3 h-9 shrink-0 px-3 bg-card border-b border-border select-none text-muted-foreground"
   >
-    <span>Problems</span>
+    <span class="font-semibold text-muted-foreground">Problems</span>
     <div class="flex items-center gap-2">
       <Badge variant={errors > 0 ? "destructive" : "secondary"}>
         {errors} errors

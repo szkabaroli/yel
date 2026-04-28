@@ -44,13 +44,14 @@ export interface CompileResult {
   wastCode: string;
   hirCode: string;
   thirCode: string;
+  dotCode: string;
 }
 
 export type CompileOutcome =
   | { tag: 'success'; val: CompileResult }
   | { tag: 'failure'; val: Diagnostic[] };
 
-export type OutputFormat = 'rust' | 'wit' | 'wasm' | 'wast' | 'hir' | 'thir';
+export type OutputFormat = 'rust' | 'wit' | 'wasm' | 'wast' | 'hir' | 'thir' | 'dot';
 
 /**
  * Check Yel source code for errors without compiling.
@@ -144,6 +145,18 @@ export function compileToWast(filename: string, source: string): string | null {
 }
 
 /**
+ * Compile to LIR (Low-level IR) and return the JSON, or null if compilation fails.
+ */
+export function compileToLir(filename: string, source: string): { ok: true; value: string } | { ok: false; error: string } {
+  const result = compile(filename, source, 'lir');
+  if (result.tag === 'success') {
+    return { ok: true, value: result.val.lirCode };
+  }
+  const errorMsg = result.val.map(d => `${d.line}:${d.column}: ${d.message}`).join('\n');
+  return { ok: false, error: errorMsg };
+}
+
+/**
  * Compile to HIR (High-level IR) and return the JSON, or null if compilation fails.
  */
 export function compileToHir(filename: string, source: string): { ok: true; value: string } | { ok: false; error: string } {
@@ -162,6 +175,18 @@ export function compileToThir(filename: string, source: string): { ok: true; val
   const result = compile(filename, source, 'thir');
   if (result.tag === 'success') {
     return { ok: true, value: result.val.thirCode };
+  }
+  const errorMsg = result.val.map(d => `${d.line}:${d.column}: ${d.message}`).join('\n');
+  return { ok: false, error: errorMsg };
+}
+
+/**
+ * Compile to DOT (Graphviz signal-dependency graph) and return the source.
+ */
+export function compileToDot(filename: string, source: string): { ok: true; value: string } | { ok: false; error: string } {
+  const result = compile(filename, source, 'dot');
+  if (result.tag === 'success') {
+    return { ok: true, value: result.val.dotCode };
   }
   const errorMsg = result.val.map(d => `${d.line}:${d.column}: ${d.message}`).join('\n');
   return { ok: false, error: errorMsg };

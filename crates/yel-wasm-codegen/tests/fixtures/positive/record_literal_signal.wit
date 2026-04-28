@@ -1,0 +1,26 @@
+package yel:reclit@0.1.0;
+
+interface shared-types {
+  record point {
+    x: s32,
+    y: s32,
+  }
+}
+
+interface app-component {
+  use shared-types.{ point };
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-origin: func() -> point;
+    set-origin: func(value: point);
+  }
+}
+
+world reclit {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

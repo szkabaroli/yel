@@ -33,6 +33,10 @@ interface compiler {
         hir,
         /// THIR (Typed HIR) as JSON - fully type-checked
         thir,
+        /// LIR (Low-level IR) as JSON - fully type-checked
+        lir,
+        /// Graphviz DOT graph of the LIR signal/effect dependency graph
+        dot,
     }
 
     /// Result of a successful compilation.
@@ -49,6 +53,10 @@ interface compiler {
         hir-code: string,
         /// Generated THIR as JSON (empty if not requested)
         thir-code: string,
+        /// Generated THIR as JSON (empty if not requested)
+        lir-code: string,
+        /// Generated DOT graph (empty if not requested)
+        dot-code: string,
     }
 
     /// A diagnostic message from the compiler.

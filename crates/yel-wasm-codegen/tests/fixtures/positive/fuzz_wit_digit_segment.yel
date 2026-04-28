@@ -1,0 +1,17 @@
+// Minimal repro: a record field whose kebab-case WIT name ends in an
+// all-digit segment (`field-0`). WIT identifiers require every
+// hyphen-separated segment to start with a letter; wit-encoder prints this
+// anyway, and wit-component's parse step then rejects the custom section.
+//
+// The compiler should reject this up-front with a clear InvalidIR error
+// instead of forwarding wit-component's "decoding custom section
+// component-type" message.
+
+record Rec {
+    field-0: s32,
+}
+
+export component Component1 {
+    v: Rec;
+    "x"
+}

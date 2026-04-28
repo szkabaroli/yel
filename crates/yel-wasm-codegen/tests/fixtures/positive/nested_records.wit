@@ -1,0 +1,30 @@
+package yel:nestedrec@0.1.0;
+
+interface shared-types {
+  record address {
+    city: string,
+    zip: string,
+  }
+  record person {
+    name: string,
+    addr: address,
+  }
+}
+
+interface app-component {
+  use shared-types.{ person };
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-me: func() -> person;
+    set-me: func(value: person);
+  }
+}
+
+world nestedrec {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

@@ -4,7 +4,7 @@
 //! a [`Name`] (an index). This reduces memory usage and enables fast
 //! equality comparisons via integer comparison.
 
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fmt;
@@ -17,7 +17,7 @@ use parking_lot::Mutex;
 ///
 /// This is a lightweight handle (just a `usize`) that can be used to
 /// retrieve the original string from an [`Interner`].
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash, Serialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
 pub struct Name(pub usize);
 
 /// A reference-counted string wrapper.
@@ -55,6 +55,25 @@ impl Deref for ArcStr {
         &self.0
     }
 }
+
+impl PartialEq<str> for ArcStr {
+    fn eq(&self, other: &str) -> bool {
+        self.0.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for ArcStr {
+    fn eq(&self, other: &&str) -> bool {
+        self.0.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for ArcStr {
+    fn eq(&self, other: &String) -> bool {
+        self.0.as_str() == other.as_str()
+    }
+}
+
 
 /// Internal interner state.
 #[derive(Debug)]

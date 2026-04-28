@@ -1,0 +1,11 @@
+package yel:optsig@0.1.0;
+
+// Exercises Option<T> signal storage and the `store_option` runtime helper.
+// A getter returning Option<string> uses the "fat pointer + discriminant"
+// encoding that's easy to get wrong on narrow-type boundaries.
+export component App {
+    maybe-title: option<string>;
+    VStack {
+        Text { "loaded" }
+    }
+}

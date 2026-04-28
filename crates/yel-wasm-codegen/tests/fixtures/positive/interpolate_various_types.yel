@@ -1,0 +1,49 @@
+package yel:interpvarious@0.1.0;
+
+// Exercises `emit_expr_as_string` on a variety of primitive types, via
+// both direct variable access AND list-index access. Graduated from the
+// f32-in-interpolation bug investigation — covers the full dispatch-on-type
+// contract so regressions get caught early.
+//
+// Intentionally skips s64/u64 because the `emit_expr_as_string` branch for
+// those still `todo!()`s (see known_bugs/ fixture for that gap).
+export component App {
+    // Direct primitive vars
+    flag: bool = true;
+    si: s32 = -7;
+    ui: u32 = 42;
+    f: f32 = 3.5;
+    d: f64 = 2.5;
+    s: string = "hi";
+    c: char = 'x';
+
+    // Same types through list-index
+    flags: list<bool> = [true, false];
+    sis: list<s32> = [10, 20, 30];
+    uis: list<u32> = [1, 2, 3];
+    fs: list<f32> = [1.0, 2.0, 3.0];
+    ds: list<f64> = [1.5, 2.5];
+    ss: list<string> = ["a", "b"];
+    cs: list<char> = ['a', 'b'];
+
+    VStack {
+        // Direct interpolation
+        Text { "flag: {flag}" }
+        Text { "si: {si}" }
+        Text { "ui: {ui}" }
+        Text { "f: {f}" }
+        Text { "d: {d}" }
+        Text { "s: {s}" }
+        Text { "c: {c}" }
+
+        // Indexed interpolation — the case that was broken for f32 before
+        // this fix. Each must route through a `*_to_string` runtime helper
+        // that matches the loaded scalar type.
+        Text { "flags[0]: {flags[0]}" }
+        Text { "sis[0]: {sis[0]}" }
+        Text { "uis[0]: {uis[0]}" }
+        Text { "fs[0]: {fs[0]}" }
+        Text { "ds[0]: {ds[0]}" }
+        Text { "cs[0]: {cs[0]}" }
+    }
+}

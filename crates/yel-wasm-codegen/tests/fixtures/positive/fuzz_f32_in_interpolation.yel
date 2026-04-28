@@ -1,0 +1,10 @@
+// String interpolation of an f32 value looked up via list index.
+// emit_expr_as_string receives an f32 but the downstream path assumes i32
+// -> "type mismatch: expected i32, found f32" at validation.
+// Root cause: coercion path for f32 -> string is missing or mis-routed when
+// the source expression is an Index/projection rather than a direct variable.
+package yel:fb@0.1.0;
+export component App {
+    items: list<f32> = [1.0, 2.0, 3.0];
+    Text { "v: {items[0]}" }
+}

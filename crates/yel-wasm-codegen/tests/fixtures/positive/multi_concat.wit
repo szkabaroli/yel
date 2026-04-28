@@ -1,0 +1,23 @@
+package yel:manyconcat@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-first: func() -> string;
+    set-first: func(value: string);
+    get-second: func() -> string;
+    set-second: func(value: string);
+    get-third: func() -> string;
+    set-third: func(value: string);
+    get-fourth: func() -> string;
+    set-fourth: func(value: string);
+  }
+}
+
+world manyconcat {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

@@ -1,0 +1,22 @@
+package test:cb-drop-result@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+  }
+}
+
+interface app-callbacks {
+  use app-component.{ app };
+  on-click: func(self: borrow<app>) -> result<s32, string>;
+}
+
+world cb-drop-result {
+  import app-callbacks;
+  import app-component;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

@@ -227,6 +227,24 @@ fn register_builtin_functions(ctx: &mut CompilerContext) {
         Ty::STRING,
     ));
 
+    // s64_to_string: func(s64) -> string
+    let s64_ty = ctx.types.intern(InternedTyKind::S64);
+    ctx.known.functions.s64_to_string = Some(register_function(
+        ctx,
+        "s64-to-string",
+        &[s64_ty],
+        Ty::STRING,
+    ));
+
+    // u64_to_string: func(u64) -> string
+    let u64_ty = ctx.types.intern(InternedTyKind::U64);
+    ctx.known.functions.u64_to_string = Some(register_function(
+        ctx,
+        "u64-to-string",
+        &[u64_ty],
+        Ty::STRING,
+    ));
+
     // f32_to_string: func(f32) -> string
     let f32_ty = ctx.types.intern(InternedTyKind::F32);
     ctx.known.functions.f32_to_string = Some(register_function(
@@ -282,6 +300,39 @@ fn register_builtin_functions(ctx: &mut CompilerContext) {
         &[Ty::ERROR, Ty::S32], // list<T>, index - polymorphic over T
         Ty::ERROR,             // option<T> - polymorphic
     ));
+
+    // min: func(s32, s32) -> s32
+    ctx.known.functions.min = Some(register_function(
+        ctx,
+        "min",
+        &[Ty::S32, Ty::S32],
+        Ty::S32,
+    ));
+
+    // max: func(s32, s32) -> s32
+    ctx.known.functions.max = Some(register_function(
+        ctx,
+        "max",
+        &[Ty::S32, Ty::S32],
+        Ty::S32,
+    ));
+
+    // filter: func(list<T>, func(T) -> bool) -> list<T>
+    // Note: This is a generic function, type parameters are resolved at call site
+    ctx.known.functions.filter = Some(register_function(
+        ctx,
+        "filter",
+        &[Ty::ERROR, Ty::ERROR], // Generic list and predicate
+        Ty::ERROR,               // Generic list result
+    ));
+
+    // starts_with: func(string, string) -> bool
+    ctx.known.functions.starts_with = Some(register_function(
+        ctx,
+        "starts_with",
+        &[Ty::STRING, Ty::STRING],
+        Ty::BOOL,
+    ));
 }
 
 fn register_builtin_elements(ctx: &mut CompilerContext) {
@@ -293,7 +344,6 @@ fn register_builtin_elements(ctx: &mut CompilerContext) {
     // Container elements
     ctx.known.elements.list = Some(register_list_element(ctx));
     ctx.known.elements.scroll_view = Some(register_scroll_view_element(ctx));
-    ctx.known.elements.div = Some(register_box_element(ctx, "div"));
     ctx.known.elements.r#box = Some(register_box_element(ctx, "Box"));
 
     // Text elements
@@ -302,7 +352,12 @@ fn register_builtin_elements(ctx: &mut CompilerContext) {
     // Input elements
     ctx.known.elements.button = Some(register_button_element(ctx));
     ctx.known.elements.text_field = Some(register_text_field_element(ctx));
+    ctx.known.elements.text_input = Some(register_text_input_element(ctx));
+    ctx.known.elements.integer_input = Some(register_integer_input_element(ctx));
+    ctx.known.elements.float_input = Some(register_float_input_element(ctx));
     ctx.known.elements.checkbox = Some(register_checkbox_element(ctx));
+    ctx.known.elements.select = Some(register_select_element(ctx));
+    ctx.known.elements.option = Some(register_option_element(ctx));
 
     // Media elements
     ctx.known.elements.image = Some(register_image_element(ctx));
@@ -531,6 +586,7 @@ fn register_element(ctx: &mut CompilerContext, name: &str, props: &[PropDesc]) -
             properties: vec![],
             callbacks: vec![],
             is_export: false,
+            has_children_slot: false,
         }),
         dummy_span(),
     );
@@ -660,6 +716,36 @@ fn register_text_field_element(ctx: &mut CompilerContext) -> DefId {
     register_element(ctx, "TextField", &props)
 }
 
+fn register_text_input_element(ctx: &mut CompilerContext) -> DefId {
+    let mut props = vec![
+        PropDesc { name: "value", ty: PropType::String },
+        PropDesc { name: "placeholder", ty: PropType::String },
+        PropDesc { name: "disabled", ty: PropType::Bool },
+    ];
+    props.extend(layout_props());
+    register_element(ctx, "TextInput", &props)
+}
+
+fn register_integer_input_element(ctx: &mut CompilerContext) -> DefId {
+    let mut props = vec![
+        PropDesc { name: "value", ty: PropType::S32 },
+        PropDesc { name: "placeholder", ty: PropType::String },
+        PropDesc { name: "disabled", ty: PropType::Bool },
+    ];
+    props.extend(layout_props());
+    register_element(ctx, "IntegerInput", &props)
+}
+
+fn register_float_input_element(ctx: &mut CompilerContext) -> DefId {
+    let mut props = vec![
+        PropDesc { name: "value", ty: PropType::F32 },
+        PropDesc { name: "placeholder", ty: PropType::String },
+        PropDesc { name: "disabled", ty: PropType::Bool },
+    ];
+    props.extend(layout_props());
+    register_element(ctx, "FloatInput", &props)
+}
+
 fn register_checkbox_element(ctx: &mut CompilerContext) -> DefId {
     let mut props = vec![
         PropDesc { name: "checked", ty: PropType::Bool },
@@ -669,6 +755,25 @@ fn register_checkbox_element(ctx: &mut CompilerContext) -> DefId {
     props.extend(layout_props());
     // TODO: Add toggled callback
     register_element(ctx, "Checkbox", &props)
+}
+
+fn register_select_element(ctx: &mut CompilerContext) -> DefId {
+    let mut props = vec![
+        PropDesc { name: "value", ty: PropType::S32 },
+        PropDesc { name: "size", ty: PropType::S32 },
+        PropDesc { name: "disabled", ty: PropType::Bool },
+    ];
+    props.extend(layout_props());
+    // TODO: Add changed callback
+    register_element(ctx, "Select", &props)
+}
+
+fn register_option_element(ctx: &mut CompilerContext) -> DefId {
+    let props = vec![
+        PropDesc { name: "value", ty: PropType::S32 },
+        PropDesc { name: "disabled", ty: PropType::Bool },
+    ];
+    register_element(ctx, "Option", &props)
 }
 
 fn register_image_element(ctx: &mut CompilerContext) -> DefId {

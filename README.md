@@ -30,12 +30,11 @@
 ## Project goals
 
 - **Portability**: Compile Yel components to WebAssembly for true cross-platform UI development
-- **Type safety**: Strong static typing with comprehensive type checking and inference
 - **Declarative syntax**: Clean, readable syntax for building user interfaces with components, properties, and callbacks
 - **Reactivity**: Seamlessly built-in reactive signals - property changes automatically update the UI
-- **Rich UI primitives**: Support for layout (VStack, HStack, ZStack), input elements, media, and more
+- **Type safety**: Strong static typing with comprehensive type checking and inference
+- **Zero trust**: Enable the building of pluggable user interfaces, without compromising security
 - **Developer experience**: Tooling including VS Code extension, compiler diagnostics, and interactive viewer
-- **Performance**: Compile to efficient and small WebAssembly components
 
 ## Example
 

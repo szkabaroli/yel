@@ -1,0 +1,16 @@
+// Integer literal assigned to an f32-typed property default. Typeck accepts
+// this (literal widening / number inference) and reports the default's type
+// as f32, but codegen emits an `i32.const` where the signal-store path
+// expects an f32. WASM validator: "expected f32, found i32".
+//
+// Root cause: either (a) typeck should reject integer literals in f32
+// context unless explicitly floated (`2.0`), matching the f32/s32 mixed-
+// arith diagnostic already in place; or (b) codegen's literal emission
+// must re-type the integer to f32 (e.g. `F32ConvertI32S`) when the
+// expected type is f32. (a) is more consistent with the existing
+// principled rejection of implicit numeric coercion.
+package yel:fb@0.1.0;
+export component App {
+    y: f32 = 2;
+    Text { "x" }
+}

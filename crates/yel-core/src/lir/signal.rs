@@ -1,12 +1,14 @@
 //! LIR reactive signals and effects.
 
+use serde::{Serialize, Deserialize};
+
 use crate::ids::{DefId, NodeId};
 use crate::types::Ty;
 
 use super::expr::LirExpr;
 
 /// A reactive signal (property with change tracking).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LirSignal {
     /// DefId of the property.
     pub def_id: DefId,
@@ -42,4 +44,9 @@ pub enum UpdateKind {
     Class(String),
     /// Update style property.
     Style(String),
+    /// Re-evaluate the source expression and write the result to a signal.
+    /// Emitted for derived signals like `doubled: s32 = count * 2` — when
+    /// any dep changes, rerun `count * 2` and store into `doubled`'s slot,
+    /// which in turn triggers any effects observing `doubled`.
+    DerivedSignal(DefId),
 }

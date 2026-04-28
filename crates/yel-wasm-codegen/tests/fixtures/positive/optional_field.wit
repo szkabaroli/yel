@@ -1,0 +1,26 @@
+package yel:optfield@0.1.0;
+
+interface shared-types {
+  record profile {
+    name: string,
+    nickname: option<string>,
+  }
+}
+
+interface app-component {
+  use shared-types.{ profile };
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-me: func() -> profile;
+    set-me: func(value: profile);
+  }
+}
+
+world optfield {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

@@ -1,0 +1,10 @@
+// List literal with >8 elements. The type table only defines list ctor types
+// up to some arity; at 15 elements codegen warns "No type for list ctor with 15
+// params" and falls back, then emits a LocalGet against a local index that
+// doesn't exist -> "unknown local 15: local index out of bounds".
+// Root cause: list ctor type table / local allocation doesn't scale to arbitrary arity.
+package yel:fb@0.1.0;
+export component App {
+    big: list<s32> = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15];
+    Text { "x" }
+}

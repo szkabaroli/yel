@@ -30,9 +30,61 @@ pub struct CompilerContext {
     pub source_map: SourceMap,
     /// Accumulated diagnostics.
     pub diagnostics: Diagnostics,
-    /// Debug names for LIR blocks: (component DefId, BlockId) -> name
-    /// Uses RefCell for interior mutability since blocks are named during lowering.
-    block_names: RefCell<HashMap<(DefId, BlockId), String>>,
+    /// Debug names for LIR blocks: (component DefId, BlockId) ->
+    /// structured `BlockDebugName`. Uses RefCell for interior
+    /// mutability since blocks are named during lowering.
+    block_names: RefCell<HashMap<(DefId, BlockId), BlockDebugName>>,
+}
+
+/// Structured debug name for a lowered block. Stored once at lowering
+/// time and consumed by both the WASM name section (which formats as
+/// `<comp>-<kind>[-b<bid>]*[-s<sid>]#<block_id>`) and the DOT signal
+/// graph renderer (which uses the same fields to build human-friendly
+/// labels). Holding the structured form rather than a pre-formatted
+/// string keeps consumers from having to re-parse strings to recover
+/// what the lowering pass already knew.
+///
+/// Boundary ids are NOT stored here — they live on
+/// `LirBlock.boundary_params` and are read directly by consumers, so
+/// adding/removing a boundary param doesn't require updating the
+/// debug name.
+#[derive(Debug, Clone)]
+pub struct BlockDebugName {
+    /// Conceptual role of the block — one of:
+    ///   `constructor`, `mount`, `update`, `noop-update`,
+    ///   `derived-update`, `if-update`, `if-branch-mount`,
+    ///   `if-branch-unmount`, `for-update`, `for-item-mount`,
+    ///   `for-item-unmount`, `handle-<event>`.
+    /// Stored as `Cow` so common kinds are static literals
+    /// (no allocation) while parameterised ones (like
+    /// `handle-<event>`) own their formatted strings.
+    pub kind: std::borrow::Cow<'static, str>,
+    /// Signal id this block is keyed to. `Some` only for the
+    /// per-(boundary, signal) update fns (`kind == "update"`).
+    pub signal: Option<u32>,
+}
+
+impl BlockDebugName {
+    pub fn kind(kind: &'static str) -> Self {
+        Self {
+            kind: std::borrow::Cow::Borrowed(kind),
+            signal: None,
+        }
+    }
+
+    pub fn update(signal: u32) -> Self {
+        Self {
+            kind: std::borrow::Cow::Borrowed("update"),
+            signal: Some(signal),
+        }
+    }
+
+    pub fn handle(event: &str) -> Self {
+        Self {
+            kind: std::borrow::Cow::Owned(format!("handle-{}", event)),
+            signal: None,
+        }
+    }
 }
 
 impl Default for CompilerContext {
@@ -77,9 +129,12 @@ impl CompilerContext {
         self.interner.intern(s)
     }
 
-    /// Get the string for an interned name.
-    pub fn str(&self, name: Name) -> String {
-        self.interner.str(name).to_string()
+    /// Get the string for an interned name. Returns an `ArcStr`
+    /// (cheaply cloneable, derefs to `&str`) — avoids the per-call
+    /// allocation that `.to_string()` would incur in hot paths like
+    /// name-section emission.
+    pub fn str(&self, name: Name) -> crate::interner::ArcStr {
+        self.interner.str(name)
     }
 
     // ========================================================================
@@ -251,15 +306,25 @@ impl CompilerContext {
     // Block debug names
     // ========================================================================
 
-    /// Register a debug name for a block.
-    /// Uses interior mutability to allow naming blocks during lowering.
-    pub fn set_block_name(&self, comp_def_id: DefId, block_id: BlockId, name: String) {
+    /// Register a structured debug name for a block. Interior
+    /// mutability lets lowering passes name blocks while iterating.
+    pub fn set_block_name(
+        &self,
+        comp_def_id: DefId,
+        block_id: BlockId,
+        name: BlockDebugName,
+    ) {
         self.block_names.borrow_mut().insert((comp_def_id, block_id), name);
     }
 
-    /// Get the debug name for a block.
-    /// Returns a cloned string since we can't return a reference to RefCell contents.
-    pub fn get_block_name(&self, comp_def_id: DefId, block_id: BlockId) -> Option<String> {
+    /// Get the structured debug name for a block. Returns an owned
+    /// clone (callers can't borrow into a RefCell across the
+    /// inevitable subsequent `borrow_mut`).
+    pub fn get_block_name(
+        &self,
+        comp_def_id: DefId,
+        block_id: BlockId,
+    ) -> Option<BlockDebugName> {
         self.block_names.borrow().get(&(comp_def_id, block_id)).cloned()
     }
 }

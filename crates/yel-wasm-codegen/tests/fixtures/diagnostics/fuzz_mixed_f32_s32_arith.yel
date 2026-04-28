@@ -1,0 +1,13 @@
+// Binary arithmetic between f32 and s32 without automatic coercion.
+// Typeck currently accepts this (maybe via number-literal widening), but
+// codegen emits `f32.add` while the s32 operand is still on the stack as i32.
+// Validator: "expected f32, found i32".
+// Root cause: either (a) typeck should reject mixed float/int without
+// explicit conversion; or (b) codegen's binary-op emitter must widen s32
+// to f32 before f32 arithmetic. Decide on language semantics.
+package yel:fb@0.1.0;
+export component App {
+    x: f32 = 1.0;
+    y: s32 = 0;
+    Text { "{x + y}" }
+}

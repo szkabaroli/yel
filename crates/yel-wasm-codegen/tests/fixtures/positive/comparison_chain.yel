@@ -1,0 +1,14 @@
+package yel:cmp@0.1.0;
+
+// Comparison operators driving an `if`. Exercises the bool-producing
+// arm of Binary emission for each comparator.
+export component App {
+    count: s32 = 5;
+    VStack {
+        if count > 0 { Text { "positive" } }
+        if count == 0 { Text { "zero" } }
+        if count < 0 { Text { "negative" } }
+        if count >= 5 { Text { "big" } }
+        if count <= 10 { Text { "in range" } }
+    }
+}

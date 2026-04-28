@@ -1,0 +1,18 @@
+package yel:reclit@0.1.0;
+
+// A record-typed signal with a literal default must compile, produce a
+// valid WIT setter, and roundtrip through wit-component. Today it fails
+// encoding at the `set-origin` export — same family as nested_records,
+// option_signal, variant_payload. Graduation path: move back to
+// positive/ when the setter WIT shape bug is fixed.
+record Point {
+    x: s32,
+    y: s32,
+}
+
+export component App {
+    origin: Point = { x: 10, y: 20 };
+    VStack {
+        Text { "at ({origin.x}, {origin.y})" }
+    }
+}

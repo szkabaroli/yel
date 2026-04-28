@@ -1,0 +1,13 @@
+// 1-slot composite getter — i32 path. This case accidentally worked
+// before the fix because the pointer convention and the direct-return
+// convention both use i32 for the core return type, so the core
+// module validated. Pinning it as a positive fixture guards the
+// single-i32-slot record against regressions when the dispatch is
+// refactored. Paired with the f32/f64 fixtures that exercise paths
+// where pointer and value cannot alias.
+package yel:r1s32@0.1.0;
+record R { a: s32, }
+export component App {
+    r: R = { a: 42 };
+    Text { "x" }
+}

@@ -1,0 +1,16 @@
+digraph yel_signal_graph {
+  rankdir=LR;
+  compound=true;
+  node [fontname="Helvetica", fontsize=10];
+  edge [fontname="Helvetica", fontsize=9];
+  subgraph cluster_c0 {
+    label="component App (export)";
+    style=rounded;
+    color="#888";
+    "c0_sig_384" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="empty\n: list<s32>", class="yel-signal"];
+    "c0_sig_385" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="one\n: list<s32>", class="yel-signal"];
+    "c0_sig_386" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="small\n: list<s32>", class="yel-signal"];
+    "c0_sig_387" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="big\n: list<s32>", class="yel-signal"];
+    "c0_sig_388" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="huge\n: list<s32>", class="yel-signal"];
+  }
+}

@@ -6,19 +6,19 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "build:compiler": "cd .. && cargo build -p yelc --release --target wasm32-wasip2 && cd yel-viewer && npm run transpile:compiler",
+    "build:compiler": "cd .. && cargo build --lib -p yelc --release --target wasm32-wasip2 && cd yel-viewer && npm run transpile:compiler",
     "transpile:compiler": "jco transpile ../target/wasm32-wasip2/release/yelc.wasm --name yelc --out-dir src/lib/compiler --minify --valid-lifting-optimization --no-nodejs-compat",
     "build:all": "npm run build:compiler && npm run build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json"
   },
   "devDependencies": {
+    "@codemirror/lint": "^6.9.2",
     "@internationalized/date": "^3.10.1",
     "@lezer/generator": "^1.8.0",
     "@lucide/svelte": "^0.562.0",
     "@sveltejs/vite-plugin-svelte": "^6.2.4",
     "@tailwindcss/vite": "^4.1.18",
-    "@codemirror/lint": "^6.9.2",
     "@tsconfig/svelte": "^5.0.6",
     "@types/node": "^24.10.1",
     "bits-ui": "^2.15.2",
@@ -31,7 +31,7 @@
     "vite": "^7.2.4"
   },
   "dependencies": {
-    "@bytecodealliance/jco": "^1.15.4",
+    "@bytecodealliance/jco": "^1.18.1",
     "@bytecodealliance/preview2-shim": "^0.17.0",
     "@codemirror/lang-javascript": "^6.2.4",
     "@codemirror/language": "^6.12.1",
@@ -39,6 +39,7 @@
     "@codemirror/view": "^6.39.8",
     "@lezer/highlight": "^1.2.3",
     "@uiw/codemirror-theme-github": "^4.23.0",
+    "@viz-js/viz": "^3.26.0",
     "clsx": "^2.1.1",
     "tailwind-merge": "^3.4.0"
   },

@@ -28,17 +28,20 @@ pub struct WitOptions {
 
 /// Generate WIT using the AST-based approach (wit-parser + wit-encoder).
 ///
-/// This builds a proper WIT AST using wit-parser types (via WitAstBuilder),
-/// then converts it to wit-encoder's Package type which can be printed to string.
-///
-/// Returns the generated WIT as a string.
+/// Accepts the full LIR component list. Every exported component contributes
+/// a resource interface; globals contribute their own interfaces. Files with
+/// no exported component still produce a well-formed package with a library
+/// world — no special casing at the call site.
 pub fn generate_wit(
-    component: &LirComponent,
+    components: &[LirComponent],
     ctx: &CompilerContext,
     options: &WitOptions,
 ) -> Result<String, CodegenError> {
+    let exported: Vec<&LirComponent> = components.iter().filter(|c| c.is_export).collect();
+    let all: Vec<&LirComponent> = components.iter().collect();
+
     let mut builder = WitAstBuilder::new(ctx, &options.namespace, &options.name, &options.version);
-    builder.build_component_wit(component)?;
+    builder.build_wit_with_all(&exported, &all)?;
 
     let (resolve, _world_id) = builder.into_resolve_and_world();
 

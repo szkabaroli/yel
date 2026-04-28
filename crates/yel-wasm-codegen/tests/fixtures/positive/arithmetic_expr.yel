@@ -1,0 +1,15 @@
+package yel:arith@0.1.0;
+
+// Exercises Binary + Unary expression emission across several integer
+// and float types. Without this, the per-type arithmetic ops
+// (Add/Sub/Mul/Div on s32/f32) are emitted only by the session-added
+// narrow-type fixtures and not in isolation.
+export component App {
+    x: s32 = 10;
+    y: s32 = 3;
+    r: f32 = 2.5;
+    VStack {
+        Text { "sum={x + y} diff={x - y} prod={x * y} quot={x / y}" }
+        Text { "neg={-x} scale={r * 2.0}" }
+    }
+}

@@ -1,0 +1,9 @@
+// Reading an option<string> signal (composite 3-slot flat shape) used to
+// under-read as a single i32. Now SignalRead flat-slot path loads
+// discriminant + ptr + len correctly.
+package test:sigread-option@0.1.0;
+
+export component App {
+    value: option<string> = some("hello");
+    Text { "app" }
+}

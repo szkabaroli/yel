@@ -1,0 +1,19 @@
+package yel:resctor@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-good: func() -> result<s32, string>;
+    set-good: func(value: result<s32, string>);
+    get-bad: func() -> result<s32, string>;
+    set-bad: func(value: result<s32, string>);
+  }
+}
+
+world resctor {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

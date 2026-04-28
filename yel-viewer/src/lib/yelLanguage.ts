@@ -39,8 +39,13 @@ interface YelState {
 
 // Known Yel keywords
 const keywords = new Set([
-  "package", "component", "record", "enum", "variant",
-  "if", "else", "for", "in", "key", "export", "func", "set"
+  "package", "component", "record", "enum", "variant", "element", "import",
+  "global", "callback", "public",
+  "if", "else", "for", "in", "key", "export", "func", "set", "bind",
+  // Property direction modifiers (only meaningful inside a `global` body, but
+  // highlighting them everywhere is a safe cosmetic choice — the strings are
+  // rare as identifiers)
+  "in-out", "out"
 ]);
 
 // Boolean literals (highlighted as values, not keywords)
@@ -64,9 +69,9 @@ const handlers = new Set([
 // Known UI elements (from stdlib)
 const elements = new Set([
   "VStack", "HStack", "ZStack",
-  "Input",
+  "TextInput", "IntegerInput", "FloatInput",
   "List", "ScrollView",
-  "div", "Box",
+  "Box",
   "Text",
   "Button",
   "TextField",
@@ -81,7 +86,7 @@ const elements = new Set([
 ]);
 
 // Type-defining keywords that should highlight the following identifier as a type
-const typeDefKeywords = new Set(["record", "enum", "variant"]);
+const typeDefKeywords = new Set(["record", "enum", "variant", "element", "component", "global"]);
 
 // Generic types that take type parameters
 const genericTypes = new Set(["list", "option", "result", "tuple"]);
@@ -297,6 +302,7 @@ const tokenTable = {
   type: tags.typeName,
   component: tags.className,
   variable: tags.variableName,
+  comment: tags.lineComment,
   handler: yelTags.handler,
   unit: yelTags.unit,
   colorLiteral: yelTags.colorLiteral,

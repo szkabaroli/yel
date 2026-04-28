@@ -3,15 +3,7 @@
 use tower_lsp::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 
-mod ast_hover;
-mod completions;
-mod diagnostics;
-mod document;
-mod hover;
-mod semantic_tokens;
-mod server;
-
-use server::YelLanguageServer;
+use yel_lsp::server::YelLanguageServer;
 
 #[tokio::main]
 async fn main() {

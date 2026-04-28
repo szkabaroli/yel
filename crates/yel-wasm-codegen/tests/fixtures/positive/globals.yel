@@ -1,0 +1,37 @@
+package yel:globals@0.1.0;
+
+global CounterStore {
+    count: s32 = 0;
+    label: string = "Shared count";
+}
+
+export global Theme {
+    in dark-mode: bool;
+    toggle-dark-mode: func();
+}
+
+component Controls {
+    HStack {
+        Button { "-"     clicked: { CounterStore.count = CounterStore.count - 1; } }
+        Button { "reset" clicked: { CounterStore.count = 0; } }
+        Button { "+"     clicked: { CounterStore.count = CounterStore.count + 1; } }
+    }
+}
+
+component Readout {
+    Text { "{CounterStore.label}: {CounterStore.count}" }
+}
+
+export component App {
+    VStack {
+        HStack {
+            Text { "Dark mode: {Theme.dark-mode}" }
+            Button { "toggle" clicked: { Theme.toggle-dark-mode(); } }
+        }
+        Readout {}
+        Controls {}
+        if CounterStore.count > 10 {
+            Text { "High count!" }
+        }
+    }
+}

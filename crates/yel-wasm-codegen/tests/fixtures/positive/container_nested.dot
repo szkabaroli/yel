@@ -1,0 +1,16 @@
+digraph yel_signal_graph {
+  rankdir=LR;
+  compound=true;
+  node [fontname="Helvetica", fontsize=10];
+  edge [fontname="Helvetica", fontsize=9];
+  subgraph cluster_c0 {
+    label="component Card";
+    style=rounded;
+    color="#888";
+  }
+  subgraph cluster_c1 {
+    label="component App (export)";
+    style=rounded;
+    color="#888";
+  }
+}

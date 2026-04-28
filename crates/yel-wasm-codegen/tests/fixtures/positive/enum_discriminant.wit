@@ -1,0 +1,27 @@
+package yel:enumtest@0.1.0;
+
+interface shared-types {
+  enum status {
+    pending,
+    active,
+    done,
+  }
+}
+
+interface app-component {
+  use shared-types.{ status };
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-state: func() -> status;
+    set-state: func(value: status);
+  }
+}
+
+world enumtest {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

@@ -1,0 +1,19 @@
+digraph yel_signal_graph {
+  rankdir=LR;
+  compound=true;
+  node [fontname="Helvetica", fontsize=10];
+  edge [fontname="Helvetica", fontsize=9];
+  subgraph cluster_c0 {
+    label="component App (export)";
+    style=rounded;
+    color="#888";
+  }
+  subgraph cluster_c1 {
+    label="component Inner";
+    style=rounded;
+    color="#888";
+    "c1_elem_0" [shape=box, style="filled", fillcolor="#e0f7fa", label="VStack #0", class="yel-element"];
+    "c1_handler_0" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on clicked", class="yel-handler"];
+    "c1_elem_0" -> "c1_handler_0" [label="fires", color="#7e57c2", class="yel-fires"];
+  }
+}

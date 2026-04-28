@@ -1,0 +1,9 @@
+// Callback result<s32,string> return dropped: LirStatement::Expr lowers to DropExpr.
+package test:cb-drop-result@0.1.0;
+
+export component App {
+    export on-click: func() -> result<s32, string>;
+    Button {
+        clicked: { on-click(); }
+    }
+}

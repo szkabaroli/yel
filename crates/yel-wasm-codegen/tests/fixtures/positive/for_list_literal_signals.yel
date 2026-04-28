@@ -1,0 +1,15 @@
+package yel:forlitsig@0.1.0;
+
+// `for x in [a, b, c]` where each element is a signal read.
+// The for-effect must register `reads: [a, b, c]` so writing any one
+// of them re-evaluates the literal and re-runs the length-delta diff.
+export component App {
+    a: s32 = 1;
+    b: s32 = 2;
+    c: s32 = 3;
+    VStack {
+        for x in [a, b, c] {
+            Text { "item" }
+        }
+    }
+}

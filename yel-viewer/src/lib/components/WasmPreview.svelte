@@ -2,7 +2,7 @@
   import { onDestroy, tick } from "svelte";
   import { ScrollArea } from "$lib/components/ui/scroll-area";
   import * as Resizable from "$lib/components/ui/resizable";
-  import { YelPreviewHost } from "$lib/preview";
+  import { YelPreviewHost, setReactiveFlashEnabled } from "$lib/preview";
 
   interface Props {
     wasmBytes: Uint8Array | null;
@@ -17,6 +17,13 @@
   let error = $state<string | null>(null);
   let isLoading = $state(false);
   let componentState = $state<Record<string, any>>({});
+  // When on, every reactive DOM mutation briefly flashes an outline
+  // around the affected element so the user can see what the reactive
+  // system is updating. Off by default.
+  let reactiveFlash = $state(false);
+  $effect(() => {
+    setReactiveFlashEnabled(reactiveFlash);
+  });
 
   onDestroy(() => {
     host?.destroy();
@@ -73,16 +80,19 @@
   function updateComponentState() {
     if (!host) return;
 
-    // Try to read common properties
-    const count = host.getProperty("count");
-    const label = host.getProperty("label");
-    const items = host.getProperty("items");
-
-    componentState = {
-      ...(count !== undefined && { count }),
-      ...(label !== undefined && { label }),
-      ...(items !== undefined && { items }),
-    };
+    // Discover every property the exported component exposes via its
+    // generated getter/setter pairs, and snapshot the current values.
+    // Replaces the old hardcoded (count/label/items) trio so components
+    // with different property names — `showing`, `title`, whatever — show
+    // up without code changes here.
+    const snapshot: Record<string, any> = {};
+    for (const name of host.listProperties()) {
+      const value = host.getProperty(name);
+      if (value !== undefined) {
+        snapshot[name] = value;
+      }
+    }
+    componentState = snapshot;
 
     onStateChange?.(componentState);
   }
@@ -94,15 +104,25 @@
     class="flex items-center justify-between h-12 shrink-0 px-4 bg-card border-b border-border"
   >
     <h3 class="text-xs font-semibold text-muted-foreground">WASM Preview</h3>
-    {#if isLoading}
-      <span class="text-[11px] text-muted-foreground">Loading...</span>
-    {:else if error}
-      <span class="text-[11px] text-destructive">Error</span>
-    {:else if host?.isMounted()}
-      <span class="text-[11px] text-green-500">Running</span>
-    {:else}
-      <span class="text-[11px] text-muted-foreground">No component</span>
-    {/if}
+
+    <div class="flex items-center gap-3">
+      <label
+        class="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
+        title="Briefly outlines DOM elements whenever a reactive effect updates them"
+      >
+        <input
+          type="checkbox"
+          bind:checked={reactiveFlash}
+          class="h-3 w-3 accent-blue-400 cursor-pointer"
+        />
+        Highlight reactive updates
+      </label>
+      <span class="text-muted-foreground font-normal text-xs">
+        Compiled size: {(
+          wasmBytes?.byteLength ? wasmBytes.byteLength / 1024 : 0
+        ).toFixed(1)} KB
+      </span>
+    </div>
   </div>
 
   <Resizable.PaneGroup direction="vertical" class="flex-1">

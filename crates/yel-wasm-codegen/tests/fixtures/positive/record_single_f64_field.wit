@@ -1,0 +1,25 @@
+package yel:r1f64@0.1.0;
+
+interface shared-types {
+  record r {
+    a: f64,
+  }
+}
+
+interface app-component {
+  use shared-types.{ r };
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-r: func() -> r;
+    set-r: func(value: r);
+  }
+}
+
+world r1f64 {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

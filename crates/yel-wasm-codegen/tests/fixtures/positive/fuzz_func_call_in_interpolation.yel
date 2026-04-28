@@ -1,0 +1,9 @@
+// Calling a user-declared `func() -> string` callback inside a string interpolation.
+// The interpolation lowering path doesn't emit the callback invocation correctly
+// -> "expected i32 but nothing on stack" during core validation.
+// Root cause: emit_expr_as_string doesn't handle Call expressions (callback invocation).
+package yel:fb@0.1.0;
+export component App {
+    get-name: func() -> string;
+    Text { "hi {get-name()}" }
+}

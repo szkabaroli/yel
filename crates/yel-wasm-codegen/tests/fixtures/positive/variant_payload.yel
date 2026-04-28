@@ -1,0 +1,18 @@
+package yel:varpl@0.1.0;
+
+// Variant with mixed payloads exercises the discriminant-byte + fat-pointer
+// storage shape, distinct from enums (no payload) and option<T> (one
+// payload). Without this, the variant-payload branches in emit_signal_store
+// / SignalRead are unreachable from any fixture.
+variant Message {
+    ping,
+    text(string),
+    tagged(u32),
+}
+
+export component App {
+    last: Message;
+    VStack {
+        Text { "message arrived" }
+    }
+}

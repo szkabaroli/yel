@@ -1,0 +1,19 @@
+package yel:derived-simple@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-count: func() -> s32;
+    set-count: func(value: s32);
+    get-doubled: func() -> s32;
+    set-doubled: func(value: s32);
+  }
+}
+
+world derived-simple {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

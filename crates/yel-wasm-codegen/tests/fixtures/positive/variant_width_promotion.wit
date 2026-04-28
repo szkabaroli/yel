@@ -1,0 +1,26 @@
+package yel:vwp@0.1.0;
+
+interface shared-types {
+  variant v {
+    a(s32),
+    b(f32),
+  }
+}
+
+interface app-component {
+  use shared-types.{ v };
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-v: func() -> v;
+    set-v: func(value: v);
+  }
+}
+
+world vwp {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

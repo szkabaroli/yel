@@ -1,0 +1,14 @@
+package yel:filttest@0.1.0;
+
+// Exercises `MethodCall` + `Closure` + filter-call generation in the
+// core module. `items.filter({ x -> x > 0 })` lowers to a specialised
+// `$filter_0` function that captures the relevant signals and walks
+// the list — previously none of this was reached.
+export component App {
+    items: list<s32> = [-2, -1, 0, 1, 2];
+    VStack {
+        for n in items.filter({ x -> x > 0 }) key(n) {
+            Text { "positive: {n}" }
+        }
+    }
+}

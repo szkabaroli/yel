@@ -1,0 +1,19 @@
+package yel:liststatic@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-nums: func() -> list<s32>;
+    set-nums: func(value: list<s32>);
+    get-tags: func() -> list<string>;
+    set-tags: func(value: list<string>);
+  }
+}
+
+world liststatic {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

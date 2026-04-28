@@ -35,7 +35,6 @@ pub struct KnownElements {
     // Container elements
     pub list: Option<DefId>,
     pub scroll_view: Option<DefId>,
-    pub div: Option<DefId>,
     pub r#box: Option<DefId>,
 
     // Text elements
@@ -44,10 +43,16 @@ pub struct KnownElements {
     // Input elements
     pub button: Option<DefId>,
     pub text_field: Option<DefId>,
+    pub text_input: Option<DefId>,
+    pub integer_input: Option<DefId>,
+    pub float_input: Option<DefId>,
     pub checkbox: Option<DefId>,
+    pub select: Option<DefId>,
+    pub option: Option<DefId>,
 
     // Media elements
     pub image: Option<DefId>,
+    pub icon: Option<DefId>,
 
     // Utility elements
     pub spacer: Option<DefId>,
@@ -79,10 +84,6 @@ impl KnownElements {
         self.scroll_view.expect("ScrollView not initialized")
     }
 
-    pub fn div(&self) -> DefId {
-        self.div.expect("div not initialized")
-    }
-
     pub fn r#box(&self) -> DefId {
         self.r#box.expect("Box not initialized")
     }
@@ -99,12 +100,36 @@ impl KnownElements {
         self.text_field.expect("TextField not initialized")
     }
 
+    pub fn text_input(&self) -> DefId {
+        self.text_input.expect("TextInput not initialized")
+    }
+
+    pub fn integer_input(&self) -> DefId {
+        self.integer_input.expect("IntegerInput not initialized")
+    }
+
+    pub fn float_input(&self) -> DefId {
+        self.float_input.expect("FloatInput not initialized")
+    }
+
     pub fn checkbox(&self) -> DefId {
         self.checkbox.expect("Checkbox not initialized")
     }
 
+    pub fn select(&self) -> DefId {
+        self.select.expect("Select not initialized")
+    }
+
+    pub fn option(&self) -> DefId {
+        self.option.expect("Option not initialized")
+    }
+
     pub fn image(&self) -> DefId {
         self.image.expect("Image not initialized")
+    }
+
+    pub fn icon(&self) -> DefId {
+        self.icon.expect("Icon not initialized")
     }
 
     pub fn spacer(&self) -> DefId {
@@ -138,13 +163,18 @@ impl KnownElements {
             || self.zstack == Some(def_id)
             || self.list == Some(def_id)
             || self.scroll_view == Some(def_id)
-            || self.div == Some(def_id)
             || self.r#box == Some(def_id)
             || self.text == Some(def_id)
             || self.button == Some(def_id)
             || self.text_field == Some(def_id)
+            || self.text_input == Some(def_id)
+            || self.integer_input == Some(def_id)
+            || self.float_input == Some(def_id)
             || self.checkbox == Some(def_id)
+            || self.select == Some(def_id)
+            || self.option == Some(def_id)
             || self.image == Some(def_id)
+            || self.icon == Some(def_id)
             || self.spacer == Some(def_id)
             || self.divider == Some(def_id)
             || self.badge == Some(def_id)
@@ -219,6 +249,10 @@ pub struct KnownFunctions {
     pub s32_to_string: Option<DefId>,
     /// Convert u32 to string: func(u32) -> string
     pub u32_to_string: Option<DefId>,
+    /// Convert s64 to string: func(s64) -> string
+    pub s64_to_string: Option<DefId>,
+    /// Convert u64 to string: func(u64) -> string
+    pub u64_to_string: Option<DefId>,
     /// Convert f32 to string: func(f32) -> string
     pub f32_to_string: Option<DefId>,
     /// Convert f64 to string: func(f64) -> string
@@ -235,6 +269,20 @@ pub struct KnownFunctions {
     /// Safe list element access: func(list<T>, s32) -> option<T>
     /// Returns some(element) if index in bounds, none if out of bounds.
     pub list_get: Option<DefId>,
+
+    // Math functions
+    /// Minimum of two values: func(s32, s32) -> s32
+    pub min: Option<DefId>,
+    /// Maximum of two values: func(s32, s32) -> s32
+    pub max: Option<DefId>,
+
+    // Collection methods
+    /// Filter list by predicate: func(list<T>, func(T) -> bool) -> list<T>
+    pub filter: Option<DefId>,
+
+    // String methods
+    /// Check if string starts with prefix: func(string, string) -> bool
+    pub starts_with: Option<DefId>,
 }
 
 impl KnownFunctions {
@@ -252,6 +300,14 @@ impl KnownFunctions {
 
     pub fn u32_to_string(&self) -> DefId {
         self.u32_to_string.expect("u32_to_string not initialized")
+    }
+
+    pub fn s64_to_string(&self) -> DefId {
+        self.s64_to_string.expect("s64_to_string not initialized")
+    }
+
+    pub fn u64_to_string(&self) -> DefId {
+        self.u64_to_string.expect("u64_to_string not initialized")
     }
 
     pub fn f32_to_string(&self) -> DefId {
@@ -278,18 +334,40 @@ impl KnownFunctions {
         self.list_get.expect("list_get not initialized")
     }
 
+    pub fn min(&self) -> DefId {
+        self.min.expect("min not initialized")
+    }
+
+    pub fn max(&self) -> DefId {
+        self.max.expect("max not initialized")
+    }
+
+    pub fn filter(&self) -> DefId {
+        self.filter.expect("filter not initialized")
+    }
+
+    pub fn starts_with(&self) -> DefId {
+        self.starts_with.expect("starts_with not initialized")
+    }
+
     /// Check if a DefId is a known builtin function.
     pub fn is_builtin(&self, def_id: DefId) -> bool {
         self.concat == Some(def_id)
             || self.bool_to_string == Some(def_id)
             || self.s32_to_string == Some(def_id)
             || self.u32_to_string == Some(def_id)
+            || self.s64_to_string == Some(def_id)
+            || self.u64_to_string == Some(def_id)
             || self.f32_to_string == Some(def_id)
             || self.f64_to_string == Some(def_id)
             || self.char_to_string == Some(def_id)
             || self.object_to_string == Some(def_id)
             || self.len == Some(def_id)
             || self.list_get == Some(def_id)
+            || self.min == Some(def_id)
+            || self.max == Some(def_id)
+            || self.filter == Some(def_id)
+            || self.starts_with == Some(def_id)
     }
 }
 

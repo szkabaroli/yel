@@ -1,0 +1,17 @@
+package yel:ctnr@0.1.0;
+
+interface card-component {
+  resource card {
+    constructor();
+    mount: func(root: u32) -> u32;
+    unmount: func();
+    get-title: func() -> string;
+    set-title: func(value: string);
+  }
+}
+
+world ctnr {
+  import yel:ui/dom@0.1.0;
+  export card-component;
+  export yel:ui/dispatch@0.1.0;
+}

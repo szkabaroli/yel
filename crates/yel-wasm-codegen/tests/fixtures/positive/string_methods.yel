@@ -1,0 +1,13 @@
+package yel:strm@0.1.0;
+
+// Exercises the `starts_with` runtime helper via `string.starts-with(prefix)`.
+// The helper has been emitted all along but never reached by any fixture
+// — compile-time dead code was still being emitted.
+export component App {
+    name: string = "widget-123";
+    VStack {
+        if name.starts-with("widget-") {
+            Text { "is a widget" }
+        }
+    }
+}

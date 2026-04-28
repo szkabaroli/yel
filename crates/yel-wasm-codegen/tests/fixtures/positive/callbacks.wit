@@ -1,0 +1,24 @@
+package yel:cbtest@0.1.0;
+
+interface widget-component {
+  resource widget {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-count: func() -> s32;
+    set-count: func(value: s32);
+  }
+}
+
+interface widget-callbacks {
+  use widget-component.{ widget };
+  increment: func(self: borrow<widget>);
+}
+
+world cbtest {
+  import widget-callbacks;
+  import widget-component;
+  import yel:ui/dom@0.1.0;
+  export widget-component;
+  export yel:ui/dispatch@0.1.0;
+}

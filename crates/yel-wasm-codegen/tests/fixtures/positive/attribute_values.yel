@@ -1,0 +1,20 @@
+package yel:attrvals@0.1.0;
+
+// Exercises `emit_expr_as_attr_value` across the bool / s32 / string / f32
+// discriminant cases through a single element with mixed-typed attribute
+// bindings. Without this, only a subset of the attr-value encoding branches
+// are reached from any positive fixture.
+export component App {
+    flag: bool = true;
+    count: s32 = 3;
+    label: string = "hi";
+    ratio: f32 = 0.5;
+    VStack {
+        Text {
+            "{label}"
+            visible: flag
+            font-size: ratio
+            text-align: count
+        }
+    }
+}

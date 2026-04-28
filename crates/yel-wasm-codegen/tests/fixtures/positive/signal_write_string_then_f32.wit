@@ -1,0 +1,19 @@
+package yel:fb@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-count: func() -> string;
+    set-count: func(value: string);
+    get-label: func() -> f32;
+    set-label: func(value: f32);
+  }
+}
+
+world fb {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

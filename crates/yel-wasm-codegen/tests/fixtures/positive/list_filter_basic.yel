@@ -1,0 +1,15 @@
+package yel:filtbasic@0.1.0;
+
+// Exercises `list.filter` with a closure that captures a component
+// signal (`threshold`). The predicate references the captured signal
+// inside the closure body, verifying that filter's closure lowering
+// wires up both the closure parameter and captured state correctly.
+export component App {
+    items: list<s32> = [1, 2, 3, 4, 5];
+    threshold: s32 = 2;
+    VStack {
+        for n in items.filter({ x -> x > threshold }) key(n) {
+            Text { "big: {n}" }
+        }
+    }
+}

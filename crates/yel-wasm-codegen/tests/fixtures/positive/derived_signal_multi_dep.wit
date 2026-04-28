@@ -1,0 +1,21 @@
+package yel:derived-multi@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-price: func() -> s32;
+    set-price: func(value: s32);
+    get-quantity: func() -> s32;
+    set-quantity: func(value: s32);
+    get-total: func() -> s32;
+    set-total: func(value: s32);
+  }
+}
+
+world derived-multi {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

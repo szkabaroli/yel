@@ -1,0 +1,4 @@
+mixed numeric types
+f32
+s32
+no implicit coercion

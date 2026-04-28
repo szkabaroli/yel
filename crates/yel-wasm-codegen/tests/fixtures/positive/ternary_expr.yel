@@ -1,0 +1,12 @@
+package yel:ternary@0.1.0;
+
+// Ternary (`cond ? a : b`) driving a reactive getter. Exercises the
+// `LirExprKind::Ternary` emission path which is otherwise never
+// triggered by the main fixture set.
+export component App {
+    loaded: bool = true;
+    label: string = loaded ? "ready" : "loading";
+    VStack {
+        Text { "{label}" }
+    }
+}

@@ -1,11 +1,13 @@
 //! LIR expression types.
 
+use serde::{Serialize, Deserialize};
+
 use crate::hir::expr::{BinOp, UnaryOp};
 use crate::ids::{DefId, FieldIdx, LocalId};
 use crate::types::Ty;
 
 /// LIR literal values (primitives only - compound types use dedicated constructs).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LirLiteral {
     // Signed integers
     S8(i8),
@@ -27,7 +29,7 @@ pub enum LirLiteral {
 }
 
 /// A LIR expression (optimized for codegen).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LirExpr {
     pub kind: LirExprKind,
     pub ty: Ty,
@@ -40,7 +42,7 @@ impl LirExpr {
 }
 
 /// Kind of LIR expression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LirExprKind {
     /// Local variable.
     Local(LocalId),
@@ -65,8 +67,10 @@ pub enum LirExprKind {
     },
     /// Function call.
     Call { func: DefId, args: Vec<LirExpr> },
-    /// Signal read.
+    /// Signal read (component-local or global property).
     SignalRead(DefId),
+    /// Call a function on a global singleton (e.g. a host-implemented function).
+    GlobalCall { function: DefId, args: Vec<LirExpr> },
     /// Ternary expression.
     Ternary {
         condition: Box<LirExpr>,
@@ -132,19 +136,42 @@ pub enum LirExprKind {
         /// Total size of the tuple in bytes.
         total_size: u32,
     },
+
+    /// Closure expression (for filter predicates, etc.).
+    /// The closure body is stored as statements to be lowered to a block later.
+    Closure {
+        /// Parameter local IDs (assigned during lowering).
+        params: Vec<(LocalId, Ty)>,
+        /// Body statements.
+        body: Vec<LirStatement>,
+    },
+
+    /// Range expression (for iteration).
+    /// Represents start..end (exclusive) or start..=end (inclusive).
+    Range {
+        start: Box<LirExpr>,
+        end: Box<LirExpr>,
+        /// If true, the range is inclusive (start..=end).
+        inclusive: bool,
+    },
 }
 
 /// LIR statement.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LirStatement {
     /// Expression statement.
     Expr(LirExpr),
-    /// Signal write.
+    /// Signal write (component-local or global property).
     SignalWrite { signal: DefId, value: LirExpr },
     /// If statement.
     If {
         condition: LirExpr,
         then_branch: Vec<LirStatement>,
         else_branch: Option<Vec<LirStatement>>,
+    },
+    /// Let binding: allocates a local variable.
+    Let {
+        local_id: LocalId,
+        value: LirExpr,
     },
 }

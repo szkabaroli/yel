@@ -1,0 +1,8 @@
+// Package identifiers must be WIT-compatible kebab-case. Underscores are
+// rejected at parse time with a clear diagnostic instead of letting
+// wit-component fail later with "decoding custom section component-type".
+package yel:bad_name@0.1.0;
+
+export component App {
+    Text { "x" }
+}

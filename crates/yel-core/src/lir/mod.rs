@@ -10,26 +10,36 @@
 
 pub mod block;
 pub(crate) mod block_lower;
+pub mod dedupe;
+pub mod diff;
 pub mod expr;
 pub mod layout;
 pub mod lower;
+pub mod module;
 pub mod node;
 pub mod signal;
+pub mod tree_shape;
 
 // Block-based types
 pub use block::{
-    BlockId, ExprId, LirBlock, LirBlockEffect, LirOp, SlotId, SlotInfo, SlotKind, SlotValType,
-    StringId,
+    ExprId, LirBindingMode, LirBlock, LirBlockEffect, LirOp, LirSlotId, LirSlotInfo, LirSlotKind,
+    LirSlotValType, StringId,
 };
 
 // Expression types
 pub use expr::{LirExpr, LirExprKind, LirLiteral};
 
 // Layout utilities
-pub use layout::{align_to, discriminant_size, LayoutContext, RecordLayout, TypeLayout, VariantLayout};
+pub use layout::{
+    align_to, discriminant_size, max_flat_counts, per_valtype_counts, FlatValTypeCounts,
+    LirCoreValType, LirLayoutContext, LirTypeLayout, RecordLayout, VariantLayout,
+};
 
 // Main lowering entry point
-pub use lower::lower_component;
+pub use lower::{lower_component, lower_globals};
+
+// Module-scoped compilation unit
+pub use module::LirModule;
 
 // Component and node types
 pub use node::{LirBinding, LirComponent, LirHandler, LirNode, LirNodeKind};

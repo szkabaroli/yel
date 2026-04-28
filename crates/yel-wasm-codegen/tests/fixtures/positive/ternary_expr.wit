@@ -1,0 +1,19 @@
+package yel:ternary@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-loaded: func() -> bool;
+    set-loaded: func(value: bool);
+    get-label: func() -> string;
+    set-label: func(value: string);
+  }
+}
+
+world ternary {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

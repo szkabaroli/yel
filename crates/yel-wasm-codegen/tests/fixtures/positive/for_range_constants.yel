@@ -1,0 +1,14 @@
+package yel:forrngconst@0.1.0;
+
+// `for i in 3..9` with literal bounds — neither bound depends on any
+// signal, so the for-loop must register ZERO effects. The .dot snapshot
+// pins this negative case: if we accidentally register an effect for a
+// constant iterable, we pay needless runtime cost on every (unrelated)
+// signal write.
+export component App {
+    VStack {
+        for i in 3..9 {
+            Text { "tick" }
+        }
+    }
+}

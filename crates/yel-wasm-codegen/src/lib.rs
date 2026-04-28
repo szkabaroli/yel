@@ -6,12 +6,14 @@
 
 use thiserror::Error;
 
+pub mod dot;
 pub mod wasm;
 pub mod wit;
 pub mod wit_ast;
 
 // pub use lir_rust::generate_rust;
-pub use wasm::{generate_wasm, generate_wasm_with_wit, WasmWithWitOptions};
+pub use dot::{generate_dot, DotOptions};
+pub use wasm::{generate_wasm, generate_wasm_module, generate_wasm_with_wit, WasmWithWitOptions};
 pub use wit::{generate_wit, WitOptions};
 
 /// Code generation error.

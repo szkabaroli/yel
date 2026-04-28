@@ -1,0 +1,14 @@
+package yel:manyconcat@0.1.0;
+
+// Five interpolation segments → emits concat5 runtime helper (previously
+// unexercised; only concat2/concat3 showed up in other fixtures). Stresses
+// the arity-generic concat generator.
+export component App {
+    first: string = "a";
+    second: string = "b";
+    third: string = "c";
+    fourth: string = "d";
+    VStack {
+        Text { "{first}|{second}|{third}|{fourth}|end" }
+    }
+}

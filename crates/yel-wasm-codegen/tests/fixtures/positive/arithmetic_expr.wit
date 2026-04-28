@@ -1,0 +1,21 @@
+package yel:arith@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-x: func() -> s32;
+    set-x: func(value: s32);
+    get-y: func() -> s32;
+    set-y: func(value: s32);
+    get-r: func() -> f32;
+    set-r: func(value: f32);
+  }
+}
+
+world arith {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

@@ -1,0 +1,9 @@
+// Writing a composite with an f32 payload exercises typed scratch
+// locals in emit_flat_slot_store. Previously errored with
+// "emit_flat_slot_store: flat slot has valtype F32 but only i32 supported".
+package test:sigwrite-f32@0.1.0;
+
+export component App {
+    value: option<f32> = some(3.14);
+    Text { "app" }
+}

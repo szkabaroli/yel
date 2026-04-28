@@ -1,0 +1,20 @@
+package yel:globout@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+  }
+}
+
+interface status {
+  on-ready-changed: func(v: bool);
+}
+
+world globout {
+  import status;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

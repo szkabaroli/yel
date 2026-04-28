@@ -1,0 +1,6 @@
+package yel:cob@0.1.0;
+export component App {
+    get-maybe: func() -> option<s32>;
+    m: option<s32> = get-maybe();
+    "x"
+}

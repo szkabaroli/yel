@@ -1,0 +1,54 @@
+package yel:dotdemo@0.1.0;
+
+interface shared-types {
+  record point {
+    x: s32,
+    y: s32,
+  }
+  enum status {
+    idle,
+    running,
+    done,
+  }
+}
+
+interface app-component {
+  use shared-types.{ status, point };
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-count: func() -> s32;
+    set-count: func(value: s32);
+    get-ratio: func() -> f32;
+    set-ratio: func(value: f32);
+    get-flag: func() -> bool;
+    set-flag: func(value: bool);
+    get-name: func() -> string;
+    set-name: func(value: string);
+    get-maybe: func() -> option<s32>;
+    set-maybe: func(value: option<s32>);
+    get-status: func() -> status;
+    set-status: func(value: status);
+    get-point: func() -> point;
+    set-point: func(value: point);
+    get-tags: func() -> list<string>;
+    set-tags: func(value: list<string>);
+    get-outcome: func() -> result<s32, string>;
+    set-outcome: func(value: result<s32, string>);
+  }
+}
+
+interface app-callbacks {
+  use app-component.{ app };
+  on-reset: func(self: borrow<app>);
+}
+
+world dotdemo {
+  import app-callbacks;
+  import app-component;
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

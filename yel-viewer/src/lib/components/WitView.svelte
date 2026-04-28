@@ -5,6 +5,7 @@
   import { StreamLanguage } from "@codemirror/language";
   import { syntaxHighlighting } from "@codemirror/language";
   import { tags, tagHighlighter } from "@lezer/highlight";
+  import CopyButton from "./CopyButton.svelte";
 
   interface Props {
     code: string;
@@ -169,6 +170,7 @@
   <!-- Header -->
   <div class="flex items-center justify-between h-12 shrink-0 px-4 bg-card border-b border-border">
     <h3 class="text-xs font-semibold text-muted-foreground">WebAssembly Interface Types</h3>
+    <CopyButton text={code} title="Copy WIT" />
   </div>
 
   <!-- Editor -->

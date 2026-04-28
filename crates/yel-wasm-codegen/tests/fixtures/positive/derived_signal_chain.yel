@@ -1,0 +1,12 @@
+// Chain of derived signals: A → B → C. Writing A must propagate all the
+// way to C and any effect reading C must re-run.
+package yel:derived-chain@0.1.0;
+
+export component App {
+    a: s32 = 1;
+    b: s32 = a + 10;
+    c: s32 = b * 2;
+    VStack {
+        Text { "c: {c}" }
+    }
+}

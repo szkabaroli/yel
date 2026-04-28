@@ -1,0 +1,18 @@
+// Minimized from fuzzer seeds 6, 7, 10 (class: "values remaining on stack").
+// Two-component programs where a non-exported component B has a callback
+// returning a composite type (option<T>, result<T,E>) that is invoked as a
+// standalone expression statement in an element handler block. The call
+// site does not drop the option payload's full flat-slot shape before
+// the handler's block end.
+// Root-cause hypothesis: statement-level discard of a composite callback
+// return only drops the first slot (the discriminant), leaving the payload
+// slots on the operand stack when the enclosing block ends. The bug is
+// sensitive to a sibling exported component earlier in the file providing
+// the resource-type registration used by B's codegen path.
+export component A {
+    export on-submit: func();
+}
+component B {
+    on-submit: func() -> option<s32>;
+    Text { pressed: { on-submit(); }, }
+}

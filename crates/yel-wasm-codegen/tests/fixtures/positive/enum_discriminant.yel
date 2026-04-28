@@ -1,0 +1,19 @@
+package yel:enumtest@0.1.0;
+
+// Exercises `LirExprKind::EnumCase` — referring to an enum case by
+// path. Without this fixture the enum-discriminant emission path is
+// never reached.
+enum Status {
+    pending,
+    active,
+    done,
+}
+
+export component App {
+    state: Status = Status.active;
+    VStack {
+        if state == Status.done {
+            Text { "finished" }
+        }
+    }
+}

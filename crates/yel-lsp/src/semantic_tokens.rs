@@ -2,9 +2,9 @@
 //!
 //! Provides semantic highlighting for user-defined types (records, enums, variants).
 
+use tower_lsp::lsp_types::*;
 use yel_core::syntax::ast::{Expr, File, Literal, Node, TyKind};
 use yel_core::syntax::parser::parse_file;
-use tower_lsp::lsp_types::*;
 
 /// Semantic token types we support.
 pub const TOKEN_TYPES: &[SemanticTokenType] = &[
@@ -66,12 +66,17 @@ pub fn provide_semantic_tokens(content: &str) -> Option<SemanticTokensResult> {
     let variant_names: Vec<&str> = file.variants.iter().map(|v| v.node.name.as_str()).collect();
 
     // Collect tokens from the AST
-    collect_tokens_from_file(file, content, &record_names, &enum_names, &variant_names, &mut tokens);
+    collect_tokens_from_file(
+        file,
+        content,
+        &record_names,
+        &enum_names,
+        &variant_names,
+        &mut tokens,
+    );
 
     // Sort tokens by position
-    tokens.sort_by(|a, b| {
-        a.line.cmp(&b.line).then(a.start_char.cmp(&b.start_char))
-    });
+    tokens.sort_by(|a, b| a.line.cmp(&b.line).then(a.start_char.cmp(&b.start_char)));
 
     // Convert to LSP format (delta encoding)
     let mut data = Vec::new();
@@ -125,7 +130,15 @@ fn collect_tokens_from_file(
 
         // Token for field types
         for field in &record.node.fields {
-            collect_tokens_from_type(&field.node.ty.kind, field.node.ty.span.start, content, record_names, enum_names, variant_names, tokens);
+            collect_tokens_from_type(
+                &field.node.ty.kind,
+                field.node.ty.span.start,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
         }
     }
 
@@ -177,7 +190,50 @@ fn collect_tokens_from_file(
 
             // Token for payload type
             if let Some(payload) = &case.node.payload {
-                collect_tokens_from_type(&payload.kind, payload.span.start, content, record_names, enum_names, variant_names, tokens);
+                collect_tokens_from_type(
+                    &payload.kind,
+                    payload.span.start,
+                    content,
+                    record_names,
+                    enum_names,
+                    variant_names,
+                    tokens,
+                );
+            }
+        }
+    }
+
+    // Globals (singleton declarations)
+    for global in &file.globals {
+        let (line, col) = offset_to_line_col(content, global.node.name_span.start);
+        tokens.push(Token {
+            line,
+            start_char: col,
+            length: global.node.name.len() as u32,
+            token_type: STRUCT_INDEX,
+            modifiers: DECLARATION_MODIFIER,
+        });
+
+        for prop in &global.node.properties {
+            collect_tokens_from_type(
+                &prop.node.ty.kind,
+                prop.node.ty.span.start,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
+            if let Some(default) = &prop.node.default {
+                collect_tokens_from_expr(
+                    &default.node,
+                    default.span.start,
+                    content,
+                    record_names,
+                    enum_names,
+                    variant_names,
+                    tokens,
+                );
             }
         }
     }
@@ -186,17 +242,40 @@ fn collect_tokens_from_file(
     for component in &file.components {
         // Property types
         for prop in &component.node.properties {
-            collect_tokens_from_type(&prop.node.ty.kind, prop.node.ty.span.start, content, record_names, enum_names, variant_names, tokens);
+            collect_tokens_from_type(
+                &prop.node.ty.kind,
+                prop.node.ty.span.start,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
 
             // Check default value for enum cases
             if let Some(default) = &prop.node.default {
-                collect_tokens_from_expr(&default.node, default.span.start, content, record_names, enum_names, variant_names, tokens);
+                collect_tokens_from_expr(
+                    &default.node,
+                    default.span.start,
+                    content,
+                    record_names,
+                    enum_names,
+                    variant_names,
+                    tokens,
+                );
             }
         }
 
         // Body nodes
         for node in &component.node.body {
-            collect_tokens_from_node(&node.node, content, record_names, enum_names, variant_names, tokens);
+            collect_tokens_from_node(
+                &node.node,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
         }
     }
 }
@@ -215,7 +294,8 @@ fn collect_tokens_from_type(
             let (line, col) = offset_to_line_col(content, offset);
             let token_type = if record_names.contains(&name.as_str()) {
                 STRUCT_INDEX
-            } else if enum_names.contains(&name.as_str()) || variant_names.contains(&name.as_str()) {
+            } else if enum_names.contains(&name.as_str()) || variant_names.contains(&name.as_str())
+            {
                 ENUM_INDEX
             } else {
                 TYPE_INDEX
@@ -229,22 +309,62 @@ fn collect_tokens_from_type(
             });
         }
         TyKind::List(inner) => {
-            collect_tokens_from_type(&inner.kind, inner.span.start, content, record_names, enum_names, variant_names, tokens);
+            collect_tokens_from_type(
+                &inner.kind,
+                inner.span.start,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
         }
         TyKind::Option(inner) => {
-            collect_tokens_from_type(&inner.kind, inner.span.start, content, record_names, enum_names, variant_names, tokens);
+            collect_tokens_from_type(
+                &inner.kind,
+                inner.span.start,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
         }
         TyKind::Result { ok, err } => {
             if let Some(ok_ty) = ok {
-                collect_tokens_from_type(&ok_ty.kind, ok_ty.span.start, content, record_names, enum_names, variant_names, tokens);
+                collect_tokens_from_type(
+                    &ok_ty.kind,
+                    ok_ty.span.start,
+                    content,
+                    record_names,
+                    enum_names,
+                    variant_names,
+                    tokens,
+                );
             }
             if let Some(err_ty) = err {
-                collect_tokens_from_type(&err_ty.kind, err_ty.span.start, content, record_names, enum_names, variant_names, tokens);
+                collect_tokens_from_type(
+                    &err_ty.kind,
+                    err_ty.span.start,
+                    content,
+                    record_names,
+                    enum_names,
+                    variant_names,
+                    tokens,
+                );
             }
         }
         TyKind::Tuple(types) => {
             for t in types {
-                collect_tokens_from_type(&t.kind, t.span.start, content, record_names, enum_names, variant_names, tokens);
+                collect_tokens_from_type(
+                    &t.kind,
+                    t.span.start,
+                    content,
+                    record_names,
+                    enum_names,
+                    variant_names,
+                    tokens,
+                );
             }
         }
         _ => {}
@@ -281,33 +401,109 @@ fn collect_tokens_from_expr(
                 Literal::Record { fields } => {
                     // Anonymous record literal - just process field values
                     for (_, value) in fields {
-                        collect_tokens_from_expr(&value.node, value.span.start, content, record_names, enum_names, variant_names, tokens);
+                        collect_tokens_from_expr(
+                            &value.node,
+                            value.span.start,
+                            content,
+                            record_names,
+                            enum_names,
+                            variant_names,
+                            tokens,
+                        );
                     }
                 }
                 Literal::List(items) => {
                     // Process each item in the list
                     for item in items {
-                        collect_tokens_from_expr(&item.node, item.span.start, content, record_names, enum_names, variant_names, tokens);
+                        collect_tokens_from_expr(
+                            &item.node,
+                            item.span.start,
+                            content,
+                            record_names,
+                            enum_names,
+                            variant_names,
+                            tokens,
+                        );
                     }
                 }
                 _ => {}
             }
         }
         Expr::Binary(left, _, right) => {
-            collect_tokens_from_expr(&left.node, left.span.start, content, record_names, enum_names, variant_names, tokens);
-            collect_tokens_from_expr(&right.node, right.span.start, content, record_names, enum_names, variant_names, tokens);
+            collect_tokens_from_expr(
+                &left.node,
+                left.span.start,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
+            collect_tokens_from_expr(
+                &right.node,
+                right.span.start,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
         }
         Expr::Unary(_, inner) => {
-            collect_tokens_from_expr(&inner.node, inner.span.start, content, record_names, enum_names, variant_names, tokens);
+            collect_tokens_from_expr(
+                &inner.node,
+                inner.span.start,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
         }
-        Expr::Ternary { condition, then_expr, else_expr } => {
-            collect_tokens_from_expr(&condition.node, condition.span.start, content, record_names, enum_names, variant_names, tokens);
-            collect_tokens_from_expr(&then_expr.node, then_expr.span.start, content, record_names, enum_names, variant_names, tokens);
-            collect_tokens_from_expr(&else_expr.node, else_expr.span.start, content, record_names, enum_names, variant_names, tokens);
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_tokens_from_expr(
+                &condition.node,
+                condition.span.start,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
+            collect_tokens_from_expr(
+                &then_expr.node,
+                then_expr.span.start,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
+            collect_tokens_from_expr(
+                &else_expr.node,
+                else_expr.span.start,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
         }
         Expr::Call(_, args) => {
             for arg in args {
-                collect_tokens_from_expr(&arg.node, arg.span.start, content, record_names, enum_names, variant_names, tokens);
+                collect_tokens_from_expr(
+                    &arg.node,
+                    arg.span.start,
+                    content,
+                    record_names,
+                    enum_names,
+                    variant_names,
+                    tokens,
+                );
             }
         }
         _ => {}
@@ -326,47 +522,126 @@ fn collect_tokens_from_node(
         Node::Element(el) => {
             // Check bindings for type references
             for binding in &el.bindings {
-                collect_tokens_from_expr(&binding.node.value.node, binding.node.value.span.start, content, record_names, enum_names, variant_names, tokens);
+                collect_tokens_from_expr(
+                    &binding.node.value.node,
+                    binding.node.value.span.start,
+                    content,
+                    record_names,
+                    enum_names,
+                    variant_names,
+                    tokens,
+                );
             }
 
             // Check handlers
             for handler in &el.handlers {
                 for stmt in &handler.node.body {
                     if let yel_core::syntax::ast::Statement::Expr(expr) = &stmt.node {
-                        collect_tokens_from_expr(&expr.node, expr.span.start, content, record_names, enum_names, variant_names, tokens);
+                        collect_tokens_from_expr(
+                            &expr.node,
+                            expr.span.start,
+                            content,
+                            record_names,
+                            enum_names,
+                            variant_names,
+                            tokens,
+                        );
                     }
                 }
             }
 
             // Recurse into children
             for child in &el.children {
-                collect_tokens_from_node(&child.node, content, record_names, enum_names, variant_names, tokens);
+                collect_tokens_from_node(
+                    &child.node,
+                    content,
+                    record_names,
+                    enum_names,
+                    variant_names,
+                    tokens,
+                );
             }
         }
         Node::If(if_node) => {
-            collect_tokens_from_expr(&if_node.condition.node, if_node.condition.span.start, content, record_names, enum_names, variant_names, tokens);
+            collect_tokens_from_expr(
+                &if_node.condition.node,
+                if_node.condition.span.start,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
             for child in &if_node.then_branch {
-                collect_tokens_from_node(&child.node, content, record_names, enum_names, variant_names, tokens);
+                collect_tokens_from_node(
+                    &child.node,
+                    content,
+                    record_names,
+                    enum_names,
+                    variant_names,
+                    tokens,
+                );
             }
             for (cond, branch) in &if_node.else_if_branches {
-                collect_tokens_from_expr(&cond.node, cond.span.start, content, record_names, enum_names, variant_names, tokens);
+                collect_tokens_from_expr(
+                    &cond.node,
+                    cond.span.start,
+                    content,
+                    record_names,
+                    enum_names,
+                    variant_names,
+                    tokens,
+                );
                 for child in branch {
-                    collect_tokens_from_node(&child.node, content, record_names, enum_names, variant_names, tokens);
+                    collect_tokens_from_node(
+                        &child.node,
+                        content,
+                        record_names,
+                        enum_names,
+                        variant_names,
+                        tokens,
+                    );
                 }
             }
             if let Some(else_branch) = &if_node.else_branch {
                 for child in else_branch {
-                    collect_tokens_from_node(&child.node, content, record_names, enum_names, variant_names, tokens);
+                    collect_tokens_from_node(
+                        &child.node,
+                        content,
+                        record_names,
+                        enum_names,
+                        variant_names,
+                        tokens,
+                    );
                 }
             }
         }
         Node::For(for_node) => {
-            collect_tokens_from_expr(&for_node.iterable.node, for_node.iterable.span.start, content, record_names, enum_names, variant_names, tokens);
+            collect_tokens_from_expr(
+                &for_node.iterable.node,
+                for_node.iterable.span.start,
+                content,
+                record_names,
+                enum_names,
+                variant_names,
+                tokens,
+            );
             for child in &for_node.body {
-                collect_tokens_from_node(&child.node, content, record_names, enum_names, variant_names, tokens);
+                collect_tokens_from_node(
+                    &child.node,
+                    content,
+                    record_names,
+                    enum_names,
+                    variant_names,
+                    tokens,
+                );
             }
         }
         Node::Text(_) => {}
+        Node::Children => {
+            // `@children` could get its own keyword token later; treat as
+            // plain text for now so the file still parses/tokenizes fine.
+        }
     }
 }
 

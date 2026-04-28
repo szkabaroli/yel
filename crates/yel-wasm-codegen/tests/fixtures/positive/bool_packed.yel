@@ -1,0 +1,12 @@
+package yel:booltest@0.1.0;
+
+// Regression: narrow types (bool) packed next to wider ones (string) used
+// to blow out adjacent bytes on every write because the setter/SignalWrite
+// fallback path emitted `i32.store` instead of `i32.store8`.
+export component App {
+    flag: bool = false;
+    title: string = "hi";
+    VStack {
+        Text { "{title}" }
+    }
+}

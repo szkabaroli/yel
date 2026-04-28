@@ -48,6 +48,7 @@
   --border: #d1d5db;
   --input: #d1d5db;
   --ring: #6b7280;
+  --comment: #6e7781;
 }
 
 /* Dark mode */
@@ -71,6 +72,7 @@
     --border: #27272a;
     --input: #27272a;
     --ring: #a1a1aa;
+    --comment: #6e7781;
   }
 }
 
@@ -199,6 +201,13 @@ body {
   .wast-name { color: #7ee787; }
   .wast-modifier { color: #ff7b72; }
   .wast-attr { color: #ff7b72; }
+
+  /* Layout-neutral wrapper element used by `for` iter and `if`
+     branch teardown. The compiler emits one `yel-frag` per iter and
+     per active branch; `display: contents` keeps it transparent to
+     flex/grid/inline layout while still owning its children for
+     cascading remove. */
+  yel-frag { display: contents; }
 
   /* WIT */
   .wit-keyword { color: #ff7b72; }

@@ -1,0 +1,17 @@
+package yel:cbargs@0.1.0;
+
+// Exercises a callback declared with arguments — `func(item: s32)`. Most
+// existing callback fixtures declare only zero-arg callbacks, so the
+// args-bearing callback-declaration path is otherwise uncovered.
+// NOTE: the snapshot shows the declared `item: s32` arg is *not* currently
+// surfaced in WIT (only `self: borrow<widget>` appears) — the argument
+// list is dropped somewhere between THIR and WIT emission. A future fix
+// should propagate the declared params; once it does, the snapshot diff
+// will flag the change for review.
+export component Widget {
+    export on-select: func(item: s32);
+
+    VStack {
+        Text { "widget" }
+    }
+}

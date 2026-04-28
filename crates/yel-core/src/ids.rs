@@ -1,5 +1,6 @@
 //! Unique identifiers for compiler definitions.
 
+use serde::Deserialize;
 use serde::Serialize;
 use std::fmt;
 
@@ -10,7 +11,7 @@ use std::fmt;
 /// - Records, Enums, Variants
 /// - Functions
 /// - Fields (within their owner)
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize)]
 pub struct DefId(pub u32);
 
 impl DefId {
@@ -36,7 +37,7 @@ impl fmt::Display for DefId {
 }
 
 /// Index into fields of a record or component.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub struct FieldIdx(pub u32);
 
 impl FieldIdx {
@@ -76,7 +77,7 @@ impl fmt::Display for VariantIdx {
 }
 
 /// Local variable identifier within a body.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub struct LocalId(pub u32);
 
 impl LocalId {
@@ -116,7 +117,7 @@ impl fmt::Display for ExprId {
 }
 
 /// Node identifier for UI nodes.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub struct NodeId(pub u32);
 
 impl NodeId {
@@ -136,7 +137,7 @@ impl fmt::Display for NodeId {
 }
 
 /// Block identifier for LIR blocks within a component.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default, Serialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default, Serialize, Deserialize)]
 pub struct BlockId(pub u32);
 
 impl BlockId {
@@ -152,6 +153,74 @@ impl BlockId {
 impl fmt::Display for BlockId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "block#{}", self.0)
+    }
+}
+
+/// Identifier for a `for` loop within a component. Stable across tree
+/// → block lowering. Used to annotate effects registered inside a
+/// for-body so their update_blocks can fan out over the correct
+/// for's tracking array.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize)]
+pub struct ForId(pub u32);
+
+impl ForId {
+    pub fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl fmt::Display for ForId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "for#{}", self.0)
+    }
+}
+
+/// Identifier for an `if` op within a component. Stable across tree → block
+/// lowering. Used to key the per-if-op typed boundary structs in the
+/// concrete-typed mount-tree.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize)]
+pub struct IfId(pub u32);
+
+impl IfId {
+    pub fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl fmt::Display for IfId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "if#{}", self.0)
+    }
+}
+
+/// Identifier for a per-component tree boundary in the concrete-typed
+/// mount-tree. One id per emitted boundary struct (component root, each
+/// `if` anchor, each branch, each `for` anchor, each iter body). Stable
+/// per `LirComponent`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize)]
+pub struct TreeBoundaryId(pub u32);
+
+impl TreeBoundaryId {
+    pub fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl fmt::Display for TreeBoundaryId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "tree_boundary#{}", self.0)
     }
 }
 

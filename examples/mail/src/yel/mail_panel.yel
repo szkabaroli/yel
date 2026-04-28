@@ -1,0 +1,833 @@
+package meshx:mail@0.1.0;
+
+// ============================================================================
+// Mail backend — all business logic lives in Rust behind this import.
+//
+// The Yel component keeps only:
+//   - local UI state (selected mailbox/label, search, filter, sort, selection,
+//     expansion, reply/compose mode)
+//   - the UI tree
+//
+// Everything else (JMAP, threading, filtering, sorting, formatting, labels,
+// quota, keybinding dispatch) comes from the backend so the UI stays pure.
+// ============================================================================
+
+export global MailBackend {
+    // ---- Data (pushed by backend as it pulls from JMAP) ----
+    in loading: bool;
+    in connected: bool;
+    in me: Account;
+    in labels: list<Label>;
+    in mailbox-counts: list<MailboxUnread>;
+    in visible-message-count: s32;
+    in flat-rows: list<FlatRow>;
+    in page-title: string;
+    in move-targets: list<MoveTarget>;
+    in storage: StorageQuota;
+
+    // Smart card carousel state for the currently-selected thread.
+    in thread-smart-cards: list<SmartCardEntry>;
+    // True when the detail view shows a full thread (count>1 and thread header selected).
+    in show-thread-view: bool;
+    // The thread rendered in the detail pane (if a single selection exists).
+    in selected-thread: option<Thread>;
+    // The single selected message (if not a thread-header selection).
+    in selected-message: option<Message>;
+    // Total count of selected ids (covers bulk-select stack view).
+    in selection-count: s32;
+    // First five messages of the current selection for the stack view.
+    in selection-preview: list<Message>;
+
+    // ---- Queries (UI asks host; host returns values) ----
+    format-full-date: func(epoch-ms: s64) -> string;
+    lookup-label: func(id: string) -> option<Label>;
+    label-exists: func(id: string) -> bool;
+
+    // ---- Commands (host-implemented functions fired by the UI) ----
+    set-mailbox: func(mailbox: Mailbox);
+    set-label-filter: func(label-id: string);
+    clear-label-filter: func();
+    set-search: func(q: string);
+    set-filter: func(f: Filter);
+    set-sort: func(s: Sort);
+
+    // Selection model (Svelte Set<string> flattened to sequential commands).
+    select-only: func(id: string);
+    select-thread: func(thread-id: string);
+    toggle-select: func(id: string);
+    extend-selection-to: func(id: string);
+    clear-selection: func();
+
+    toggle-thread-expanded: func(thread-id: string);
+    focus-next-row: func();
+    focus-prev-row: func();
+
+    mark-read: func(id: string);
+    toggle-flag: func(id: string);
+    toggle-read: func(id: string);
+    fetch-body: func(id: string);
+
+    bulk-set-read: func(read: bool);
+    bulk-toggle-flag: func();
+    bulk-move: func(mailbox: Mailbox);
+
+    update-message-labels: func(id: string, labels: list<string>);
+    add-label: func(name: string, color: LabelColor) -> string;
+    create-label-from-prompt: func();    // opens host prompt, creates, attaches
+
+    // Compose + reply lifecycle
+    open-compose: func();
+    close-compose: func();
+    send-compose: func(to: string, body: string);
+    schedule-compose: func(to: string, body: string);
+
+    start-reply: func(mode: ReplyMode);
+    cancel-reply: func();
+    send-reply: func(body: string, forward-to: string);
+
+    // Smart card carousel
+    smart-card-prev: func();
+    smart-card-next: func();
+
+    // Keyboard actions (fired from KeybindingAction elements)
+    handle-action: func(name: string);
+
+    // Session bootstrap (URL → params handled in Rust; Yel triggers on mount).
+    boot: func();
+}
+
+// ============================================================================
+// Helper: the mailbox icon lookup. Enum match would be nicer; today Yel uses
+// a chain of if/else-if at the call site, so we split into a tiny component.
+// ============================================================================
+
+component MailboxIcon {
+    mailbox: Mailbox;
+    size: s32 = 18;
+
+    if mailbox == Mailbox.inbox    { Icon { name: "tray",              size: size } }
+    else if mailbox == Mailbox.flagged { Icon { name: "flag",          size: size } }
+    else if mailbox == Mailbox.sent    { Icon { name: "paper-plane-right", size: size } }
+    else if mailbox == Mailbox.drafts  { Icon { name: "note",          size: size } }
+    else if mailbox == Mailbox.archive { Icon { name: "archive",       size: size } }
+    else if mailbox == Mailbox.spam    { Icon { name: "prohibit",      size: size } }
+    else                                 { Icon { name: "trash",         size: size } }
+}
+
+// ============================================================================
+// Filter / sort dropdown (top-right funnel icon in the heading)
+// ============================================================================
+
+component FilterSortMenu {
+    current-filter: Filter;
+    current-sort: Sort;
+
+    DropdownMenu {
+        align: "end"
+        min-width: 192px
+        trigger-icon: "funnel-simple"
+        trigger-variant: "ghost"
+
+        DropdownLabel { text: "Filter" }
+        DropdownItem {
+            label: "All messages"
+            icon: "tray"
+            active: current-filter == Filter.all
+            clicked: { MailBackend.set-filter(Filter.all); }
+        }
+        DropdownItem {
+            label: "Unread"
+            icon: "circle"
+            active: current-filter == Filter.unread
+            clicked: { MailBackend.set-filter(Filter.unread); }
+        }
+        DropdownItem {
+            label: "Flagged"
+            icon: "flag"
+            active: current-filter == Filter.flagged
+            clicked: { MailBackend.set-filter(Filter.flagged); }
+        }
+        DropdownItem {
+            label: "Has attachments"
+            icon: "paperclip"
+            active: current-filter == Filter.attachments
+            clicked: { MailBackend.set-filter(Filter.attachments); }
+        }
+        DropdownItem {
+            label: "Mentions me"
+            icon: "at"
+            active: current-filter == Filter.mentions-me
+            clicked: { MailBackend.set-filter(Filter.mentions-me); }
+        }
+        DropdownItem {
+            label: "To me"
+            icon: "user"
+            active: current-filter == Filter.to-me
+            clicked: { MailBackend.set-filter(Filter.to-me); }
+        }
+
+        DropdownSeparator {}
+        DropdownLabel { text: "Sort by" }
+        DropdownItem {
+            label: "Date"    icon: "calendar" active: current-sort == Sort.date
+            clicked: { MailBackend.set-sort(Sort.date); }
+        }
+        DropdownItem {
+            label: "Sender"  icon: "user"     active: current-sort == Sort.sender
+            clicked: { MailBackend.set-sort(Sort.sender); }
+        }
+        DropdownItem {
+            label: "Subject" icon: "text-aa"  active: current-sort == Sort.subject
+            clicked: { MailBackend.set-sort(Sort.subject); }
+        }
+    }
+}
+
+// ============================================================================
+// Row in the message list — one flat row (thread header, thread member, or
+// collapsed thread). All tint / rounding / divider decisions come pre-baked
+// from FlatRow so the UI has no imperative logic.
+// ============================================================================
+
+component MessageRow {
+    row: FlatRow;
+    my-email: string;
+
+    HStack {
+        tint: row.tint
+        round-top: row.round-top
+        round-bottom: row.round-bottom
+        selected: row.tint == 3
+        padding: 10px
+
+        // Flag + unread dot column
+        VStack {
+            gap: 6px
+            Button {
+                variant: "icon"
+                tint: row.msg.flagged ? #eab308 : #9ca3af
+                Icon {
+                    name: "flag"
+                    variant: row.msg.flagged ? "fill" : "regular"
+                    size: 16
+                }
+                clicked: { MailBackend.toggle-flag(row.msg.id); }
+            }
+            if row.unread-dot {
+                Icon { name: "asterisk-simple" variant: "fill" size: 16 tint: #f43f5e }
+            }
+        }
+
+        // Main column: sender row, subject row, preview row
+        VStack {
+            grow: 1
+            // Sender / thread-count / icons / date
+            HStack {
+                Text {
+                    // "To: a, b" when I'm the sender, else the from name.
+                    content: row.msg.from.email == my-email
+                        ? "To: {row.msg.to-display}"
+                        : row.msg.from.name
+                    weight: row.tint == 3 ? "inherit" : (row.unread-dot ? "bold" : "medium")
+                }
+
+                if row.thread-count > 1 {
+                    Button {
+                        variant: "pill"
+                        "{row.thread-count}"
+                        Icon {
+                            name: row.is-expanded ? "caret-down" : "caret-right"
+                            size: 12
+                        }
+                        clicked: { MailBackend.toggle-thread-expanded(row.thread-id); }
+                    }
+                }
+
+                Spacer {}
+
+                if row.msg.smart-card.kind != SmartCardKind.none {
+                    Icon { name: row.msg.smart-card-icon variant: "fill" size: 14 }
+                }
+                if row.msg.has-attachments {
+                    Icon { name: "paperclip" variant: "fill" size: 14 }
+                }
+                Text { content: row.msg.date-display size: 12px }
+            }
+
+            // Subject
+            Text {
+                content: row.msg.subject
+                weight: row.unread-dot ? "medium" : "regular"
+                color: row.tint == 3 ? #ffffff : (row.unread-dot ? #27272a : #71717a)
+            }
+
+            // Preview
+            Text {
+                content: row.msg.preview
+                size: 12px
+                opacity: row.tint == 3 ? 50% : 70%
+            }
+        }
+
+        // Click / keyboard
+        clicked: {
+            if row.is-thread-header && row.thread-count > 1 {
+                MailBackend.select-thread(row.thread-id);
+            } else {
+                MailBackend.select-only(row.msg.id);
+                MailBackend.mark-read(row.msg.id);
+                MailBackend.fetch-body(row.msg.id);
+            }
+        }
+    }
+
+    if row.show-divider {
+        Divider {}
+    }
+}
+
+// ============================================================================
+// Detail-pane toolbar (read/unread, move-to, archive/trash/junk, reply,
+// reply-all, forward, flag, close).
+// ============================================================================
+
+component DetailToolbar {
+    message: Message;
+
+    HStack {
+        gap: 4px
+        padding: 8px
+
+        Tooltip {
+            label: message.read ? "Mark as unread" : "Mark as read"
+            Button {
+                variant: "ghost"
+                Icon { name: message.read ? "envelope" : "envelope-open" size: 18 }
+                clicked: { MailBackend.toggle-read(message.id); }
+            }
+        }
+
+        Divider { vertical: true }
+
+        // Move-to dropdown only for trash/archive/spam; otherwise the default
+        // three-action group (archive / trash / junk).
+        if message.mailbox == Mailbox.trash
+           || message.mailbox == Mailbox.archive
+           || message.mailbox == Mailbox.spam {
+            DropdownMenu {
+                align: "start"
+                min-width: 160px
+                trigger-label: "Move to"
+                trigger-icon: "folder"
+                trigger-variant: "ghost"
+
+                for target in MailBackend.move-targets {
+                    DropdownItem {
+                        label: target.label
+                        icon: target.icon
+                        clicked: { MailBackend.bulk-move(target.mailbox); }
+                    }
+                }
+            }
+        } else {
+            Tooltip { label: "Archive"
+                Button { variant: "ghost" Icon { name: "archive" size: 18 }
+                    clicked: { MailBackend.bulk-move(Mailbox.archive); } } }
+            Tooltip { label: "Move to trash"
+                Button { variant: "ghost" Icon { name: "trash" size: 18 }
+                    clicked: { MailBackend.bulk-move(Mailbox.trash); } } }
+            Tooltip { label: "Mark as junk"
+                Button { variant: "ghost" Icon { name: "prohibit" size: 18 }
+                    clicked: { MailBackend.bulk-move(Mailbox.spam); } } }
+        }
+
+        Divider { vertical: true }
+
+        Tooltip { label: "Reply"
+            Button { variant: "ghost"
+                Icon { name: "arrow-bend-up-left" size: 18 }
+                clicked: { MailBackend.start-reply(ReplyMode.reply); } } }
+        Tooltip { label: "Reply all"
+            Button { variant: "ghost"
+                Icon { name: "arrow-bend-double-up-left" size: 18 }
+                clicked: { MailBackend.start-reply(ReplyMode.reply-all); } } }
+        Tooltip { label: "Forward"
+            Button { variant: "ghost"
+                Icon { name: "arrow-bend-up-right" size: 18 }
+                clicked: { MailBackend.start-reply(ReplyMode.forward); } } }
+
+        Divider { vertical: true }
+
+        Tooltip {
+            label: message.flagged ? "Remove flag" : "Flag message"
+            Button {
+                variant: "ghost"
+                Icon {
+                    name: "flag"
+                    variant: message.flagged ? "fill" : "regular"
+                    size: 18
+                    tint: message.flagged ? #d97706 : #71717a
+                }
+                clicked: { MailBackend.toggle-flag(message.id); }
+            }
+        }
+
+        Spacer {}
+
+        Tooltip { label: "Close message"
+            Button { variant: "ghost"
+                Icon { name: "x" size: 18 }
+                clicked: { MailBackend.clear-selection(); } } }
+    }
+}
+
+// ============================================================================
+// Subject header inside the detail pane + label pills + "+" picker.
+// ============================================================================
+
+component SubjectHeader {
+    message: Message;
+    show-thread-view: bool;
+    thread-count: s32;
+
+    HStack {
+        background: show-thread-view ? #f4f4f5 : transparent
+        radius: 6px
+        padding: 18px
+
+        HStack {
+            Text { content: message.subject size: 18px weight: "medium" }
+            if show-thread-view {
+                Text { content: "{thread-count} messages" color: #71717a }
+            }
+        }
+
+        Spacer {}
+
+        // Existing labels
+        for label-id in message.labels {
+            if MailBackend.label-exists(label-id) {
+                LabelPill { label-id: label-id name: "" color: LabelColor.zinc }
+            }
+        }
+
+        // Add-label dropdown (dashed "+" target)
+        DropdownMenu {
+            align: "end"
+            min-width: 144px
+            trigger-icon: "plus"
+            trigger-variant: "dashed"
+
+            for label in MailBackend.labels {
+                DropdownItem {
+                    label: label.name
+                    active: false   // backend could precompute; wired in commands
+                    icon: "circle"  // host resolves LabelColor → hue
+                    clicked: {
+                        MailBackend.update-message-labels(message.id, [label.id]);
+                    }
+                }
+            }
+            DropdownSeparator {}
+            DropdownItem {
+                label: "Create label"
+                icon: "plus-circle"
+                clicked: { MailBackend.create-label-from-prompt(); }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Smart-card carousel — wraps the host SmartCardView with prev/next buttons
+// when the thread has more than one card.
+// ============================================================================
+
+component SmartCardCarousel {
+    entries: list<SmartCardEntry>;
+    index: s32;
+    my-email: string;
+
+    if entries.len() > 0 {
+        VStack {
+            // Header with pager
+            if entries.len() > 1 {
+                HStack {
+                    Spacer {}
+                    Button {
+                        variant: "ghost"
+                        disabled: index == 0
+                        Icon { name: "caret-left" size: 14 }
+                        clicked: { MailBackend.smart-card-prev(); }
+                    }
+                    Text { content: "{index + 1} of {entries.len()}" }
+                    Button {
+                        variant: "ghost"
+                        disabled: index >= entries.len() - 1
+                        Icon { name: "caret-right" size: 14 }
+                        clicked: { MailBackend.smart-card-next(); }
+                    }
+                }
+            }
+            SmartCardView {
+                handle: entries[index].card.handle
+                compact: false
+                my-email: my-email
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Reply composer — inline under the selected message when reply-mode != none.
+// Keeps its own local `body` + `forward-to` buffers; backend owns the "send".
+// ============================================================================
+
+component ReplyComposer {
+    mode: ReplyMode;
+    message: Message;
+    my-email: string;
+
+    // Local buffers
+    reply-body: string = "";
+    forward-to: string = "";
+
+    VStack {
+        // Header: "To" block depends on mode
+        if mode == ReplyMode.forward {
+            HStack {
+                Text { content: "To" color: #71717a }
+                Input {
+                    placeholder: "Enter recipient email..."
+                    value: forward-to
+                    set value: { forward-to = value; }
+                }
+            }
+        } else {
+            HStack {
+                Text { content: "To" color: #71717a }
+                Text { content: "{message.from.name} <{message.from.email}>" }
+            }
+            if mode == ReplyMode.reply-all && message.to.len() > 1 {
+                HStack {
+                    Text { content: "Cc" color: #71717a }
+                    Text { content: message.to-cc-display }
+                }
+            }
+        }
+
+        ComposeBox {
+            placeholder: mode == ReplyMode.forward
+                ? "Add a message..."
+                : "Write your reply..."
+            value: reply-body
+            submit-label: mode == ReplyMode.forward
+                ? "Send"
+                : (mode == ReplyMode.reply-all ? "Reply all" : "Reply")
+            submit-icon: mode == ReplyMode.forward
+                ? "paper-plane-tilt"
+                : "arrow-bend-up-left"
+            submit-variant: "rose"
+
+            set value: { reply-body = value; }
+            submit: {
+                MailBackend.send-reply(reply-body, forward-to);
+                reply-body = "";
+                forward-to = "";
+            }
+            cancel: {
+                MailBackend.cancel-reply();
+                reply-body = "";
+                forward-to = "";
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Compose dialog — the "new message" modal. Opened from the sidebar button.
+// ============================================================================
+
+component ComposeDialog {
+    open: bool;
+
+    // Local buffers
+    to: string = "";
+    body: string = "";
+
+    Dialog {
+        open: open
+        title: "New message"
+        max-width: 672px
+
+        ComposeBox {
+            placeholder: "Write your message..."
+            value: body
+            borderless: true
+            submit-label: "Send"
+            submit-icon: "paper-plane-tilt"
+            submit-variant: "rose"
+
+            // Header snippet-equivalent: Yel has no named slots, so we render
+            // the "To" line as a sibling above the composer body.
+            // Host ComposeBox reads adjacent Input via its own contract.
+            Input {
+                placeholder: "Recipient email..."
+                value: to
+                set value: { to = value; }
+            }
+
+            set value: { body = value; }
+            submit: {
+                MailBackend.send-compose(to, body);
+                to = "";
+                body = "";
+                MailBackend.close-compose();
+            }
+            cancel: {
+                to = "";
+                body = "";
+                MailBackend.close-compose();
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Multi-selection "stack" detail view — up to 5 cards, depth-offset.
+// The Svelte version animates; Yel just renders the pile statically and lets
+// the host engine tween between mounts.
+// ============================================================================
+
+component SelectionStack {
+    messages: list<Message>;
+    selection-count: s32;
+    my-email: string;
+
+    VStack {
+        Text { content: "{selection-count} messages selected" }
+        ZStack {
+            width: 100%
+            for msg in messages {
+                VStack {
+                    // Rounded-rect card
+                    HStack {
+                        Text { content: msg.subject size: 14px color: #ffffff }
+                        Spacer {}
+                        for label-id in msg.labels {
+                            if MailBackend.label-exists(label-id) {
+                                LabelPill { label-id: label-id name: "" color: LabelColor.zinc compact: true }
+                            }
+                        }
+                    }
+                    HStack {
+                        Avatar { src: msg.from.avatar label: msg.from.name size: 28px shape: "circle" }
+                        VStack {
+                            HStack {
+                                Text { content: msg.from.name size: 12px }
+                                Text { content: "<{msg.from.email}>" size: 10px color: #52525b }
+                            }
+                            Text {
+                                content: "To: {msg.to-display} · {msg.date-full}"
+                                size: 10px color: #71717a
+                            }
+                        }
+                    }
+                    if msg.body-loading {
+                        VStack {
+                            Divider { skeleton: true width: 75% }
+                            Divider { skeleton: true width: 100% }
+                            Divider { skeleton: true width: 66% }
+                        }
+                    } else {
+                        Text { content: msg.body size: 12px color: #a1a1aa }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Sidebar sign-off: the storage meter.
+// ============================================================================
+
+component StorageFooter {
+    storage: StorageQuota;
+
+    VStack {
+        padding: 12px
+        StorageMeter {
+            percent: storage.percent
+            used-display: storage.used-display
+            total-display: storage.total-display
+        }
+        Text {
+            content: "{storage.used-display} of {storage.total-display} used"
+            size: 11px
+            color: #71717a
+        }
+    }
+}
+
+// ============================================================================
+// The main component — composes everything above.
+// ============================================================================
+
+export component MailPanel {
+    // ---- Local UI state signals ----
+    compose-open: bool = false;
+
+    // ---- Keyboard action registration ----
+    // Svelte wired useKeybindingActions({ DESELECT, ARCHIVE, DELETE }). Yel has
+    // no global hook API; declaring these elements registers the shortcuts
+    // with the host keybinding service, which calls handle-action(...).
+    KeybindingAction { action: "DESELECT:meshx://mail" }
+    KeybindingAction { action: "ARCHIVE:meshx://mail"  }
+    KeybindingAction { action: "DELETE:meshx://mail"   }
+
+    // ---- Heading row (title + count + filter/sort menu) ----
+    HStack {
+        if !MailBackend.selected-label-id.is-empty() {
+            LabelDot { color: LabelColor.blue size: 10px }
+        } else {
+            MailboxIcon { mailbox: MailBackend.current-mailbox size: 18 }
+        }
+        Text { content: MailBackend.page-title size: 16px weight: "medium" }
+        Text { content: "{MailBackend.visible-message-count}" color: #71717a size: 14px }
+        Spacer {}
+        FilterSortMenu {
+            current-filter: MailBackend.current-filter
+            current-sort:   MailBackend.current-sort
+        }
+    }
+
+    // ---- Message list ----
+    ScrollArea {
+        anchor-id: "mail-list"
+
+        if MailBackend.loading {
+            // 8 skeleton rows — static list unrolled because Yel has no
+            // numeric for-loops with integer ranges other than `for i in 0..N`.
+            for i in 0..8 {
+                HStack {
+                    skeleton: true
+                    Avatar { src: "" label: "" size: 32px shape: "circle" }
+                    VStack {
+                        Divider { skeleton: true width: 40% }
+                        Divider { skeleton: true width: 80% }
+                        Divider { skeleton: true width: 60% }
+                    }
+                }
+            }
+        } else if MailBackend.visible-message-count == 0 {
+            VStack {
+                align: "center"
+                Icon { name: "envelope" size: 40 }
+                Text { content: MailBackend.empty-message color: #71717a size: 14px }
+            }
+        } else {
+            for row in MailBackend.flat-rows key(row.msg.id) {
+                MessageRow { row: row my-email: MailBackend.me.email }
+            }
+        }
+    }
+
+    // ---- Detail pane ----
+    // Three modes: many selected → stack; one selected → full detail; none →
+    // empty-state panel.
+    if MailBackend.selection-count > 1 {
+        SelectionStack {
+            messages: MailBackend.selection-preview
+            selection-count: MailBackend.selection-count
+            my-email: MailBackend.me.email
+        }
+    } else if MailBackend.selected-message.is-some() {
+        VStack {
+            DetailToolbar { message: MailBackend.selected-message.unwrap() }
+
+            ScrollArea {
+                anchor-id: "detail-scroll"
+
+                SubjectHeader {
+                    message: MailBackend.selected-message.unwrap()
+                    show-thread-view: MailBackend.show-thread-view
+                    thread-count: MailBackend.selected-thread.is-some()
+                        ? MailBackend.selected-thread.unwrap().count
+                        : 1
+                }
+
+                SmartCardCarousel {
+                    entries: MailBackend.thread-smart-cards
+                    index:   MailBackend.smart-card-index
+                    my-email: MailBackend.me.email
+                }
+
+                // Earlier thread messages, oldest first
+                if MailBackend.show-thread-view {
+                    for msg in MailBackend.earlier-thread-messages key(msg.id) {
+                        MessageView {
+                            message-id: msg.id
+                            my-email: MailBackend.me.email
+                            compact: true
+                        }
+                    }
+                }
+
+                // The latest message (always rendered)
+                MessageView {
+                    message-id: MailBackend.selected-message.unwrap().id
+                    my-email: MailBackend.me.email
+                    compact: false
+                }
+
+                // Reply quick-actions OR inline composer
+                if MailBackend.current-reply-mode == ReplyMode.none {
+                    HStack {
+                        Button { variant: "rose"
+                            Icon { name: "arrow-bend-up-left" size: 18 } "Reply"
+                            clicked: { MailBackend.start-reply(ReplyMode.reply); } }
+                        Button { variant: "secondary"
+                            Icon { name: "arrow-bend-double-up-left" size: 18 } "Reply all"
+                            clicked: { MailBackend.start-reply(ReplyMode.reply-all); } }
+                        Button { variant: "secondary"
+                            Icon { name: "arrow-bend-up-right" size: 18 } "Forward"
+                            clicked: { MailBackend.start-reply(ReplyMode.forward); } }
+                    }
+                } else {
+                    ReplyComposer {
+                        mode:    MailBackend.current-reply-mode
+                        message: MailBackend.selected-message.unwrap()
+                        my-email: MailBackend.me.email
+                    }
+                }
+            }
+        }
+    } else {
+        VStack {
+            align: "center"
+            Icon { name: "envelope" size: 40 }
+            Text { content: "No message selected" size: 14px color: #71717a }
+        }
+    }
+
+    // ---- Compose dialog (modal) ----
+    ComposeDialog { open: compose-open }
+
+    // ---- Sidebar slots ----
+    // The Svelte file used setSlots({ heading, children, detail, detailHeading,
+    // sidebarAction }). Yel has no named-slot system. To get the sidebar
+    // "Compose new mail" button, we render it here and the host layout is
+    // told (through host convention) to hoist KeybindingAction / button
+    // elements with the `slot:` attribute. Pending a real slots feature —
+    // see the README at examples/mail for status.
+    Button {
+        slot: "sidebar-action"
+        variant: "rose"
+        Icon { name: "paper-plane-tilt" variant: "fill" size: 18 }
+        "Compose new mail"
+        clicked: { compose-open = true; MailBackend.open-compose(); }
+    }
+
+    StorageFooter { slot: "sidebar-footer" storage: MailBackend.storage }
+}

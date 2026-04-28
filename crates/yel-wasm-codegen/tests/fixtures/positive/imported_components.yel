@@ -1,0 +1,31 @@
+package yel:embed@0.1.0;
+
+import component Dialog {
+    title: string;
+    open: bool;
+    func show();
+    func hide();
+}
+
+import component Icon {
+    name: string;
+    size: s32;
+}
+
+export component App {
+    showing: bool = false;
+    title: string = "Welcome";
+
+    VStack {
+        HStack {
+            Text { "Imported components demo" }
+        }
+
+        HStack {
+            Button {
+                "toggle dialog"
+                clicked: { showing = !showing; }
+            }
+        }
+    }
+}

@@ -1,0 +1,18 @@
+package yel:varctor@0.1.0;
+
+// Exercises user-declared `VariantCtor` with each case shape — a unit case
+// (`a`), an s32-payload case (`b(2)`), and a string-payload case (`c("hi")`).
+variant V {
+    a,
+    b(s32),
+    c(string),
+}
+
+export component App {
+    first: V = a;
+    second: V = b(2);
+    third: V = c("hi");
+    VStack {
+        Text { "variant ctors" }
+    }
+}

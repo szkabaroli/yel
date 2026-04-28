@@ -1,0 +1,17 @@
+package yel:optsig@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-maybe-title: func() -> option<string>;
+    set-maybe-title: func(value: option<string>);
+  }
+}
+
+world optsig {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

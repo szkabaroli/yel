@@ -1,0 +1,10 @@
+package yel:cbtest@0.1.0;
+
+export component Widget {
+    count: s32 = 0;
+    export increment: func();
+
+    VStack {
+        Text { "count: {count}" }
+    }
+}

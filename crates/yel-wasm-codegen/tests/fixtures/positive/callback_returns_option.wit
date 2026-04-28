@@ -1,0 +1,24 @@
+package yel:cob@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-m: func() -> option<s32>;
+    set-m: func(value: option<s32>);
+  }
+}
+
+interface app-callbacks {
+  use app-component.{ app };
+  get-maybe: func(self: borrow<app>) -> option<s32>;
+}
+
+world cob {
+  import app-callbacks;
+  import app-component;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

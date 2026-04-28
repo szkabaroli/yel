@@ -1,0 +1,14 @@
+package yel:listvariedarity@0.1.0;
+
+// Exercises list literals at several arities in the same component:
+// empty, single-element, medium, and >8 (previously capped). Regression
+// coverage for the dynamic list-ctor type interning — see
+// `fuzz_list_ctor_arity_15.yel`.
+export component App {
+    empty: list<s32> = [];
+    one: list<s32> = [42];
+    small: list<s32> = [1, 2, 3];
+    big: list<s32> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    huge: list<s32> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+    Text { "varied arity" }
+}

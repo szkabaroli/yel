@@ -1,11 +1,13 @@
 //! Parser implementation for Yel.
 
 use super::ast::{
-    Binding, Component, ElementNode, Enum, Expr, File, ForNode, FunctionDecl, Handler, IfNode,
-    InterpolationPart, Literal, Node, NodeId, PackageId, Property, PropModifier, Record,
-    RecordField, Spanned, Statement, TextNode, Ty, TyKind, Variant, VariantCase,
+    Binding, Component, Element, ElementNode, Enum, Expr, File, ForNode, FunctionDecl, Global,
+    GlobalProperty, Handler, IfNode, ImportComponent, InterpolationPart, Literal, Node, PackageId,
+    PropModifier, Property, PropertyDirection, Record, RecordField, Spanned, Statement, TextNode,
+    Ty, TyKind, Variant, VariantCase,
 };
 use crate::source::{SourceId, Span};
+use crate::syntax::NodeId;
 use pest::iterators::{Pair, Pairs};
 use pest::pratt_parser::{Assoc, Op, PrattParser};
 use pest::Parser;
@@ -34,7 +36,10 @@ static PRATT_PARSER: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
             | Op::infix(Rule::modulo, Assoc::Left))
         // Highest precedence
         .op(Op::prefix(Rule::neg) | Op::prefix(Rule::not))
-        .op(Op::postfix(Rule::call) | Op::postfix(Rule::member) | Op::postfix(Rule::optional_member) | Op::postfix(Rule::index))
+        .op(Op::postfix(Rule::call)
+            | Op::postfix(Rule::member)
+            | Op::postfix(Rule::optional_member)
+            | Op::postfix(Rule::index))
 });
 
 /// Parse error with source location.
@@ -134,7 +139,9 @@ pub fn parse(source: &str) -> Result<Component, ParseError> {
 pub fn parse_with_source_id(source: &str, source_id: SourceId) -> Result<Component, ParseError> {
     let result = parse_file_with_source_id(source, source_id)?;
     // Note: catched_errors are discarded here - use parse_file_with_source_id for full error reporting
-    result.file.components
+    result
+        .file
+        .components
         .into_iter()
         .next()
         .map(|s| s.node)
@@ -155,7 +162,10 @@ pub fn parse_file(source: &str) -> Result<ParseResult, ParseError> {
 
 /// Parse DSL source into a File AST with caught errors.
 /// Returns both the AST and any syntax errors that were recovered from.
-pub fn parse_file_with_source_id(source: &str, source_id: SourceId) -> Result<ParseResult, ParseError> {
+pub fn parse_file_with_source_id(
+    source: &str,
+    source_id: SourceId,
+) -> Result<ParseResult, ParseError> {
     let pairs = DslParser::parse(Rule::file, source).map_err(|err| {
         let (line, column) = match err.line_col {
             pest::error::LineColLocation::Pos((l, c)) => (l, c),
@@ -206,6 +216,9 @@ fn parse_file_inner(ctx: &mut ParserContext, mut pairs: Pairs<Rule>) -> Result<F
     let mut records = Vec::new();
     let mut enums = Vec::new();
     let mut variants = Vec::new();
+    let mut elements = Vec::new();
+    let mut import_components = Vec::new();
+    let mut globals = Vec::new();
     let mut components = Vec::new();
 
     for inner in file_pair.into_inner() {
@@ -225,6 +238,18 @@ fn parse_file_inner(ctx: &mut ParserContext, mut pairs: Pairs<Rule>) -> Result<F
                 let span = ctx.span(&inner);
                 variants.push(Spanned::new(parse_variant(ctx, inner)?, span));
             }
+            Rule::element_decl => {
+                let span = ctx.span(&inner);
+                elements.push(Spanned::new(parse_element(ctx, inner)?, span));
+            }
+            Rule::import_component => {
+                let span = ctx.span(&inner);
+                import_components.push(Spanned::new(parse_import_component(ctx, inner)?, span));
+            }
+            Rule::global_decl => {
+                let span = ctx.span(&inner);
+                globals.push(Spanned::new(parse_global(ctx, inner)?, span));
+            }
             Rule::component => {
                 let span = ctx.span(&inner);
                 components.push(Spanned::new(parse_component(ctx, inner)?, span));
@@ -242,6 +267,9 @@ fn parse_file_inner(ctx: &mut ParserContext, mut pairs: Pairs<Rule>) -> Result<F
         records,
         enums,
         variants,
+        elements,
+        import_components,
+        globals,
         components,
     })
 }
@@ -410,16 +438,361 @@ fn parse_variant_case(ctx: &ParserContext, pair: Pair<Rule>) -> Result<VariantCa
     Ok(VariantCase { name, payload })
 }
 
+fn parse_element(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Element, ParseError> {
+    let mut inner = pair.into_inner();
+
+    let name_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("element name".into()))?;
+    let name_span = ctx.span(&name_pair);
+    let name = name_pair.as_str().to_string();
+
+    let mut properties = Vec::new();
+
+    for item in inner {
+        if item.as_rule() == Rule::element_property {
+            let span = ctx.span(&item);
+            properties.push(Spanned::new(parse_element_property(ctx, item)?, span));
+        }
+    }
+
+    Ok(Element {
+        name,
+        name_span,
+        properties,
+    })
+}
+
+fn parse_element_property(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Property, ParseError> {
+    let mut inner = pair.into_inner();
+
+    let name_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("property name".into()))?;
+    let name_span = ctx.span(&name_pair);
+    let name = name_pair.as_str().to_string();
+
+    let type_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("property type".into()))?;
+    let type_span = ctx.span(&type_pair);
+    let ty = Ty::new(parse_type(ctx, type_pair)?, type_span);
+
+    Ok(Property {
+        name,
+        name_span,
+        ty,
+        default: None,
+    })
+}
+
+fn parse_import_component(
+    ctx: &ParserContext,
+    pair: Pair<Rule>,
+) -> Result<ImportComponent, ParseError> {
+    let mut inner = pair.into_inner();
+
+    let name_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("component name".into()))?;
+    let name_span = ctx.span(&name_pair);
+    let name = name_pair.as_str().to_string();
+
+    let mut properties = Vec::new();
+    let mut methods = Vec::new();
+    let mut has_children_slot = false;
+
+    for item in inner {
+        match item.as_rule() {
+            Rule::import_property => {
+                let span = ctx.span(&item);
+                properties.push(Spanned::new(parse_import_property(ctx, item)?, span));
+            }
+            Rule::import_method => {
+                let span = ctx.span(&item);
+                methods.push(Spanned::new(parse_import_method(ctx, item)?, span));
+            }
+            Rule::children_node => {
+                has_children_slot = true;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(ImportComponent {
+        name,
+        name_span,
+        properties,
+        methods,
+        has_children_slot,
+    })
+}
+
+fn parse_import_property(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Property, ParseError> {
+    let mut inner = pair.into_inner();
+
+    let name_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("property name".into()))?;
+    let name_span = ctx.span(&name_pair);
+    let name = name_pair.as_str().to_string();
+
+    let type_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("property type".into()))?;
+    let type_span = ctx.span(&type_pair);
+    let ty = Ty::new(parse_type(ctx, type_pair)?, type_span);
+
+    Ok(Property {
+        name,
+        name_span,
+        ty,
+        default: None,
+    })
+}
+
+fn parse_import_method(ctx: &ParserContext, pair: Pair<Rule>) -> Result<FunctionDecl, ParseError> {
+    let mut inner = pair.into_inner();
+
+    let name_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("method name".into()))?;
+    let name_span = ctx.span(&name_pair);
+    let name = name_pair.as_str().to_string();
+
+    let mut params = Vec::new();
+    let mut return_type = None;
+
+    for item in inner {
+        match item.as_rule() {
+            Rule::func_params => {
+                for param_pair in item.into_inner() {
+                    if param_pair.as_rule() == Rule::func_param {
+                        let mut param_inner = param_pair.into_inner();
+                        let param_name = param_inner
+                            .next()
+                            .ok_or(ParseError::Missing("param name".into()))?
+                            .as_str()
+                            .to_string();
+                        let param_type_pair = param_inner
+                            .next()
+                            .ok_or(ParseError::Missing("param type".into()))?;
+                        let param_type_span = ctx.span(&param_type_pair);
+                        let param_type =
+                            Ty::new(parse_type(ctx, param_type_pair)?, param_type_span);
+                        params.push((param_name, param_type));
+                    }
+                }
+            }
+            Rule::func_return => {
+                let ret_type_pair = item
+                    .into_inner()
+                    .next()
+                    .ok_or(ParseError::Missing("return type".into()))?;
+                let ret_type_span = ctx.span(&ret_type_pair);
+                return_type = Some(Ty::new(parse_type(ctx, ret_type_pair)?, ret_type_span));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(FunctionDecl {
+        name,
+        name_span,
+        is_export: false,
+        params,
+        return_type,
+    })
+}
+
+fn parse_global(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Global, ParseError> {
+    let mut inner = pair.into_inner();
+
+    // First pair may be an `export_modifier` or the name identifier.
+    let first = inner
+        .next()
+        .ok_or(ParseError::Missing("global name".into()))?;
+
+    let (is_export, name_pair) = if first.as_rule() == Rule::export_modifier {
+        (
+            true,
+            inner
+                .next()
+                .ok_or(ParseError::Missing("global name".into()))?,
+        )
+    } else {
+        (false, first)
+    };
+
+    let name_span = ctx.span(&name_pair);
+    let name = name_pair.as_str().to_string();
+
+    let mut properties = Vec::new();
+    let mut callbacks = Vec::new();
+
+    for item in inner {
+        match item.as_rule() {
+            Rule::global_property => {
+                let span = ctx.span(&item);
+                properties.push(Spanned::new(parse_global_property(ctx, item)?, span));
+            }
+            Rule::function_decl => {
+                let span = ctx.span(&item);
+                callbacks.push(Spanned::new(parse_function_decl(ctx, item)?, span));
+            }
+            Rule::global_callback => {
+                let span = ctx.span(&item);
+                callbacks.push(Spanned::new(parse_global_callback(ctx, item)?, span));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(Global {
+        name,
+        name_span,
+        is_export,
+        properties,
+        callbacks,
+    })
+}
+
+fn parse_global_property(
+    ctx: &ParserContext,
+    pair: Pair<Rule>,
+) -> Result<GlobalProperty, ParseError> {
+    let mut inner = pair.into_inner();
+
+    // First pair may be property_direction, or may be the name identifier.
+    let first = inner
+        .next()
+        .ok_or(ParseError::Missing("global property".into()))?;
+
+    let (direction, name_pair) = if first.as_rule() == Rule::property_direction {
+        let dir = match first.as_str() {
+            "in-out" => PropertyDirection::InOut,
+            "out" => PropertyDirection::Out,
+            _ => PropertyDirection::In,
+        };
+        let name_pair = inner
+            .next()
+            .ok_or(ParseError::Missing("property name".into()))?;
+        (dir, name_pair)
+    } else {
+        (PropertyDirection::In, first)
+    };
+
+    let name_span = ctx.span(&name_pair);
+    let name = name_pair.as_str().to_string();
+
+    let type_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("property type".into()))?;
+    let type_span = ctx.span(&type_pair);
+    let ty = Ty::new(parse_type(ctx, type_pair)?, type_span);
+
+    // Optional default expression.
+    let mut default = None;
+    for item in inner {
+        if item.as_rule() == Rule::expr {
+            let span = ctx.span(&item);
+            default = Some(Spanned::new(parse_expr(ctx, item)?, span));
+        }
+    }
+
+    Ok(GlobalProperty {
+        direction,
+        name,
+        name_span,
+        ty,
+        default,
+    })
+}
+
+fn parse_global_callback(
+    ctx: &ParserContext,
+    pair: Pair<Rule>,
+) -> Result<FunctionDecl, ParseError> {
+    // Same shape as an import_method; the leading "callback" keyword is a
+    // literal that pest doesn't surface as an inner pair. Callbacks are
+    // host-implemented (imports), so is_export = false.
+    parse_func_sig(ctx, pair, /* is_export */ false)
+}
+
+/// Parse the body of a `name(params) -> ret` signature (shared by
+/// import_method and global_callback).
+fn parse_func_sig(
+    ctx: &ParserContext,
+    pair: Pair<Rule>,
+    is_export: bool,
+) -> Result<FunctionDecl, ParseError> {
+    let mut inner = pair.into_inner();
+
+    let name_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("function name".into()))?;
+    let name_span = ctx.span(&name_pair);
+    let name = name_pair.as_str().to_string();
+
+    let mut params = Vec::new();
+    let mut return_type = None;
+
+    for item in inner {
+        match item.as_rule() {
+            Rule::func_params => {
+                for param_pair in item.into_inner() {
+                    if param_pair.as_rule() == Rule::func_param {
+                        let mut param_inner = param_pair.into_inner();
+                        let param_name = param_inner
+                            .next()
+                            .ok_or(ParseError::Missing("param name".into()))?
+                            .as_str()
+                            .to_string();
+                        let param_type_pair = param_inner
+                            .next()
+                            .ok_or(ParseError::Missing("param type".into()))?;
+                        let param_type_span = ctx.span(&param_type_pair);
+                        let param_type =
+                            Ty::new(parse_type(ctx, param_type_pair)?, param_type_span);
+                        params.push((param_name, param_type));
+                    }
+                }
+            }
+            Rule::func_return => {
+                let ret_type_pair = item
+                    .into_inner()
+                    .next()
+                    .ok_or(ParseError::Missing("return type".into()))?;
+                let ret_type_span = ctx.span(&ret_type_pair);
+                return_type = Some(Ty::new(parse_type(ctx, ret_type_pair)?, ret_type_span));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(FunctionDecl {
+        name,
+        name_span,
+        is_export,
+        params,
+        return_type,
+    })
+}
+
 fn parse_component(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Component, ParseError> {
     let mut inner = pair.into_inner();
 
     // Check for export modifier
     let mut is_export = false;
-    let first = inner.next().ok_or(ParseError::Missing("component name".into()))?;
+    let first = inner
+        .next()
+        .ok_or(ParseError::Missing("component name".into()))?;
 
     let name_pair = if first.as_rule() == Rule::export_modifier {
         is_export = true;
-        inner.next().ok_or(ParseError::Missing("component name".into()))?
+        inner
+            .next()
+            .ok_or(ParseError::Missing("component name".into()))?
     } else {
         first
     };
@@ -441,7 +814,11 @@ fn parse_component(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Componen
                 let span = ctx.span(&member);
                 functions.push(Spanned::new(parse_function_decl(ctx, member)?, span));
             }
-            Rule::element_node | Rule::if_node | Rule::for_node | Rule::string_node => {
+            Rule::element_node
+            | Rule::if_node
+            | Rule::for_node
+            | Rule::string_node
+            | Rule::children_node => {
                 let span = ctx.span(&member);
                 body.push(Spanned::new(parse_node_inner(ctx, member)?, span));
             }
@@ -467,11 +844,15 @@ fn parse_component(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Componen
 fn parse_property(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Property, ParseError> {
     let mut inner = pair.into_inner();
 
-    let name_pair = inner.next().ok_or(ParseError::Missing("property name".into()))?;
+    let name_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("property name".into()))?;
     let name_span = ctx.span(&name_pair);
     let name = name_pair.as_str().to_string();
 
-    let type_pair = inner.next().ok_or(ParseError::Missing("property type".into()))?;
+    let type_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("property type".into()))?;
     let type_span = ctx.span(&type_pair);
     let ty = Ty::new(parse_type(ctx, type_pair)?, type_span);
 
@@ -496,11 +877,15 @@ fn parse_function_decl(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Function
 
     // Check for export modifier
     let mut is_export = false;
-    let mut next = inner.next().ok_or(ParseError::Missing("function name".into()))?;
+    let mut next = inner
+        .next()
+        .ok_or(ParseError::Missing("function name".into()))?;
 
     if next.as_rule() == Rule::export_modifier {
         is_export = true;
-        next = inner.next().ok_or(ParseError::Missing("function name".into()))?;
+        next = inner
+            .next()
+            .ok_or(ParseError::Missing("function name".into()))?;
     }
 
     // Get function name
@@ -508,7 +893,9 @@ fn parse_function_decl(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Function
     let name = next.as_str().to_string();
 
     // Get func_type
-    let func_type = inner.next().ok_or(ParseError::Missing("function type".into()))?;
+    let func_type = inner
+        .next()
+        .ok_or(ParseError::Missing("function type".into()))?;
     let mut func_inner = func_type.into_inner();
 
     // Parse parameters
@@ -558,7 +945,10 @@ fn parse_function_decl(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Function
 }
 
 fn parse_type(ctx: &ParserContext, pair: Pair<Rule>) -> Result<TyKind, ParseError> {
-    let inner = pair.into_inner().next().ok_or(ParseError::Missing("type".into()))?;
+    let inner = pair
+        .into_inner()
+        .next()
+        .ok_or(ParseError::Missing("type".into()))?;
 
     match inner.as_rule() {
         Rule::primitive_type => match inner.as_str() {
@@ -597,13 +987,19 @@ fn parse_type(ctx: &ParserContext, pair: Pair<Rule>) -> Result<TyKind, ParseErro
             }),
         },
         Rule::list_type => {
-            let inner_pair = inner.into_inner().next().ok_or(ParseError::Missing("list inner type".into()))?;
+            let inner_pair = inner
+                .into_inner()
+                .next()
+                .ok_or(ParseError::Missing("list inner type".into()))?;
             let span = ctx.span(&inner_pair);
             let inner_type = parse_type(ctx, inner_pair)?;
             Ok(TyKind::List(Box::new(Ty::new(inner_type, span))))
         }
         Rule::option_type => {
-            let inner_pair = inner.into_inner().next().ok_or(ParseError::Missing("option inner type".into()))?;
+            let inner_pair = inner
+                .into_inner()
+                .next()
+                .ok_or(ParseError::Missing("option inner type".into()))?;
             let span = ctx.span(&inner_pair);
             let inner_type = parse_type(ctx, inner_pair)?;
             Ok(TyKind::Option(Box::new(Ty::new(inner_type, span))))
@@ -612,7 +1008,9 @@ fn parse_type(ctx: &ParserContext, pair: Pair<Rule>) -> Result<TyKind, ParseErro
             let mut types_iter = inner.into_inner();
             if let Some(result_types) = types_iter.next() {
                 let mut inner_iter = result_types.into_inner();
-                let ok_pair = inner_iter.next().ok_or(ParseError::Missing("result ok type".into()))?;
+                let ok_pair = inner_iter
+                    .next()
+                    .ok_or(ParseError::Missing("result ok type".into()))?;
                 let ok_span = ctx.span(&ok_pair);
                 let ok_type = parse_type(ctx, ok_pair)?;
 
@@ -629,17 +1027,65 @@ fn parse_type(ctx: &ParserContext, pair: Pair<Rule>) -> Result<TyKind, ParseErro
                 })
             } else {
                 // Bare `result` with no type parameters
-                Ok(TyKind::Result { ok: None, err: None })
+                Ok(TyKind::Result {
+                    ok: None,
+                    err: None,
+                })
             }
         }
         Rule::tuple_type => {
-            let type_list = inner.into_inner().next().ok_or(ParseError::Missing("tuple types".into()))?;
+            let type_list = inner
+                .into_inner()
+                .next()
+                .ok_or(ParseError::Missing("tuple types".into()))?;
             let mut types = Vec::new();
             for type_pair in type_list.into_inner() {
                 let span = ctx.span(&type_pair);
                 types.push(Ty::new(parse_type(ctx, type_pair)?, span));
             }
             Ok(TyKind::Tuple(types))
+        }
+        Rule::func_type => {
+            let mut params = Vec::new();
+            let mut return_type = None;
+
+            for item in inner.into_inner() {
+                match item.as_rule() {
+                    Rule::func_params => {
+                        for param_pair in item.into_inner() {
+                            if param_pair.as_rule() == Rule::func_param {
+                                let mut param_inner = param_pair.into_inner();
+                                let param_name = param_inner
+                                    .next()
+                                    .ok_or(ParseError::Missing("param name".into()))?
+                                    .as_str()
+                                    .to_string();
+                                let param_type_pair = param_inner
+                                    .next()
+                                    .ok_or(ParseError::Missing("param type".into()))?;
+                                let param_type_span = ctx.span(&param_type_pair);
+                                let param_type = parse_type(ctx, param_type_pair)?;
+                                params.push((param_name, Ty::new(param_type, param_type_span)));
+                            }
+                        }
+                    }
+                    Rule::func_return => {
+                        let ret_type_pair = item
+                            .into_inner()
+                            .next()
+                            .ok_or(ParseError::Missing("return type".into()))?;
+                        let ret_span = ctx.span(&ret_type_pair);
+                        let ret_type = parse_type(ctx, ret_type_pair)?;
+                        return_type = Some(Box::new(Ty::new(ret_type, ret_span)));
+                    }
+                    _ => {}
+                }
+            }
+
+            Ok(TyKind::Func {
+                params,
+                return_type,
+            })
         }
         Rule::named_type | Rule::identifier => Ok(TyKind::Named(inner.as_str().to_string())),
         _ => Err(ParseError::UnexpectedRule {
@@ -656,6 +1102,7 @@ fn parse_node_inner(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node, P
         Rule::string_node => parse_text_node(ctx, pair),
         Rule::if_node => parse_if_node(ctx, pair),
         Rule::for_node => parse_for_node(ctx, pair),
+        Rule::children_node => Ok(Node::Children),
         _ => Err(ParseError::UnexpectedRule {
             expected: "node".into(),
             found: format!("{:?}", pair.as_rule()),
@@ -667,7 +1114,9 @@ fn parse_node_inner(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node, P
 fn parse_element_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node, ParseError> {
     let mut inner = pair.into_inner();
 
-    let name_pair = inner.next().ok_or(ParseError::Missing("element name".into()))?;
+    let name_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("element name".into()))?;
     let name_span = ctx.span(&name_pair);
     let name = name_pair.as_str().to_string();
 
@@ -704,16 +1153,23 @@ fn parse_element_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node,
 
                         bindings.push(Spanned::new(binding, span));
                     }
-                    Rule::element_node | Rule::if_node | Rule::for_node | Rule::string_node => {
+                    Rule::element_node
+                    | Rule::if_node
+                    | Rule::for_node
+                    | Rule::string_node
+                    | Rule::children_node => {
                         let span = ctx.span(&content_item);
                         children.push(Spanned::new(parse_node_inner(ctx, content_item)?, span));
                     }
                     Rule::string_expr => {
                         let span = ctx.span(&content_item);
                         let expr = parse_string_expr(ctx, content_item)?;
-                        children.push(Spanned::new(Node::Text(TextNode {
-                            content: Spanned::new(expr, span),
-                        }), span));
+                        children.push(Spanned::new(
+                            Node::Text(TextNode {
+                                content: Spanned::new(expr, span),
+                            }),
+                            span,
+                        ));
                     }
                     Rule::BLOCK_LEVEL_CATCH_ALL => {
                         // Error recovery: report invalid syntax but continue parsing
@@ -735,7 +1191,10 @@ fn parse_element_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node,
 }
 
 fn parse_text_node(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Node, ParseError> {
-    let string_expr = pair.into_inner().next().ok_or(ParseError::Missing("string".into()))?;
+    let string_expr = pair
+        .into_inner()
+        .next()
+        .ok_or(ParseError::Missing("string".into()))?;
     let span = ctx.span(&string_expr);
     let expr = parse_string_expr(ctx, string_expr)?;
     Ok(Node::Text(TextNode {
@@ -746,7 +1205,9 @@ fn parse_text_node(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Node, ParseE
 fn parse_if_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node, ParseError> {
     let mut inner = pair.into_inner();
 
-    let cond_pair = inner.next().ok_or(ParseError::Missing("if condition".into()))?;
+    let cond_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("if condition".into()))?;
     let cond_span = ctx.span(&cond_pair);
     let condition = Spanned::new(parse_expr(ctx, cond_pair)?, cond_span);
 
@@ -759,7 +1220,11 @@ fn parse_if_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node, Pars
             Rule::if_body => {
                 for node in item.into_inner() {
                     match node.as_rule() {
-                        Rule::element_node | Rule::if_node | Rule::for_node | Rule::string_node => {
+                        Rule::element_node
+                        | Rule::if_node
+                        | Rule::for_node
+                        | Rule::string_node
+                        | Rule::children_node => {
                             let span = ctx.span(&node);
                             then_branch.push(Spanned::new(parse_node_inner(ctx, node)?, span));
                         }
@@ -769,17 +1234,25 @@ fn parse_if_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node, Pars
             }
             Rule::else_if_branch => {
                 let mut branch_inner = item.into_inner();
-                let branch_cond_pair = branch_inner.next().ok_or(ParseError::Missing("else-if condition".into()))?;
+                let branch_cond_pair = branch_inner
+                    .next()
+                    .ok_or(ParseError::Missing("else-if condition".into()))?;
                 let branch_cond_span = ctx.span(&branch_cond_pair);
-                let branch_cond = Spanned::new(parse_expr(ctx, branch_cond_pair)?, branch_cond_span);
+                let branch_cond =
+                    Spanned::new(parse_expr(ctx, branch_cond_pair)?, branch_cond_span);
                 let mut branch_nodes = Vec::new();
                 for body in branch_inner {
                     if body.as_rule() == Rule::if_body {
                         for node in body.into_inner() {
                             match node.as_rule() {
-                                Rule::element_node | Rule::if_node | Rule::for_node | Rule::string_node => {
+                                Rule::element_node
+                                | Rule::if_node
+                                | Rule::for_node
+                                | Rule::string_node
+                                | Rule::children_node => {
                                     let span = ctx.span(&node);
-                                    branch_nodes.push(Spanned::new(parse_node_inner(ctx, node)?, span));
+                                    branch_nodes
+                                        .push(Spanned::new(parse_node_inner(ctx, node)?, span));
                                 }
                                 _ => {}
                             }
@@ -794,9 +1267,14 @@ fn parse_if_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node, Pars
                     if body.as_rule() == Rule::if_body {
                         for node in body.into_inner() {
                             match node.as_rule() {
-                                Rule::element_node | Rule::if_node | Rule::for_node | Rule::string_node => {
+                                Rule::element_node
+                                | Rule::if_node
+                                | Rule::for_node
+                                | Rule::string_node
+                                | Rule::children_node => {
                                     let span = ctx.span(&node);
-                                    branch_nodes.push(Spanned::new(parse_node_inner(ctx, node)?, span));
+                                    branch_nodes
+                                        .push(Spanned::new(parse_node_inner(ctx, node)?, span));
                                 }
                                 _ => {}
                             }
@@ -820,11 +1298,15 @@ fn parse_if_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node, Pars
 fn parse_for_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node, ParseError> {
     let mut inner = pair.into_inner();
 
-    let item_pair = inner.next().ok_or(ParseError::Missing("for item name".into()))?;
+    let item_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("for item name".into()))?;
     let item_name_span = ctx.span(&item_pair);
     let item_name = item_pair.as_str().to_string();
 
-    let iterable_pair = inner.next().ok_or(ParseError::Missing("for iterable".into()))?;
+    let iterable_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("for iterable".into()))?;
     let iterable_span = ctx.span(&iterable_pair);
     let iterable = Spanned::new(parse_expr(ctx, iterable_pair)?, iterable_span);
 
@@ -844,7 +1326,11 @@ fn parse_for_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node, Par
             Rule::for_body => {
                 for node in item.into_inner() {
                     match node.as_rule() {
-                        Rule::element_node | Rule::if_node | Rule::for_node | Rule::string_node => {
+                        Rule::element_node
+                        | Rule::if_node
+                        | Rule::for_node
+                        | Rule::string_node
+                        | Rule::children_node => {
                             let span = ctx.span(&node);
                             body.push(Spanned::new(parse_node_inner(ctx, node)?, span));
                         }
@@ -869,14 +1355,19 @@ fn parse_binding(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Binding, Parse
     let mut inner = pair.into_inner();
 
     // Check for optional modifier (set, etc.)
-    let first = inner.next().ok_or(ParseError::Missing("binding name or modifier".into()))?;
+    let first = inner
+        .next()
+        .ok_or(ParseError::Missing("binding name or modifier".into()))?;
     let (modifier, name_pair) = if first.as_rule() == Rule::prop_modifier {
         let mod_str = first.as_str();
         let modifier = match mod_str {
             "set" => PropModifier::Set,
+            "bind" => PropModifier::Bind,
             _ => PropModifier::None,
         };
-        let name_pair = inner.next().ok_or(ParseError::Missing("binding name".into()))?;
+        let name_pair = inner
+            .next()
+            .ok_or(ParseError::Missing("binding name".into()))?;
         (modifier, name_pair)
     } else {
         (PropModifier::None, first)
@@ -885,7 +1376,9 @@ fn parse_binding(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Binding, Parse
     let name_span = ctx.span(&name_pair);
     let name = name_pair.as_str().to_string();
 
-    let value_pair = inner.next().ok_or(ParseError::Missing("binding value".into()))?;
+    let value_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("binding value".into()))?;
     let value_span = ctx.span(&value_pair);
     let value = Spanned::new(parse_expr(ctx, value_pair)?, value_span);
 
@@ -898,12 +1391,17 @@ fn parse_binding(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Binding, Parse
 }
 
 fn parse_statement(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Statement, ParseError> {
-    let inner = pair.into_inner().next().ok_or(ParseError::Missing("statement".into()))?;
+    let inner = pair
+        .into_inner()
+        .next()
+        .ok_or(ParseError::Missing("statement".into()))?;
 
     match inner.as_rule() {
         Rule::if_statement => {
             let mut items = inner.into_inner();
-            let cond_pair = items.next().ok_or(ParseError::Missing("if condition".into()))?;
+            let cond_pair = items
+                .next()
+                .ok_or(ParseError::Missing("if condition".into()))?;
             let cond_span = ctx.span(&cond_pair);
             let condition = Spanned::new(parse_expr(ctx, cond_pair)?, cond_span);
 
@@ -933,15 +1431,21 @@ fn parse_statement(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Statement, P
         }
         Rule::assign_statement => {
             let mut items = inner.into_inner();
-            let target_pair = items.next().ok_or(ParseError::Missing("assign target".into()))?;
+            let target_pair = items
+                .next()
+                .ok_or(ParseError::Missing("assign target".into()))?;
             let target_span = ctx.span(&target_pair);
             let target = Spanned::new(parse_expr(ctx, target_pair)?, target_span);
 
-            let next = items.next().ok_or(ParseError::Missing("assign operator or value".into()))?;
+            let next = items
+                .next()
+                .ok_or(ParseError::Missing("assign operator or value".into()))?;
 
             if next.as_rule() == Rule::compound_op {
                 let op = next.as_str().to_string();
-                let value_pair = items.next().ok_or(ParseError::Missing("assign value".into()))?;
+                let value_pair = items
+                    .next()
+                    .ok_or(ParseError::Missing("assign value".into()))?;
                 let value_span = ctx.span(&value_pair);
                 let value = Spanned::new(parse_expr(ctx, value_pair)?, value_span);
                 Ok(Statement::CompoundAssign(target, op, value))
@@ -952,10 +1456,46 @@ fn parse_statement(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Statement, P
             }
         }
         Rule::expr_statement => {
-            let expr_pair = inner.into_inner().next().ok_or(ParseError::Missing("expression".into()))?;
+            let expr_pair = inner
+                .into_inner()
+                .next()
+                .ok_or(ParseError::Missing("expression".into()))?;
             let span = ctx.span(&expr_pair);
             let expr = parse_expr(ctx, expr_pair)?;
             Ok(Statement::Expr(Spanned::new(expr, span)))
+        }
+        Rule::let_statement => {
+            let mut items = inner.into_inner();
+            let name_pair = items
+                .next()
+                .ok_or(ParseError::Missing("let variable name".into()))?;
+            let name = name_pair.as_str().to_string();
+            let name_span = ctx.span(&name_pair);
+
+            // Check for optional type annotation
+            let next = items
+                .next()
+                .ok_or(ParseError::Missing("type or value".into()))?;
+            let (ty, value_pair) = if next.as_rule() == Rule::type_annotation {
+                let ty_span = ctx.span(&next);
+                let ty = Some(Ty::new(parse_type(ctx, next)?, ty_span));
+                let value_pair = items
+                    .next()
+                    .ok_or(ParseError::Missing("let value".into()))?;
+                (ty, value_pair)
+            } else {
+                (None, next)
+            };
+
+            let value_span = ctx.span(&value_pair);
+            let value = Spanned::new(parse_expr(ctx, value_pair)?, value_span);
+
+            Ok(Statement::Let {
+                name,
+                name_span,
+                ty,
+                value,
+            })
         }
         _ => Err(ParseError::UnexpectedRule {
             expected: "statement".into(),
@@ -981,11 +1521,15 @@ fn parse_ternary_suffix(
     let suffix_span = ctx.span(&suffix);
     let mut inner = suffix.into_inner();
 
-    let then_pair = inner.next().ok_or(ParseError::Missing("then expression".into()))?;
+    let then_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("then expression".into()))?;
     let then_span = ctx.span(&then_pair);
     let then_expr = parse_expr(ctx, then_pair)?;
 
-    let else_pair = inner.next().ok_or(ParseError::Missing("else expression".into()))?;
+    let else_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("else expression".into()))?;
     let else_span = ctx.span(&else_pair);
     let else_expr = parse_expr(ctx, else_pair)?;
 
@@ -1030,15 +1574,20 @@ fn parse_expr_with_span(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Spanned
             let op_str = match op.as_rule() {
                 Rule::neg => "-",
                 Rule::not => "!",
-                _ => return Err(ParseError::UnexpectedRule {
-                    expected: "prefix operator".into(),
-                    found: format!("{:?}", op.as_rule()),
-                    span: Some(op_span),
-                }),
+                _ => {
+                    return Err(ParseError::UnexpectedRule {
+                        expected: "prefix operator".into(),
+                        found: format!("{:?}", op.as_rule()),
+                        span: Some(op_span),
+                    })
+                }
             };
             let combined_span = Span::new(op_span.source, op_span.start, rhs_span.end);
             Ok((
-                Expr::Unary(op_str.to_string(), Box::new(Spanned::new(rhs_expr, rhs_span))),
+                Expr::Unary(
+                    op_str.to_string(),
+                    Box::new(Spanned::new(rhs_expr, rhs_span)),
+                ),
                 combined_span,
             ))
         })
@@ -1060,47 +1609,60 @@ fn parse_expr_with_span(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Spanned
                     }
                     let combined_span = Span::new(lhs_span.source, lhs_span.start, op_span.end);
                     match lhs_expr {
-                        Expr::Ident(name) => {
-                            Ok((Expr::Call(name, args), combined_span))
-                        }
+                        Expr::Ident(name) => Ok((Expr::Call(name, args), combined_span)),
                         // Handle member call like Type.case(args) -> PathCall
                         Expr::Member(base, member) => {
-                            Ok((Expr::PathCall {
-                                base,
-                                member,
-                                args,
-                            }, combined_span))
+                            Ok((Expr::PathCall { base, member, args }, combined_span))
                         }
-                        _ => {
-                            Err(ParseError::InvalidCallBase {
-                                span: Some(lhs_span),
-                            })
-                        }
+                        _ => Err(ParseError::InvalidCallBase {
+                            span: Some(lhs_span),
+                        }),
                     }
                 }
                 Rule::member => {
-                    let member_name = op.into_inner().next()
+                    let member_name = op
+                        .into_inner()
+                        .next()
                         .ok_or(ParseError::Missing("member name".into()))?
-                        .as_str().to_string();
+                        .as_str()
+                        .to_string();
                     let combined_span = Span::new(lhs_span.source, lhs_span.start, op_span.end);
-                    Ok((Expr::Member(Box::new(Spanned::new(lhs_expr, lhs_span)), member_name), combined_span))
+                    Ok((
+                        Expr::Member(Box::new(Spanned::new(lhs_expr, lhs_span)), member_name),
+                        combined_span,
+                    ))
                 }
                 Rule::optional_member => {
-                    let member_name = op.into_inner().next()
+                    let member_name = op
+                        .into_inner()
+                        .next()
                         .ok_or(ParseError::Missing("member name".into()))?
-                        .as_str().to_string();
+                        .as_str()
+                        .to_string();
                     let combined_span = Span::new(lhs_span.source, lhs_span.start, op_span.end);
-                    Ok((Expr::OptionalMember(Box::new(Spanned::new(lhs_expr, lhs_span)), member_name), combined_span))
+                    Ok((
+                        Expr::OptionalMember(
+                            Box::new(Spanned::new(lhs_expr, lhs_span)),
+                            member_name,
+                        ),
+                        combined_span,
+                    ))
                 }
                 Rule::index => {
-                    let idx_pair = op.into_inner().next().ok_or(ParseError::Missing("index expression".into()))?;
+                    let idx_pair = op
+                        .into_inner()
+                        .next()
+                        .ok_or(ParseError::Missing("index expression".into()))?;
                     let idx_span = ctx.span(&idx_pair);
                     let index_expr = parse_expr(ctx, idx_pair)?;
                     let combined_span = Span::new(lhs_span.source, lhs_span.start, op_span.end);
-                    Ok((Expr::Index(
-                        Box::new(Spanned::new(lhs_expr, lhs_span)),
-                        Box::new(Spanned::new(index_expr, idx_span)),
-                    ), combined_span))
+                    Ok((
+                        Expr::Index(
+                            Box::new(Spanned::new(lhs_expr, lhs_span)),
+                            Box::new(Spanned::new(index_expr, idx_span)),
+                        ),
+                        combined_span,
+                    ))
                 }
                 _ => Err(ParseError::UnexpectedRule {
                     expected: "postfix operator".into(),
@@ -1115,16 +1677,22 @@ fn parse_expr_with_span(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Spanned
             let combined_span = Span::new(lhs_span.source, lhs_span.start, rhs_span.end);
 
             match op.as_rule() {
-                Rule::range => Ok((Expr::Range {
-                    start: Box::new(Spanned::new(lhs_expr, lhs_span)),
-                    end: Box::new(Spanned::new(rhs_expr, rhs_span)),
-                    inclusive: false,
-                }, combined_span)),
-                Rule::range_inclusive => Ok((Expr::Range {
-                    start: Box::new(Spanned::new(lhs_expr, lhs_span)),
-                    end: Box::new(Spanned::new(rhs_expr, rhs_span)),
-                    inclusive: true,
-                }, combined_span)),
+                Rule::range => Ok((
+                    Expr::Range {
+                        start: Box::new(Spanned::new(lhs_expr, lhs_span)),
+                        end: Box::new(Spanned::new(rhs_expr, rhs_span)),
+                        inclusive: false,
+                    },
+                    combined_span,
+                )),
+                Rule::range_inclusive => Ok((
+                    Expr::Range {
+                        start: Box::new(Spanned::new(lhs_expr, lhs_span)),
+                        end: Box::new(Spanned::new(rhs_expr, rhs_span)),
+                        inclusive: true,
+                    },
+                    combined_span,
+                )),
                 _ => {
                     let op_str = match op.as_rule() {
                         Rule::or => "||",
@@ -1140,17 +1708,22 @@ fn parse_expr_with_span(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Spanned
                         Rule::mul => "*",
                         Rule::div => "/",
                         Rule::modulo => "%",
-                        _ => return Err(ParseError::UnexpectedRule {
-                            expected: "infix operator".into(),
-                            found: format!("{:?}", op.as_rule()),
-                            span: Some(ctx.span(&op)),
-                        }),
+                        _ => {
+                            return Err(ParseError::UnexpectedRule {
+                                expected: "infix operator".into(),
+                                found: format!("{:?}", op.as_rule()),
+                                span: Some(ctx.span(&op)),
+                            })
+                        }
                     };
-                    Ok((Expr::Binary(
-                        Box::new(Spanned::new(lhs_expr, lhs_span)),
-                        op_str.to_string(),
-                        Box::new(Spanned::new(rhs_expr, rhs_span)),
-                    ), combined_span))
+                    Ok((
+                        Expr::Binary(
+                            Box::new(Spanned::new(lhs_expr, lhs_span)),
+                            op_str.to_string(),
+                            Box::new(Spanned::new(rhs_expr, rhs_span)),
+                        ),
+                        combined_span,
+                    ))
                 }
             }
         })
@@ -1171,6 +1744,7 @@ fn parse_primary(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Expr, ParseErr
         Rule::record_literal => parse_record_literal(ctx, pair),
         Rule::tuple_literal => parse_tuple_literal(ctx, pair),
         Rule::closure_with_params => parse_closure_with_params(ctx, pair),
+        Rule::closure_inferred_params => parse_closure_inferred_params(ctx, pair),
         Rule::closure_no_params => parse_closure_no_params(ctx, pair),
         Rule::identifier => Ok(Expr::Ident(pair.as_str().to_string())),
         Rule::expr => parse_expr(ctx, pair),
@@ -1191,6 +1765,38 @@ fn parse_closure_with_params(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Ex
         .next()
         .ok_or(ParseError::Missing("closure parameters".into()))?;
     let params = parse_closure_param_list(ctx, param_list)?;
+
+    // Parse body
+    let body_pair = inner
+        .next()
+        .ok_or(ParseError::Missing("closure body".into()))?;
+    let body = parse_closure_body(ctx, body_pair)?;
+
+    Ok(Expr::Closure { params, body })
+}
+
+/// Parse closure with inferred parameter types: { p -> body } or { p, q -> body }
+/// The parameter types are set to Unknown and will be inferred from context.
+fn parse_closure_inferred_params(
+    ctx: &ParserContext,
+    pair: Pair<Rule>,
+) -> Result<Expr, ParseError> {
+    let mut inner = pair.into_inner();
+
+    // Parse parameter list (identifiers only, no types)
+    let param_list = inner
+        .next()
+        .ok_or(ParseError::Missing("closure parameters".into()))?;
+
+    let mut params = Vec::new();
+    for param_pair in param_list.into_inner() {
+        if param_pair.as_rule() == Rule::identifier {
+            let name = param_pair.as_str().to_string();
+            let span = ctx.span(&param_pair);
+            // Use Unknown type - will be inferred from context
+            params.push((name, Ty::new(TyKind::Unknown, span)));
+        }
+    }
 
     // Parse body
     let body_pair = inner
@@ -1266,7 +1872,10 @@ fn parse_closure_body(
                     .ok_or(ParseError::Missing("trailing expression".into()))?;
                 let span = ctx.span(&expr_pair);
                 let expr = parse_expr(ctx, expr_pair)?;
-                body.push(Spanned::new(Statement::Expr(Spanned::new(expr, span)), span));
+                body.push(Spanned::new(
+                    Statement::Expr(Spanned::new(expr, span)),
+                    span,
+                ));
             }
             _ => {}
         }
@@ -1316,7 +1925,10 @@ fn parse_record_literal(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Expr, P
 }
 
 fn parse_literal(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Expr, ParseError> {
-    let inner = pair.into_inner().next().ok_or(ParseError::Missing("literal".into()))?;
+    let inner = pair
+        .into_inner()
+        .next()
+        .ok_or(ParseError::Missing("literal".into()))?;
 
     match inner.as_rule() {
         Rule::unit_literal => {
@@ -1331,21 +1943,27 @@ fn parse_literal(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Expr, ParseErr
             Ok(Expr::Literal(Literal::Unit(value, unit.to_string())))
         }
         Rule::int_literal => {
-            let value = inner.as_str().parse::<i64>().map_err(|e| ParseError::Syntax {
-                message: e.to_string(),
-                line: 0,
-                column: 0,
-                span: Some(ctx.span(&inner)),
-            })?;
+            let value = inner
+                .as_str()
+                .parse::<i64>()
+                .map_err(|e| ParseError::Syntax {
+                    message: e.to_string(),
+                    line: 0,
+                    column: 0,
+                    span: Some(ctx.span(&inner)),
+                })?;
             Ok(Expr::Literal(Literal::Int(value)))
         }
         Rule::float_literal => {
-            let value = inner.as_str().parse::<f64>().map_err(|e| ParseError::Syntax {
-                message: e.to_string(),
-                line: 0,
-                column: 0,
-                span: Some(ctx.span(&inner)),
-            })?;
+            let value = inner
+                .as_str()
+                .parse::<f64>()
+                .map_err(|e| ParseError::Syntax {
+                    message: e.to_string(),
+                    line: 0,
+                    column: 0,
+                    span: Some(ctx.span(&inner)),
+                })?;
             Ok(Expr::Literal(Literal::Float(value)))
         }
         Rule::color_literal => Ok(Expr::Literal(Literal::Color(inner.as_str().to_string()))),
@@ -1389,7 +2007,8 @@ fn parse_literal(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Expr, ParseErr
 }
 
 fn split_unit_literal(s: &str) -> (&str, &str) {
-    let unit_start = s.char_indices()
+    let unit_start = s
+        .char_indices()
         .find(|(_, c)| !c.is_ascii_digit() && *c != '.' && *c != '-')
         .map(|(i, _)| i)
         .unwrap_or(s.len());
@@ -1405,7 +2024,10 @@ fn parse_string_expr(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Expr, Pars
                 parts.push(InterpolationPart::Literal(part.as_str().to_string()));
             }
             Rule::interpolation => {
-                let expr_pair = part.into_inner().next().ok_or(ParseError::Missing("interpolation expression".into()))?;
+                let expr_pair = part
+                    .into_inner()
+                    .next()
+                    .ok_or(ParseError::Missing("interpolation expression".into()))?;
                 let span = ctx.span(&expr_pair);
                 let expr = parse_expr(ctx, expr_pair)?;
                 parts.push(InterpolationPart::Expr(Spanned::new(expr, span)));
@@ -1484,7 +2106,7 @@ mod tests {
             package yel:counter@1.0.0;
             component Counter {}
         "#;
-        let file = parse_file(source).unwrap();
+        let file = parse_file(source).unwrap().file;
         assert!(file.package.is_some());
         let pkg = file.package.unwrap();
         assert_eq!(pkg.namespace, "yel");
@@ -1498,7 +2120,7 @@ mod tests {
             package my-namespace:my-package;
             component Foo {}
         "#;
-        let file = parse_file(source).unwrap();
+        let file = parse_file(source).unwrap().file;
         let pkg = file.package.unwrap();
         assert_eq!(pkg.namespace, "my-namespace");
         assert_eq!(pkg.name, "my-package");
@@ -1512,7 +2134,7 @@ mod tests {
             component B {}
             component C {}
         "#;
-        let file = parse_file(source).unwrap();
+        let file = parse_file(source).unwrap().file;
         assert_eq!(file.components.len(), 3);
     }
 
@@ -1569,7 +2191,7 @@ mod tests {
             }
         "#;
         // Note: char literals aren't fully supported yet, but type parsing should work
-        let result = parse(source);
+        let _result = parse(source);
         // This might fail on 'x' literal, which is expected
         // The test verifies type parsing works
     }
@@ -1982,7 +2604,7 @@ mod tests {
         let result = parse_file(source);
         assert!(result.is_ok(), "Parse failed: {:?}", result.err());
 
-        let file = result.unwrap();
+        let file = result.unwrap().file;
         assert_eq!(file.components.len(), 1);
         let comp = &file.components[0].node;
         assert_eq!(comp.properties.len(), 2);
@@ -2270,8 +2892,12 @@ mod tests {
                 for i items {}
             }
         "#;
-        let result = parse(source);
-        assert!(result.is_err());
+        // Malformed `for` is now recovered via CATCH_ALL; parse succeeds but records caught errors.
+        let result = parse_file(source).expect("top-level parse should succeed via recovery");
+        assert!(
+            !result.catched_errors.is_empty(),
+            "expected caught errors for malformed for-loop"
+        );
     }
 
     #[test]
@@ -2301,8 +2927,13 @@ mod tests {
             package invalid;
             component Foo {}
         "#;
-        let result = parse_file(source);
-        assert!(result.is_err());
+        // Invalid package decls are now recovered; parse succeeds but records caught errors
+        // and/or leaves the package unset.
+        let result = parse_file(source).expect("top-level parse should succeed via recovery");
+        assert!(
+            result.file.package.is_none() || !result.catched_errors.is_empty(),
+            "expected invalid package to be rejected or caught"
+        );
     }
 
     // ==================== Function Declarations ====================
@@ -2355,7 +2986,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_non_export_function() {
+    fn test_parse_non_export_function_as_property() {
+        // Without the `export` keyword, `name: func(...)` parses as a property with
+        // a function type (callback-style), not as a function declaration.
         let source = r#"
             component Counter {
                 internal_fn: func(value: s32);
@@ -2364,8 +2997,9 @@ mod tests {
         let result = parse(source);
         assert!(result.is_ok(), "Parse failed: {:?}", result.err());
         let component = result.unwrap();
-        assert_eq!(component.functions.len(), 1);
-        assert!(!component.functions[0].is_export);
+        assert_eq!(component.functions.len(), 0);
+        assert_eq!(component.properties.len(), 1);
+        assert_eq!(component.properties[0].name, "internal_fn");
     }
 
     #[test]
@@ -2381,6 +3015,7 @@ mod tests {
 
     #[test]
     fn test_parse_multiple_functions() {
+        // Only `export`-prefixed decls become functions; others are callback-typed properties.
         let source = r#"
             component Counter {
                 count: s32 = 0;
@@ -2392,8 +3027,9 @@ mod tests {
         let result = parse(source);
         assert!(result.is_ok(), "Parse failed: {:?}", result.err());
         let component = result.unwrap();
-        assert_eq!(component.properties.len(), 1);
-        assert_eq!(component.functions.len(), 3);
+        // `count` and `helper` are properties; the two `export ... : func(...)` are functions.
+        assert_eq!(component.properties.len(), 2);
+        assert_eq!(component.functions.len(), 2);
     }
 
     // ==================== Record Declarations ====================
@@ -2407,7 +3043,7 @@ mod tests {
             }
             component App {}
         "#;
-        let file = parse_file(source).unwrap();
+        let file = parse_file(source).unwrap().file;
         assert_eq!(file.records.len(), 1);
         assert_eq!(file.records[0].name, "Point");
         assert_eq!(file.records[0].fields.len(), 2);
@@ -2430,7 +3066,7 @@ mod tests {
             }
             component MailViewer {}
         "#;
-        let file = parse_file(source).unwrap();
+        let file = parse_file(source).unwrap().file;
         assert_eq!(file.records.len(), 1);
         assert_eq!(file.records[0].name, "Mail");
         assert_eq!(file.records[0].fields.len(), 8);
@@ -2449,7 +3085,7 @@ mod tests {
             }
             component Canvas {}
         "#;
-        let file = parse_file(source).unwrap();
+        let file = parse_file(source).unwrap().file;
         assert_eq!(file.records.len(), 2);
         assert_eq!(file.records[0].name, "Point");
         assert_eq!(file.records[1].name, "Size");
@@ -2464,7 +3100,7 @@ mod tests {
             }
             component App {}
         "#;
-        let file = parse_file(source).unwrap();
+        let file = parse_file(source).unwrap().file;
         assert_eq!(file.records.len(), 1);
         assert_eq!(file.records[0].fields.len(), 2);
     }
@@ -2475,7 +3111,7 @@ mod tests {
             record Empty {}
             component App {}
         "#;
-        let file = parse_file(source).unwrap();
+        let file = parse_file(source).unwrap().file;
         assert_eq!(file.records.len(), 1);
         assert_eq!(file.records[0].name, "Empty");
         assert!(file.records[0].fields.is_empty());
@@ -2495,7 +3131,7 @@ mod tests {
                 mails: list<Mail>;
             }
         "#;
-        let file = parse_file(source).unwrap();
+        let file = parse_file(source).unwrap().file;
         assert!(file.package.is_some());
         assert_eq!(file.records.len(), 1);
         assert_eq!(file.components.len(), 1);
@@ -2512,7 +3148,7 @@ mod tests {
                 }
             }
         "##;
-        let file = parse_file(source).unwrap();
+        let file = parse_file(source).unwrap().file;
         assert_eq!(file.components.len(), 1);
         // The binding should parse with a ternary expression
         let comp = &file.components[0].node;
@@ -2528,7 +3164,7 @@ mod tests {
                 }
             }
         "#;
-        let file = parse_file(source).unwrap();
+        let file = parse_file(source).unwrap().file;
         assert_eq!(file.components.len(), 1);
     }
 
@@ -2541,7 +3177,7 @@ mod tests {
                 }
             }
         "#;
-        let file = parse_file(source).unwrap();
+        let file = parse_file(source).unwrap().file;
         assert_eq!(file.components.len(), 1);
     }
 
@@ -2554,7 +3190,7 @@ mod tests {
                 my-prop: s32 = 42;
             }
         "#;
-        let file = parse_file(source).unwrap();
+        let file = parse_file(source).unwrap().file;
         assert_eq!(file.components.len(), 1);
         assert_eq!(file.components[0].node.properties.len(), 3);
         assert_eq!(file.components[0].node.properties[0].name, "selected-id");
@@ -2585,7 +3221,7 @@ component MailItem {
         "#;
         let result = parse_file(source);
         assert!(result.is_ok(), "Parse failed: {:?}", result.err());
-        let file = result.unwrap();
+        let file = result.unwrap().file;
         assert_eq!(file.components.len(), 1);
         assert_eq!(file.components[0].node.name, "MailItem");
     }
@@ -2605,7 +3241,7 @@ component App {
         "#;
         let result = parse_file(source);
         assert!(result.is_ok(), "Parse failed: {:?}", result.err());
-        let file = result.unwrap();
+        let file = result.unwrap().file;
         assert_eq!(file.variants.len(), 1);
         assert_eq!(file.variants[0].node.name, "filter");
         assert_eq!(file.variants[0].node.cases.len(), 3);

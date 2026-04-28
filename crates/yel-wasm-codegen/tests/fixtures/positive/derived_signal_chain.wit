@@ -1,0 +1,21 @@
+package yel:derived-chain@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-a: func() -> s32;
+    set-a: func(value: s32);
+    get-b: func() -> s32;
+    set-b: func(value: s32);
+    get-c: func() -> s32;
+    set-c: func(value: s32);
+  }
+}
+
+world derived-chain {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

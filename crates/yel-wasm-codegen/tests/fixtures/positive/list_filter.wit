@@ -1,0 +1,17 @@
+package yel:filttest@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-items: func() -> list<s32>;
+    set-items: func(value: list<s32>);
+  }
+}
+
+world filttest {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

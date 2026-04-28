@@ -1,0 +1,15 @@
+// Ternary returning an `option<T>` — previously failed with
+// "values remaining on stack at end of block" because the WASM
+// `if` block was declared with a single-slot BlockType::Result
+// while both branches pushed the 2-slot flat shape (discriminant
+// + value). Fixed by centralising block-type selection in
+// `super::repr::block_ty_for`, which pre-registers a
+// `() -> (i32, i32)` function type for every multi-slot ternary
+// during the Type section build.
+package yel:ternary-option@0.1.0;
+
+export component App {
+    flag: bool = true;
+    maybe: option<s32> = flag ? some(42) : none;
+    Text { "x" }
+}

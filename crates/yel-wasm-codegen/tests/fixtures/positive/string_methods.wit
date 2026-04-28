@@ -1,0 +1,17 @@
+package yel:strm@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-name: func() -> string;
+    set-name: func(value: string);
+  }
+}
+
+world strm {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

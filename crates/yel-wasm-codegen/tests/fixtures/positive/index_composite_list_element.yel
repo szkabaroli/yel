@@ -1,0 +1,15 @@
+// Indexing a list whose element type flattens to 3 or more canonical-ABI
+// slots (here: `result<string, string>` = disc + ptr + len). The Index
+// emission must push the full flat shape, not a single pointer, so
+// downstream consumers (list_ctor, setter, interpolation) see the expected
+// arity. Previously the caller underflowed the stack by (slots - 1)
+// because only the element pointer was pushed.
+package yel:idx-composite@0.1.0;
+
+export component App {
+    items: list<result<string, string>> = [ok("first"), err("second")];
+    VStack {
+        clicked: { items = [err("replaced"), items[0]]; }
+        Text { "x" }
+    }
+}

@@ -1,0 +1,17 @@
+package yel:app@0.1.0;
+
+interface component1-component {
+  resource component1 {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-items: func() -> tuple<f32, bool, char>;
+    set-items: func(value: tuple<f32, bool, char>);
+  }
+}
+
+world app {
+  import yel:ui/dom@0.1.0;
+  export component1-component;
+  export yel:ui/dispatch@0.1.0;
+}

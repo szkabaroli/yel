@@ -1,10 +1,16 @@
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte'
-    import { EditorView, lineNumbers } from '@codemirror/view'
+    import { EditorView, lineNumbers, keymap } from '@codemirror/view'
     import { EditorState } from '@codemirror/state'
-    import { StreamLanguage } from '@codemirror/language'
-    import { syntaxHighlighting } from '@codemirror/language'
+    import {
+        StreamLanguage,
+        syntaxHighlighting,
+        foldService,
+        foldGutter,
+        foldKeymap,
+    } from '@codemirror/language'
     import { tags, tagHighlighter } from '@lezer/highlight'
+    import CopyButton from './CopyButton.svelte'
 
     interface Props {
         code: string
@@ -71,9 +77,12 @@
                 return 'operator'
             }
 
-            // Storage modifiers (storage.modifier.wat)
+            // Storage modifiers (storage.modifier.wat). Returned as
+            // `keyword` because lezer's `tags.modifier` is a tag
+            // transformer (function), not a terminal tag — using it as
+            // a standalone class falls through to default styling.
             if (stream.match(/^(mut|shared|passive)\b/)) {
-                return 'modifier'
+                return 'keyword'
             }
 
             // Module elements (storage.type.wat) - must follow ( in WAT but we're lenient
@@ -104,9 +113,16 @@
                 return 'typeName'
             }
 
-            // GC heap types
+            // GC structural keywords (type-section forms, not types themselves)
+            const gcStructural =
+                /^(struct|array|field|sub|final|rec)\b(?!\.)/
+            if (stream.match(gcStructural)) {
+                return 'keyword'
+            }
+
+            // GC heap-type abstract names
             const heapTypes =
-                /^(func|extern|any|eq|nofunc|noextern|struct|array|none|sub|final|rec|field)\b(?!\.)/
+                /^(func|extern|any|eq|nofunc|noextern|none)\b(?!\.)/
             if (stream.match(heapTypes)) {
                 return 'typeName'
             }
@@ -181,6 +197,107 @@
         },
     })
 
+    // Paren-based fold service. WAT is fully `(...)`-nested, so any
+    // line that opens a paren whose match lives on a later line can
+    // be folded down to its first line. We scan from the line's
+    // outermost unmatched `(` forward, respecting string literals
+    // and `(;...;)` block comments. `;;` line comments end at EOL,
+    // so they don't disturb depth.
+    const wastFoldService = foldService.of((state, lineStart, lineEnd) => {
+        const doc = state.doc
+        const lineText = doc.sliceString(lineStart, lineEnd)
+        // Find the position of the *outermost* still-open `(` on the
+        // line — i.e., the last `(` whose matching `)` doesn't also
+        // sit on this line. Walking the line once tracking depth
+        // gives us that.
+        let openPos = -1
+        let depth = 0
+        let i = 0
+        while (i < lineText.length) {
+            const ch = lineText[i]
+            // Line comment runs to EOL.
+            if (ch === ';' && lineText[i + 1] === ';') break
+            // Block comment.
+            if (ch === '(' && lineText[i + 1] === ';') {
+                i += 2
+                while (i < lineText.length) {
+                    if (lineText[i] === ';' && lineText[i + 1] === ')') {
+                        i += 2
+                        break
+                    }
+                    i++
+                }
+                continue
+            }
+            // String.
+            if (ch === '"') {
+                i++
+                while (i < lineText.length) {
+                    if (lineText[i] === '\\') { i += 2; continue }
+                    if (lineText[i] === '"') { i++; break }
+                    i++
+                }
+                continue
+            }
+            if (ch === '(') {
+                if (depth === 0) openPos = i
+                depth++
+            } else if (ch === ')') {
+                depth--
+            }
+            i++
+        }
+        if (openPos < 0 || depth <= 0) return null
+
+        // Walk forward from after the open paren to find the matching
+        // close, respecting strings + block comments, treating `;;`
+        // line comments as run-to-EOL.
+        const total = doc.length
+        let pos = lineStart + openPos + 1
+        let d = 1
+        while (pos < total) {
+            const c = doc.sliceString(pos, pos + 1)
+            const c2 = pos + 1 < total ? doc.sliceString(pos + 1, pos + 2) : ''
+            if (c === ';' && c2 === ';') {
+                // skip to next line
+                const ln = doc.lineAt(pos)
+                pos = ln.to + 1
+                continue
+            }
+            if (c === '(' && c2 === ';') {
+                pos += 2
+                while (pos < total) {
+                    const a = doc.sliceString(pos, pos + 1)
+                    const b = pos + 1 < total ? doc.sliceString(pos + 1, pos + 2) : ''
+                    if (a === ';' && b === ')') { pos += 2; break }
+                    pos++
+                }
+                continue
+            }
+            if (c === '"') {
+                pos++
+                while (pos < total) {
+                    const a = doc.sliceString(pos, pos + 1)
+                    if (a === '\\') { pos += 2; continue }
+                    if (a === '"') { pos++; break }
+                    pos++
+                }
+                continue
+            }
+            if (c === '(') d++
+            else if (c === ')') {
+                d--
+                if (d === 0) {
+                    // Fold from end of opening line to end of matching `)`.
+                    if (pos <= lineEnd) return null // entire form fits on one line
+                    return { from: lineEnd, to: pos + 1 }
+                }
+            }
+            pos++
+        }
+        return null
+    })
+
     // WAST tag highlighter - colors defined in CSS
     const wastHighlighter = tagHighlighter([
         { tag: tags.keyword, class: 'wast-keyword' },
@@ -206,6 +323,9 @@
                 EditorState.readOnly.of(true),
                 lineNumbers(),
                 wastLanguage,
+                wastFoldService,
+                foldGutter(),
+                keymap.of(foldKeymap),
                 syntaxHighlighting(wastHighlighter),
                 EditorView.theme({
                     '&': {
@@ -253,6 +373,7 @@
         <h3 class="text-xs font-semibold text-muted-foreground">
             WebAssembly Text Format
         </h3>
+        <CopyButton text={code} title="Copy WAT" />
     </div>
 
     <!-- Editor -->

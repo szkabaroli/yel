@@ -5,6 +5,10 @@ edition = "2024"
 description = "Language Server Protocol implementation for Yel language"
 license.workspace = true
 
+[lib]
+name = "yel_lsp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "yel-lsp"
 path = "src/main.rs"

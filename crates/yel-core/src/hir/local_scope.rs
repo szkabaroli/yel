@@ -73,6 +73,12 @@ impl LocalScope {
         &self.locals[id]
     }
 
+    /// Update the type of an already-defined local (used when the type is
+    /// inferred after the local is defined, e.g. a for-loop item).
+    pub fn set_ty(&mut self, id: LocalId, ty: Ty) {
+        self.locals[id].ty = ty;
+    }
+
     /// Push a new nested scope.
     pub fn push_scope(&mut self) {
         self.stack.push(std::mem::take(&mut self.current));

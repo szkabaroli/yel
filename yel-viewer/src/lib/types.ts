@@ -197,6 +197,9 @@ export interface TreeNode {
 /** HIR output from compiler - array of components */
 export type HirOutput = HirComponent[];
 
+/** HIR output from compiler - array of components */
+export type LirOutput = LirComponent[];
+
 /** Interned type handle (u32 index) */
 export type Ty = number;
 
@@ -219,6 +222,15 @@ export interface HirComponent {
   span: Span;
   is_export: boolean;
   body: HirNode[];
+}
+
+/** LIR Component - matches Rust LirComponent */
+export interface LirComponent {
+  def_id: DefId;
+  name: Name;
+  span: Span;
+  is_export: boolean;
+  [x: string]: any;
 }
 
 /** HIR Node - matches Rust HirNode */
@@ -313,122 +325,3 @@ export type HirStatement =
 export type HirStmt = HirStatement;
 export type SymbolId = number;
 export type ResolvedType = string | { [key: string]: unknown };
-
-// =============================================================================
-// THIR Types - Typed HIR with full type information
-// =============================================================================
-
-/** THIR output from compiler - component + symbol table + types */
-export interface ThirOutput {
-  component: ThirComponent;
-  symbols: HirSymbolTable;
-  types: TypeRegistry;
-}
-
-/** THIR Component */
-export interface ThirComponent {
-  name: string;
-  is_export: boolean;
-  properties: ThirProperty[];
-  callbacks: ThirCallback[];
-  body: ThirNode[];
-  span: Span;
-}
-
-/** THIR Property */
-export interface ThirProperty {
-  symbol: SymbolId;
-  ty: ResolvedType;
-  default?: ThirExpr;
-  span: Span;
-}
-
-/** THIR Callback */
-export interface ThirCallback {
-  symbol: SymbolId;
-  params: [SymbolId, ResolvedType][];
-  return_ty?: ResolvedType;
-  is_export: boolean;
-  span: Span;
-}
-
-/** THIR Node */
-export interface ThirNode {
-  kind: ThirNodeKind;
-  span: Span;
-}
-
-/** THIR Node Kind */
-export type ThirNodeKind =
-  | { Element: { name: string; is_component: boolean; bindings: ThirBinding[]; handlers: ThirHandler[]; children: ThirNode[] } }
-  | { Text: { content: ThirExpr } }
-  | { If: { condition: ThirExpr; then_branch: ThirNode[]; else_ifs: [ThirExpr, ThirNode[]][]; else_branch?: ThirNode[] } }
-  | { For: { item: SymbolId; item_ty: ResolvedType; iterable: ThirExpr; key?: ThirExpr; body: ThirNode[] } };
-
-/** THIR Binding */
-export interface ThirBinding {
-  name: string;
-  value: ThirExpr;
-  expected_ty: ResolvedType;
-  span: Span;
-}
-
-/** THIR Handler */
-export interface ThirHandler {
-  name: string;
-  body: ThirStmt[];
-  span: Span;
-}
-
-/** THIR Expression - every expression has a type */
-export interface ThirExpr {
-  kind: ThirExprKind;
-  ty: ResolvedType;
-  span: Span;
-}
-
-/** THIR Expression Kind */
-export type ThirExprKind =
-  | { Var: SymbolId }
-  | { Literal: HirLiteral }
-  | { Binary: { op: BinOp; lhs: ThirExpr; rhs: ThirExpr } }
-  | { Unary: { op: UnaryOp; operand: ThirExpr } }
-  | { Call: { func: SymbolId; args: ThirExpr[] } }
-  | { MethodCall: { receiver: ThirExpr; method: string; args: ThirExpr[] } }
-  | { Field: { base: ThirExpr; field: string } }
-  | { Index: { base: ThirExpr; index: ThirExpr } }
-  | { Match: { scrutinee: ThirExpr; arms: ThirMatchArm[] } }
-  | { If: { cond: ThirExpr; then_expr: ThirExpr; else_expr: ThirExpr } }
-  | { Range: { start: ThirExpr; end: ThirExpr; inclusive: boolean } }
-  | { Closure: { params: [SymbolId, ResolvedType][]; body: ThirStmt[]; return_ty?: ResolvedType } }
-  | { RecordLit: { ty_name: string; fields: [string, ThirExpr][] } }
-  | { VariantCtor: { ty_name: string; case: string; payload?: ThirExpr } }
-  | { EnumCase: { ty_name: string; case: string } }
-  | { Tuple: ThirExpr[] }
-  | { List: ThirExpr[] }
-  | { Coerce: { expr: ThirExpr; from: ResolvedType; to: ResolvedType } }
-  | "Error";
-
-/** THIR Match Arm */
-export interface ThirMatchArm {
-  pattern: ThirPattern;
-  guard?: ThirExpr;
-  body: ThirExpr;
-}
-
-/** THIR Pattern */
-export type ThirPattern =
-  | "Wildcard"
-  | { Var: SymbolId }
-  | { Some: ThirPattern }
-  | "None"
-  | { Ok: ThirPattern }
-  | { Err: ThirPattern }
-  | { Variant: { ty_name: string; case: string; binding?: SymbolId } }
-  | { Literal: HirLiteral };
-
-/** THIR Statement */
-export type ThirStmt =
-  | { Expr: ThirExpr }
-  | { Assign: { target: ThirExpr; value: ThirExpr } }
-  | { If: { cond: ThirExpr; then_branch: ThirStmt[]; else_branch?: ThirStmt[] } };

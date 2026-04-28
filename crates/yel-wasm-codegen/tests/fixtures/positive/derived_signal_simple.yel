@@ -1,0 +1,13 @@
+// Derived signal: a property whose default expression reads another
+// signal. When the source changes, the derived value must recompute.
+// Compiles and validates today, but runtime reactivity is broken —
+// covered by the execution test `derived_signal_updates_when_source_changes`.
+package yel:derived-simple@0.1.0;
+
+export component App {
+    count: s32 = 0;
+    doubled: s32 = count * 2;
+    VStack {
+        Text { "doubled: {doubled}" }
+    }
+}

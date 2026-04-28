@@ -1,0 +1,19 @@
+package yel:booltest@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-flag: func() -> bool;
+    set-flag: func(value: bool);
+    get-title: func() -> string;
+    set-title: func(value: string);
+  }
+}
+
+world booltest {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

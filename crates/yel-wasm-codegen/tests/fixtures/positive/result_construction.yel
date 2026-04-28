@@ -1,0 +1,11 @@
+package yel:resctor@0.1.0;
+
+// Exercises `VariantCtor` for the builtin Result<T, E> — `ok(1)` and `err("x")`.
+// Without this the result construction path has zero fixture coverage.
+export component App {
+    good: result<s32, string> = ok(1);
+    bad: result<s32, string> = err("x");
+    VStack {
+        Text { "result signals" }
+    }
+}

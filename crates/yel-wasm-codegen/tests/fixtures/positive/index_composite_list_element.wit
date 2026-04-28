@@ -1,0 +1,17 @@
+package yel:idx-composite@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-items: func() -> list<result<string, string>>;
+    set-items: func(value: list<result<string, string>>);
+  }
+}
+
+world idx-composite {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

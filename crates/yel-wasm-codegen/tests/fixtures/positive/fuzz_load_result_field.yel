@@ -1,0 +1,9 @@
+// Same panic class as fuzz_load_option_field but for a `result<OK, ERR>`
+// field. Codegen panics at expr.rs:1451 `todo!("load field: {:?}")`.
+// Fix subsumes this once the option variant is handled.
+package yel:fb@0.1.0;
+record Rec { r: result<s32, s32>, x: s32, }
+export component App {
+    v: Rec = { r: ok(1), x: 0 };
+    Text { "hi {v.r}" }
+}

@@ -1,9 +1,11 @@
 //! AST-based hover information provider.
 
+use tower_lsp::lsp_types::*;
 use yel_core::source::{SourceId, Span};
 use yel_core::syntax::ast::*;
 use yel_core::syntax::parser;
-use tower_lsp::lsp_types::*;
+
+use crate::builtins_catalog;
 
 // Stub types for removed analyzer module functionality
 #[derive(Clone, Debug)]
@@ -25,6 +27,22 @@ pub enum ResolvedType {
     Option(Box<ResolvedType>),
     Named(std::string::String),
     Unknown,
+    Length,
+    PhysicalLength,
+    Angle,
+    Duration,
+    Percent,
+    RelativeFontSize,
+    Color,
+    Brush,
+    Image,
+    Easing,
+    Result(Option<Box<ResolvedType>>, Option<Box<ResolvedType>>),
+    Tuple(Vec<ResolvedType>),
+    Func {
+        params: Vec<(String, ResolvedType)>,
+        ret: Option<Box<ResolvedType>>,
+    },
 }
 
 impl std::fmt::Display for ResolvedType {
@@ -47,6 +65,45 @@ impl std::fmt::Display for ResolvedType {
             ResolvedType::Option(inner) => write!(f, "option<{}>", inner),
             ResolvedType::Named(name) => write!(f, "{}", name),
             ResolvedType::Unknown => write!(f, "unknown"),
+            ResolvedType::Length => write!(f, "length"),
+            ResolvedType::PhysicalLength => write!(f, "physical-length"),
+            ResolvedType::Angle => write!(f, "angle"),
+            ResolvedType::Duration => write!(f, "duration"),
+            ResolvedType::Percent => write!(f, "percent"),
+            ResolvedType::RelativeFontSize => write!(f, "relative-font-size"),
+            ResolvedType::Color => write!(f, "color"),
+            ResolvedType::Brush => write!(f, "brush"),
+            ResolvedType::Image => write!(f, "image"),
+            ResolvedType::Easing => write!(f, "easing"),
+            ResolvedType::Result(ok, err) => {
+                let os = ok
+                    .as_ref()
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "_".to_string());
+                let es = err
+                    .as_ref()
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "_".to_string());
+                write!(f, "result<{}, {}>", os, es)
+            }
+            ResolvedType::Tuple(items) => {
+                let inner: Vec<_> = items.iter().map(|t| t.to_string()).collect();
+                write!(f, "tuple<{}>", inner.join(", "))
+            }
+            ResolvedType::Func { params, ret } => {
+                let ps: Vec<_> = params
+                    .iter()
+                    .map(|(n, t)| format!("{}: {}", n, t))
+                    .collect();
+                write!(
+                    f,
+                    "func({}){}",
+                    ps.join(", "),
+                    ret.as_ref()
+                        .map(|t| format!(" -> {}", t))
+                        .unwrap_or_default()
+                )
+            }
         }
     }
 }
@@ -78,6 +135,10 @@ impl TypeNarrowings {
 }
 
 /// Convert an AST TyKind to a ResolvedType.
+fn resolve_ast_ty(ty: &Ty) -> ResolvedType {
+    resolve_ast_type(&ty.kind)
+}
+
 fn resolve_ast_type(ty: &TyKind) -> ResolvedType {
     match ty {
         TyKind::Bool => ResolvedType::Bool,
@@ -93,79 +154,35 @@ fn resolve_ast_type(ty: &TyKind) -> ResolvedType {
         TyKind::F64 => ResolvedType::F64,
         TyKind::Char => ResolvedType::Char,
         TyKind::String => ResolvedType::String,
-        TyKind::List(inner) => ResolvedType::List(Box::new(resolve_ast_type(&inner.kind))),
-        TyKind::Option(inner) => ResolvedType::Option(Box::new(resolve_ast_type(&inner.kind))),
+        TyKind::List(inner) => ResolvedType::List(Box::new(resolve_ast_ty(inner))),
+        TyKind::Option(inner) => ResolvedType::Option(Box::new(resolve_ast_ty(inner))),
         TyKind::Named(name) => ResolvedType::Named(name.clone()),
-        _ => ResolvedType::Unknown,
-    }
-}
-
-// Stub module for removed stdlib functionality
-mod stdlib {
-    #[allow(dead_code)]
-    pub struct BuiltinElement {
-        pub name: String,
-        pub properties: Vec<BuiltinProperty>,
-        pub functions: Vec<BuiltinFunction>,
-    }
-
-    #[allow(dead_code)]
-    pub struct BuiltinProperty {
-        pub name: String,
-        pub ty: BuiltinTy,
-    }
-
-    #[allow(dead_code)]
-    pub struct BuiltinTy {
-        pub kind: yel_core::syntax::ast::TyKind,
-    }
-
-    #[allow(dead_code)]
-    pub struct BuiltinFunction {
-        pub name: String,
-        pub params: Vec<(String, BuiltinTy)>,
-        pub return_type: Option<BuiltinTy>,
-    }
-
-    #[allow(dead_code)]
-    pub struct BuiltinEnum {
-        pub name: String,
-        pub cases: Vec<String>,
-    }
-
-    #[allow(dead_code)]
-    pub struct BuiltinVariant {
-        pub name: String,
-        pub cases: Vec<BuiltinVariantCase>,
-    }
-
-    #[allow(dead_code)]
-    pub struct BuiltinVariantCase {
-        pub name: String,
-        pub payload: Option<yel_core::syntax::ast::TyKind>,
-    }
-
-    pub fn get_builtin(_name: &str) -> Option<BuiltinElement> {
-        None
-    }
-
-    pub fn accepts_children(_name: &str) -> bool {
-        true
-    }
-
-    #[allow(dead_code)]
-    pub fn builtin_enums() -> Vec<BuiltinEnum> {
-        vec![]
-    }
-
-    #[allow(dead_code)]
-    pub fn builtin_variants() -> Vec<BuiltinVariant> {
-        vec![]
-    }
-
-    #[allow(dead_code)]
-    pub fn get_prop_type(_element: &str, _prop: &str) -> Option<yel_core::syntax::ast::TyKind> {
-        None
+        TyKind::Length => ResolvedType::Length,
+        TyKind::PhysicalLength => ResolvedType::PhysicalLength,
+        TyKind::Angle => ResolvedType::Angle,
+        TyKind::Duration => ResolvedType::Duration,
+        TyKind::Percent => ResolvedType::Percent,
+        TyKind::RelativeFontSize => ResolvedType::RelativeFontSize,
+        TyKind::Color => ResolvedType::Color,
+        TyKind::Brush => ResolvedType::Brush,
+        TyKind::Image => ResolvedType::Image,
+        TyKind::Easing => ResolvedType::Easing,
+        TyKind::Result { ok, err } => ResolvedType::Result(
+            ok.as_ref().map(|t| Box::new(resolve_ast_ty(t))),
+            err.as_ref().map(|t| Box::new(resolve_ast_ty(t))),
+        ),
+        TyKind::Tuple(types) => ResolvedType::Tuple(types.iter().map(resolve_ast_ty).collect()),
+        TyKind::Func {
+            params,
+            return_type,
+        } => ResolvedType::Func {
+            params: params
+                .iter()
+                .map(|(n, t)| (n.clone(), resolve_ast_ty(t)))
+                .collect(),
+            ret: return_type.as_ref().map(|t| Box::new(resolve_ast_ty(t))),
+        },
+        TyKind::Unknown => ResolvedType::Unknown,
     }
 }
 
@@ -227,7 +244,8 @@ fn find_hover_content(
             return Some(format_component(&comp.node));
         }
         if contains(&comp.span, offset, source_id) {
-            if let Some(content) = find_in_component(&comp.node, file, offset, source_id, narrowings)
+            if let Some(content) =
+                find_in_component(&comp.node, file, offset, source_id, narrowings)
             {
                 return Some(content);
             }
@@ -303,7 +321,7 @@ fn find_in_node(
                     return Some(format_component_use(&ref_comp.node));
                 }
                 // Check stdlib
-                if let Some(builtin) = stdlib::get_builtin(&el.name) {
+                if let Some(builtin) = builtins_catalog::get_builtin(&el.name) {
                     return Some(format_builtin(&builtin));
                 }
                 return None;
@@ -314,7 +332,14 @@ fn find_in_node(
                         return format_binding(&b.node.name, &el.name, file);
                     }
                     if contains(&b.node.value.span, offset, sid) {
-                        return find_in_expr(&b.node.value.node, comp, file, offset, sid, narrowings);
+                        return find_in_expr(
+                            &b.node.value.node,
+                            comp,
+                            file,
+                            offset,
+                            sid,
+                            narrowings,
+                        );
                     }
                 }
             }
@@ -388,6 +413,10 @@ fn find_in_node(
                     return find_in_node(&child.node, comp, file, offset, sid, narrowings);
                 }
             }
+        }
+        Node::Children => {
+            // `@children` is a zero-width marker; hover is handled by the
+            // caller-passed children at the use site, not here.
         }
     }
     None
@@ -472,14 +501,18 @@ fn find_in_expr(
                 return find_in_expr(&base.node, comp, file, offset, sid, narrowings);
             }
             // Cursor is on the field name - provide field info based on base type
-            Some(format_member_field(base, field, comp, file, offset, narrowings))
+            Some(format_member_field(
+                base, field, comp, file, offset, narrowings,
+            ))
         }
         Expr::OptionalMember(base, field) => {
             if contains(&base.span, offset, sid) {
                 return find_in_expr(&base.node, comp, file, offset, sid, narrowings);
             }
             // Cursor is on the field name - provide field info for optional chaining
-            Some(format_optional_member_field(base, field, comp, file, offset, narrowings))
+            Some(format_optional_member_field(
+                base, field, comp, file, offset, narrowings,
+            ))
         }
         Expr::Index(base, idx) => {
             if contains(&base.span, offset, sid) {
@@ -549,6 +582,23 @@ fn find_in_expr(
                 }
             }
             Some(format!("```yel\n::{}(...)\n```\n---\nPath call.", member))
+        }
+        Expr::MethodCall {
+            receiver,
+            method,
+            method_span: _,
+            args,
+        } => {
+            // Method call like `receiver.method(args)`
+            if contains(&receiver.span, offset, sid) {
+                return find_in_expr(&receiver.node, comp, file, offset, sid, narrowings);
+            }
+            for arg in args {
+                if contains(&arg.span, offset, sid) {
+                    return find_in_expr(&arg.node, comp, file, offset, sid, narrowings);
+                }
+            }
+            Some(format!("```yel\n.{}(...)\n```\n---\nMethod call.", method))
         }
     }
 }
@@ -631,21 +681,41 @@ fn format_component(comp: &Component) -> String {
     if !comp.functions.is_empty() {
         s.push_str("\n**Functions:**\n");
         for f in &comp.functions {
-            let params: Vec<_> = f.node.params.iter().map(|(n, t)| format!("{}: {}", n, t.kind)).collect();
+            let params: Vec<_> = f
+                .node
+                .params
+                .iter()
+                .map(|(n, t)| format!("{}: {}", n, t.kind))
+                .collect();
             let export = if f.node.is_export { "export " } else { "" };
-            s.push_str(&format!("- `{}{}({})`\n", export, f.node.name, params.join(", ")));
+            s.push_str(&format!(
+                "- `{}{}({})`\n",
+                export,
+                f.node.name,
+                params.join(", ")
+            ));
         }
     }
     s
 }
 
 fn format_component_use(comp: &Component) -> String {
-    let mut s = format!("```yel\n{}\n```\n---\nComponent instantiation.\n\n", comp.name);
+    let mut s = format!(
+        "```yel\n{}\n```\n---\nComponent instantiation.\n\n",
+        comp.name
+    );
     if !comp.properties.is_empty() {
         s.push_str("**Properties:**\n");
         for p in &comp.properties {
-            let req = if p.node.default.is_some() { "" } else { " *(required)*" };
-            s.push_str(&format!("- `{}`: `{}`{}\n", p.node.name, p.node.ty.kind, req));
+            let req = if p.node.default.is_some() {
+                ""
+            } else {
+                " *(required)*"
+            };
+            s.push_str(&format!(
+                "- `{}`: `{}`{}\n",
+                p.node.name, p.node.ty.kind, req
+            ));
         }
     }
     s
@@ -653,10 +723,17 @@ fn format_component_use(comp: &Component) -> String {
 
 fn format_property(prop: &Property, comp_name: &str) -> String {
     let def = if prop.default.is_some() { " = ..." } else { "" };
-    format!("```yel\n{}: {}{}\n```\n---\nProperty of `{}`.", prop.name, prop.ty.kind, def, comp_name)
+    format!(
+        "```yel\n{}: {}{}\n```\n---\nProperty of `{}`.",
+        prop.name, prop.ty.kind, def, comp_name
+    )
 }
 
-fn format_property_ref_narrowed(prop: &Property, comp_name: &str, narrowed_ty: &ResolvedType) -> String {
+fn format_property_ref_narrowed(
+    prop: &Property,
+    comp_name: &str,
+    narrowed_ty: &ResolvedType,
+) -> String {
     format!(
         "```yel\n{}: {}\n```\n---\nProperty of `{}`\n\n*Narrowed from `{}`*",
         prop.name,
@@ -694,39 +771,43 @@ fn format_member_field(
                 field, type_name
             )
         }
-        ResolvedType::Option(inner) => {
-            match field {
-                "is_some" => "```yel\nis_some: bool\n```\n---\nReturns `true` if the option contains a value.".to_string(),
-                "is_none" => "```yel\nis_none: bool\n```\n---\nReturns `true` if the option is empty.".to_string(),
-                "unwrap" => format!(
-                    "```yel\nunwrap: {}\n```\n---\nReturns the contained value. Panics if empty.",
-                    format_resolved_type(inner)
-                ),
-                _ => format!("```yel\n.{}\n```\n---\nField on `option`", field),
+        ResolvedType::Option(inner) => match field {
+            "is_some" => {
+                "```yel\nis_some: bool\n```\n---\nReturns `true` if the option contains a value."
+                    .to_string()
             }
-        }
-        ResolvedType::List(inner) => {
-            match field {
-                "len" => "```yel\nlen: s32\n```\n---\nReturns the number of elements.".to_string(),
-                "is_empty" => "```yel\nis_empty: bool\n```\n---\nReturns `true` if the list has no elements.".to_string(),
-                "first" => format!(
-                    "```yel\nfirst: option<{}>\n```\n---\nReturns the first element, or `none` if empty.",
-                    format_resolved_type(inner)
-                ),
-                "last" => format!(
-                    "```yel\nlast: option<{}>\n```\n---\nReturns the last element, or `none` if empty.",
-                    format_resolved_type(inner)
-                ),
-                _ => format!("```yel\n.{}\n```\n---\nField on `list`", field),
+            "is_none" => "```yel\nis_none: bool\n```\n---\nReturns `true` if the option is empty."
+                .to_string(),
+            "unwrap" => format!(
+                "```yel\nunwrap: {}\n```\n---\nReturns the contained value. Panics if empty.",
+                format_resolved_type(inner)
+            ),
+            _ => format!("```yel\n.{}\n```\n---\nField on `option`", field),
+        },
+        ResolvedType::List(inner) => match field {
+            "len" => "```yel\nlen: s32\n```\n---\nReturns the number of elements.".to_string(),
+            "is_empty" => {
+                "```yel\nis_empty: bool\n```\n---\nReturns `true` if the list has no elements."
+                    .to_string()
             }
-        }
-        ResolvedType::String => {
-            match field {
-                "len" => "```yel\nlen: s32\n```\n---\nReturns the length of the string.".to_string(),
-                "is_empty" => "```yel\nis_empty: bool\n```\n---\nReturns `true` if the string is empty.".to_string(),
-                _ => format!("```yel\n.{}\n```\n---\nField on `string`", field),
+            "first" => format!(
+                "```yel\nfirst: option<{}>\n```\n---\nReturns the first element, or `none` if empty.",
+                format_resolved_type(inner)
+            ),
+            "last" => format!(
+                "```yel\nlast: option<{}>\n```\n---\nReturns the last element, or `none` if empty.",
+                format_resolved_type(inner)
+            ),
+            _ => format!("```yel\n.{}\n```\n---\nField on `list`", field),
+        },
+        ResolvedType::String => match field {
+            "len" => "```yel\nlen: s32\n```\n---\nReturns the length of the string.".to_string(),
+            "is_empty" => {
+                "```yel\nis_empty: bool\n```\n---\nReturns `true` if the string is empty."
+                    .to_string()
             }
-        }
+            _ => format!("```yel\n.{}\n```\n---\nField on `string`", field),
+        },
         _ => format!(
             "```yel\n.{}\n```\n---\nField access on `{}`",
             field,
@@ -757,21 +838,30 @@ fn format_optional_member_field(
                 ResolvedType::Named(type_name) => {
                     // Look up in user-defined records
                     if let Some(rec) = file.records.iter().find(|r| &r.node.name == type_name) {
-                        if let Some(field_def) = rec.node.fields.iter().find(|f| f.node.name == field) {
+                        if let Some(field_def) =
+                            rec.node.fields.iter().find(|f| f.node.name == field)
+                        {
                             return format!(
                                 "```yel\n?.{}: {}\n```\n---\nOptional chaining on `option<{}>`. Returns `{}`.",
-                                field, field_def.node.ty.kind, type_name, format_resolved_type(&result_ty)
+                                field,
+                                field_def.node.ty.kind,
+                                type_name,
+                                format_resolved_type(&result_ty)
                             );
                         }
                     }
                     format!(
                         "```yel\n?.{}: {}\n```\n---\nOptional field access on `option<{}>`",
-                        field, format_resolved_type(&result_ty), type_name
+                        field,
+                        format_resolved_type(&result_ty),
+                        type_name
                     )
                 }
                 _ => format!(
                     "```yel\n?.{}: {}\n```\n---\nOptional chaining. Returns `{}`.",
-                    field, format_resolved_type(&result_ty), format_resolved_type(&result_ty)
+                    field,
+                    format_resolved_type(&result_ty),
+                    format_resolved_type(&result_ty)
                 ),
             }
         }
@@ -870,9 +960,17 @@ fn format_resolved_type(ty: &ResolvedType) -> String {
 }
 
 fn format_function(func: &FunctionDecl, comp_name: &str) -> String {
-    let params: Vec<_> = func.params.iter().map(|(n, t)| format!("{}: {}", n, t.kind)).collect();
+    let params: Vec<_> = func
+        .params
+        .iter()
+        .map(|(n, t)| format!("{}: {}", n, t.kind))
+        .collect();
     let export = if func.is_export { "export " } else { "" };
-    let ret = func.return_type.as_ref().map(|t| format!(" -> {}", t.kind)).unwrap_or_default();
+    let ret = func
+        .return_type
+        .as_ref()
+        .map(|t| format!(" -> {}", t.kind))
+        .unwrap_or_default();
     format!(
         "```yel\n{}{}: func({}){}\n```\n---\nCallback in `{}`.",
         export,
@@ -884,8 +982,16 @@ fn format_function(func: &FunctionDecl, comp_name: &str) -> String {
 }
 
 fn format_function_call(func: &FunctionDecl, comp_name: &str) -> String {
-    let params: Vec<_> = func.params.iter().map(|(n, t)| format!("{}: {}", n, t.kind)).collect();
-    let ret = func.return_type.as_ref().map(|t| format!(" -> {}", t.kind)).unwrap_or_default();
+    let params: Vec<_> = func
+        .params
+        .iter()
+        .map(|(n, t)| format!("{}: {}", n, t.kind))
+        .collect();
+    let ret = func
+        .return_type
+        .as_ref()
+        .map(|t| format!(" -> {}", t.kind))
+        .unwrap_or_default();
     format!(
         "```yel\n{}: func({}){}\n```\n---\nCallback call. Defined in `{}`.",
         func.name,
@@ -924,7 +1030,10 @@ fn format_type(ty: &TyKind) -> String {
         TyKind::Option(_) => "Optional type.",
         TyKind::Result { .. } => "Result type.",
         TyKind::Tuple(_) => "Tuple type.",
-        TyKind::Func { params, return_type } => {
+        TyKind::Func {
+            params,
+            return_type,
+        } => {
             let param_strs: Vec<_> = params
                 .iter()
                 .map(|(name, ty)| format!("{}: {}", name, ty.kind))
@@ -949,14 +1058,17 @@ fn format_literal(lit: &Literal) -> String {
     match lit {
         Literal::Int(v) => format!("```yel\ns32\n```\n---\n`{}` (`0x{:X}`)", v, v),
         Literal::Float(v) => format!("```yel\nf32\n```\n---\n`{}`", v),
-        Literal::String(s) => format!("```yel\nstring\n```\n---\n\"{}\"", if s.len() > 40 { &s[..37] } else { s }),
+        Literal::String(s) => format!(
+            "```yel\nstring\n```\n---\n\"{}\"",
+            if s.len() > 40 { &s[..37] } else { s }
+        ),
         Literal::Bool(v) => format!("```yel\nbool\n```\n---\n`{}`", v),
         Literal::Unit(v, u) => {
             let ty = match u.as_str() {
-                "px"|"pt"|"rem"|"in"|"mm"|"cm" => "length",
+                "px" | "pt" | "rem" | "in" | "mm" | "cm" => "length",
                 "phx" => "physical-length",
-                "deg"|"rad"|"turn" => "angle",
-                "ms"|"s" => "duration",
+                "deg" | "rad" | "turn" => "angle",
+                "ms" | "s" => "duration",
                 "%" => "percent",
                 _ => "unit",
             };
@@ -965,19 +1077,42 @@ fn format_literal(lit: &Literal) -> String {
         Literal::Color(hex) => {
             let h = hex.trim_start_matches('#');
             let (r, g, b) = match h.len() {
-                3 => (u8::from_str_radix(&h[0..1], 16).unwrap_or(0)*17, u8::from_str_radix(&h[1..2], 16).unwrap_or(0)*17, u8::from_str_radix(&h[2..3], 16).unwrap_or(0)*17),
-                _ => (u8::from_str_radix(h.get(0..2).unwrap_or("0"), 16).unwrap_or(0), u8::from_str_radix(h.get(2..4).unwrap_or("0"), 16).unwrap_or(0), u8::from_str_radix(h.get(4..6).unwrap_or("0"), 16).unwrap_or(0)),
+                3 => (
+                    u8::from_str_radix(&h[0..1], 16).unwrap_or(0) * 17,
+                    u8::from_str_radix(&h[1..2], 16).unwrap_or(0) * 17,
+                    u8::from_str_radix(&h[2..3], 16).unwrap_or(0) * 17,
+                ),
+                _ => (
+                    u8::from_str_radix(h.get(0..2).unwrap_or("0"), 16).unwrap_or(0),
+                    u8::from_str_radix(h.get(2..4).unwrap_or("0"), 16).unwrap_or(0),
+                    u8::from_str_radix(h.get(4..6).unwrap_or("0"), 16).unwrap_or(0),
+                ),
             };
-            format!("```yel\ncolor\n```\n---\nrgb({}, {}, {})\n`{}`", r, g, b, hex)
+            format!(
+                "```yel\ncolor\n```\n---\nrgb({}, {}, {})\n`{}`",
+                r, g, b, hex
+            )
         }
         Literal::List(elements) => {
-            format!("```yel\nlist\n```\n---\nList with {} element{}", elements.len(), if elements.len() == 1 { "" } else { "s" })
+            format!(
+                "```yel\nlist\n```\n---\nList with {} element{}",
+                elements.len(),
+                if elements.len() == 1 { "" } else { "s" }
+            )
         }
         Literal::Tuple(elements) => {
-            format!("```yel\ntuple\n```\n---\nTuple with {} element{}", elements.len(), if elements.len() == 1 { "" } else { "s" })
+            format!(
+                "```yel\ntuple\n```\n---\nTuple with {} element{}",
+                elements.len(),
+                if elements.len() == 1 { "" } else { "s" }
+            )
         }
         Literal::Record { fields } => {
-            format!("```yel\nrecord\n```\n---\nAnonymous record literal with {} field{}", fields.len(), if fields.len() == 1 { "" } else { "s" })
+            format!(
+                "```yel\nrecord\n```\n---\nAnonymous record literal with {} field{}",
+                fields.len(),
+                if fields.len() == 1 { "" } else { "s" }
+            )
         }
         Literal::Char(c) => format!("```yel\nchar\n```\n---\n`'{}'`", c),
     }
@@ -986,16 +1121,30 @@ fn format_literal(lit: &Literal) -> String {
 fn format_handler(handler_name: &str, element_name: &str, file: &File) -> Option<String> {
     // Check if element is a user-defined component
     if let Some(comp) = file.components.iter().find(|c| c.node.name == element_name) {
-        if let Some(func) = comp.node.functions.iter().find(|f| f.node.name == handler_name) {
-            let params: Vec<_> = func.node.params.iter()
+        if let Some(func) = comp
+            .node
+            .functions
+            .iter()
+            .find(|f| f.node.name == handler_name)
+        {
+            let params: Vec<_> = func
+                .node
+                .params
+                .iter()
                 .map(|(n, t)| format!("{}: {}", n, t.kind))
                 .collect();
-            let ret = func.node.return_type.as_ref()
+            let ret = func
+                .node
+                .return_type
+                .as_ref()
                 .map(|t| format!(" -> {}", t.kind))
                 .unwrap_or_default();
             return Some(format!(
                 "```yel\n{}: func({}){}\n```\n---\nCallback on `{}`.",
-                handler_name, params.join(", "), ret, element_name
+                handler_name,
+                params.join(", "),
+                ret,
+                element_name
             ));
         }
     }
@@ -1007,7 +1156,12 @@ fn format_handler(handler_name: &str, element_name: &str, file: &File) -> Option
 fn format_binding(prop_name: &str, element_name: &str, file: &File) -> Option<String> {
     // Check if element is a user-defined component
     if let Some(comp) = file.components.iter().find(|c| c.node.name == element_name) {
-        if let Some(prop) = comp.node.properties.iter().find(|p| p.node.name == prop_name) {
+        if let Some(prop) = comp
+            .node
+            .properties
+            .iter()
+            .find(|p| p.node.name == prop_name)
+        {
             return Some(format!(
                 "```yel\n{}: {}\n```\n---\nProperty of `{}`.",
                 prop_name, prop.node.ty.kind, element_name
@@ -1015,12 +1169,11 @@ fn format_binding(prop_name: &str, element_name: &str, file: &File) -> Option<St
         }
     }
 
-    // Check if element is a stdlib builtin (stub - always returns None)
-    if let Some(builtin) = stdlib::get_builtin(element_name) {
+    if let Some(builtin) = builtins_catalog::get_builtin(element_name) {
         if let Some(prop) = builtin.properties.iter().find(|p| p.name == prop_name) {
             return Some(format!(
                 "```yel\n{}: {}\n```\n---\nProperty of `{}`.",
-                prop_name, prop.ty.kind, element_name
+                prop_name, prop.ty, element_name
             ));
         }
     }
@@ -1028,34 +1181,33 @@ fn format_binding(prop_name: &str, element_name: &str, file: &File) -> Option<St
     None
 }
 
-fn format_builtin(builtin: &stdlib::BuiltinElement) -> String {
+fn format_builtin(builtin: &builtins_catalog::BuiltinElement) -> String {
     let mut s = format!("```yel\n{}\n```\n---\n", builtin.name);
 
     s.push_str("Built-in component\n\n");
 
     // Show main properties (not common layout props)
-    let main_props: Vec<_> = builtin.properties.iter()
+    let main_props: Vec<_> = builtin
+        .properties
+        .iter()
         .filter(|p| !is_common_prop(&p.name))
         .collect();
 
     if !main_props.is_empty() {
         s.push_str("**Properties:**\n");
         for p in main_props {
-            s.push_str(&format!("- `{}`: `{}`\n", p.name, p.ty.kind));
+            s.push_str(&format!("- `{}`: `{}`\n", p.name, p.ty));
         }
     }
 
     if !builtin.functions.is_empty() {
         s.push_str("\n**Callbacks:**\n");
         for c in &builtin.functions {
-            let params: Vec<_> = c.params.iter()
-                .map(|(n, t)| format!("{}: {}", n, t.kind))
-                .collect();
-            s.push_str(&format!("- `{}({})`\n", c.name, params.join(", ")));
+            s.push_str(&format!("- `{}`\n", c.name));
         }
     }
 
-    if !stdlib::accepts_children(&builtin.name) {
+    if !builtins_catalog::accepts_children(&builtin.name) {
         s.push_str("\n*Does not accept children.*");
     }
 
@@ -1063,10 +1215,22 @@ fn format_builtin(builtin: &stdlib::BuiltinElement) -> String {
 }
 
 fn is_common_prop(name: &str) -> bool {
-    matches!(name,
-        "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height" |
-        "padding" | "margin" | "visible" | "opacity" |
-        "background" | "border-color" | "border-width" | "border-radius"
+    matches!(
+        name,
+        "width"
+            | "height"
+            | "min-width"
+            | "min-height"
+            | "max-width"
+            | "max-height"
+            | "padding"
+            | "margin"
+            | "visible"
+            | "opacity"
+            | "background"
+            | "border-color"
+            | "border-width"
+            | "border-radius"
     )
 }
 
@@ -1075,14 +1239,20 @@ fn format_enum_case(case_name: &str, file: &File) -> Option<String> {
     // Check builtin option/result cases FIRST (highest priority)
     match case_name {
         "none" => return Some("```yel\noption.none\n```\n---\n`option<T>` empty case".to_string()),
-        "some" => return Some("```yel\noption.some(T)\n```\n---\n`option<T>` value case".to_string()),
-        "ok" => return Some("```yel\nresult.ok(T)\n```\n---\n`result<T, E>` success case".to_string()),
-        "err" => return Some("```yel\nresult.err(E)\n```\n---\n`result<T, E>` error case".to_string()),
+        "some" => {
+            return Some("```yel\noption.some(T)\n```\n---\n`option<T>` value case".to_string());
+        }
+        "ok" => {
+            return Some("```yel\nresult.ok(T)\n```\n---\n`result<T, E>` success case".to_string());
+        }
+        "err" => {
+            return Some("```yel\nresult.err(E)\n```\n---\n`result<T, E>` error case".to_string());
+        }
         _ => {}
     }
-    // Check builtin enums (stub - always empty)
-    for builtin_enum in stdlib::builtin_enums() {
-        if builtin_enum.cases.iter().any(|c| c == case_name) {
+    // Check builtin enums
+    for builtin_enum in builtins_catalog::builtin_enums() {
+        if builtin_enum.cases.iter().any(|c| *c == case_name) {
             return Some(format!(
                 "```yel\n{}.{}\n```\n---\n`{}` enum value",
                 builtin_enum.name, case_name, builtin_enum.name
@@ -1107,10 +1277,12 @@ fn format_variant_case(case_name: &str, file: &File) -> Option<String> {
     if matches!(case_name, "none" | "some" | "ok" | "err") {
         return None;
     }
-    // Check builtin variants (stub - always empty)
-    for builtin_variant in stdlib::builtin_variants() {
+    // Check builtin variants
+    for builtin_variant in builtins_catalog::builtin_variants() {
         if let Some(case) = builtin_variant.cases.iter().find(|c| c.name == case_name) {
-            let payload = case.payload.as_ref()
+            let payload = case
+                .payload
+                .as_ref()
                 .map(|p| format!("({})", p))
                 .unwrap_or_default();
             return Some(format!(
@@ -1121,8 +1293,16 @@ fn format_variant_case(case_name: &str, file: &File) -> Option<String> {
     }
     // Check user-defined variants
     for variant_def in &file.variants {
-        if let Some(case) = variant_def.node.cases.iter().find(|c| c.node.name == case_name) {
-            let payload = case.node.payload.as_ref()
+        if let Some(case) = variant_def
+            .node
+            .cases
+            .iter()
+            .find(|c| c.node.name == case_name)
+        {
+            let payload = case
+                .node
+                .payload
+                .as_ref()
                 .map(|p| format!("({})", p.kind))
                 .unwrap_or_default();
             return Some(format!(

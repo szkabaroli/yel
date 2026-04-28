@@ -1,0 +1,25 @@
+package yel:listvariedarity@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-empty: func() -> list<s32>;
+    set-empty: func(value: list<s32>);
+    get-one: func() -> list<s32>;
+    set-one: func(value: list<s32>);
+    get-small: func() -> list<s32>;
+    set-small: func(value: list<s32>);
+    get-big: func() -> list<s32>;
+    set-big: func(value: list<s32>);
+    get-huge: func() -> list<s32>;
+    set-huge: func(value: list<s32>);
+  }
+}
+
+world listvariedarity {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

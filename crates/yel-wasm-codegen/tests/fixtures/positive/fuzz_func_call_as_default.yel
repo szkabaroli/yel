@@ -1,0 +1,11 @@
+// Calling a user-declared callback as a property default-value expression.
+// Codegen doesn't wire the callback invocation when it appears as a signal's
+// initializer -> "expected i32 but nothing on stack".
+// Root cause: emit_expr for Call expression doesn't push the result when used
+// outside a callback-block context.
+package yel:fb@0.1.0;
+export component App {
+    cb: func() -> s32;
+    x: s32 = cb();
+    Text { "x" }
+}

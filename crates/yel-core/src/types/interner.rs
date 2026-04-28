@@ -2,7 +2,7 @@
 
 use crate::ids::DefId;
 use crate::syntax::ast::TyKind as AstTyKind;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -10,7 +10,7 @@ use std::fmt;
 ///
 /// This is a lightweight handle (just a u32) that represents a type.
 /// Equal types always have the same `Ty` value.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Ty(pub u32);
 
 impl Ty {

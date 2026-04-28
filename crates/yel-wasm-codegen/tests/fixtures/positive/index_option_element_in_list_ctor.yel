@@ -1,0 +1,14 @@
+// Indexing a `list<option<T>>` (2-slot composite element that isn't a
+// fat pointer) used in a list-literal ctor. Previously the Index
+// dispatch only routed `>=3` slot composites through
+// `emit_flat_slot_load_at_ptr`; 2-slot composites fell through to
+// `emit_load_from_ptr` which pushed only 1 slot — the surrounding
+// list_ctor underflowed because it expected 2.
+package yel:fb@0.1.0;
+export component App {
+    count: list<option<s32>>;
+    VStack {
+        clicked: { count = [some(1), count[0], some(3)]; }
+        Text { "x" }
+    }
+}

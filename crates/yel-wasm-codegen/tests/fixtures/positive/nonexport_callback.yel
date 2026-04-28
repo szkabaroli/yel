@@ -1,0 +1,19 @@
+package yel:nx@0.1.0;
+
+// A non-exported `func` field declares a host-imported callback that is
+// callable from the component body but not re-exposed in the component's
+// public WIT interface. The LIR still lowers the invocation to a `Call`
+// targeting the callback's DefId, but `ImportLayout::new` used to register
+// only `is_export` functions in the callback import table — so compilation
+// failed with "not a registered callback import" for plain-`func` fields.
+export component App {
+    VStack { Text { "root" } }
+}
+
+component Inner {
+    on-click: func();
+    VStack {
+        clicked: { on-click(); },
+        Text { "inner" }
+    }
+}

@@ -1,0 +1,19 @@
+package yel:ternary-option@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-flag: func() -> bool;
+    set-flag: func(value: bool);
+    get-maybe: func() -> option<s32>;
+    set-maybe: func(value: option<s32>);
+  }
+}
+
+world ternary-option {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

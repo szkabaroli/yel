@@ -1,0 +1,25 @@
+package yel:fb@0.1.0;
+
+interface shared-types {
+  record r {
+    a: f32,
+  }
+}
+
+interface app-component {
+  use shared-types.{ r };
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-r: func() -> r;
+    set-r: func(value: r);
+  }
+}
+
+world fb {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

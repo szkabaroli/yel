@@ -1,0 +1,14 @@
+package yel:liststringidx@0.1.0;
+
+// End-to-end exercise of `list<string>` indexing through the $list_get_fat
+// runtime helper. Covers:
+//   * Interpolating `items[i]` inside a Text content (2-slot composite
+//     element materialised via $list_get_fat, then concatenated).
+//   * Iterating over a `list<string>` via the index path (`for` over range).
+export component App {
+    items: list<string> = ["alpha", "beta", "gamma"];
+    VStack {
+        Text { "first: {items[0]}" }
+        Text { "second: {items[1]}" }
+    }
+}

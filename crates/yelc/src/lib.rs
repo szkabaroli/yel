@@ -46,8 +46,9 @@ shadow_rs::shadow!(build);
 
 #[cfg(target_arch = "wasm32")]
 mod wasi_impl {
-    use yel_core::{Compiler, codegen};
+    use yel_core::Compiler;
     use yel_core::diagnostic::Severity;
+    use yel_wasm_codegen as codegen;
 
     // Generate bindings from WIT
     wit_bindgen::generate!({
@@ -110,27 +111,18 @@ mod wasi_impl {
             }
         }
 
-        fn compile(
-            filename: String,
-            source: String,
-            format: OutputFormat,
-        ) -> CompileOutcome {
+        fn compile(filename: String, source: String, format: OutputFormat) -> CompileOutcome {
             compile_impl(vec![(filename, source)], format)
         }
 
-        fn compile_multi(
-            files: Vec<(String, String)>,
-            format: OutputFormat,
-        ) -> CompileOutcome {
+        fn compile_multi(files: Vec<(String, String)>, format: OutputFormat) -> CompileOutcome {
             compile_impl(files, format)
         }
 
         fn parse_to_json(source: String) -> Result<String, String> {
             match yel_core::syntax::parser::parse_file(&source) {
-                Ok(result) => {
-                    serde_json::to_string_pretty(&result.file)
-                        .map_err(|e| format!("JSON serialization error: {}", e))
-                }
+                Ok(result) => serde_json::to_string_pretty(&result.file)
+                    .map_err(|e| format!("JSON serialization error: {}", e)),
                 Err(e) => Err(format!("{}", e)),
             }
         }
@@ -164,6 +156,7 @@ mod wasi_impl {
         let mut lir_components = Vec::new();
         let mut all_hir_components = Vec::new();
         let mut all_thir_components = Vec::new();
+        let mut all_lir_components = Vec::new();
         let mut package_info: Option<yel_core::syntax::ast::PackageId> = None;
 
         for (_, source) in &files {
@@ -196,11 +189,27 @@ mod wasi_impl {
 
                 // Store THIR for potential serialization
                 all_thir_components.push(thir.clone());
-
                 let lir = compiler.lower_to_lir(&thir);
+                all_lir_components.push(lir.clone());
                 lir_components.push(lir);
             }
         }
+
+        // Type-check and lower global-singleton property defaults once,
+        // after all components. The module start function seeds these slots.
+        let thir_globals = compiler.type_check_globals();
+        if compiler.has_errors() {
+            return CompileOutcome::Failure(convert_diagnostics(&compiler));
+        }
+        let lir_globals = compiler.lower_globals_to_lir(&thir_globals);
+
+        // Assemble the module — one compilation unit holding every component
+        // and module-scope artifact.
+        let module = yel_core::lir::LirModule {
+            components: lir_components.clone(),
+            global_defaults: lir_globals.clone(),
+            package: package_info.clone(),
+        };
 
         let ctx = compiler.context();
 
@@ -226,37 +235,35 @@ mod wasi_impl {
             OutputFormat::Rust => {
                 // Rust codegen temporarily disabled - needs update for block-based LIR
                 CompileResult {
-                    rust_code: "// Rust codegen not available - use WASM output instead\n".to_string(),
+                    rust_code: "// Rust codegen not available - use WASM output instead\n"
+                        .to_string(),
                     wit_code: String::new(),
                     wasm_bytes: Vec::new(),
                     wast_code: String::new(),
                     hir_code: String::new(),
                     thir_code: String::new(),
+                    lir_code: String::new(),
+                    dot_code: String::new(),
                 }
             }
             OutputFormat::Wit => {
-                let mut wit_code = String::new();
-                for lir in &lir_components {
-                    if lir.is_export {
-                        match codegen::generate_wit(lir, ctx, &wit_options) {
-                            Ok(code) => {
-                                wit_code.push_str(&code);
-                                wit_code.push('\n');
-                            }
-                            Err(e) => {
-                                let msg = format!("WIT generation error: {}", e);
-                                return CompileOutcome::Failure(vec![Diagnostic {
-                                    message: msg.clone(),
-                                    rendered: format!("error: {}", msg),
-                                    line: 0,
-                                    column: 0,
-                                    length: 1,
-                                    severity: "error".to_string(),
-                                }]);
-                            }
-                        }
+                // Single WIT document per compilation: library files produce
+                // a valid package + library world; files with exports get
+                // their full world.
+                let wit_code = match codegen::generate_wit(&lir_components, ctx, &wit_options) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        let msg = format!("WIT generation error: {}", e);
+                        return CompileOutcome::Failure(vec![Diagnostic {
+                            message: msg.clone(),
+                            rendered: format!("error: {}", msg),
+                            line: 0,
+                            column: 0,
+                            length: 1,
+                            severity: "error".to_string(),
+                        }]);
                     }
-                }
+                };
                 CompileResult {
                     rust_code: String::new(),
                     wit_code,
@@ -264,6 +271,8 @@ mod wasi_impl {
                     wast_code: String::new(),
                     hir_code: String::new(),
                     thir_code: String::new(),
+                    lir_code: String::new(),
+                    dot_code: String::new(),
                 }
             }
             OutputFormat::Wasm => {
@@ -271,9 +280,10 @@ mod wasi_impl {
                     namespace: wit_options.namespace.clone(),
                     name: wit_options.name.clone(),
                     version: wit_options.version.clone(),
+                    global_defaults: lir_globals.clone(),
                 };
                 let wasm_bytes = if !lir_components.is_empty() {
-                    match codegen::generate_wasm_with_wit(&lir_components, ctx, &wasm_options) {
+                    match codegen::generate_wasm_module(&module, ctx, &wasm_options) {
                         Ok(bytes) => bytes,
                         Err(e) => {
                             let msg = format!("WASM generation error: {}", e);
@@ -297,6 +307,8 @@ mod wasi_impl {
                     wast_code: String::new(),
                     hir_code: String::new(),
                     thir_code: String::new(),
+                    lir_code: String::new(),
+                    dot_code: String::new(),
                 }
             }
             OutputFormat::Wast => {
@@ -305,14 +317,12 @@ mod wasi_impl {
                     namespace: wit_options.namespace.clone(),
                     name: wit_options.name.clone(),
                     version: wit_options.version.clone(),
+                    global_defaults: lir_globals.clone(),
                 };
                 let wast_code = if !lir_components.is_empty() {
-                    match codegen::generate_wasm_with_wit(&lir_components, ctx, &wasm_options) {
-                        Ok(bytes) => {
-                            wasmprinter::print_bytes(&bytes).unwrap_or_else(|e| {
-                                format!(";; WAST conversion error: {}", e)
-                            })
-                        }
+                    match codegen::generate_wasm_module(&module, ctx, &wasm_options) {
+                        Ok(bytes) => wasmprinter::print_bytes(&bytes)
+                            .unwrap_or_else(|e| format!(";; WAST conversion error: {}", e)),
                         Err(e) => format!(";; WASM generation error: {}", e),
                     }
                 } else {
@@ -325,6 +335,8 @@ mod wasi_impl {
                     wast_code,
                     hir_code: String::new(),
                     thir_code: String::new(),
+                    lir_code: String::new(),
+                    dot_code: String::new(),
                 }
             }
             OutputFormat::Hir => {
@@ -339,6 +351,8 @@ mod wasi_impl {
                     wast_code: String::new(),
                     hir_code,
                     thir_code: String::new(),
+                    lir_code: String::new(),
+                    dot_code: String::new(),
                 }
             }
             OutputFormat::Thir => {
@@ -349,7 +363,45 @@ mod wasi_impl {
                     wasm_bytes: Vec::new(),
                     wast_code: String::new(),
                     hir_code: String::new(),
-                    thir_code: "// THIR output not yet implemented".to_string(),
+                    thir_code: "{ \"thir_code\": \"not yet implemented\" }".to_string(),
+                    lir_code: String::new(),
+                    dot_code: String::new(),
+                }
+            }
+            OutputFormat::Lir => {
+                let lir_code = match serde_json::to_string_pretty(&all_lir_components) {
+                    Ok(json) => json,
+                    Err(e) => format!("// HIR serialization error: {}", e),
+                };
+                CompileResult {
+                    rust_code: String::new(),
+                    wit_code: String::new(),
+                    wasm_bytes: Vec::new(),
+                    wast_code: String::new(),
+                    hir_code: String::new(),
+                    lir_code,
+                    thir_code: String::new(),
+                    dot_code: String::new(),
+                }
+            }
+            OutputFormat::Dot => {
+                let dot_code = if !lir_components.is_empty() {
+                    match codegen::generate_dot(&lir_components, ctx, &codegen::DotOptions::new()) {
+                        Ok(code) => code,
+                        Err(e) => format!("// DOT generation error: {}", e),
+                    }
+                } else {
+                    "// No components to render".to_string()
+                };
+                CompileResult {
+                    rust_code: String::new(),
+                    wit_code: String::new(),
+                    wasm_bytes: Vec::new(),
+                    wast_code: String::new(),
+                    hir_code: String::new(),
+                    thir_code: String::new(),
+                    lir_code: String::new(),
+                    dot_code,
                 }
             }
         };
@@ -363,8 +415,9 @@ mod wasi_impl {
 // Re-export types for non-WASM targets (for testing)
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native {
-    use yel_core::{Compiler, codegen};
+    use yel_core::Compiler;
     use yel_core::diagnostic::Severity;
+    use yel_wasm_codegen as codegen;
 
     /// Output format for compilation.
     #[derive(Debug, Clone, Copy)]
@@ -480,6 +533,22 @@ pub mod native {
             }
         }
 
+        // Type-check and lower global-singleton property defaults once,
+        // after all components. The module start function seeds these slots.
+        let thir_globals = compiler.type_check_globals();
+        if compiler.has_errors() {
+            return CompileOutcome::Failure(convert_diagnostics(&compiler));
+        }
+        let lir_globals = compiler.lower_globals_to_lir(&thir_globals);
+
+        // Assemble the module — one compilation unit holding every component
+        // and module-scope artifact.
+        let module = yel_core::lir::LirModule {
+            components: lir_components.clone(),
+            global_defaults: lir_globals.clone(),
+            package: package_info.clone(),
+        };
+
         let ctx = compiler.context();
 
         // Build WitOptions from package info
@@ -503,34 +572,30 @@ pub mod native {
             OutputFormat::Rust => {
                 // Rust codegen temporarily disabled - needs update for block-based LIR
                 CompileResult {
-                    rust_code: "// Rust codegen not available - use WASM output instead\n".to_string(),
+                    rust_code: "// Rust codegen not available - use WASM output instead\n"
+                        .to_string(),
                     wit_code: String::new(),
                     wasm_bytes: Vec::new(),
                 }
             }
             OutputFormat::Wit => {
-                let mut wit_code = String::new();
-                for lir in &lir_components {
-                    if lir.is_export {
-                        match codegen::generate_wit(lir, ctx, &wit_options) {
-                            Ok(code) => {
-                                wit_code.push_str(&code);
-                                wit_code.push('\n');
-                            }
-                            Err(e) => {
-                                let msg = format!("WIT generation error: {}", e);
-                                return CompileOutcome::Failure(vec![Diagnostic {
-                                    message: msg.clone(),
-                                    rendered: format!("error: {}", msg),
-                                    line: 0,
-                                    column: 0,
-                                    length: 1,
-                                    severity: "error".to_string(),
-                                }]);
-                            }
-                        }
+                // Single WIT document per compilation: the builder handles
+                // any number of components plus globals, and still emits
+                // valid output (library world) when there are no exports.
+                let wit_code = match codegen::generate_wit(&lir_components, ctx, &wit_options) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        let msg = format!("WIT generation error: {}", e);
+                        return CompileOutcome::Failure(vec![Diagnostic {
+                            message: msg.clone(),
+                            rendered: format!("error: {}", msg),
+                            line: 0,
+                            column: 0,
+                            length: 1,
+                            severity: "error".to_string(),
+                        }]);
                     }
-                }
+                };
                 CompileResult {
                     rust_code: String::new(),
                     wit_code,
@@ -542,10 +607,11 @@ pub mod native {
                     namespace: wit_options.namespace.clone(),
                     name: wit_options.name.clone(),
                     version: wit_options.version.clone(),
+                    global_defaults: lir_globals.clone(),
                 };
                 let wasm_bytes = if !lir_components.is_empty() {
-                    // Pass all components to generate_wasm_with_wit with package options
-                    match codegen::generate_wasm_with_wit(&lir_components, ctx, &wasm_options) {
+                    // Pass the assembled module to codegen with package options
+                    match codegen::generate_wasm_module(&module, ctx, &wasm_options) {
                         Ok(bytes) => bytes,
                         Err(e) => {
                             let msg = format!("WASM generation error: {}", e);

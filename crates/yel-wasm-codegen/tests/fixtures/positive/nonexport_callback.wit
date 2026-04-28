@@ -1,0 +1,22 @@
+package yel:nx@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+  }
+}
+
+interface inner-callbacks {
+  use app-component.{ app };
+  on-click: func(self: borrow<app>);
+}
+
+world nx {
+  import app-component;
+  import inner-callbacks;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

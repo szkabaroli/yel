@@ -6,12 +6,13 @@
 use crate::context::CompilerContext;
 use crate::diagnostic::Diagnostic;
 use crate::hir::{lower_file, HirComponent};
-use crate::lir::{lower_component as lower_to_lir, LirComponent};
+use crate::ids::DefId;
+use crate::lir::{lower_component as lower_to_lir, lower_globals, LirComponent, LirExpr};
 use crate::source::{SourceId, Span};
 use crate::stdlib_lookup::lookup_known_definitions;
 use crate::syntax::ast::File;
 use crate::syntax::parser::{parse_file_with_source_id, CatchedError, ParseError};
-use crate::thir::{type_check, ThirComponent};
+use crate::thir::{type_check, type_check_globals, ThirComponent, ThirExpr};
 
 use std::path::Path;
 
@@ -56,6 +57,43 @@ impl std::error::Error for CompileError {}
 /// Convert a CatchedError to a Diagnostic.
 fn catched_error_to_diagnostic(e: &CatchedError) -> Diagnostic {
     Diagnostic::error(&e.message).with_span(e.span)
+}
+
+/// Validate that `s` is a valid WIT kebab-case identifier:
+/// one or more non-empty hyphen-separated segments, each starting with an
+/// ASCII letter and containing only ASCII letters/digits.
+fn validate_kebab_identifier(s: &str) -> Result<(), String> {
+    if s.is_empty() {
+        return Err("empty".into());
+    }
+    for segment in s.split('-') {
+        if segment.is_empty() {
+            return Err("empty segment (consecutive or trailing `-`)".into());
+        }
+        let mut chars = segment.chars();
+        let first = chars.next().unwrap();
+        if !first.is_ascii_alphabetic() {
+            if first == '_' {
+                return Err("underscores are not allowed (use `-`)".into());
+            }
+            return Err(format!(
+                "segment `{}` must start with an ASCII letter",
+                segment
+            ));
+        }
+        for c in chars {
+            if c == '_' {
+                return Err("underscores are not allowed (use `-`)".into());
+            }
+            if !c.is_ascii_alphanumeric() {
+                return Err(format!(
+                    "segment `{}` contains invalid character `{}`",
+                    segment, c
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Convert a ParseError to a Diagnostic.
@@ -159,6 +197,7 @@ impl Compiler {
                 for e in &result.catched_errors {
                     self.ctx.diagnostics.push(catched_error_to_diagnostic(e));
                 }
+                self.validate_package(&result.file, source_id);
                 Ok(result.file)
             }
             Err(e) => {
@@ -183,11 +222,40 @@ impl Compiler {
                 for e in &result.catched_errors {
                     self.ctx.diagnostics.push(catched_error_to_diagnostic(e));
                 }
+                self.validate_package(&result.file, source_id);
                 Ok(result.file)
             }
             Err(e) => {
                 self.ctx.diagnostics.push(parse_error_to_diagnostic(&e, source_id));
                 Err(e.into())
+            }
+        }
+    }
+
+    /// Validate that the package identifier uses WIT-compatible naming.
+    /// WIT requires kebab-case: each hyphen-separated segment non-empty, starts
+    /// with a letter, and contains only ASCII alphanumerics. The grammar is
+    /// permissive (underscores allowed, digit-leading segments allowed) so
+    /// the parser doesn't reject, but we reject here with a clear message
+    /// instead of letting `wit-component` fail later with an opaque
+    /// `decoding custom section component-type` error.
+    fn validate_package(&mut self, file: &File, source_id: SourceId) {
+        let Some(pkg) = &file.package else { return };
+        // Use a zero-length span at the start of the file — diagnostics
+        // need a valid Span, and the package declaration is always the
+        // very first thing in the source if present.
+        let full_span = Span::point(source_id, 0);
+        for (label, value) in [("namespace", &pkg.namespace), ("name", &pkg.name)] {
+            if let Err(reason) = validate_kebab_identifier(value) {
+                self.ctx.diagnostics.error(
+                    full_span,
+                    format!(
+                        "invalid package {} `{}`: {}. WIT package identifiers \
+                         must be kebab-case (ASCII letters, digits, hyphens; \
+                         each segment must start with a letter)",
+                        label, value, reason,
+                    ),
+                );
             }
         }
     }
@@ -205,6 +273,19 @@ impl Compiler {
     /// Lower a THIR component to LIR.
     pub fn lower_to_lir(&self, thir: &ThirComponent) -> LirComponent {
         lower_to_lir(thir, &self.ctx)
+    }
+
+    /// Type check all global-singleton property defaults.
+    pub fn type_check_globals(&mut self) -> std::collections::HashMap<DefId, ThirExpr> {
+        type_check_globals(&mut self.ctx)
+    }
+
+    /// Lower type-checked global property defaults to LIR.
+    pub fn lower_globals_to_lir(
+        &self,
+        thir_defaults: &std::collections::HashMap<DefId, ThirExpr>,
+    ) -> std::collections::HashMap<DefId, LirExpr> {
+        lower_globals(thir_defaults, &self.ctx)
     }
     
     /// Check if there were any errors.
@@ -335,10 +416,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_error_empty_source() {
+    fn test_parse_empty_source() {
+        // Empty sources are now legal: they parse to a file with no components.
         let mut compiler = Compiler::new();
-        let result = compiler.parse("");
-        assert!(result.is_err());
+        let file = compiler.parse("").expect("empty source should parse successfully");
+        assert!(file.components.is_empty());
     }
 
     // ========================================================================
@@ -371,9 +453,9 @@ mod tests {
         let mut compiler = Compiler::new();
 
         let source = r#"
-            component Button {}
+            component MyButton {}
             component App {
-                Button {}
+                MyButton {}
             }
         "#;
 
@@ -381,7 +463,7 @@ mod tests {
         let hir = compiler.lower_to_hir(&file);
 
         assert_eq!(hir.len(), 2);
-        assert!(!compiler.has_errors());
+        assert!(!compiler.has_errors(), "diagnostics: {}", compiler.render_diagnostics());
     }
 
     // ========================================================================
@@ -977,47 +1059,4 @@ mod tests {
         assert_eq!(hir.len(), 1);
     }
 
-    #[test]
-    fn test_wasm_generation_and_validation() {
-        use crate::codegen::generate_wasm;
-
-        let source = r#"
-            export component Counter {
-                count: s32 = 0;
-
-                VStack {
-                    Text { "Count: {count}" },
-                    Button {
-                        "+",
-                        clicked: { count += 1; }
-                    }
-                }
-            }
-        "#;
-
-        let mut compiler = Compiler::new();
-
-        // Parse
-        let file = compiler.parse(source).expect("Parse failed");
-
-        // Lower to HIR
-        let hir = compiler.lower_to_hir(&file);
-        assert!(!hir.is_empty(), "No components found");
-
-        // Type check
-        let thir = compiler.type_check(&hir[0]);
-
-        // Lower to LIR
-        let lir = compiler.lower_to_lir(&thir);
-
-        // Generate WASM
-        let wasm_bytes = generate_wasm(&[lir], compiler.context()).expect("WASM generation failed");
-
-        assert!(wasm_bytes.len() > 100, "WASM too small: {} bytes", wasm_bytes.len());
-
-        // Write to temp file for validation
-        std::fs::write("/tmp/test_counter.wasm", &wasm_bytes).expect("Failed to write WASM");
-
-        println!("Generated {} bytes of WASM", wasm_bytes.len());
-    }
 }
