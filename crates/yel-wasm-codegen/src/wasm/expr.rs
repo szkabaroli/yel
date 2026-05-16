@@ -4,22 +4,48 @@
 //! code generator. These are implemented as methods on `WasmPackageBuilder`.
 
 use wasm_encoder::{Function, Instruction};
+use wasm_encoder::{Ieee32, Ieee64};
 use yel_core::{DefId, Ty};
 
 use super::CodegenError;
 use yel_core::hir::expr::{BinOp, UnaryOp};
-use yel_core::lir::{LirBindingMode, LirComponent, LirExpr, LirExprKind, LirLiteral};
+use yel_core::lir::{LirBindingMode, LirResource, LirExpr, LirExprKind, LirLiteral};
 use yel_core::types::InternedTyKind;
 
-use super::codegen::{mem_arg, slot_local};
+use super::codegen::{mem_arg, slot_local_resource_only};
 use super::{MemoryLayout, WasmPackageBuilder};
+
+fn emit_zero_default(func: &mut Function, vt: wasm_encoder::ValType) -> Result<(), CodegenError> {
+    use wasm_encoder::ValType;
+    match vt {
+        ValType::I32 => {
+            func.instruction(&Instruction::I32Const(0));
+        }
+        ValType::I64 => {
+            func.instruction(&Instruction::I64Const(0));
+        }
+        ValType::F32 => {
+            func.instruction(&Instruction::F32Const(0.0_f32.into()));
+        }
+        ValType::F64 => {
+            func.instruction(&Instruction::F64Const(0.0_f64.into()));
+        }
+        other => {
+            return Err(CodegenError::InvalidIR(format!(
+                "emit_zero_default: unsupported valtype {:?}",
+                other
+            )));
+        }
+    }
+    Ok(())
+}
 
 impl WasmPackageBuilder<'_> {
     pub(super) fn emit_expr(
         &mut self,
         func: &mut Function,
         expr: &LirExpr,
-        component: &LirComponent,
+        component: &LirResource,
         layout: &MemoryLayout,
     ) -> Result<usize, CodegenError> {
         match &expr.kind {
@@ -82,7 +108,7 @@ impl WasmPackageBuilder<'_> {
                                             "Runtime functions not initialized".to_string(),
                                         )
                                     })?;
-                                func.instruction(&Instruction::Call(runtime_funcs.load_fat_ptr));
+                                func.instruction(&Instruction::Call(runtime_funcs.load_fat_ptr.expect("load_fat_ptr must be in runtime_needs (scan missed it?)")));
                             }
                             // Record types (Adt) - return pointer as-is (field access will use it)
                             _ => {}
@@ -105,7 +131,7 @@ impl WasmPackageBuilder<'_> {
                     && let Some(slot_id) = local_to_slot.get(local_id)
                 {
                     // Local is in an inline-computed slot - this is a pointer to the item
-                    let local_idx = slot_local(component, *slot_id) + local_offset;
+                    let local_idx = slot_local_resource_only(component, *slot_id, local_offset);
                     func.instruction(&Instruction::LocalGet(local_idx));
 
                     if binding_mode == LirBindingMode::Ptr {
@@ -140,7 +166,7 @@ impl WasmPackageBuilder<'_> {
                                             "Runtime functions not initialized".to_string(),
                                         )
                                     })?;
-                                func.instruction(&Instruction::Call(runtime_funcs.load_fat_ptr));
+                                func.instruction(&Instruction::Call(runtime_funcs.load_fat_ptr.expect("load_fat_ptr must be in runtime_needs (scan missed it?)")));
                             }
                             // Record types (Adt) - return pointer as-is (field access will use it)
                             _ => {}
@@ -437,7 +463,7 @@ impl WasmPackageBuilder<'_> {
                             todo!("s32-to-string requires 1 arg: {:?}", expr.kind)
                         }
                         if let Some(ref runtime_funcs) = self.runtime_funcs {
-                            func.instruction(&Instruction::Call(runtime_funcs.s32_to_string));
+                            func.instruction(&Instruction::Call(runtime_funcs.s32_to_string.expect("s32_to_string must be in runtime_needs (scan missed it?)")));
                         }
                         // Returns (ptr, len)
                     }
@@ -449,7 +475,7 @@ impl WasmPackageBuilder<'_> {
                             todo!("bool-to-string requires 1 arg: {:?}", expr.kind)
                         }
                         if let Some(ref runtime_funcs) = self.runtime_funcs {
-                            func.instruction(&Instruction::Call(runtime_funcs.bool_to_string));
+                            func.instruction(&Instruction::Call(runtime_funcs.bool_to_string.expect("bool_to_string must be in runtime_needs (scan missed it?)")));
                         }
                         // Returns (ptr, len)
                     }
@@ -461,7 +487,7 @@ impl WasmPackageBuilder<'_> {
                             todo!("u32-to-string requires 1 arg: {:?}", expr.kind)
                         }
                         if let Some(ref runtime_funcs) = self.runtime_funcs {
-                            func.instruction(&Instruction::Call(runtime_funcs.s32_to_string));
+                            func.instruction(&Instruction::Call(runtime_funcs.s32_to_string.expect("s32_to_string must be in runtime_needs (scan missed it?)")));
                         }
                         // Returns (ptr, len)
                     }
@@ -476,7 +502,7 @@ impl WasmPackageBuilder<'_> {
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
-                        func.instruction(&Instruction::Call(runtime_funcs.s64_to_string));
+                        func.instruction(&Instruction::Call(runtime_funcs.s64_to_string.expect("s64_to_string must be in runtime_needs (scan missed it?)")));
                     }
                     "f32-to-string" => {
                         let arg = args.first().ok_or_else(|| {
@@ -486,7 +512,7 @@ impl WasmPackageBuilder<'_> {
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
-                        func.instruction(&Instruction::Call(runtime_funcs.f32_to_string));
+                        func.instruction(&Instruction::Call(runtime_funcs.f32_to_string.expect("f32_to_string must be in runtime_needs (scan missed it?)")));
                     }
                     "f64-to-string" => {
                         let arg = args.first().ok_or_else(|| {
@@ -501,7 +527,7 @@ impl WasmPackageBuilder<'_> {
                         // generated. This is lossy but validates cleanly and
                         // produces sensible interpolation output.
                         func.instruction(&Instruction::F32DemoteF64);
-                        func.instruction(&Instruction::Call(runtime_funcs.f32_to_string));
+                        func.instruction(&Instruction::Call(runtime_funcs.f32_to_string.expect("f32_to_string must be in runtime_needs (scan missed it?)")));
                     }
                     "char-to-string" => {
                         // A `char` is a u32 scalar value. For now delegate to
@@ -516,7 +542,7 @@ impl WasmPackageBuilder<'_> {
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
-                        func.instruction(&Instruction::Call(runtime_funcs.s32_to_string));
+                        func.instruction(&Instruction::Call(runtime_funcs.s32_to_string.expect("s32_to_string must be in runtime_needs (scan missed it?)")));
                     }
                     "object-to-string" => {
                         // Return "[object]" string
@@ -635,47 +661,16 @@ impl WasmPackageBuilder<'_> {
                         }
                     }
                     "list-get" => {
-                        // Safe list element access: list.get(idx) -> option<T>
-                        // Returns (is_some: i32, value) where value depends on element type.
-                        if args.len() != 2 {
-                            return Err(CodegenError::InvalidIR(
-                                "list-get requires 2 args: list, index".to_string(),
-                            ));
-                        }
-
-                        // First arg is the list (produces ptr, len on stack)
-                        self.emit_expr(func, &args[0], component, layout)?;
-                        // Stack: [ptr, len]
-
-                        // Second arg is the index
-                        self.emit_expr(func, &args[1], component, layout)?;
-                        // Stack: [ptr, len, idx]
-
-                        // Determine element size from the expression's result type
-                        // expr.ty is option<element_ty>, so we need to extract element_ty
-                        let element_size = match self.ctx.ty_kind(expr.ty) {
-                            InternedTyKind::Option(elem_ty) => self.layout_ctx.size_of(*elem_ty),
-                            _ => 4, // fallback to 4 bytes
-                        };
-                        func.instruction(&Instruction::I32Const(element_size as i32));
-                        // Stack: [ptr, len, idx, elem_size]
-
-                        // Call list_get_opt(ptr, len, idx, elem_size) -> (is_some, elem_ptr)
-                        let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
-                            CodegenError::InvalidIR("Runtime functions not initialized".to_string())
-                        })?;
-                        func.instruction(&Instruction::Call(runtime_funcs.list_get_opt));
-                        // Stack: [is_some, elem_ptr]
-
-                        // Now we need to load the actual value from elem_ptr if is_some=1
-                        // For simplicity, we use a conditional:
-                        // if is_some { load_value } else { default_value }
-                        //
-                        // For now, we just return (is_some, elem_ptr) and let the consumer
-                        // load the value based on context. This matches how options are typically
-                        // represented as (discriminant, payload_ptr/value).
-                        //
-                        // The caller will need to check is_some and load from elem_ptr as needed.
+                        // Phase 7 cleanup: the safe `list.get(idx)` builtin
+                        // was backed by the `list_get_opt` runtime helper,
+                        // which has been deleted. Re-introduce as a typed
+                        // `array.len`-bounded helper if/when the YEL surface
+                        // syntax exposes it.
+                        return Err(CodegenError::InvalidIR(
+                            "list-get builtin: removed in Phase 7 cleanup; \
+                             reintroduce on a typed-GC-array foundation"
+                                .into(),
+                        ));
                     }
                     "starts-with" | "starts_with" => {
                         // string.starts-with(prefix) -> bool
@@ -698,7 +693,7 @@ impl WasmPackageBuilder<'_> {
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
-                        func.instruction(&Instruction::Call(runtime_funcs.starts_with));
+                        func.instruction(&Instruction::Call(runtime_funcs.starts_with.expect("starts_with must be in runtime_needs (scan missed it?)")));
                         // Stack: [bool]
                     }
                     "min" => {
@@ -752,20 +747,47 @@ impl WasmPackageBuilder<'_> {
                         func.instruction(&Instruction::I32GtS); // a > b
                         func.instruction(&Instruction::Select); // select(a, b, a>b) = a>b ? a : b
                     }
+                    "append" => {
+                        // list.append(elem) → call per-list-Ty helper.
+                        // Signature `(ref null $arr, elem) -> (ref null $arr)`;
+                        // helper allocates a new array of len+1, copies, writes
+                        // the appended element, returns it. See
+                        // `generate_list_append_function`.
+                        if args.len() != 2 {
+                            return Err(CodegenError::InvalidIR(
+                                "append requires 2 args: list, element".to_string(),
+                            ));
+                        }
+                        let list_ty = args[0].ty;
+                        // Push src list (ref null $arr) and the new element.
+                        self.emit_expr(func, &args[0], component, layout)?;
+                        self.emit_expr(func, &args[1], component, layout)?;
+                        let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
+                            CodegenError::InvalidIR("Runtime functions not initialized".to_string())
+                        })?;
+                        let append_fn_idx =
+                            runtime_funcs.list_append(list_ty).ok_or_else(|| {
+                                CodegenError::InvalidIR(format!(
+                                    "append: no list_append helper registered for {:?}",
+                                    list_ty
+                                ))
+                            })?;
+                        func.instruction(&Instruction::Call(append_fn_idx));
+                    }
                     "filter" => {
-                        // list.filter({ item -> predicate }) -> list<T>
-                        // Calls generated filter function, returns (result_ptr, result_len)
+                        // Stage 6 of typed-GC migration: filter is now
+                        // a typed-array → typed-array helper. The src
+                        // list, captured signals, and result all flow
+                        // in their natural `signal_storage_valtypes`
+                        // shape; no materializer round-trip on either
+                        // side.
                         if args.len() != 2 {
                             return Err(CodegenError::InvalidIR(
                                 "filter requires 2 args: list, predicate closure".to_string(),
                             ));
                         }
-
-                        // Get filter ID and predicate
                         let filter_id = self.current_filter_call_idx;
                         self.current_filter_call_idx += 1;
-
-                        // Get the predicate from filter_calls to extract captured signals
                         let predicate = self
                             .filter_calls
                             .get(filter_id)
@@ -776,85 +798,50 @@ impl WasmPackageBuilder<'_> {
                                     filter_id
                                 ))
                             })?;
-
-                        // Extract captured signals from predicate
                         let mut captured_signals: Vec<(DefId, Ty)> = Vec::new();
                         self.extract_signal_reads(&predicate, &mut captured_signals);
 
-                        // Emit source list. For non-GC lists this produces
-                        // (ptr, len) directly. For GC list signals (internal
-                        // repr GcArrayRef) it produces 1 GC array ref —
-                        // materialise it to (ptr, len) so the filter fn's
-                        // (src_ptr, src_len) params are i32.
+                        // Push src list as typed array ref. Internal
+                        // repr must be GcArrayRef post Stage 6 — the
+                        // LIR builder only registers filter calls when
+                        // args[0] has typed list type.
                         self.emit_expr(func, &args[0], component, layout)?;
-                        if let super::repr::InternalRepr::GcArrayRef(arr_type_idx) =
-                            self.internal_repr(args[0].ty)
-                        {
-                            let mat_fn = *self
-                                .gc_list_materializer_fn_indices
-                                .get(&arr_type_idx)
-                                .ok_or_else(|| {
-                                CodegenError::InvalidIR(format!(
-                                    "filter source GC list: no materializer for arr_type_idx {}",
-                                    arr_type_idx
-                                ))
-                            })?;
-                            func.instruction(&Instruction::Call(mat_fn));
-                        }
-                        // Stack: [src_ptr, src_len]
 
-                        // Emit captured signal values in the same order as generate_filter_function
+                        // Push each captured signal in its natural
+                        // storage shape (typed list = 1 ref, string =
+                        // 2 i32, scalar = 1 slot).
                         for (def_id, ty) in &captured_signals {
-                            // Find signal index and emit its value
-                            if let Some(sig_idx) =
+                            let Some(sig_idx) =
                                 component.signals.iter().position(|s| s.def_id == *def_id)
-                            {
-                                // Phase 5b-v.3: GC list signals are backed by a GC struct
-                                // field, not by linear memory. Emit struct.get + materialize.
-                                if let super::repr::InternalRepr::GcArrayRef(arr_type_idx) =
-                                    self.internal_repr(*ty)
-                                {
-                                    if let Some(comp_idx) = self.comp_idx_of(component)
-                                        && self.signal_in_struct(comp_idx, sig_idx)
-                                    {
-                                        self.emit_signal_struct_read(func, comp_idx, sig_idx)?;
-                                        let mat_fn = *self
-                                            .gc_list_materializer_fn_indices
-                                            .get(&arr_type_idx)
-                                            .ok_or_else(|| CodegenError::InvalidIR(format!(
-                                                "filter captured GC list: no materializer for arr_type_idx {}",
-                                                arr_type_idx
-                                            )))?;
-                                        func.instruction(&Instruction::Call(mat_fn));
-                                        continue;
-                                    }
-                                }
-                                let addr = layout.signal_addr(sig_idx);
-                                func.instruction(&Instruction::I32Const(addr));
-
-                                match self.ctx.ty_kind(*ty) {
-                                    InternedTyKind::String | InternedTyKind::List(_) => {
-                                        // Load ptr from addr
-                                        func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                                        // Load len from addr+4
-                                        func.instruction(&Instruction::I32Const(addr + 4));
-                                        func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                                    }
-                                    _ => {
-                                        // Single value
-                                        func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                                    }
-                                }
-                            } else {
+                            else {
                                 return Err(CodegenError::InvalidIR(format!(
                                     "Captured signal {:?} not found in component signals",
                                     def_id
                                 )));
+                            };
+                            let comp_idx = self.comp_idx_of(component);
+                            if let Some(ci) = comp_idx
+                                && self.signal_in_struct(ci, sig_idx)
+                            {
+                                self.emit_signal_struct_read(func, ci, sig_idx)?;
+                                continue;
+                            }
+                            // Legacy memory fallback for the rare Zero/
+                            // unit-typed or test-bypass case.
+                            let addr = layout.signal_addr(sig_idx);
+                            func.instruction(&Instruction::I32Const(addr));
+                            match self.ctx.ty_kind(*ty) {
+                                InternedTyKind::String | InternedTyKind::List(_) => {
+                                    func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
+                                    func.instruction(&Instruction::I32Const(addr + 4));
+                                    func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
+                                }
+                                _ => {
+                                    func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
+                                }
                             }
                         }
-                        // Stack: [src_ptr, src_len, captured_0, captured_1, ...]
 
-                        // Get filter function index and call it
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
@@ -864,9 +851,8 @@ impl WasmPackageBuilder<'_> {
                                 filter_id
                             ))
                         })?;
-
                         func.instruction(&Instruction::Call(filter_func_idx));
-                        // Returns (result_ptr, result_len) on stack
+                        // Returns 1 typed `(ref null $list_arr)`.
                     }
                     _ => {
                         // Check if this is a callback call. The import's
@@ -910,7 +896,18 @@ impl WasmPackageBuilder<'_> {
                         }
                     }
                 }
-                return Ok(self.flatten_core_valtypes(expr.ty).len());
+                // After Stage 7d the indirect-return path repacks
+                // canonical bytes into a single FlatGcStruct supertype
+                // ref, so the produced stack-slot count matches
+                // `internal_stack_slots(expr.ty)` rather than the
+                // canonical-flat slot count for FlatGcStruct returns.
+                let slots_produced = match self.internal_repr(expr.ty) {
+                    crate::wasm::repr::InternalRepr::FlatGcStruct(_) => {
+                        self.internal_stack_slots(expr.ty)
+                    }
+                    _ => self.flatten_core_valtypes(expr.ty).len(),
+                };
+                return Ok(slots_produced);
             }
 
             LirExprKind::Field { base, field_idx } => {
@@ -953,14 +950,7 @@ impl WasmPackageBuilder<'_> {
                 // chain returns a memory pointer for non-SLR outer).
                 //
                 // Reject both — fall through to the legacy memory path.
-                // Phase 4: re-use `payload_emits_memory_record_ptr` so the
-                // Field gate handles nested record chains uniformly. A
-                // `Field` whose base is a DTR record produces a GC ref
-                // (not a memory ptr); recursion bubbles up through nested
-                // Field accesses on DTR records.
-                let base_is_memory_record_ptr = self.payload_emits_memory_record_ptr(base);
-                if !base_is_memory_record_ptr
-                    && self.is_single_level_record(base.ty)
+                if self.is_single_level_record(base.ty)
                     && let InternedTyKind::Adt(record_def_id) = self.ctx.ty_kind(base.ty)
                 {
                     let type_idx = self
@@ -1017,33 +1007,43 @@ impl WasmPackageBuilder<'_> {
                         struct_type_index: type_idx,
                         field_index: gc_field_idx,
                     });
-                    // Phase 5e.6: typed-array list field — call the
-                    // per-array materializer to produce (ptr, len) for
-                    // legacy consumers (EvalListExpr, indexing, etc.).
-                    // Only fires when the list type actually has a
-                    // materializer emitted (gated by `is_scalar_list_ty`),
-                    // not for any list registered in the array map.
+                    // Stage 2 of typed-GC migration: typed-array list
+                    // field — leave the `(ref null $list_arr)` on the
+                    // stack. Index (Stage 1) consumes it directly via
+                    // `array.get`; RecordConstruct passes through as a
+                    // typed array; legacy consumers (rare post-Stage-7)
+                    // materialize at their own call site.
                     let typed_array_field = matches!(
                         self.ctx.ty_kind(field_ty),
                         InternedTyKind::List(_)
                     ) && self
                         .record_gc_types
                         .list_array_type_idx
-                        .get(&field_ty)
-                        .and_then(|arr_idx| self.gc_list_materializer_fn_indices.get(arr_idx))
-                        .is_some();
+                        .contains_key(&field_ty);
                     if typed_array_field {
-                        let arr_idx = self
-                            .record_gc_types
-                            .list_array_type_idx[&field_ty];
-                        let mat_fn = *self
-                            .gc_list_materializer_fn_indices
-                            .get(&arr_idx)
-                            .ok_or_else(|| CodegenError::InvalidIR(
-                                "Field (SLR): missing materializer for typed-array list field".into(),
-                            ))?;
-                        func.instruction(&Instruction::Call(mat_fn));
-                        return Ok(self.flatten_core_valtypes(expr.ty).len());
+                        return Ok(1);
+                    }
+                    // Phase 5e.5 Stage 7a: FlatGcStruct field —
+                    // materialize the supertype ref to canonical
+                    // multi-slot form so legacy interpolation /
+                    // concat / canonical-flat consumers see the
+                    // expected (disc, payload…) shape.
+                    if let crate::wasm::repr::InternalRepr::FlatGcStruct(_) =
+                        self.internal_repr(field_ty)
+                    {
+                        // Drop the supertype ref already on the stack;
+                        // the materializer re-emits base+struct.get
+                        // for each canonical slot's cascade.
+                        func.instruction(&Instruction::Drop);
+                        return self.emit_flat_gc_field_materialize_to_stack(
+                            func,
+                            base,
+                            type_idx,
+                            gc_field_idx,
+                            field_ty,
+                            component,
+                            layout,
+                        );
                     }
                     // For string / list<scalar> fields, the struct slot
                     // is `(ref null $fat_value)` — unbox to (ptr, len).
@@ -1132,7 +1132,7 @@ impl WasmPackageBuilder<'_> {
                                                 "Runtime functions not initialized".to_string(),
                                             )
                                         })?
-                                        .load_fat_ptr;
+                                        .load_fat_ptr.expect("load_fat_ptr must be in runtime_needs (scan missed it?)");
                                     func.instruction(&Instruction::Call(load_fat_ptr_idx));
                                 }
                                 InternedTyKind::F32 => {
@@ -1216,7 +1216,7 @@ impl WasmPackageBuilder<'_> {
                                                 "Runtime functions not initialized".to_string(),
                                             )
                                         })?
-                                        .load_fat_ptr;
+                                        .load_fat_ptr.expect("load_fat_ptr must be in runtime_needs (scan missed it?)");
                                     func.instruction(&Instruction::Call(load_fat_ptr_idx));
                                 }
                                 InternedTyKind::Adt(def_id) => {
@@ -1272,19 +1272,24 @@ impl WasmPackageBuilder<'_> {
                                         }
                                     }
                                 }
-                                // Option / Result: load each canonical-ABI flat
-                                // slot at its recorded offset within the field.
-                                // Mirrors the SignalRead composite path so text
-                                // formatting, match arms, etc. see the same
-                                // multi-value shape regardless of source.
+                                // Option / Result fields used to be loaded
+                                // here as canonical-ABI flat slots from a
+                                // memory-backed record base. Phase 7
+                                // cleanup: every option/result Ty now has
+                                // `InternalRepr::FlatGcStruct`, and DTR
+                                // records (the GC-ref carriers) admit
+                                // option/result fields as
+                                // `(ref null $opt_super)` slots — the
+                                // legacy memory-backed Field path is no
+                                // longer reachable for these field types.
                                 InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
-                                    if field_offset > 0 {
-                                        func.instruction(&Instruction::I32Const(
-                                            field_offset as i32,
-                                        ));
-                                        func.instruction(&Instruction::I32Add);
-                                    }
-                                    self.emit_flat_slot_load_at_ptr(func, *field_ty)?;
+                                    return Err(CodegenError::InvalidIR(format!(
+                                        "Field on memory-backed base with Option/Result \
+                                         field type {:?} is unreachable post Phase 7 — \
+                                         FlatGcStruct migration should have routed this \
+                                         through the GC-struct Field path",
+                                        field_ty
+                                    )));
                                 }
                                 _ => {
                                     return Err(CodegenError::InvalidIR(format!(
@@ -1322,24 +1327,17 @@ impl WasmPackageBuilder<'_> {
                 // nested lists), the consumer expects the ref directly.
                 use super::repr::InternalRepr;
                 if let InternalRepr::GcArrayRef(arr_ty_idx) = self.internal_repr(base.ty) {
+                    // String elements are stored as `(ref null
+                    // $fat_value)` and unbox to (ptr, len) for legacy
+                    // consumers expecting fat-pointer shape. All other
+                    // element types (scalars, records, tuples,
+                    // FlatGcStruct, nested lists) yield their natural
+                    // single-slot representation directly.
                     let elem_is_string = matches!(
                         self.ctx.ty_kind(expr.ty),
                         InternedTyKind::String
                     );
-                    // Phase 5e.5: option<scalar-i32-fits> — array.get
-                    // returns ref fat_value; unbox to (disc, payload).
-                    let elem_is_option_box = if matches!(
-                        self.ctx.ty_kind(expr.ty),
-                        InternedTyKind::Option(_)
-                    ) {
-                        let canonical = self.canonical_flat_valtypes(expr.ty);
-                        canonical.len() == 2
-                            && canonical.iter().all(|vt|
-                                matches!(vt, wasm_encoder::ValType::I32))
-                    } else {
-                        false
-                    };
-                    if elem_is_string || elem_is_option_box {
+                    if elem_is_string {
                         let fv = self.record_gc_types.fat_value_type_idx
                             .ok_or_else(|| CodegenError::InvalidIR(
                                 "Index: $fat_value type idx missing".into(),
@@ -1371,62 +1369,19 @@ impl WasmPackageBuilder<'_> {
                     return Ok(1);
                 }
 
-                // Emit base expression - for a list this gives (ptr, len)
-                self.emit_expr(func, base, component, layout)?;
-                // Stack: [ptr, len]
-
-                // Emit index
-                self.emit_expr(func, index, component, layout)?;
-                // Stack: [ptr, len, idx]
-
-                // Get element size from result type
-                let element_size = self.layout_ctx.size_of(expr.ty);
-                func.instruction(&Instruction::I32Const(element_size as i32));
-                // Stack: [ptr, len, idx, elem_size]
-
-                let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
-                    CodegenError::InvalidIR("Runtime functions not initialized".to_string())
-                })?;
-
-                // Route based on the element type's **internal**
-                // representation (not canonical ABI flattening — those
-                // differ for records/tuples, which are pointer-passed
-                // internally). `super::repr::internal_repr` is the
-                // single source of truth.
-                match self.internal_repr(expr.ty) {
-                    InternalRepr::FatPointer => {
-                        // string / list<T> elements — 2 i32s (ptr, len).
-                        func.instruction(&Instruction::Call(runtime_funcs.list_get_fat));
-                    }
-                    // Phase 3: SLR records inside `list<Record>` STAY
-                    // on the inline-byte memory path until Phase 5.
-                    // The list-element layout writes flat field bytes
-                    // (not boxed `(ref null $rec_record)` slots), so
-                    // `Index` must return an i32 pointer here just like
-                    // the legacy `Pointer` case — even though the record
-                    // type's signal-storage repr is `GcRef`. Field
-                    // access on the resulting pointer goes through the
-                    // legacy memory path (the SLR Field arm gates on
-                    // the BASE expression's actual stack shape, which
-                    // is still i32 here because Index returns ptr).
-                    InternalRepr::Pointer | InternalRepr::GcRef(_) => {
-                        // Records / tuples — pointer IS the element.
-                        func.instruction(&Instruction::Call(runtime_funcs.list_get));
-                    }
-                    InternalRepr::Flat if self.internal_stack_slots(expr.ty) >= 2 => {
-                        // option / result / variant-with-payload — flat
-                        // multi-slot. Load per-slot from memory.
-                        func.instruction(&Instruction::Call(runtime_funcs.list_get));
-                        self.emit_flat_slot_load_at_ptr(func, expr.ty)?;
-                    }
-                    _ => {
-                        // Single-slot scalar (primitive, enum, 1-slot
-                        // option/result).
-                        func.instruction(&Instruction::Call(runtime_funcs.list_get));
-                        self.emit_load_from_ptr(func, expr.ty)?;
-                    }
-                }
-                return Ok(self.flatten_core_valtypes(expr.ty).len());
+                // Phase 7 cleanup: every list now lowers to a typed GC
+                // array (`GcArrayRef`); the legacy memory-backed
+                // `list_get*` path was deleted. If we reach here the
+                // base type wasn't seeded into `list_array_type_idx`
+                // — investigate `extra_seed_tys` coverage rather than
+                // re-add a fallback.
+                return Err(CodegenError::InvalidIR(format!(
+                    "Index: base type {:?} has no GcArrayRef registration; \
+                     legacy list_get path was removed in Phase 7 cleanup. \
+                     Check that `build.rs::extra_seed_tys` walks the LirExpr \
+                     tree containing this index's base.",
+                    self.ctx.ty_kind(base.ty)
+                )));
             }
 
             LirExprKind::EnumCase { discriminant, .. } => {
@@ -1437,6 +1392,25 @@ impl WasmPackageBuilder<'_> {
             LirExprKind::VariantCtor {
                 case_idx, payload, ..
             } => {
+                use super::repr::InternalRepr;
+                // Phase 5e.5 (Stage 3): when the parent type is migrated to
+                // the W3C subtype-hierarchy GC representation, emit a single
+                // `struct.new $<parent>_<case>` instead of the flat
+                // discriminant + padded-payload-slots shape. The legacy
+                // `emit_variant_ctor_flat` is still called for non-migrated
+                // types AND for boundary writes (set-attribute, exports,
+                // callback returns).
+                if let InternalRepr::FlatGcStruct(_) = self.internal_repr(expr.ty) {
+                    self.emit_variant_ctor_gc(
+                        func,
+                        expr.ty,
+                        *case_idx,
+                        payload.as_deref(),
+                        component,
+                        layout,
+                    )?;
+                    return Ok(1);
+                }
                 self.emit_variant_ctor_flat(
                     func,
                     expr.ty,
@@ -1556,27 +1530,20 @@ impl WasmPackageBuilder<'_> {
                         func.instruction(&Instruction::I32Const(0));
                         func.instruction(&Instruction::ArrayNewDefault(arr_ty_idx));
                     } else {
-                        let first_ty = elements.first().map(|e| e.ty);
-                        let elem_is_string = first_ty.map(|t| {
-                            matches!(self.ctx.ty_kind(t), InternedTyKind::String)
-                        }).unwrap_or(false);
-                        // Phase 5e.5: option<scalar-i32-fits> — emit_expr
-                        // pushes (disc, payload) which we box into $fat_value.
-                        let elem_is_option_box = first_ty.map(|t| {
-                            if matches!(self.ctx.ty_kind(t), InternedTyKind::Option(_)) {
-                                let canonical = self.canonical_flat_valtypes(t);
-                                canonical.len() == 2
-                                    && canonical.iter().all(|vt|
-                                        matches!(vt, wasm_encoder::ValType::I32))
-                            } else {
-                                false
-                            }
-                        }).unwrap_or(false);
-                        let fat_value_idx = self.record_gc_types.fat_value_type_idx;
+                        // String elements arrive as (ptr, len) and are
+                        // boxed into `$fat_value` before array.new_fixed.
+                        // Other element types (scalars, records,
+                        // tuples, FlatGcStruct, nested lists) push the
+                        // typed ref / scalar directly that the array
+                        // expects.
+                        let elem_is_string = elements
+                            .first()
+                            .map(|e| matches!(self.ctx.ty_kind(e.ty), InternedTyKind::String))
+                            .unwrap_or(false);
                         for elem in elements {
                             self.emit_expr(func, elem, component, layout)?;
-                            if elem_is_string || elem_is_option_box {
-                                let fv = fat_value_idx.ok_or_else(|| {
+                            if elem_is_string {
+                                let fv = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
                                     CodegenError::InvalidIR(
                                         "ListConstruct: $fat_value type idx missing".into(),
                                     )
@@ -1853,103 +1820,129 @@ impl WasmPackageBuilder<'_> {
                     "Range expressions should be handled by for-loop iteration".to_string(),
                 ));
             }
-        }
-    }
 
-    /// Phase 5 stopgap: detect whether an expression that produces an
-    /// SLR record value will leave a memory pointer (i32) on the stack,
-    /// rather than a `(ref null $rec_record)` GC ref. Mirrors the gate
-    /// in the SLR `Field` arm: `Index` and `Field` always produce a
-    /// memory ptr (lists and nested non-SLR records are still inline
-    /// bytes); `Local` produces a memory ptr when the binding lives in
-    /// the for-iter / captured-local maps. All other producers
-    /// (`RecordConstruct`, `SignalRead`, etc.) leave a GC ref.
-    ///
-    /// This helper exists because Phase 3 migrated record signal
-    /// storage to GC structs while leaving list-element layouts on the
-    /// inline-byte path. Phase 5 will replace `list_get` with
-    /// `array.get` returning a ref directly, after which this gate (and
-    /// its caller) collapse.
-    fn payload_emits_memory_record_ptr(&self, p: &LirExpr) -> bool {
-        match &p.kind {
-            LirExprKind::Local(local_id) => {
-                // Phase 5e.1: if the local maps to a slot typed as
-                // RefNullForRecord, the value is a record GC ref, not
-                // a memory ptr — even if the local is in the iter /
-                // captured maps.
-                use yel_core::lir::LirSlotValType;
-                let captured_hit = self
-                    .current_block_captured_locals
-                    .as_ref()
-                    .map(|m| m.contains_key(local_id))
-                    .unwrap_or(false);
-                let inline_hit = self
-                    .current_block_local_to_slot
-                    .as_ref()
-                    .map(|m| m.contains_key(local_id))
-                    .unwrap_or(false);
-                if !captured_hit && !inline_hit {
-                    return false;
-                }
-                // Look up the bound slot's val_ty; if it's a record
-                // ref, the value is a GC ref (not a memory ptr).
-                if let Some(slot_id) = self
-                    .current_block_local_to_slot
-                    .as_ref()
-                    .and_then(|m| m.get(local_id).copied())
-                    && let Some(comp_idx) = self.current_self_comp_idx
-                    && let Some(comp) = self.components.get(comp_idx)
-                    && let Some(slot_info) = comp.slots.iter().find(|s| s.id == slot_id)
-                    && matches!(slot_info.val_ty, LirSlotValType::RefNullForRecord(_))
-                {
-                    return false;
-                }
-                // Phase 5e.1: captured iter binding for a `list<record>`
-                // gets `BindingMode::Value` — the local already holds
-                // the typed record GC ref directly, not a memory ptr.
-                // Field access should use the GC `struct.get` path.
-                if let Some(modes) = &self.current_block_local_modes
-                    && matches!(
-                        modes.get(local_id).copied(),
-                        Some(yel_core::lir::LirBindingMode::Value)
-                    )
-                {
-                    return false;
-                }
-                true
+            LirExprKind::IsCase { base, case_idx } => {
+                // Phase 5e.5: discriminant test on a migrated parent —
+                // emit `ref.test (ref $<parent>_<case>)`. For non-migrated
+                // parents we fall through to the legacy "load disc slot,
+                // compare" pattern, which is compiled by the lowering
+                // emitting `Field { idx: 0 } eq <case_idx>` instead of
+                // `IsCase`. So if we see IsCase here, the parent MUST
+                // be migrated.
+                use super::repr::InternalRepr;
+                let case_sub_idx = match self.internal_repr(base.ty) {
+                    InternalRepr::FlatGcStruct(_) => *self
+                        .record_gc_types
+                        .flat_gc_case_idx
+                        .get(&(base.ty, *case_idx))
+                        .ok_or_else(|| {
+                            CodegenError::InvalidIR(format!(
+                                "IsCase: missing case subtype index for \
+                                 base.ty={:?} case_idx={}",
+                                base.ty, case_idx
+                            ))
+                        })?,
+                    other => {
+                        return Err(CodegenError::InvalidIR(format!(
+                            "IsCase: parent base.ty={:?} has non-FlatGcStruct \
+                             repr {:?} — lowering must only emit IsCase for \
+                             migrated parents",
+                            base.ty, other
+                        )));
+                    }
+                };
+                self.emit_expr(func, base, component, layout)?;
+                // Use `ref.test (ref $sub)` — the non-null variant. A
+                // null base ref returns 0 for every case, matching the
+                // legacy "no case is active" semantics for an
+                // uninitialized signal. (Using the nullable variant
+                // would match null against every subtype test,
+                // returning true for *every* case — broken.)
+                //
+                // InitSignalDefault for FlatGcStruct overrides the
+                // component-struct zero-init by storing
+                // `struct.new_default $<sup>_<case0>` so the user-
+                // observable default is "case 0", matching what the
+                // legacy zero-byte memory init produced.
+                func.instruction(&Instruction::RefTestNonNull(
+                    wasm_encoder::HeapType::Concrete(case_sub_idx),
+                ));
+                return Ok(1);
             }
-            // Index into a list of records: list elements still live in
-            // inline-byte memory until Phase 5, so the result is a memory
-            // ptr — UNLESS the list is a typed GC array whose
-            // element internal repr is a record GC ref. In that case
-            // Index returns the ref directly.
-            LirExprKind::Index { base, .. } => {
-                if let super::repr::InternalRepr::GcArrayRef(_) = self.internal_repr(base.ty) {
-                    if let InternedTyKind::List(elem) = self.ctx.ty_kind(base.ty) {
-                        if matches!(
-                            self.internal_repr(*elem),
-                            super::repr::InternalRepr::GcRef(_)
-                        ) {
-                            return false;
-                        }
+
+            LirExprKind::VariantField {
+                base,
+                case_idx,
+                field_idx,
+            } => {
+                // Phase 5e.5: payload extraction from a known case —
+                // `ref.cast (ref $<parent>_<case>); struct.get_<u|s>?
+                // $<parent>_<case> <field_idx>`.
+                //
+                // The case must be active at runtime (caller has
+                // typically discriminated via IsCase); if not, ref.cast
+                // traps. This matches today's behavior where reading a
+                // non-active case payload reads garbage / pads — the
+                // GC migration trades that silent garbage for a hard
+                // trap, which is strictly better.
+                use super::repr::InternalRepr;
+                use super::gc_types::StructGetVariant;
+                let case_sub_idx = match self.internal_repr(base.ty) {
+                    InternalRepr::FlatGcStruct(_) => *self
+                        .record_gc_types
+                        .flat_gc_case_idx
+                        .get(&(base.ty, *case_idx))
+                        .ok_or_else(|| {
+                            CodegenError::InvalidIR(format!(
+                                "VariantField: missing case subtype index for \
+                                 base.ty={:?} case_idx={}",
+                                base.ty, case_idx
+                            ))
+                        })?,
+                    other => {
+                        return Err(CodegenError::InvalidIR(format!(
+                            "VariantField: parent base.ty={:?} has non-\
+                             FlatGcStruct repr {:?} — lowering must only emit \
+                             VariantField for migrated parents",
+                            base.ty, other
+                        )));
+                    }
+                };
+                let payload_ty = super::gc_types::case_payload_ty(self.ctx, base.ty, *case_idx)
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR(format!(
+                            "VariantField on case with no payload: base.ty={:?} \
+                             case_idx={} field_idx={}",
+                            base.ty, case_idx, field_idx
+                        ))
+                    })?;
+                self.emit_expr(func, base, component, layout)?;
+                func.instruction(&Instruction::RefCastNonNull(
+                    wasm_encoder::HeapType::Concrete(case_sub_idx),
+                ));
+                let getter = super::gc_types::struct_get_op_for_payload(self.ctx, payload_ty);
+                match getter {
+                    StructGetVariant::Plain => {
+                        func.instruction(&Instruction::StructGet {
+                            struct_type_index: case_sub_idx,
+                            field_index: *field_idx,
+                        });
+                    }
+                    StructGetVariant::Signed => {
+                        func.instruction(&Instruction::StructGetS {
+                            struct_type_index: case_sub_idx,
+                            field_index: *field_idx,
+                        });
+                    }
+                    StructGetVariant::Unsigned => {
+                        func.instruction(&Instruction::StructGetU {
+                            struct_type_index: case_sub_idx,
+                            field_index: *field_idx,
+                        });
                     }
                 }
-                true
+                return Ok(self.flatten_core_valtypes(expr.ty).len());
             }
-            // Phase 4: a `Field` whose base is a DTR record produces a
-            // GC ref via `struct.get`, NOT a memory ptr. Bubble up the
-            // memory-vs-ref classification through the chain. If the
-            // base is itself a memory-backed record (non-DTR outer),
-            // the field load returns a memory ptr; otherwise it's a GC
-            // ref.
-            LirExprKind::Field { base, .. } => {
-                if self.is_single_level_record(base.ty) {
-                    self.payload_emits_memory_record_ptr(base)
-                } else {
-                    true
-                }
-            }
-            _ => false,
         }
     }
 
@@ -1959,32 +1952,491 @@ impl WasmPackageBuilder<'_> {
     /// remaining slots in the joined shape are padded with zeros of the
     /// correct valtype. For Option/Result the parent is handled identically
     /// to a user variant — the join rule subsumes their two-case shape.
+    /// Phase 5e.5 (Stage 3): emit a constructor for an `option<T>` /
+    /// `result<T,E>` / user `variant` value into the W3C subtype-
+    /// hierarchy GC representation. Pushes a single `(ref null
+    /// $<parent>_super)` on the stack — the case-subtype reference is
+    /// implicitly upcast when stored into a supertype-typed slot.
+    ///
+    /// - Cases without payload: `struct.new_default $<parent>_<case>`.
+    /// - Cases with payload: emit the payload's `internal_repr`, then
+    ///   `struct.new $<parent>_<case>`. Wasm-GC type-checks the
+    ///   payload value against the case subtype's single field.
+    ///
+    /// The caller must have already checked that the parent's
+    /// `internal_repr` is `FlatGcStruct` (typically via the dispatch in
+    /// `LirExprKind::VariantCtor`).
+    /// Phase 5e.5 Stage 7a: materialize a FlatGcStruct field reached
+    /// via `<base>.struct.get $parent <gc_field_idx>` to the canonical
+    /// multi-slot stack layout that interpolation / concat / canonical-
+    /// flat consumers expect.
+    ///
+    /// Re-emits the base+struct.get for each canonical slot and uses a
+    /// per-case `ref.test`/`ref.cast`/`struct.get` cascade. Caller has
+    /// already dropped the previously-loaded supertype ref. SLR bases
+    /// are side-effect-free per the comment block on the SLR Field
+    /// path, so re-emission is safe and cheap.
+    ///
+    /// Currently only `option<P>` parents are handled. result and user
+    /// variants land on tasks #79 / #78. Nested `option<option<...>>`
+    /// payloads (canonical-flat-valtypes len > 1) are out of scope —
+    /// they need recursive sub-materialization and are tracked with
+    /// fuzz_nested_option.
+    pub(super) fn emit_flat_gc_field_materialize_to_stack(
+        &mut self,
+        func: &mut Function,
+        base: &LirExpr,
+        parent_type_idx: u32,
+        gc_field_idx: u32,
+        field_ty: Ty,
+        component: &LirResource,
+        layout: &MemoryLayout,
+    ) -> Result<usize, CodegenError> {
+        use super::gc_types::StructGetVariant;
+        use yel_core::types::InternedTyKind;
+
+        // Phase 5e.5 Stage 7a/7d: dispatch on parent kind.
+        match self.ctx.ty_kind(field_ty) {
+            InternedTyKind::Result { ok, err } => {
+                let ok = *ok;
+                let err = *err;
+                return self.emit_flat_gc_result_field_materialize(
+                    func,
+                    base,
+                    parent_type_idx,
+                    gc_field_idx,
+                    field_ty,
+                    ok,
+                    err,
+                    component,
+                    layout,
+                );
+            }
+            InternedTyKind::Option(_) => {}
+            _ => {
+                return Err(CodegenError::InvalidIR(format!(
+                    "flat_gc field materialize: only option<P>/result<T,E> \
+                     parents supported in Stage 7a/7d — got {:?}",
+                    field_ty
+                )));
+            }
+        }
+        let inner = match self.ctx.ty_kind(field_ty) {
+            InternedTyKind::Option(inner) => *inner,
+            _ => unreachable!(),
+        };
+
+        let case_some_idx = *self
+            .record_gc_types
+            .flat_gc_case_idx
+            .get(&(field_ty, 0))
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "flat_gc field materialize: missing $opt_some case \
+                     idx for {:?}",
+                    field_ty
+                ))
+            })?;
+
+        let inner_canonical = self.flatten_core_valtypes(inner);
+        if inner_canonical.len() > 2 {
+            return Err(CodegenError::InvalidIR(format!(
+                "flat_gc field materialize: nested multi-slot option \
+                 payload not yet supported — inner ty={:?} has {} \
+                 canonical slots",
+                inner,
+                inner_canonical.len()
+            )));
+        }
+
+        // Slot 0: discriminant. Some=0, None=1 per YEL convention; null
+        // ref → ref.test_non_null returns 0 → eqz returns 1 → None.
+        self.emit_expr(func, base, component, layout)?;
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: parent_type_idx,
+            field_index: gc_field_idx,
+        });
+        func.instruction(&Instruction::RefTestNonNull(
+            wasm_encoder::HeapType::Concrete(case_some_idx),
+        ));
+        func.instruction(&Instruction::I32Eqz);
+
+        // Detect fat-box payload: case-subtype payload field is
+        // `(ref null $fat_value)` for string / non-typed-array list.
+        let is_fat_box = matches!(self.ctx.ty_kind(inner), InternedTyKind::String)
+            || (matches!(self.ctx.ty_kind(inner), InternedTyKind::List(_))
+                && self.record_gc_types.list_array_type_idx.get(&inner).is_none());
+
+        if is_fat_box {
+            // Canonical: 2 i32 slots (ptr, len). Some-arm unboxes
+            // $fat_value's two fields; None-arm pushes (0, 0).
+            let fat_value_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
+                CodegenError::InvalidIR(
+                    "flat_gc field materialize: $fat_value type idx missing".into(),
+                )
+            })?;
+            for fat_field in 0u32..2u32 {
+                self.emit_expr(func, base, component, layout)?;
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: parent_type_idx,
+                    field_index: gc_field_idx,
+                });
+                func.instruction(&Instruction::RefTestNonNull(
+                    wasm_encoder::HeapType::Concrete(case_some_idx),
+                ));
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
+                    wasm_encoder::ValType::I32,
+                )));
+                self.emit_expr(func, base, component, layout)?;
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: parent_type_idx,
+                    field_index: gc_field_idx,
+                });
+                func.instruction(&Instruction::RefCastNonNull(
+                    wasm_encoder::HeapType::Concrete(case_some_idx),
+                ));
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: case_some_idx,
+                    field_index: 0,
+                });
+                func.instruction(&Instruction::RefAsNonNull);
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: fat_value_idx,
+                    field_index: fat_field,
+                });
+                func.instruction(&Instruction::Else);
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::End);
+            }
+            return Ok(self.flatten_core_valtypes(field_ty).len());
+        }
+
+        // Single-slot scalar / typed payload: canonical len == 1.
+        let payload_valtype = inner_canonical.into_iter().next().ok_or_else(|| {
+            CodegenError::InvalidIR(
+                "flat_gc field materialize: empty inner canonical layout".into(),
+            )
+        })?;
+        self.emit_expr(func, base, component, layout)?;
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: parent_type_idx,
+            field_index: gc_field_idx,
+        });
+        func.instruction(&Instruction::RefTestNonNull(
+            wasm_encoder::HeapType::Concrete(case_some_idx),
+        ));
+        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(payload_valtype)));
+        self.emit_expr(func, base, component, layout)?;
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: parent_type_idx,
+            field_index: gc_field_idx,
+        });
+        func.instruction(&Instruction::RefCastNonNull(
+            wasm_encoder::HeapType::Concrete(case_some_idx),
+        ));
+        let getter = super::gc_types::struct_get_op_for_payload(self.ctx, inner);
+        match getter {
+            StructGetVariant::Plain => {
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: case_some_idx,
+                    field_index: 0,
+                });
+            }
+            StructGetVariant::Signed => {
+                func.instruction(&Instruction::StructGetS {
+                    struct_type_index: case_some_idx,
+                    field_index: 0,
+                });
+            }
+            StructGetVariant::Unsigned => {
+                func.instruction(&Instruction::StructGetU {
+                    struct_type_index: case_some_idx,
+                    field_index: 0,
+                });
+            }
+        }
+        func.instruction(&Instruction::Else);
+        match payload_valtype {
+            wasm_encoder::ValType::I32 => {
+                func.instruction(&Instruction::I32Const(0));
+            }
+            wasm_encoder::ValType::I64 => {
+                func.instruction(&Instruction::I64Const(0));
+            }
+            wasm_encoder::ValType::F32 => {
+                func.instruction(&Instruction::F32Const(0.0_f32.into()));
+            }
+            wasm_encoder::ValType::F64 => {
+                func.instruction(&Instruction::F64Const(0.0_f64.into()));
+            }
+            other => {
+                return Err(CodegenError::InvalidIR(format!(
+                    "flat_gc field materialize: unsupported default \
+                     payload valtype {:?}",
+                    other
+                )));
+            }
+        }
+        func.instruction(&Instruction::End);
+
+        Ok(self.flatten_core_valtypes(field_ty).len())
+    }
+
+    /// Phase 5e.5 Stage 7d: materialize a `result<T, E>` FlatGcStruct
+    /// field to canonical (disc, joined-payload) stack slots.
+    ///
+    /// Restricted to single-slot scalar payloads with matching valtypes
+    /// in both arms (no width promotion). Fat-box / nested / promoted
+    /// shapes route to follow-up tasks.
+    pub(super) fn emit_flat_gc_result_field_materialize(
+        &mut self,
+        func: &mut Function,
+        base: &LirExpr,
+        parent_type_idx: u32,
+        gc_field_idx: u32,
+        field_ty: Ty,
+        ok: Option<Ty>,
+        err: Option<Ty>,
+        component: &LirResource,
+        layout: &MemoryLayout,
+    ) -> Result<usize, CodegenError> {
+        use super::gc_types::StructGetVariant;
+        use wasm_encoder::ValType;
+
+        let case_ok_idx = *self
+            .record_gc_types
+            .flat_gc_case_idx
+            .get(&(field_ty, 0))
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "result field materialize: missing $res_ok case idx for {:?}",
+                    field_ty
+                ))
+            })?;
+        let case_err_idx = *self
+            .record_gc_types
+            .flat_gc_case_idx
+            .get(&(field_ty, 1))
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "result field materialize: missing $res_err case idx for {:?}",
+                    field_ty
+                ))
+            })?;
+
+        let ok_flat = ok.map(|t| self.flatten_core_valtypes(t)).unwrap_or_default();
+        let err_flat = err.map(|t| self.flatten_core_valtypes(t)).unwrap_or_default();
+        if ok_flat.len() > 1 || err_flat.len() > 1 {
+            return Err(CodegenError::InvalidIR(format!(
+                "result field materialize: multi-slot payload not yet \
+                 supported — ok={} err={} for {:?}",
+                ok_flat.len(),
+                err_flat.len(),
+                field_ty
+            )));
+        }
+        // Width-promotion / mixed-valtype joined payload not yet
+        // supported.
+        if let (Some(o), Some(e)) = (ok_flat.first(), err_flat.first()) {
+            if o != e {
+                return Err(CodegenError::InvalidIR(format!(
+                    "result field materialize: mixed payload valtypes \
+                     {:?}/{:?} (width promotion) not yet supported for {:?}",
+                    o, e, field_ty
+                )));
+            }
+        }
+
+        // Slot 0: discriminant. Ok=0, Err=1.
+        // Cascade: ref.test $res_ok ? 0 : 1.
+        self.emit_expr(func, base, component, layout)?;
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: parent_type_idx,
+            field_index: gc_field_idx,
+        });
+        func.instruction(&Instruction::RefTestNonNull(
+            wasm_encoder::HeapType::Concrete(case_ok_idx),
+        ));
+        func.instruction(&Instruction::I32Eqz);
+
+        // Joined payload slot, if any.
+        let joined_valtype = ok_flat.first().copied().or_else(|| err_flat.first().copied());
+        if let Some(payload_vt) = joined_valtype {
+            self.emit_expr(func, base, component, layout)?;
+            func.instruction(&Instruction::StructGet {
+                struct_type_index: parent_type_idx,
+                field_index: gc_field_idx,
+            });
+            func.instruction(&Instruction::RefTestNonNull(
+                wasm_encoder::HeapType::Concrete(case_ok_idx),
+            ));
+            func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(payload_vt)));
+            // Ok arm.
+            if let Some(ok_ty) = ok {
+                self.emit_expr(func, base, component, layout)?;
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: parent_type_idx,
+                    field_index: gc_field_idx,
+                });
+                func.instruction(&Instruction::RefCastNonNull(
+                    wasm_encoder::HeapType::Concrete(case_ok_idx),
+                ));
+                let getter = super::gc_types::struct_get_op_for_payload(self.ctx, ok_ty);
+                match getter {
+                    StructGetVariant::Plain => func.instruction(&Instruction::StructGet {
+                        struct_type_index: case_ok_idx,
+                        field_index: 0,
+                    }),
+                    StructGetVariant::Signed => func.instruction(&Instruction::StructGetS {
+                        struct_type_index: case_ok_idx,
+                        field_index: 0,
+                    }),
+                    StructGetVariant::Unsigned => func.instruction(&Instruction::StructGetU {
+                        struct_type_index: case_ok_idx,
+                        field_index: 0,
+                    }),
+                };
+            } else {
+                emit_zero_default(func, payload_vt)?;
+            }
+            func.instruction(&Instruction::Else);
+            // Err arm.
+            if let Some(err_ty) = err {
+                self.emit_expr(func, base, component, layout)?;
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: parent_type_idx,
+                    field_index: gc_field_idx,
+                });
+                func.instruction(&Instruction::RefCastNonNull(
+                    wasm_encoder::HeapType::Concrete(case_err_idx),
+                ));
+                let getter = super::gc_types::struct_get_op_for_payload(self.ctx, err_ty);
+                match getter {
+                    StructGetVariant::Plain => func.instruction(&Instruction::StructGet {
+                        struct_type_index: case_err_idx,
+                        field_index: 0,
+                    }),
+                    StructGetVariant::Signed => func.instruction(&Instruction::StructGetS {
+                        struct_type_index: case_err_idx,
+                        field_index: 0,
+                    }),
+                    StructGetVariant::Unsigned => func.instruction(&Instruction::StructGetU {
+                        struct_type_index: case_err_idx,
+                        field_index: 0,
+                    }),
+                };
+            } else {
+                emit_zero_default(func, payload_vt)?;
+            }
+            func.instruction(&Instruction::End);
+            // Suppress unused warning when err missing.
+            let _ = ValType::I32;
+        }
+
+        Ok(self.flatten_core_valtypes(field_ty).len())
+    }
+
+    pub(super) fn emit_variant_ctor_gc(
+        &mut self,
+        func: &mut Function,
+        parent_ty: Ty,
+        case_idx: u32,
+        payload: Option<&LirExpr>,
+        component: &LirResource,
+        layout: &MemoryLayout,
+    ) -> Result<(), CodegenError> {
+        use super::repr::InternalRepr;
+        let case_sub_idx = *self
+            .record_gc_types
+            .flat_gc_case_idx
+            .get(&(parent_ty, case_idx))
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "emit_variant_ctor_gc: missing case subtype index for \
+                     parent_ty={:?} case_idx={}",
+                    parent_ty, case_idx
+                ))
+            })?;
+        match payload {
+            None => {
+                // Empty case (none / unit case / etc.) — every field
+                // (there are none) defaults trivially.
+                func.instruction(&Instruction::StructNewDefault(case_sub_idx));
+            }
+            Some(p) => {
+                self.emit_expr(func, p, component, layout)?;
+                // Phase 5e.5: when the case payload's `internal_repr`
+                // pushes more values than the case subtype's field
+                // expects, box appropriately. The case subtype's
+                // payload field uses `record_field_storage_type`
+                // rules — strings and non-typed-array lists become
+                // `(ref null $fat_value)`. So when emit_expr pushed
+                // (ptr, len) for a string/list payload, wrap them in
+                // a `$fat_value` struct first.
+                let payload_repr = self.internal_repr(p.ty);
+                if matches!(payload_repr, InternalRepr::FatPointer) {
+                    let fat_value_idx = self.record_gc_types.fat_value_type_idx
+                        .ok_or_else(|| CodegenError::InvalidIR(
+                            "emit_variant_ctor_gc: $fat_value type idx missing — \
+                             cannot box string/list payload".into(),
+                        ))?;
+                    func.instruction(&Instruction::StructNew(fat_value_idx));
+                }
+                // For Pointer (memory-backed records/tuples): payload
+                // is a single i32 ptr. The subtype field would be
+                // `anyref` (since record_field_storage_type defaults
+                // to anyref for non-DTR). emit_expr pushes the i32 —
+                // wasm-GC won't accept i32 where ref is expected, so
+                // this case errors loudly. Stages 6c/6d migrate non-
+                // DTR-record / tuple payload types out of this state.
+                func.instruction(&Instruction::StructNew(case_sub_idx));
+            }
+        }
+        Ok(())
+    }
+
+    /// Phase 5e.5 / Phase 7: emit a variant value in canonical-ABI flat
+    /// shape (`disc i32, ...payload-slots`) on the stack.
+    ///
+    /// **Boundary-only.** Internal SSA emission must use
+    /// `emit_variant_ctor_gc` for any FlatGcStruct-migrated parent.
+    /// This function is still called from:
+    /// - WIT export return-value lowering (set-attribute, callback args).
+    /// - Option-of-ref collapse for `option<list<T>>` and similar
+    ///   where the option is a single ref slot internally.
+    ///
+    /// (`InternalRepr::Flat` was removed in Phase 7 cleanup, so the
+    /// "non-migrated option/result fallback" path no longer exists —
+    /// every option/result/variant now goes through `FlatGcStruct`
+    /// for internal SSA, and this helper is reached only by boundary
+    /// dispatchers that need canonical-ABI bytes.)
     pub(super) fn emit_variant_ctor_flat(
         &mut self,
         func: &mut Function,
         parent_ty: Ty,
         case_idx: u32,
         payload: Option<&LirExpr>,
-        component: &LirComponent,
+        component: &LirResource,
         layout: &MemoryLayout,
     ) -> Result<(), CodegenError> {
         use wasm_encoder::{HeapType, ValType};
 
         // Option-of-ref collapse path: parent_ty is `option<T>` whose
         // inner T has a ref internal repr. The whole option is one
-        // nullable ref slot — no discriminant. case_idx 0 = none → null;
-        // case_idx 1 = some → the payload's emitted ref.
+        // nullable ref slot — no discriminant. THIR convention (matches
+        // FlatGcStruct case_idx): **0 = some**, **1 = none**.
         if let Some(arr_idx) = self.option_collapses_to_ref(parent_ty) {
             match case_idx {
                 0 => {
-                    // none → typed null ref
-                    func.instruction(&Instruction::RefNull(HeapType::Concrete(arr_idx)));
-                }
-                _ => {
+                    // some → emit payload's ref
                     let p = payload.ok_or_else(|| {
                         CodegenError::InvalidIR("option-collapse some(): payload missing".into())
                     })?;
                     self.emit_expr(func, p, component, layout)?;
+                }
+                _ => {
+                    // none → typed null ref
+                    func.instruction(&Instruction::RefNull(HeapType::Concrete(arr_idx)));
                 }
             }
             return Ok(());
@@ -2070,21 +2522,12 @@ impl WasmPackageBuilder<'_> {
             // physical-shape case we must unfold the same way as the
             // legacy `Pointer` repr. Replace this with `array.get`
             // returning a ref directly once Phase 5 lands.
-            use super::repr::InternalRepr;
-            let payload_internal_repr = self.internal_repr(p.ty);
-            let payload_is_memory_ptr_slr = matches!(payload_internal_repr, InternalRepr::GcRef(_))
-                && self.is_single_level_record(p.ty)
-                && self.payload_emits_memory_record_ptr(p);
+            // Phase 7 cleanup: `payload_emits_memory_record_ptr` is
+            // dead post-migration, so the SLR-record memory-pointer
+            // unfold path can no longer fire. The payload is always
+            // pushed in its `internal_repr` shape (typed GC ref or
+            // scalar slots) — no materializer call needed.
             self.emit_expr(func, p, component, layout)?;
-            // Phase 5b-v.3: scalar list (GcArrayRef) nested inside option/
-            // result is now natively a single GC ref slot in the parent's
-            // flat layout — no materializer call needed; the ref pushed
-            // by emit_expr is exactly what the joined slot expects.
-            if (matches!(payload_internal_repr, InternalRepr::Pointer) || payload_is_memory_ptr_slr)
-                && payload_flat.len() > 1
-            {
-                self.emit_flat_slot_load_at_ptr(func, p.ty)?;
-            }
 
             if let Some(&i) = mismatches.last() {
                 let pv = payload_flat[i];
@@ -2125,10 +2568,10 @@ impl WasmPackageBuilder<'_> {
                     func.instruction(&Instruction::I64Const(0));
                 }
                 ValType::F32 => {
-                    func.instruction(&Instruction::F32Const(0.0));
+                    func.instruction(&Instruction::F32Const(Ieee32::from(0.0)));
                 }
                 ValType::F64 => {
-                    func.instruction(&Instruction::F64Const(0.0));
+                    func.instruction(&Instruction::F64Const(Ieee64::from(0.0)));
                 }
                 ValType::Ref(ref_ty) => {
                     func.instruction(&Instruction::RefNull(ref_ty.heap_type));
@@ -2175,10 +2618,10 @@ impl WasmPackageBuilder<'_> {
             }
             // Floats
             LirLiteral::F32(v) => {
-                func.instruction(&Instruction::F32Const(*v));
+                func.instruction(&Instruction::F32Const(Ieee32::from(*v)));
             }
             LirLiteral::F64(v) => {
-                func.instruction(&Instruction::F64Const(*v));
+                func.instruction(&Instruction::F64Const(Ieee64::from(*v)));
             }
             // Other primitives
             LirLiteral::Bool(b) => {
@@ -2392,7 +2835,7 @@ impl WasmPackageBuilder<'_> {
                 match op {
                     UnaryOp::Not => {
                         // !x for f32: x == 0.0 ? 1.0 : 0.0
-                        func.instruction(&Instruction::F32Const(0.0));
+                        func.instruction(&Instruction::F32Const(Ieee32::from(0.0)));
                         func.instruction(&Instruction::F32Eq);
                         func.instruction(&Instruction::F32ConvertI32S);
                     }
@@ -2403,7 +2846,7 @@ impl WasmPackageBuilder<'_> {
             }
             InternedTyKind::F64 => match op {
                 UnaryOp::Not => {
-                    func.instruction(&Instruction::F64Const(0.0));
+                    func.instruction(&Instruction::F64Const(Ieee64::from(0.0)));
                     func.instruction(&Instruction::F64Eq);
                     func.instruction(&Instruction::F64ConvertI64S);
                 }
@@ -2423,94 +2866,11 @@ impl WasmPackageBuilder<'_> {
         }
     }
 
-    /// Given a stack with an element pointer on top, load the element
-    /// according to its Yel type and leave the loaded value(s) on the stack.
-    ///
-    /// - Primitive numerics / bool / char: load the scalar — returns 1.
-    /// - Record / Tuple / ADT / Option / Result: keep the pointer — returns 1.
-    ///   (Compound types are passed by pointer through the pipeline.)
-    /// - String / List (reference types stored inline as (ptr,len) pair):
-    ///   not yet supported via indexing — returns `Err`.
-    fn emit_load_from_ptr(&mut self, func: &mut Function, ty: Ty) -> Result<usize, CodegenError> {
-        let count = match self.ctx.ty_kind(ty) {
-            InternedTyKind::String | InternedTyKind::List(_) => {
-                // Should not reach here: 2-slot composite list elements are
-                // routed through `list_get_fat` in the `Index` arm above,
-                // which materialises the pair via its own scratch local.
-                // Hitting this branch means some other caller of
-                // `emit_load_from_ptr` (not the `Index` arm) asked us to
-                // load a fat-pointer scalar — fail loudly.
-                return Err(CodegenError::InvalidIR(format!(
-                    "emit_load_from_ptr called for 2-slot composite element \
-                     type {:?}; indexed-list reads of this type are now \
-                     handled via $list_get_fat — caller should have dispatched \
-                     there instead of invoking this loader.",
-                    self.ctx.ty_kind(ty)
-                )));
-            }
-            InternedTyKind::F32
-            | InternedTyKind::Length
-            | InternedTyKind::PhysicalLength
-            | InternedTyKind::Angle
-            | InternedTyKind::Duration
-            | InternedTyKind::Percent
-            | InternedTyKind::RelativeFontSize => {
-                func.instruction(&Instruction::F32Load(mem_arg(0, 2)));
-                1
-            }
-            InternedTyKind::F64 => {
-                func.instruction(&Instruction::F64Load(mem_arg(0, 3)));
-                1
-            }
-            InternedTyKind::S64 | InternedTyKind::U64 => {
-                func.instruction(&Instruction::I64Load(mem_arg(0, 3)));
-                1
-            }
-            InternedTyKind::Bool | InternedTyKind::U8 => {
-                func.instruction(&Instruction::I32Load8U(mem_arg(0, 0)));
-                1
-            }
-            InternedTyKind::S8 => {
-                func.instruction(&Instruction::I32Load8S(mem_arg(0, 0)));
-                1
-            }
-            InternedTyKind::U16 => {
-                func.instruction(&Instruction::I32Load16U(mem_arg(0, 1)));
-                1
-            }
-            InternedTyKind::S16 => {
-                func.instruction(&Instruction::I32Load16S(mem_arg(0, 1)));
-                1
-            }
-            InternedTyKind::S32
-            | InternedTyKind::U32
-            | InternedTyKind::Char
-            | InternedTyKind::Color
-            | InternedTyKind::Brush => {
-                func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                1
-            }
-            // Compound/reference types stay as a pointer on the stack —
-            // downstream consumers dereference as needed.
-            InternedTyKind::Adt(_)
-            | InternedTyKind::Option(_)
-            | InternedTyKind::Result { .. }
-            | InternedTyKind::Tuple(_) => 1,
-            other => {
-                return Err(CodegenError::InvalidIR(format!(
-                    "emit_load_from_ptr: unsupported element type {:?}",
-                    other
-                )));
-            }
-        };
-        Ok(count)
-    }
-
     pub(super) fn emit_expr_as_string(
         &mut self,
         func: &mut Function,
         expr: &LirExpr,
-        component: &LirComponent,
+        component: &LirResource,
         layout: &MemoryLayout,
     ) -> Result<(), CodegenError> {
         let runtime_funcs = self
@@ -2527,19 +2887,19 @@ impl WasmPackageBuilder<'_> {
             }
             InternedTyKind::S32 | InternedTyKind::U32 => {
                 self.emit_expr(func, expr, component, layout)?;
-                func.instruction(&Instruction::Call(runtime_funcs.s32_to_string));
+                func.instruction(&Instruction::Call(runtime_funcs.s32_to_string.expect("s32_to_string must be in runtime_needs (scan missed it?)")));
             }
             InternedTyKind::S64 | InternedTyKind::U64 => {
                 self.emit_expr(func, expr, component, layout)?;
-                func.instruction(&Instruction::Call(runtime_funcs.s64_to_string));
+                func.instruction(&Instruction::Call(runtime_funcs.s64_to_string.expect("s64_to_string must be in runtime_needs (scan missed it?)")));
             }
             InternedTyKind::Bool => {
                 self.emit_expr(func, expr, component, layout)?;
-                func.instruction(&Instruction::Call(runtime_funcs.bool_to_string));
+                func.instruction(&Instruction::Call(runtime_funcs.bool_to_string.expect("bool_to_string must be in runtime_needs (scan missed it?)")));
             }
             InternedTyKind::F32 => {
                 self.emit_expr(func, expr, component, layout)?;
-                func.instruction(&Instruction::Call(runtime_funcs.f32_to_string));
+                func.instruction(&Instruction::Call(runtime_funcs.f32_to_string.expect("f32_to_string must be in runtime_needs (scan missed it?)")));
             }
             other => {
                 return Err(CodegenError::InvalidIR(format!(
@@ -2553,18 +2913,29 @@ impl WasmPackageBuilder<'_> {
     }
 
     /// Emit an expression as an attribute-value variant using canonical ABI flattening.
-    /// The canonical ABI flattens this variant to: (discrim: i32, payload_i64: i64, payload_i32: i32)
+    /// Canonical ABI: (discrim: i32, payload_i64: i64, payload_i32_slot1..4: i32 x 4)
     /// - payload_i64: Used for string (ptr<<32|len), i64/u64 values, or f64 reinterpreted as i64
-    /// - payload_i32: Used for i32/u32/bool/s8-s32/u8-u32/char values, or f32 reinterpreted as i32
+    /// - payload_i32_slot1: Used for i32/u32/bool/s8-s32/u8-u32/char/f32-as-i32, str len, or color disc
+    /// - payload_i32_slot2..4: Color rgba tuple bytes (zero for non-color cases)
     ///
-    /// Variant cases: 0=str, 1=bool, 2=s8, 3=s16, 4=s32, 5=s64, 6=u8, 7=u16, 8=u32, 9=u64, 10=f32, 11=f64, 12=char
+    /// Variant cases: 0=str, 1=bool, 2=s8, 3=s16, 4=s32, 5=s64, 6=u8,
+    ///                7=u16, 8=u32, 9=u64, 10=f32, 11=f64, 12=char,
+    ///                13=color.
     pub(super) fn emit_expr_as_attr_value(
         &mut self,
         func: &mut Function,
         expr: &LirExpr,
-        component: &LirComponent,
+        component: &LirResource,
         layout: &MemoryLayout,
     ) -> Result<(), CodegenError> {
+        // Phase 7: handle the language-level `color` primitive (now a
+        // FlatGcStruct variant on the stack) BEFORE the generic
+        // `Adt` arm — color values flow through the typed
+        // `attribute-value::color(color)` case (disc=13) via the
+        // per-program `pack_color_to_attr_slots` helper.
+        if self.is_color_ty(expr.ty) {
+            return self.emit_attr_value_color_arm(func, expr, component, layout);
+        }
         // Determine discriminant and emit variant based on type
         // Canonical ABI: (discrim: i32, payload_i64: i64, payload_i32: i32)
         match self.ctx.ty_kind(expr.ty) {
@@ -2575,8 +2946,12 @@ impl WasmPackageBuilder<'_> {
                 self.emit_expr(func, expr, component, layout)?; // pushes ptr, len
                 // Call helper to promote (ptr, len) -> (ptr_i64, len)
                 if let Some(runtime_funcs) = &self.runtime_funcs {
-                    func.instruction(&Instruction::Call(runtime_funcs.pack_fat_ptr_to_i64));
+                    func.instruction(&Instruction::Call(runtime_funcs.pack_fat_ptr_to_i64.expect("pack_fat_ptr_to_i64 must be in runtime_needs (scan missed it?)")));
                 }
+                // Trailing color-payload pad slots.
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
             }
             InternedTyKind::Bool
             | InternedTyKind::S8
@@ -2586,15 +2961,12 @@ impl WasmPackageBuilder<'_> {
             | InternedTyKind::U16
             | InternedTyKind::U32
             | InternedTyKind::Char
-            | InternedTyKind::Color
             | InternedTyKind::Brush => {
-                // Canonical-ABI variant flattening joins all payload arms
-                // to `(slot0: i64, slot1: i32)`. Narrow integer arms
-                // (≤32 bits) carry their value in slot0 with slot1 as
-                // padding — matches the f32/f64 arms, which also extend
-                // their payload into slot0. Earlier this emitted the
-                // value into slot1 with slot0=0, which the host read back
-                // as 0 via jco's variant lifting.
+                // Canonical-ABI variant flattening joins all payload
+                // arms to `(slot0: i64, slot1: i32, slot2..4: i32)`.
+                // Narrow integer arms carry their value in slot0 with
+                // slots 1-4 zero — matches the f32/f64 arms, which
+                // also extend payload into slot0.
                 let kind = self.ctx.ty_kind(expr.ty).clone();
                 let discrim = match kind {
                     InternedTyKind::Bool => 1,
@@ -2603,7 +2975,7 @@ impl WasmPackageBuilder<'_> {
                     InternedTyKind::S32 => 4,
                     InternedTyKind::U8 => 6,
                     InternedTyKind::U16 => 7,
-                    InternedTyKind::U32 | InternedTyKind::Color | InternedTyKind::Brush => 8,
+                    InternedTyKind::U32 | InternedTyKind::Brush => 8,
                     InternedTyKind::Char => 12,
                     _ => {
                         return Err(CodegenError::InternalError(format!(
@@ -2624,9 +2996,12 @@ impl WasmPackageBuilder<'_> {
                     func.instruction(&Instruction::I64ExtendI32U);
                 }
                 func.instruction(&Instruction::I32Const(0)); // slot1 padding
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
             }
             InternedTyKind::S64 | InternedTyKind::U64 => {
-                // These use payload_i64, payload_i32 = 0
+                // These use payload_i64, slots 1-4 = 0.
                 let discrim = if matches!(self.ctx.ty_kind(expr.ty), InternedTyKind::S64) {
                     5
                 } else {
@@ -2634,7 +3009,10 @@ impl WasmPackageBuilder<'_> {
                 };
                 func.instruction(&Instruction::I32Const(discrim)); // discrim
                 self.emit_expr(func, expr, component, layout)?; // payload_i64 = value (i64)
-                func.instruction(&Instruction::I32Const(0)); // payload_i32 = 0
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
             }
             InternedTyKind::F32
             | InternedTyKind::Length
@@ -2643,20 +3021,27 @@ impl WasmPackageBuilder<'_> {
             | InternedTyKind::Duration
             | InternedTyKind::Percent
             | InternedTyKind::RelativeFontSize => {
-                // f32 (and f32-backed UI types) go in payload_i64 (reinterpreted
-                // as i32, then extended to i64) per canonical ABI variant "join".
+                // f32 (and f32-backed UI types) go in payload_i64
+                // (reinterpreted as i32, then extended to i64) per
+                // canonical ABI variant "join".
                 func.instruction(&Instruction::I32Const(10)); // discrim
                 self.emit_expr(func, expr, component, layout)?; // f32 value
-                func.instruction(&Instruction::I32ReinterpretF32); // reinterpret as i32
-                func.instruction(&Instruction::I64ExtendI32U); // extend to i64 for payload_i64 slot
-                func.instruction(&Instruction::I32Const(0)); // payload_i32 = 0
+                func.instruction(&Instruction::I32ReinterpretF32);
+                func.instruction(&Instruction::I64ExtendI32U);
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
             }
             InternedTyKind::F64 => {
-                // f64 uses payload_i64 with reinterpret, payload_i32 = 0
+                // f64 uses payload_i64 with reinterpret, slots 1-4 = 0.
                 func.instruction(&Instruction::I32Const(11)); // discrim
                 self.emit_expr(func, expr, component, layout)?; // f64 value
-                func.instruction(&Instruction::I64ReinterpretF64); // reinterpret as i64
-                func.instruction(&Instruction::I32Const(0)); // payload_i32 = 0
+                func.instruction(&Instruction::I64ReinterpretF64);
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
             }
             InternedTyKind::Adt(_)
             | InternedTyKind::List(_)
@@ -2678,13 +3063,58 @@ impl WasmPackageBuilder<'_> {
                 func.instruction(&Instruction::I32Const(ptr as i32));
                 func.instruction(&Instruction::I32Const(len as i32));
                 if let Some(runtime_funcs) = &self.runtime_funcs {
-                    func.instruction(&Instruction::Call(runtime_funcs.pack_fat_ptr_to_i64));
+                    func.instruction(&Instruction::Call(runtime_funcs.pack_fat_ptr_to_i64.expect("pack_fat_ptr_to_i64 must be in runtime_needs (scan missed it?)")));
                 }
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::I32Const(0));
             }
             other => {
                 todo!("emit_expr_as_attr_value: unsupported type {:?}", other)
             }
         }
+        Ok(())
+    }
+
+    /// True iff `ty` is the language-level `color` builtin variant.
+    /// Hex literals (`#2563eb`) and named cases (`Color.red` etc.) all
+    /// resolve to this single ADT (see `register_builtin_variants` in
+    /// `yel-core/src/stdlib_lookup.rs`).
+    fn is_color_ty(&self, ty: Ty) -> bool {
+        if let InternedTyKind::Adt(d) = self.ctx.ty_kind(ty) {
+            if let Some(color_def) = self.ctx.known.variants.color {
+                return *d == color_def;
+            }
+        }
+        false
+    }
+
+    /// Phase 7: pack a YEL `color` value (a `(ref null $var_color)`
+    /// FlatGcStruct supertype ref) into the canonical-ABI flattening
+    /// of `attribute-value::color(color)`. Pushes the full attribute-
+    /// value flat shape: `(disc=13, slot0=color_disc widened to i64,
+    /// slot1=r as i32, slot2=g as i32, slot3=b as i32, slot4=a as i32)`.
+    /// Non-rgba cases push their disc and zero rgba slots.
+    fn emit_attr_value_color_arm(
+        &mut self,
+        func: &mut Function,
+        expr: &LirExpr,
+        component: &LirResource,
+        layout: &MemoryLayout,
+    ) -> Result<(), CodegenError> {
+        let helper = self
+            .pack_color_helper_fn_idx
+            .ok_or_else(|| CodegenError::InvalidIR(
+                "attr-value color: $pack_color_to_attr_slots helper not registered — \
+                 build.rs should emit it whenever the program references the language \
+                 `color` type".into(),
+            ))?;
+        // attribute-value disc = 13 (color case).
+        func.instruction(&Instruction::I32Const(13));
+        // Push the color ref; the helper consumes it and produces
+        // (i64 inner_disc, i32 r, i32 g, i32 b, i32 a).
+        self.emit_expr(func, expr, component, layout)?;
+        func.instruction(&Instruction::Call(helper));
         Ok(())
     }
 
@@ -2790,7 +3220,215 @@ impl WasmPackageBuilder<'_> {
         })?;
         func.instruction(&Instruction::I32Const(ret_addr));
         func.instruction(&Instruction::Call(cb_func_idx));
+        // Phase 5e.5 Stage 7b: callback returns of FlatGcStruct must
+        // produce a single supertype ref (matching internal_repr) for
+        // signal-store / Field consumers — not the canonical (disc,
+        // payload) flat slots. Re-pack the canonical bytes into a
+        // case-subtype struct.
+        if let crate::wasm::repr::InternalRepr::FlatGcStruct(_) =
+            self.internal_repr(ret_ty)
+        {
+            return self.emit_cb_flat_gc_return_load(func, ret_addr, ret_ty);
+        }
         self.emit_cb_indirect_return_load(func, ret_addr, ret_ty)
+    }
+
+    /// Phase 5e.5 Stage 7b/7d: read canonical (disc, payload) bytes
+    /// that the host wrote into the callback return scratch and
+    /// assemble a FlatGcStruct supertype ref. Handles option, result,
+    /// and user-variant uniformly via an N-case `if disc == k` cascade.
+    pub(super) fn emit_cb_flat_gc_return_load(
+        &mut self,
+        func: &mut Function,
+        ret_addr: i32,
+        ret_ty: Ty,
+    ) -> Result<usize, CodegenError> {
+        use wasm_encoder::{HeapType, RefType, ValType};
+
+        let super_idx = *self
+            .record_gc_types
+            .flat_gc_super_idx
+            .get(&ret_ty)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "cb flat-gc return: missing supertype idx for {:?}",
+                    ret_ty
+                ))
+            })?;
+        let case_count = *self
+            .record_gc_types
+            .flat_gc_case_count
+            .get(&ret_ty)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "cb flat-gc return: missing case count for {:?}",
+                    ret_ty
+                ))
+            })?;
+
+        let slots = self.flatten_core_slots(ret_ty);
+        let disc_slot = slots.first().ok_or_else(|| {
+            CodegenError::InvalidIR("cb flat-gc return: missing disc slot".into())
+        })?;
+        let disc_offset = disc_slot.offset as i32;
+        // Payload area starts at the first non-disc slot offset (or
+        // disc_offset + 1 if there are no payload slots — the case-0
+        // empty case is still valid).
+        let payload_base = slots
+            .get(1)
+            .map(|s| s.offset)
+            .unwrap_or((disc_offset as u32) + 1);
+
+        let result_block_ty = wasm_encoder::BlockType::Result(ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(super_idx),
+        }));
+
+        // Cascade: for each case k emit `if disc == k { build case k }
+        // else { ... }`. Innermost else falls back to
+        // struct.new_default $case0 (unreachable: host must send a
+        // valid disc).
+        let mut nesting: u32 = 0;
+        for k in 0..case_count {
+            let case_sub_idx = *self
+                .record_gc_types
+                .flat_gc_case_idx
+                .get(&(ret_ty, k))
+                .ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "cb flat-gc return: missing case_idx for ({:?}, {})",
+                        ret_ty, k
+                    ))
+                })?;
+            // disc == k
+            func.instruction(&Instruction::I32Const(ret_addr + disc_offset));
+            func.instruction(&Instruction::I32Load8U(mem_arg(0, 0)));
+            func.instruction(&Instruction::I32Const(k as i32));
+            func.instruction(&Instruction::I32Eq);
+            func.instruction(&Instruction::If(result_block_ty));
+
+            // Build case k.
+            if let Some(payload_ty) =
+                super::gc_types::case_payload_ty(self.ctx, ret_ty, k)
+            {
+                self.emit_cb_flat_gc_load_case_payload(
+                    func,
+                    ret_addr,
+                    payload_ty,
+                    payload_base,
+                )?;
+                func.instruction(&Instruction::StructNew(case_sub_idx));
+            } else {
+                func.instruction(&Instruction::StructNewDefault(case_sub_idx));
+            }
+
+            func.instruction(&Instruction::Else);
+            nesting += 1;
+        }
+        // Innermost else: invariant violation — push case0 default.
+        let case0_sub_idx = *self
+            .record_gc_types
+            .flat_gc_case_idx
+            .get(&(ret_ty, 0))
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "cb flat-gc return: missing case 0 idx for {:?}",
+                    ret_ty
+                ))
+            })?;
+        func.instruction(&Instruction::StructNewDefault(case0_sub_idx));
+        for _ in 0..nesting {
+            func.instruction(&Instruction::End);
+        }
+        Ok(1)
+    }
+
+    /// Helper for `emit_cb_flat_gc_return_load`: load a single case's
+    /// payload from canonical-ABI memory at `payload_base` (absolute,
+    /// i.e. `ret_addr + offset`) and leave the value(s) needed by the
+    /// case-subtype's payload field on the stack.
+    fn emit_cb_flat_gc_load_case_payload(
+        &mut self,
+        func: &mut Function,
+        ret_addr: i32,
+        payload_ty: Ty,
+        payload_base: u32,
+    ) -> Result<(), CodegenError> {
+        use super::StoreWidth;
+        use wasm_encoder::ValType;
+        use yel_core::types::InternedTyKind;
+
+        let payload_canonical = self.flatten_core_valtypes(payload_ty);
+        let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
+            || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
+                && self
+                    .record_gc_types
+                    .list_array_type_idx
+                    .get(&payload_ty)
+                    .is_none());
+
+        if is_fat_box {
+            let fat_value_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
+                CodegenError::InvalidIR(
+                    "cb flat-gc return: $fat_value type idx missing".into(),
+                )
+            })?;
+            // ptr at payload_base, len at payload_base + 4
+            func.instruction(&Instruction::I32Const(ret_addr + payload_base as i32));
+            func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
+            func.instruction(&Instruction::I32Const(ret_addr + payload_base as i32 + 4));
+            func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
+            func.instruction(&Instruction::StructNew(fat_value_idx));
+            return Ok(());
+        }
+
+        if payload_canonical.len() != 1 {
+            return Err(CodegenError::InvalidIR(format!(
+                "cb flat-gc return: nested multi-slot payload ({} slots) \
+                 not yet supported — payload_ty={:?}",
+                payload_canonical.len(),
+                payload_ty
+            )));
+        }
+
+        // Single-slot scalar payload. Compute its canonical layout to
+        // get the precise store width — for primitives the slot sits
+        // at payload_base.
+        let payload_slots = self.flatten_core_slots(payload_ty);
+        let slot = payload_slots.first().ok_or_else(|| {
+            CodegenError::InvalidIR(
+                "cb flat-gc return: payload has zero flat slots but non-empty canonical".into(),
+            )
+        })?;
+        let slot_addr = ret_addr + payload_base as i32 + slot.offset as i32;
+        func.instruction(&Instruction::I32Const(slot_addr));
+        match (slot.store, slot.valtype) {
+            (StoreWidth::I32, ValType::I32) => {
+                func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
+            }
+            (StoreWidth::I32_8, ValType::I32) => {
+                func.instruction(&Instruction::I32Load8U(mem_arg(0, 0)));
+            }
+            (StoreWidth::I32_16, ValType::I32) => {
+                func.instruction(&Instruction::I32Load16U(mem_arg(0, 1)));
+            }
+            (StoreWidth::I64, ValType::I64) => {
+                func.instruction(&Instruction::I64Load(mem_arg(0, 3)));
+            }
+            (StoreWidth::F32, ValType::F32) => {
+                func.instruction(&Instruction::F32Load(mem_arg(0, 2)));
+            }
+            (StoreWidth::F64, ValType::F64) => {
+                func.instruction(&Instruction::F64Load(mem_arg(0, 3)));
+            }
+            other => {
+                return Err(CodegenError::InvalidIR(format!(
+                    "cb flat-gc return: unsupported payload slot {:?}",
+                    other
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Emit instructions that load the flattened canonical-ABI representation
@@ -2862,9 +3500,13 @@ impl WasmPackageBuilder<'_> {
 
     /// Load each canonical-ABI flat slot of a signal of type `ty` located at
     /// base address `addr`, pushing the values onto the stack in declaration
-    /// order. Used by `SignalRead` for composite types (option, result,
-    /// variant-with-payload) so downstream consumers get the exact
-    /// multi-value shape their emitters expect.
+    /// order.
+    ///
+    /// **Boundary / fallback only.** With FlatGcStruct now hosting
+    /// every option/result/variant signal, the SignalRead callsite for
+    /// `signal_in_struct == false` is dead in practice. Kept so the
+    /// not-yet-migrated `InternalRepr::Flat` arm (TODO in `repr.rs`)
+    /// still works for raw enums and corner cases.
     pub(super) fn emit_flat_slot_signal_read(
         &mut self,
         func: &mut Function,
@@ -2912,6 +3554,12 @@ impl WasmPackageBuilder<'_> {
         Ok(())
     }
 
+    /// **Boundary only.** Three live callers (record-field memory load,
+    /// `emit_variant_ctor_flat` payload lift, callback POR-record return
+    /// load) all live on canonical-ABI boundaries, not internal SSA.
+    /// `InternalRepr::Flat` is gone, so the "non-migrated option/result
+    /// fallback" mentioned in earlier comments no longer exists.
+    ///
     /// Load each canonical-ABI flat slot of a value of type `ty` from a base
     /// pointer currently on top of the WASM stack, pushing the slot values onto
     /// the stack in declaration order. Consumes the base pointer from the
@@ -3053,7 +3701,7 @@ mod tests {
     use wasm_encoder::{CodeSection, FunctionSection, Module, TypeSection};
     use wasmparser::{Operator, Parser, Payload};
     use yel_core::context::CompilerContext;
-    use yel_core::lir::LirComponent;
+    use yel_core::lir::LirResource;
     use yel_core::types::{InternedTyKind, Ty};
 
     /// Wrap an emitted `Function` into a minimal valid WASM module
@@ -3109,7 +3757,7 @@ mod tests {
     fn make_builder(ctx: &CompilerContext) -> WasmPackageBuilder<'_> {
         // Empty component slice; the helpers under test don't touch
         // `self.components`.
-        static EMPTY: &[LirComponent] = &[];
+        static EMPTY: &[LirResource] = &[];
         WasmPackageBuilder::new(EMPTY, ctx)
     }
 
@@ -3486,23 +4134,19 @@ mod tests {
     /// emitter called.
     fn sentinel_runtime_funcs() -> RuntimeFunctions {
         RuntimeFunctions {
-            s32_to_string: 100,
-            s64_to_string: 103,
-            bool_to_string: 101,
-            f32_to_string: 102,
+            s32_to_string: Some(100),
+            s64_to_string: Some(103),
+            bool_to_string: Some(101),
+            f32_to_string: Some(102),
             concat_indices: std::collections::HashMap::new(),
-            store_fat_ptr: 110,
-            load_fat_ptr: 111,
-            store_option: 120,
-            store_result: 121,
-            list_get: 130,
-            list_get_opt: 131,
-            list_get_fat: 132,
-            starts_with: 140,
+            store_fat_ptr: Some(110),
+            load_fat_ptr: Some(111),
+            starts_with: Some(140),
             record_ctors: std::collections::HashMap::new(),
             record_ctors_at: std::collections::HashMap::new(),
             list_ctors: std::collections::HashMap::new(),
-            pack_fat_ptr_to_i64: 150,
+            list_appends: std::collections::HashMap::new(),
+            pack_fat_ptr_to_i64: Some(150),
             filter_indices: std::collections::HashMap::new(),
             count: 200,
         }
@@ -3522,9 +4166,9 @@ mod tests {
         b
     }
 
-    /// Minimal LirComponent + MemoryLayout sufficient for the literal path.
-    fn empty_component(ctx: &CompilerContext) -> yel_core::lir::LirComponent {
-        yel_core::lir::LirComponent::empty_module_carrier(ctx.intern("test"))
+    /// Minimal LirResource + MemoryLayout sufficient for the literal path.
+    fn empty_component(ctx: &CompilerContext) -> yel_core::lir::LirResource {
+        yel_core::lir::LirResource::empty_module_carrier(ctx.intern("test"))
     }
     fn empty_layout() -> MemoryLayout {
         MemoryLayout {

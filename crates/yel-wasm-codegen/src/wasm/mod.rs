@@ -11,18 +11,25 @@
 
 mod codegen;
 mod expr;
-mod gc_types;
+pub mod functions;
+pub(crate) mod gc_types;
 pub(super) mod repr;
 pub mod runtime;
 
 use std::collections::HashMap;
+use std::error::Error as _;
+use std::fmt::Write;
 
 use super::CodegenError;
 use super::wit_ast::WitAstBuilder;
+use wasmparser::{CompositeInnerType, FuncType, Parser, Payload, TypeRef};
+use wit_component::ComponentEncoder;
+use wit_component::{StringEncoding, dummy_module};
+use wit_parser::{ManglingAndAbi, Resolve, WorldId};
 use yel_core::context::CompilerContext;
-use yel_core::ids::{DefId, LocalId, BlockId};
+use yel_core::ids::{BlockId, DefId, LocalId};
 use yel_core::lir::{LirBindingMode, LirLayoutContext, LirLiteral, LirSlotKind, align_to};
-use yel_core::lir::{LirComponent, LirExpr, LirExprKind, LirModule, LirSlotId};
+use yel_core::lir::{LirExpr, LirExprKind, LirModule, LirResource, LirSlotId};
 use yel_core::types::Ty;
 use yel_core::{definitions::DefKind, types::InternedTyKind};
 
@@ -103,8 +110,6 @@ fn augment_with_context(bytes: &[u8], msg: &str) -> String {
 
 /// List every declared function type as a human-readable signature string.
 fn list_function_types(bytes: &[u8]) -> Option<Vec<String>> {
-    use std::fmt::Write;
-    use wasmparser::{CompositeInnerType, Parser, Payload};
     let mut out: Vec<String> = Vec::new();
     for payload in Parser::new(0).parse_all(bytes) {
         if let Ok(Payload::TypeSection(reader)) = payload {
@@ -139,11 +144,10 @@ fn list_function_types(bytes: &[u8]) -> Option<Vec<String>> {
 
 /// List every function import in order. Returns (module, name, type_index).
 fn list_function_imports(bytes: &[u8]) -> Option<Vec<(String, String, u32)>> {
-    use wasmparser::{Parser, Payload, TypeRef};
     let mut out = Vec::new();
     for payload in Parser::new(0).parse_all(bytes) {
         if let Ok(Payload::ImportSection(reader)) = payload {
-            for import in reader {
+            for import in reader.into_imports() {
                 if let Ok(imp) = import
                     && let TypeRef::Func(type_idx) = imp.ty
                 {
@@ -163,13 +167,12 @@ fn print_single_function_wat(bytes: &[u8], func_index: u32) -> Option<String> {
     let wat = wasmprinter::print_bytes(bytes).ok()?;
     // wasmprinter prints local functions after imports; compute absolute
     // index in the module's function index space.
-    use wasmparser::{Parser, Payload};
     let mut num_imports: u32 = 0;
     for payload in Parser::new(0).parse_all(bytes) {
         if let Ok(Payload::ImportSection(reader)) = payload {
-            for import in reader {
+            for import in reader.into_imports() {
                 if let Ok(imp) = import
-                    && matches!(imp.ty, wasmparser::TypeRef::Func(_))
+                    && matches!(imp.ty, TypeRef::Func(_))
                 {
                     num_imports += 1;
                 }
@@ -210,9 +213,6 @@ fn print_single_function_wat(bytes: &[u8], func_index: u32) -> Option<String> {
 /// Walk the code section and find the function whose body contains `offset`.
 /// Returns `None` if the module is malformed or no function covers the offset.
 fn locate_function_at_offset(bytes: &[u8], offset: usize) -> Option<FuncLoc> {
-    use std::fmt::Write;
-    use wasmparser::{FuncType, Parser, Payload};
-
     // Collect type section (FuncTypes) and function section (type indices)
     // as we scan so we can annotate the result.
     let mut func_types: Vec<FuncType> = Vec::new();
@@ -226,7 +226,7 @@ fn locate_function_at_offset(bytes: &[u8], offset: usize) -> Option<FuncLoc> {
                 for rec_group in reader {
                     let rec_group = rec_group.ok()?;
                     for sub in rec_group.into_types() {
-                        if let wasmparser::CompositeInnerType::Func(ft) = sub.composite_type.inner {
+                        if let CompositeInnerType::Func(ft) = sub.composite_type.inner {
                             func_types.push(ft);
                         }
                     }
@@ -303,7 +303,7 @@ fn locate_function_at_offset(bytes: &[u8], offset: usize) -> Option<FuncLoc> {
 /// Legacy entry — prefer [`generate_wasm_module`] for new code. Wraps the
 /// slice into an anonymous `LirModule` and delegates.
 pub fn generate_wasm(
-    components: &[LirComponent],
+    components: &[LirResource],
     ctx: &CompilerContext,
 ) -> Result<Vec<u8>, CodegenError> {
     generate_wasm_with_wit(components, ctx, &WasmWithWitOptions::default())
@@ -312,7 +312,7 @@ pub fn generate_wasm(
 /// Legacy entry that accepts a component slice plus `options.global_defaults`.
 /// Prefer [`generate_wasm_module`]. Kept as a shim while callers migrate.
 pub fn generate_wasm_with_wit(
-    components: &[LirComponent],
+    components: &[LirResource],
     ctx: &CompilerContext,
     options: &WasmWithWitOptions,
 ) -> Result<Vec<u8>, CodegenError> {
@@ -333,6 +333,12 @@ pub struct WasmWithWitOptions {
     /// module start function stores them to each property's backing slot
     /// before any export runs.
     pub global_defaults: HashMap<DefId, LirExpr>,
+    /// Optional Binaryen `wasm-opt` invocation. When `Some`, the core
+    /// module bytes are piped through the `wasm-opt` binary on `PATH`
+    /// after build but before WIT-metadata embedding. The contained
+    /// args are forwarded verbatim — typical examples: `-O3`,
+    /// `--enable-gc`, `--enable-reference-types`, `--type-merging`.
+    pub wasm_opt_args: Option<Vec<String>>,
 }
 
 impl Default for WasmWithWitOptions {
@@ -342,6 +348,7 @@ impl Default for WasmWithWitOptions {
             name: "ui".to_string(),
             version: "0.1.0".to_string(),
             global_defaults: HashMap::new(),
+            wasm_opt_args: None,
         }
     }
 }
@@ -361,27 +368,34 @@ pub fn generate_wasm_module(
     ctx: &CompilerContext,
     options: &WasmWithWitOptions,
 ) -> Result<Vec<u8>, CodegenError> {
-    use wit_component::{ComponentEncoder, StringEncoding};
-
-    // Build WIT AST from every exported component plus every global. Files
-    // with no exported component still produce a well-formed package with
-    // a library world (imports only, no exports).
-    let exported: Vec<&LirComponent> = module.exported_components().collect();
-    let all: Vec<&LirComponent> = module.components.iter().collect();
-
     let mut wit_builder =
         WitAstBuilder::new(ctx, &options.namespace, &options.name, &options.version);
+    let exported: Vec<&LirResource> = module.exported_components().collect();
+    let all: Vec<&LirResource> = module.components.iter().collect();
     wit_builder.build_wit_with_all(&exported, &all)?;
     let (resolve, world_id) = wit_builder.into_resolve_and_world();
+    generate_wasm_module_with_wit(module, ctx, options, resolve, world_id)
+}
 
+/// Like [`generate_wasm_module`] but the caller supplies a pre-built
+/// `(Resolve, WorldId)` pair instead of letting yel-wasm-codegen derive
+/// one from the LIR. Used by `yel-flow-core` to emit components whose
+/// WIT is authored directly from a `WireModule` tree (interfaces,
+/// resources, fields synthesised to get/set methods) rather than
+/// projected from UI-flavoured LIR resources.
+pub fn generate_wasm_module_with_wit(
+    module: &LirModule,
+    ctx: &CompilerContext,
+    options: &WasmWithWitOptions,
+    resolve: Resolve,
+    world_id: WorldId,
+) -> Result<Vec<u8>, CodegenError> {
     // Zero-component modules (e.g. globals-only libraries) emit a real core
     // module — allocator, memory, start function that seeds global defaults —
     // not a dummy stub. The only case we still stub is truly empty modules
     // with no state worth initializing.
     let has_module_state = !module.components.is_empty() || !module.global_defaults.is_empty();
     if !has_module_state {
-        use wit_component::dummy_module;
-        use wit_parser::ManglingAndAbi;
         let dummy = dummy_module(&resolve, world_id, ManglingAndAbi::Standard32);
         let mut dummy_bytes = dummy;
         wit_component::embed_component_metadata(
@@ -444,6 +458,14 @@ pub fn generate_wasm_module(
             msg.push_str(&augment_with_context(&core_module_bytes, &msg));
             return Err(CodegenError::EncodingError(msg));
         }
+    }
+
+    // Optionally pipe through `wasm-opt`. Must run before metadata
+    // embedding — wasm-opt operates on raw core modules and would
+    // strip the custom sections wit_component is about to add.
+    #[cfg(not(target_family = "wasm"))]
+    if let Some(args) = options.wasm_opt_args.as_ref() {
+        core_module_bytes = run_wasm_opt(&core_module_bytes, args)?;
     }
 
     // Embed WIT metadata into the core module (modifies in place)
@@ -608,36 +630,26 @@ pub(crate) struct MemoryLayout {
     /// Offset for each signal (relative to base)
     pub signal_offsets: Vec<i32>,
     /// Total size used
-    #[allow(dead_code)]
     pub size: i32,
 }
 
 impl MemoryLayout {
-    pub fn new(component: &LirComponent, base: i32, layout_ctx: &mut LirLayoutContext) -> Self {
-        let mut offset = 0i32;
-
-        // Per-signal byte allocation. GC-struct-migrated signals
-        // (every internal-repr kind except `Pointer` — i.e. all
-        // signals except those typed as records/tuples) live in the
-        // component's `$Comp_<i>` GC struct fields and need zero
-        // linear-memory bytes. Their `signal_offsets` slot is set to
-        // `-1` as a sentinel; legacy callers gate on `signal_in_struct`
-        // before reading, so the sentinel is never dereferenced.
-        // Pointer-typed signals (records, tuples) keep memory storage
-        // and reserve `size_of(ty)` bytes each.
+    pub fn new(component: &LirResource, base: i32, _layout_ctx: &mut LirLayoutContext) -> Self {
+        // Phase 1.1a: per-signal offsets sourced from
+        // `component.signal_layout` (computed at LIR-lowering time).
+        // GC-struct-migrated signals keep their `signal_offsets[i] == -1`
+        // sentinel so the legacy `signal_addr` API stays valid; callers
+        // gate on `signal_in_struct` before dereferencing.
         let signal_offsets: Vec<i32> = component
+            .signal_layout
             .signals
             .iter()
-            .map(|signal| {
-                if !layout_ctx.is_pointer_repr(signal.ty) {
-                    return -1;
-                }
-                let o = offset;
-                let size = layout_ctx.size_of(signal.ty) as i32;
-                offset += size;
-                o
+            .map(|storage| match storage.mem {
+                Some(m) => m.offset as i32,
+                None => -1,
             })
             .collect();
+        let mut offset = component.signal_layout.memory_size as i32;
 
         // Memory slots are pre-computed in component.slots
         // Find max offset to get total size
@@ -667,7 +679,7 @@ impl MemoryLayout {
 
     /// An empty layout for module-scope emission (no component signals).
     ///
-    /// Paired with [`LirComponent`] containing `signals: []`, it routes every
+    /// Paired with [`LirResource`] containing `signals: []`, it routes every
     /// signal lookup through the module-level `global_property_addrs` path
     /// rather than the component-local one. Any expression that does try to
     /// resolve a component-local signal will hit an out-of-bounds
@@ -688,28 +700,19 @@ impl MemoryLayout {
 
 pub(crate) const IMPORT_CREATE_ELEMENT: u32 = 0;
 pub(crate) const IMPORT_CREATE_TEXT: u32 = 1;
-#[allow(dead_code)]
 pub(crate) const IMPORT_CREATE_COMMENT: u32 = 2;
 pub(crate) const IMPORT_SET_ATTRIBUTE: u32 = 3;
-#[allow(dead_code)]
 pub(crate) const IMPORT_REMOVE_ATTRIBUTE: u32 = 4;
 pub(crate) const IMPORT_SET_TEXT_CONTENT: u32 = 5;
-#[allow(dead_code)]
 pub(crate) const IMPORT_SET_STYLE: u32 = 6;
-#[allow(dead_code)]
 pub(crate) const IMPORT_SET_CLASS: u32 = 7;
 pub(crate) const IMPORT_APPEND_CHILD: u32 = 8;
-#[allow(dead_code)]
 pub(crate) const IMPORT_INSERT_BEFORE: u32 = 9;
-#[allow(dead_code)]
 pub(crate) const IMPORT_REMOVE_CHILD: u32 = 10;
 pub(crate) const IMPORT_REMOVE: u32 = 11;
-#[allow(dead_code)]
 pub(crate) const IMPORT_GET_PARENT: u32 = 12;
-#[allow(dead_code)]
 pub(crate) const IMPORT_GET_NEXT_SIBLING: u32 = 13;
 pub(crate) const IMPORT_ADD_EVENT_LISTENER: u32 = 14;
-#[allow(dead_code)]
 pub(crate) const IMPORT_REMOVE_EVENT_LISTENER: u32 = 15;
 /// Insert node after anchor (for conditional rendering).
 /// Signature: insert_after(parent: i32, node: i32, anchor: i32) -> ()
@@ -723,6 +726,56 @@ pub(crate) const IMPORT_CREATE_FRAGMENT: u32 = 17;
 // After DOM imports (18 total), callbacks are imported dynamically
 // Then: resource-new, resource-drop, realloc
 pub(crate) const NUM_DOM_IMPORTS: u32 = 18;
+
+/// Round-trip a `DomImports.*` DefId back to its wasm import index.
+///
+/// Phase 2.1 lands this helper; Phase 2.2 invokes it from
+/// `LirOp::CallFunction` emission so the lowering can switch DOM-op
+/// sites to the generic call op against the pre-allocated DOM-import
+/// DefIds. Returns `None` if `def_id` is not one of the 18
+/// pre-allocated DOM-import DefIds.
+pub(crate) fn wasm_import_index_for_dom_def(ctx: &CompilerContext, def_id: DefId) -> Option<u32> {
+    let d = ctx.dom_imports();
+    if def_id == d.create_element {
+        Some(IMPORT_CREATE_ELEMENT)
+    } else if def_id == d.create_text {
+        Some(IMPORT_CREATE_TEXT)
+    } else if def_id == d.create_comment {
+        Some(IMPORT_CREATE_COMMENT)
+    } else if def_id == d.create_fragment {
+        Some(IMPORT_CREATE_FRAGMENT)
+    } else if def_id == d.set_attribute {
+        Some(IMPORT_SET_ATTRIBUTE)
+    } else if def_id == d.remove_attribute {
+        Some(IMPORT_REMOVE_ATTRIBUTE)
+    } else if def_id == d.set_text_content {
+        Some(IMPORT_SET_TEXT_CONTENT)
+    } else if def_id == d.set_style {
+        Some(IMPORT_SET_STYLE)
+    } else if def_id == d.set_class {
+        Some(IMPORT_SET_CLASS)
+    } else if def_id == d.append_child {
+        Some(IMPORT_APPEND_CHILD)
+    } else if def_id == d.insert_before {
+        Some(IMPORT_INSERT_BEFORE)
+    } else if def_id == d.insert_after {
+        Some(IMPORT_INSERT_AFTER)
+    } else if def_id == d.remove_child {
+        Some(IMPORT_REMOVE_CHILD)
+    } else if def_id == d.remove {
+        Some(IMPORT_REMOVE)
+    } else if def_id == d.get_parent {
+        Some(IMPORT_GET_PARENT)
+    } else if def_id == d.get_next_sibling {
+        Some(IMPORT_GET_NEXT_SIBLING)
+    } else if def_id == d.add_event_listener {
+        Some(IMPORT_ADD_EVENT_LISTENER)
+    } else if def_id == d.remove_event_listener {
+        Some(IMPORT_REMOVE_EVENT_LISTENER)
+    } else {
+        None
+    }
+}
 
 /// Import indices for a single component's callbacks and resource intrinsics.
 ///
@@ -793,7 +846,7 @@ impl ImportLayout {
     /// it does NOT gate whether it is imported. See `wit_ast.rs` for the
     /// export-surface side of this distinction.
     pub fn new(
-        all_components: &[&LirComponent],
+        all_components: &[&LirResource],
         ctx: &CompilerContext,
     ) -> Result<Self, CodegenError> {
         // Step 1: collect each component's callback DefIds.
@@ -898,7 +951,7 @@ pub type FilterCallEntry = (Option<usize>, Ty, u32, (LocalId, Ty), LirExpr);
 /// Builder for WASM package (component) generation.
 pub(crate) struct WasmPackageBuilder<'a> {
     /// All components (code is generated for all of them)
-    pub components: &'a [LirComponent],
+    pub components: &'a [LirResource],
     pub ctx: &'a CompilerContext,
     /// String data manager for literal interning
     pub strings: StringData,
@@ -920,8 +973,18 @@ pub(crate) struct WasmPackageBuilder<'a> {
     pub record_types: Vec<DefId>,
     /// Global handler counter for event handler registration/dispatch
     pub handler_counter: usize,
-    /// Block function index mapping: (component_idx, block_id) -> wasm_func_idx
-    pub block_func_indices: std::collections::HashMap<(usize, BlockId), u32>,
+    /// Block function index mapping: block_id -> wasm_func_idx.
+    /// Phase 0.3q: BlockIds are module-wide unique, so `(comp_idx, BlockId)`
+    /// collapsed to just `BlockId`. Cross-component calls (lifecycle)
+    /// resolve through this single map identically to intra-component calls.
+    pub block_func_indices: std::collections::HashMap<BlockId, u32>,
+    /// `DefId → wasm function index` map used by `LirOp::CallFunction`.
+    /// Populated externally before `op_emit` runs — yel-lang's UI
+    /// compiler never emits `CallFunction` so this stays empty for
+    /// pure-UI builds. Flow-frontend codegen pre-populates it with one
+    /// entry per registered flow function so cross-function calls
+    /// resolve to the right wasm idx.
+    pub def_id_to_func_idx: std::collections::HashMap<DefId, u32>,
     /// Memory layouts by component index
     pub layouts: Vec<MemoryLayout>,
     /// Names accumulated for dynamically-emitted function types in the
@@ -955,6 +1018,12 @@ pub(crate) struct WasmPackageBuilder<'a> {
     pub current_block_local_modes: Option<HashMap<LocalId, LirBindingMode>>,
     /// List construct info: (element_type, element_count) for runtime function generation
     pub list_constructs: Vec<(Ty, usize)>,
+
+    /// List types that need an `append` runtime helper. One per unique
+    /// `list<T>` referenced by `Call { func: append, args: [list, elem] }`.
+    /// Each entry triggers `generate_list_append_function(list_ty)` and
+    /// gets a `RuntimeFunctions::list_append` index.
+    pub list_appends: Vec<Ty>,
     /// Memory addresses for global singleton properties, keyed by property DefId.
     pub global_property_addrs: HashMap<DefId, i32>,
     /// Per-block layouts for migrated `global Foo { ... }` blocks. One
@@ -993,6 +1062,14 @@ pub(crate) struct WasmPackageBuilder<'a> {
     /// `Some(i)` for a call inside component `i`, `None` for module-scope
     /// (e.g. a `.filter(...)` in a global-singleton default).
     pub filter_calls: Vec<FilterCallEntry>,
+
+    /// Demand-driven runtime helper flags. Populated by
+    /// [`collect_runtime_needs`] before the type/function/code section
+    /// build pass. Drives both index allocation in
+    /// [`runtime::RuntimeFunctions::new`] and emission gating in
+    /// `build_core_module` — anything `false` here is neither indexed
+    /// nor written into the code section.
+    pub runtime_needs: runtime::RuntimeNeeds,
 
     /// Block-type indices for `if … else …` expressions whose result is
     /// multi-slot (e.g. `option<s32>` flattens to `(i32 discr, i32 val)`).
@@ -1136,6 +1213,12 @@ pub(crate) struct WasmPackageBuilder<'a> {
     /// `record_pack_from_memory` when a record field is a typed-array
     /// list (DTR-eligible nested list).
     pub gc_list_unmaterializer_fn_indices: HashMap<u32, u32>,
+    /// Phase 7: function index of `$pack_color_to_attr_slots`, the
+    /// per-program helper that lifts a `(ref null $var_color)` to the
+    /// canonical-ABI flattening of the `attribute-value::color(color)`
+    /// case — `(i64 inner_disc, i32 r, i32 g, i32 b, i32 a)`. Emitted
+    /// only when the program references the language `color` type.
+    pub pack_color_helper_fn_idx: Option<u32>,
 }
 
 impl<'a> WasmPackageBuilder<'a> {
@@ -1146,7 +1229,7 @@ impl<'a> WasmPackageBuilder<'a> {
     /// - 0x0100+: String data section
     const STRING_DATA_BASE: u32 = 256;
 
-    pub fn new(components: &'a [LirComponent], ctx: &'a CompilerContext) -> Self {
+    pub fn new(components: &'a [LirResource], ctx: &'a CompilerContext) -> Self {
         Self {
             components,
             ctx,
@@ -1161,6 +1244,7 @@ impl<'a> WasmPackageBuilder<'a> {
             record_types: Vec::new(),
             handler_counter: 0,
             block_func_indices: std::collections::HashMap::new(),
+            def_id_to_func_idx: std::collections::HashMap::new(),
             function_type_names: Vec::new(),
             layouts: Vec::new(),
             global_property_addrs: HashMap::new(),
@@ -1176,7 +1260,9 @@ impl<'a> WasmPackageBuilder<'a> {
             current_block_local_to_slot: None,
             current_block_local_modes: None,
             list_constructs: Vec::new(),
+            list_appends: Vec::new(),
             filter_calls: Vec::new(),
+            runtime_needs: runtime::RuntimeNeeds::default(),
             ternary_block_types: HashMap::new(),
             gc_layouts: Vec::new(),
             shared_handle_type_idx: None,
@@ -1202,6 +1288,7 @@ impl<'a> WasmPackageBuilder<'a> {
             function_label_names: HashMap::new(),
             gc_list_materializer_fn_indices: HashMap::new(),
             gc_list_unmaterializer_fn_indices: HashMap::new(),
+            pack_color_helper_fn_idx: None,
         }
     }
 
@@ -1227,7 +1314,7 @@ impl<'a> WasmPackageBuilder<'a> {
     }
 
     /// Get exported components
-    pub fn get_exported_components(&self) -> Vec<&LirComponent> {
+    pub fn get_exported_components(&self) -> Vec<&LirResource> {
         self.components.iter().filter(|c| c.is_export).collect()
     }
 
@@ -1245,7 +1332,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
     pub(crate) fn collect_strings(&mut self) {
         // Collect strings from all components
-        // LirComponent now has pre-computed strings, so we just copy them
+        // LirResource now has pre-computed strings, so we just copy them
         for (comp_idx, component) in self.components.iter().enumerate() {
             // Copy pre-interned strings from component
             for s in &component.strings {
@@ -1260,7 +1347,10 @@ impl<'a> WasmPackageBuilder<'a> {
                     self.collect_record_types(default_expr);
                     self.collect_list_constructs(default_expr);
                     self.collect_filter_calls(Some(comp_idx), default_expr);
+                    self.collect_runtime_needs(default_expr);
                 }
+                // FatPointer signals trigger load_fat_ptr/store_fat_ptr.
+                self.note_signal_runtime_needs(signal.ty);
             }
 
             // Collect strings, concat arities, record types, list constructs, and filter calls from pre-lowered expressions
@@ -1271,6 +1361,16 @@ impl<'a> WasmPackageBuilder<'a> {
                 self.collect_record_types(expr);
                 self.collect_list_constructs(expr);
                 self.collect_filter_calls(Some(comp_idx), expr);
+                self.collect_runtime_needs(expr);
+            }
+
+            // Walk every block's ops to detect helpers triggered by ops
+            // (CreateTextDynamic / SignalWriteExpr → emit_expr_as_string
+            // / emit_expr_as_attr_value).
+            for block in &component.blocks {
+                for op in &block.ops {
+                    self.collect_runtime_needs_for_op(component, op);
+                }
             }
         }
 
@@ -1284,6 +1384,7 @@ impl<'a> WasmPackageBuilder<'a> {
             self.collect_concat_arities(expr);
             self.collect_record_types(expr);
             self.collect_list_constructs(expr);
+            self.collect_runtime_needs(expr);
             self.collect_filter_calls(None, expr);
         }
     }
@@ -1423,6 +1524,12 @@ impl<'a> WasmPackageBuilder<'a> {
                     self.collect_concat_arities(p);
                 }
             }
+            LirExprKind::IsCase { base, .. } => {
+                self.collect_concat_arities(base);
+            }
+            LirExprKind::VariantField { base, .. } => {
+                self.collect_concat_arities(base);
+            }
             LirExprKind::Closure { body, .. } => {
                 for stmt in body {
                     if let yel_core::lir::expr::LirStatement::Expr(e) = stmt {
@@ -1509,6 +1616,12 @@ impl<'a> WasmPackageBuilder<'a> {
                 if let Some(p) = payload {
                     self.collect_record_types(p);
                 }
+            }
+            LirExprKind::IsCase { base, .. } => {
+                self.collect_record_types(base);
+            }
+            LirExprKind::VariantField { base, .. } => {
+                self.collect_record_types(base);
             }
             LirExprKind::Closure { body, .. } => {
                 for stmt in body {
@@ -1604,6 +1717,12 @@ impl<'a> WasmPackageBuilder<'a> {
                     self.collect_list_constructs(p);
                 }
             }
+            LirExprKind::IsCase { base, .. } => {
+                self.collect_list_constructs(base);
+            }
+            LirExprKind::VariantField { base, .. } => {
+                self.collect_list_constructs(base);
+            }
             LirExprKind::Closure { body, .. } => {
                 // Closures contain statements with expressions
                 for stmt in body {
@@ -1626,6 +1745,188 @@ impl<'a> WasmPackageBuilder<'a> {
             | LirExprKind::ListStatic { .. } => {
                 // No sub-expressions to traverse
             }
+        }
+    }
+
+    /// Walk an expression tree and turn on `runtime_needs.X` flags for
+    /// every helper any reachable emit-site will eventually call. The
+    /// scan must over-approximate the live set rather than under-: a
+    /// missed flag turns a real `Call(idx)` into a `Call(None.unwrap())`
+    /// at codegen time. Conservative heuristic: any `Call { func: "X" }`
+    /// with a known builtin name flips the matching helper on, and any
+    /// expression typed as a primitive scalar that could route through
+    /// `emit_expr_as_string` / `emit_expr_as_attr_value` flips its
+    /// to_string helper on too (handled per-op in
+    /// `collect_runtime_needs_for_op`).
+    fn collect_runtime_needs(&mut self, expr: &LirExpr) {
+        match &expr.kind {
+            LirExprKind::Call { func, args } => {
+                let func_name = self.ctx.str(self.ctx.defs.name(*func));
+                match func_name.as_str() {
+                    "s32-to-string" | "u32-to-string" | "char-to-string" => {
+                        self.runtime_needs.s32_to_string = true;
+                    }
+                    "s64-to-string" | "u64-to-string" => {
+                        self.runtime_needs.s64_to_string = true;
+                    }
+                    "bool-to-string" => self.runtime_needs.bool_to_string = true,
+                    "f32-to-string" => self.runtime_needs.f32_to_string = true,
+                    "f64-to-string" => {
+                        // f64-to-string demotes to f32 then calls f32_to_string.
+                        self.runtime_needs.f32_to_string = true;
+                    }
+                    "starts-with" | "starts_with" => self.runtime_needs.starts_with = true,
+                    "append" => {
+                        // list.append(elem) — register a per-list-Ty
+                        // runtime helper. The receiver (args[0]) carries
+                        // the list type.
+                        if let Some(receiver) = args.first() {
+                            let list_ty = receiver.ty;
+                            if !self.list_appends.contains(&list_ty) {
+                                self.list_appends.push(list_ty);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                for arg in args {
+                    self.collect_runtime_needs(arg);
+                }
+            }
+            LirExprKind::Binary { lhs, rhs, .. } => {
+                self.collect_runtime_needs(lhs);
+                self.collect_runtime_needs(rhs);
+            }
+            LirExprKind::Unary { operand, .. } => self.collect_runtime_needs(operand),
+            LirExprKind::Ternary {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.collect_runtime_needs(condition);
+                self.collect_runtime_needs(then_expr);
+                self.collect_runtime_needs(else_expr);
+            }
+            LirExprKind::Field { base, .. } => self.collect_runtime_needs(base),
+            LirExprKind::Index { base, index } => {
+                self.collect_runtime_needs(base);
+                self.collect_runtime_needs(index);
+            }
+            LirExprKind::ListConstruct { elements, .. }
+            | LirExprKind::TupleConstruct { elements, .. } => {
+                for e in elements {
+                    self.collect_runtime_needs(e);
+                }
+            }
+            LirExprKind::RecordConstruct { fields, .. } => {
+                for f in fields {
+                    self.collect_runtime_needs(f);
+                }
+            }
+            LirExprKind::Range { start, end, .. } => {
+                self.collect_runtime_needs(start);
+                self.collect_runtime_needs(end);
+            }
+            LirExprKind::VariantCtor { payload, .. } => {
+                if let Some(p) = payload {
+                    self.collect_runtime_needs(p);
+                }
+            }
+            LirExprKind::IsCase { base, .. } | LirExprKind::VariantField { base, .. } => {
+                self.collect_runtime_needs(base);
+            }
+            LirExprKind::Closure { body, .. } => {
+                for stmt in body {
+                    if let yel_core::lir::expr::LirStatement::Expr(e) = stmt {
+                        self.collect_runtime_needs(e);
+                    }
+                }
+            }
+            LirExprKind::GlobalCall { args, .. } => {
+                for a in args {
+                    self.collect_runtime_needs(a);
+                }
+            }
+            LirExprKind::SignalRead(_)
+            | LirExprKind::Local(_)
+            | LirExprKind::Def(_)
+            | LirExprKind::Literal(_)
+            | LirExprKind::EnumCase { .. }
+            | LirExprKind::ListStatic { .. } => {}
+        }
+    }
+
+    /// Inspect a single LIR op to detect helpers triggered by ops
+    /// (rather than expressions). The Push* stack-prefix ops route
+    /// expr payloads through `emit_expr_as_string` /
+    /// `emit_expr_as_attr_value`, which dispatch by type and call one
+    /// of the to_string runtime fns. `SignalWriteExpr` to a
+    /// FatPointer signal needs `store_fat_ptr`.
+    fn collect_runtime_needs_for_op(
+        &mut self,
+        component: &LirResource,
+        op: &yel_core::lir::block::LirOp,
+    ) {
+        use yel_core::lir::block::LirOp;
+        match op {
+            // Phase 2.2b: the Push* stack-prefix ops carry the expr
+            // payload that the legacy DOM ops embedded. Mirror the
+            // runtime-needs side-effects so stringify / fat-ptr helpers
+            // remain materialized.
+            LirOp::PushExprAsString { expr } => {
+                let e = component.get_expr(*expr);
+                self.note_to_string_for_ty(e.ty);
+                self.collect_runtime_needs(e);
+            }
+            LirOp::PushExprAsAttrValue { expr } => {
+                let e = component.get_expr(*expr);
+                self.runtime_needs.pack_fat_ptr_to_i64 = true;
+                self.note_to_string_for_ty(e.ty);
+                self.collect_runtime_needs(e);
+            }
+            _ => {}
+        }
+    }
+
+    /// Set the to_string flag matching a type's `emit_expr_as_string`
+    /// dispatch (mirrors the type-table at `expr.rs::emit_expr_as_string`).
+    fn note_to_string_for_ty(&mut self, ty: Ty) {
+        match self.ctx.ty_kind(ty) {
+            InternedTyKind::S32
+            | InternedTyKind::U32
+            | InternedTyKind::S8
+            | InternedTyKind::S16
+            | InternedTyKind::U8
+            | InternedTyKind::U16
+            | InternedTyKind::Char => {
+                self.runtime_needs.s32_to_string = true;
+            }
+            InternedTyKind::S64 | InternedTyKind::U64 => {
+                self.runtime_needs.s64_to_string = true;
+            }
+            InternedTyKind::Bool => self.runtime_needs.bool_to_string = true,
+            InternedTyKind::F32 | InternedTyKind::F64 => {
+                self.runtime_needs.f32_to_string = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Note runtime needs implied by a signal's storage shape.
+    ///
+    /// FatPointer signals (today only the rare unmigrated string /
+    /// raw-pointer-list shapes) trigger load_fat_ptr / store_fat_ptr.
+    /// We can't consult `internal_repr` here because the GC type
+    /// registry isn't populated yet at collection time, so the gating
+    /// stays structural: any String or List type counts. Over-flag is
+    /// safe (helpers stay alive); under-flag would crash codegen.
+    fn note_signal_runtime_needs(&mut self, ty: Ty) {
+        match self.ctx.ty_kind(ty) {
+            InternedTyKind::String | InternedTyKind::List(_) => {
+                self.runtime_needs.load_fat_ptr = true;
+                self.runtime_needs.store_fat_ptr = true;
+            }
+            _ => {}
         }
     }
 
@@ -1653,7 +1954,7 @@ impl<'a> WasmPackageBuilder<'a> {
                             {
                                 self.filter_calls.push((
                                     comp_idx,
-                                    *elem_ty,
+                                    args[0].ty,
                                     elem_size,
                                     *param,
                                     predicate.clone(),
@@ -1713,6 +2014,12 @@ impl<'a> WasmPackageBuilder<'a> {
                 if let Some(p) = payload {
                     self.collect_filter_calls(comp_idx, p);
                 }
+            }
+            LirExprKind::IsCase { base, .. } => {
+                self.collect_filter_calls(comp_idx, base);
+            }
+            LirExprKind::VariantField { base, .. } => {
+                self.collect_filter_calls(comp_idx, base);
             }
             LirExprKind::Closure { body, .. } => {
                 for stmt in body {
@@ -1955,7 +2262,11 @@ impl<'a> WasmPackageBuilder<'a> {
                 _ => continue,
             };
             // Phase 5e.4: record ctor params follow canonical ABI
-            // (each list/string field takes 2 i32 = ptr+len).
+            // (each list/string field takes 2 i32 = ptr+len). Records
+            // whose fields are FlatGcStruct-migrated reach this path
+            // ONLY for non-DTR records (memory-backed); DTR records
+            // use the SLR struct.new path in expr.rs which never
+            // calls record_ctor.
             v.extend(self.canonical_flat_valtypes(field_ty));
         }
         v
@@ -2174,7 +2485,7 @@ impl<'a> WasmPackageBuilder<'a> {
     }
 
     /// Get signal index by DefId within a specific component
-    pub fn signal_index_in(&self, component: &LirComponent, def_id: DefId) -> Option<usize> {
+    pub fn signal_index_in(&self, component: &LirResource, def_id: DefId) -> Option<usize> {
         component.signals.iter().position(|s| s.def_id == def_id)
     }
 
@@ -2183,7 +2494,7 @@ impl<'a> WasmPackageBuilder<'a> {
     /// Returns `None` only for the empty `MemoryLayout::empty_for_module`
     /// carrier used during global-defaults emission, where no component
     /// owns the expressions being lowered.
-    pub fn comp_idx_of(&self, component: &LirComponent) -> Option<usize> {
+    pub fn comp_idx_of(&self, component: &LirResource) -> Option<usize> {
         self.components
             .iter()
             .position(|c| c.def_id == component.def_id)
@@ -2235,6 +2546,61 @@ pub(crate) fn to_wit_name(s: &str) -> String {
         .collect();
 
     segments.join("-")
+}
+
+/// Spawn Binaryen's `wasm-opt` and pipe `input_bytes` through it.
+/// `extra_args` are forwarded verbatim after the `-i`/`-o` paths,
+/// e.g. `["-O3", "--enable-gc"]`.
+#[cfg(not(target_family = "wasm"))]
+fn run_wasm_opt(input_bytes: &[u8], extra_args: &[String]) -> Result<Vec<u8>, CodegenError> {
+    use std::io::Write;
+    use std::process::Command;
+
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_dir = std::env::temp_dir();
+    let in_path = tmp_dir.join(format!("yel-wasm-opt-in-{}-{}.wasm", pid, nanos));
+    let out_path = tmp_dir.join(format!("yel-wasm-opt-out-{}-{}.wasm", pid, nanos));
+
+    {
+        let mut f = std::fs::File::create(&in_path).map_err(|e| {
+            CodegenError::EncodingError(format!("wasm-opt: cannot create input temp file: {}", e))
+        })?;
+        f.write_all(input_bytes).map_err(|e| {
+            CodegenError::EncodingError(format!("wasm-opt: cannot write input temp file: {}", e))
+        })?;
+    }
+
+    let output = Command::new("wasm-opt")
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&out_path)
+        .args(extra_args)
+        .output();
+
+    let result = match output {
+        Ok(out) if out.status.success() => std::fs::read(&out_path).map_err(|e| {
+            CodegenError::EncodingError(format!("wasm-opt: cannot read output: {}", e))
+        }),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            Err(CodegenError::EncodingError(format!(
+                "wasm-opt failed (status {}): {}",
+                out.status, stderr
+            )))
+        }
+        Err(e) => Err(CodegenError::EncodingError(format!(
+            "wasm-opt: failed to spawn (is it on PATH?): {}",
+            e
+        ))),
+    };
+
+    let _ = std::fs::remove_file(&in_path);
+    let _ = std::fs::remove_file(&out_path);
+    result
 }
 
 #[cfg(test)]

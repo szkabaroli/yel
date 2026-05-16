@@ -1,0 +1,20 @@
+package yel:listapp@0.1.0;
+
+// Exercises `list.append(x)` — a click handler appends a new item to a
+// list signal. Validates the per-list-Ty `list_append` runtime helper
+// (allocates a new typed-GC array of len+1, copies, writes the new last
+// element, returns the new ref).
+export component App {
+    items: list<s32> = [1, 2, 3];
+    next: s32 = 4;
+
+    VStack {
+        for x in items {
+            Text { "{x}" }
+        }
+        Button {
+            "add"
+            clicked: { items = items.append(next); next += 1; }
+        }
+    }
+}

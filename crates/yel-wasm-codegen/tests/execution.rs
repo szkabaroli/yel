@@ -150,6 +150,7 @@ fn compile_to_component(source: &str) -> Vec<u8> {
         name,
         version,
         global_defaults: lir_globals,
+        wasm_opt_args: None,
     };
     codegen::generate_wasm_module(&module, compiler.context(), &opts).expect("wasm codegen")
 }
@@ -507,7 +508,6 @@ fn call_dispatch(h: &mut Harness, handler_id: u32) {
 
 /// Dispatch a DOM `input` event whose underlying `<input>` had
 /// `type="number"` — wraps `event-value::input-f64(value)`.
-#[allow(dead_code)]
 fn dispatch_input_number(h: &mut Harness, handler_id: u32, value: f64) {
     call_dispatch_with_event(
         h,
@@ -518,7 +518,6 @@ fn dispatch_input_number(h: &mut Harness, handler_id: u32, value: f64) {
 
 /// Dispatch a DOM `input` event whose underlying `<input>` had
 /// `type="text"` — wraps `event-value::input-text(value)`.
-#[allow(dead_code)]
 fn dispatch_input_text(h: &mut Harness, handler_id: u32, value: &str) {
     call_dispatch_with_event(
         h,
@@ -532,7 +531,6 @@ fn dispatch_input_text(h: &mut Harness, handler_id: u32, value: &str) {
 
 /// Dispatch a DOM `input` event whose underlying `<input>` had
 /// `type="checkbox"` — wraps `event-value::input-bool(value)`.
-#[allow(dead_code)]
 fn dispatch_input_bool(h: &mut Harness, handler_id: u32, value: bool) {
     call_dispatch_with_event(
         h,
@@ -3492,7 +3490,6 @@ fn walker_library_shared_across_for_anchors() {
 /// Helper: count internal/exported fns in the emitted component whose
 /// name section entry starts with `prefix`. Walks every core module
 /// embedded in the component and inspects its name section.
-#[allow(dead_code)] // used by ignored tests until Phase 3a/3b land
 fn count_named_fns_with_prefix(bytes: &[u8], prefix: &str) -> usize {
     use wasmparser::{KnownCustom, Name, Parser, Payload};
 
@@ -3571,9 +3568,9 @@ fn record_signal_field_read_after_setter() {
         Val::S32(77),
     );
     let post = dom.lock().unwrap().ops[pre..].to_vec();
-    let saw = post.iter().any(|op| {
-        matches!(op, DomOp::SetTextContent { content, .. } if content.contains("x=77"))
-    });
+    let saw = post
+        .iter()
+        .any(|op| matches!(op, DomOp::SetTextContent { content, .. } if content.contains("x=77")));
     assert!(
         saw,
         "after setting `xv=77`, derived record `origin` field `x` should \
@@ -3619,9 +3616,9 @@ fn slr_record_signal_string_field_read_after_setter() {
         Val::U32(77),
     );
     let post = dom.lock().unwrap().ops[pre..].to_vec();
-    let saw = post.iter().any(|op| {
-        matches!(op, DomOp::SetTextContent { content, .. } if content.contains("alice=77"))
-    });
+    let saw = post.iter().any(
+        |op| matches!(op, DomOp::SetTextContent { content, .. } if content.contains("alice=77")),
+    );
     assert!(
         saw,
         "after setting `agev=77`, derived SLR record `user` field `name` \
@@ -3667,12 +3664,16 @@ fn record_signal_passes_through_canonical_abi() {
     // of multi-field interpolation in a single string. Each must
     // render its respective field value, proving field storage
     // round-trips independently.
-    let saw_x = ops.iter().any(|op| matches!(op,
+    let saw_x = ops.iter().any(|op| {
+        matches!(op,
         DomOp::CreateText { content, .. } | DomOp::SetTextContent { content, .. }
-            if content == "7"));
-    let saw_y = ops.iter().any(|op| matches!(op,
+            if content == "7")
+    });
+    let saw_y = ops.iter().any(|op| {
+        matches!(op,
         DomOp::CreateText { content, .. } | DomOp::SetTextContent { content, .. }
-            if content == "99"));
+            if content == "99")
+    });
     assert!(
         saw_x && saw_y,
         "literal-default record `origin = {{ x: 7, y: 99 }}` must render \
@@ -3840,7 +3841,6 @@ fn gc_record_type_emitted() {
 /// entries. Used by the Phase 1 migration test to assert per-record
 /// `(struct ...)` types are emitted with the convention
 /// `$<lowercased_record_name>_record`.
-#[allow(dead_code)] // used by the ignored Phase 1 test until it lands
 fn count_struct_types_with_name_prefix(bytes: &[u8], prefix: &str) -> usize {
     use wasmparser::{CompositeInnerType, KnownCustom, Name, Parser, Payload};
 
@@ -3860,10 +3860,7 @@ fn count_struct_types_with_name_prefix(bytes: &[u8], prefix: &str) -> usize {
                 for rec in reader {
                     let Ok(rec) = rec else { continue };
                     for sub in rec.types() {
-                        if matches!(
-                            sub.composite_type.inner,
-                            CompositeInnerType::Struct(_)
-                        ) {
+                        if matches!(sub.composite_type.inner, CompositeInnerType::Struct(_)) {
                             struct_indices.insert((module_idx, type_idx_in_module));
                         }
                         type_idx_in_module += 1;
@@ -3893,8 +3890,7 @@ fn count_struct_types_with_name_prefix(bytes: &[u8], prefix: &str) -> usize {
                             for naming in type_names {
                                 let Ok(naming) = naming else { continue };
                                 if naming.name.starts_with(prefix)
-                                    && struct_indices
-                                        .contains(&(module_idx, naming.index))
+                                    && struct_indices.contains(&(module_idx, naming.index))
                                 {
                                     count += 1;
                                 }

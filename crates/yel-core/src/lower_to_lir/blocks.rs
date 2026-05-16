@@ -1,6 +1,6 @@
 //! Block Lowering Pass
 //!
-//! Converts tree-based LIR (`TreeLirComponent`) to block-based LIR (`LirComponent`).
+//! Converts tree-based LIR (`TreeLirResource`) to block-based LIR (`LirResource`).
 //!
 //! The lowering process:
 //! 1. Walks the UI tree and emits LirOp instructions
@@ -11,17 +11,20 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use super::block::{
-    BoundaryDepIndex, ExprId, LirBlock, LirBlockEffect, LirOp, LirSlotId, LirSlotInfo, LirSlotKind,
-    PendingBinding, PendingBindingKind, LirSlotValType, StringId,
-};
-use super::expr::{LirExpr, LirExprKind, LirStatement};
-use super::lower::TreeLirComponent;
-use super::node::{LirComponent, LirHandler, LirNode, LirNodeKind};
-use super::signal::{LirEffect, LirSignal, UpdateKind};
+use super::component::TreeLirResource;
 use crate::context::CompilerContext;
 use crate::definitions::DefKind;
-use crate::hir::expr::BinOp;
+use crate::lir::block::{
+    BoundaryDepIndex, ExprId, LirBlock, LirBlockEffect, LirOp, LirSlotId, LirSlotInfo, LirSlotKind,
+    LirSlotValType, PendingBinding, PendingBindingKind, StringId,
+};
+use crate::lir::expr::{LirExpr, LirExprKind, LirStatement};
+use crate::lir::node::{LirHandler, LirNode, LirNodeKind, LirResource};
+use crate::lir::signal::{LirEffect, LirSignal, UpdateKind};
+// `block_lower` IS the THIR→LIR bridge so it legitimately consumes
+// HIR/THIR; the operator type itself, however, lives in the neutral
+// `crate::ops` so any future direct emitter can use it without
+// dragging HIR in.
 use crate::ids::{BlockId, DefId, ForId, LocalId, TreeBoundaryId};
 use crate::lir::block::{
     ComponentTreeShape, ForContext, TreeBoundary, TreeBoundaryKind, TreeFieldDecl,
@@ -29,24 +32,89 @@ use crate::lir::block::{
 use crate::lir::dedupe::dedupe_update_blocks;
 use crate::lir::tree_shape::{synthesize, IterSource};
 use crate::lir::{LirBindingMode, LirLayoutContext};
+use crate::ops::BinOp;
 use crate::types::{InternedTyKind, Ty};
 use crate::{BlockDebugName, NodeId};
+
+/// Result of `inline_signal_write_or_init_from_expr`. See its rustdoc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InlineResult {
+    NotHandled,
+    Handled,
+    HandledAndTriggered,
+}
+
+/// Convert a yel `Ty` into the matching `LirSlotValType` — the
+/// canonical, frontend-neutral entry point. Used by UI's
+/// `BlockLowering::ty_to_slot_val_type` (which delegates here) and by
+/// the flow frontend (`yel-flow-core`) to assign slot types
+/// consistently with how codegen will interpret them.
+///
+/// The gating predicates that decide which migration phase a type
+/// belongs to (`is_scalar_list_ty_struct`, `is_dtr_record_struct`,
+/// `is_flat_gc_migrated_ty_struct`) are the source of truth — keeping
+/// this function as the single dispatch point means UI and flow can
+/// never drift out of sync with codegen's storage-type expectations.
+pub fn ty_to_slot_val_type(
+    ctx: &crate::context::CompilerContext,
+    ty: crate::types::Ty,
+) -> crate::lir::block::LirSlotValType {
+    use crate::lir::block::LirSlotValType;
+
+    let mut seen = HashSet::new();
+    // Phase 5b-v.3: scalar lists are typed GC array refs.
+    if is_scalar_list_ty_struct(ctx, ty, &mut seen) {
+        return LirSlotValType::RefNullForListGc(ty);
+    }
+    // Phase 5b-v.3 / 5d preview: option<list<scalar>> collapses to a
+    // single nullable ref of the inner list's array type. Storage-wise
+    // this is the same as `list<scalar>` itself — none == null, some
+    // == arr.
+    if let InternedTyKind::Option(inner_ty) = ctx.ty_kind(ty) {
+        let mut seen2 = HashSet::new();
+        if is_scalar_list_ty_struct(ctx, *inner_ty, &mut seen2) {
+            return LirSlotValType::RefNullForListGc(*inner_ty);
+        }
+    }
+    // Phase 5e.1: DTR records have a single GC ref internal repr.
+    if let InternedTyKind::Adt(d) = ctx.ty_kind(ty) {
+        if matches!(ctx.defs.kind(*d), DefKind::Record(_)) && is_dtr_record_struct(ctx, *d) {
+            return LirSlotValType::RefNullForRecord(ty);
+        }
+    }
+    // Phase 5e.5: option / result / variant migrated to W3C
+    // subtype-hierarchy GC repr — single nullable supertype ref.
+    if is_flat_gc_migrated_ty_struct(ctx, ty) {
+        return LirSlotValType::RefNullForFlatGc(ty);
+    }
+    // Task #100: tuples are GcRef-repr internally — single nullable
+    // ref to the tuple struct type. Mirrors records (RefNullForRecord).
+    if matches!(ctx.ty_kind(ty), InternedTyKind::Tuple(_)) {
+        return LirSlotValType::RefNullForTuple(ty);
+    }
+    match ctx.ty_kind(ty) {
+        InternedTyKind::F32 => LirSlotValType::F32,
+        InternedTyKind::F64 => LirSlotValType::F64,
+        InternedTyKind::S64 | InternedTyKind::U64 => LirSlotValType::I64,
+        _ => LirSlotValType::I32,
+    }
+}
 
 /// Phase 5e.1: structural DTR-record check, free-function form for use
 /// inside closures that only capture `&CompilerContext`. Mirrors the
 /// `is_dtr_record_ty` method on `BlockLowering`.
-fn is_dtr_record_struct(
+pub(crate) fn is_dtr_record_struct(
     ctx: &crate::context::CompilerContext,
     def_id: crate::DefId,
 ) -> bool {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     is_dtr_record_struct_inner(ctx, def_id, &mut seen)
 }
 
 fn is_dtr_record_struct_inner(
     ctx: &crate::context::CompilerContext,
     def_id: crate::DefId,
-    seen: &mut std::collections::HashSet<crate::DefId>,
+    seen: &mut HashSet<crate::DefId>,
 ) -> bool {
     let record = match ctx.defs.kind(def_id) {
         DefKind::Record(r) => r.clone(),
@@ -74,16 +142,22 @@ fn is_dtr_record_struct_inner(
 fn is_dtr_field_ty_struct(
     ctx: &crate::context::CompilerContext,
     ty: crate::types::Ty,
-    seen: &mut std::collections::HashSet<crate::DefId>,
+    seen: &mut HashSet<crate::DefId>,
 ) -> bool {
     if matches!(
         ctx.ty_kind(ty),
         InternedTyKind::Bool
-        | InternedTyKind::S8 | InternedTyKind::S16 | InternedTyKind::S32
-        | InternedTyKind::U8 | InternedTyKind::U16 | InternedTyKind::U32
-        | InternedTyKind::S64 | InternedTyKind::U64
-        | InternedTyKind::F32 | InternedTyKind::F64
-        | InternedTyKind::Char
+            | InternedTyKind::S8
+            | InternedTyKind::S16
+            | InternedTyKind::S32
+            | InternedTyKind::U8
+            | InternedTyKind::U16
+            | InternedTyKind::U32
+            | InternedTyKind::S64
+            | InternedTyKind::U64
+            | InternedTyKind::F32
+            | InternedTyKind::F64
+            | InternedTyKind::Char
     ) || matches!(ctx.ty_kind(ty), InternedTyKind::Adt(d) if matches!(ctx.defs.kind(*d), DefKind::Enum(_)))
     {
         return true;
@@ -93,16 +167,129 @@ fn is_dtr_field_ty_struct(
         InternedTyKind::List(_) => is_scalar_list_ty_struct(ctx, ty, seen),
         InternedTyKind::Adt(d) => match ctx.defs.kind(*d) {
             DefKind::Record(_) => is_dtr_record_struct_inner(ctx, *d, seen),
+            // Phase 5e.5: migrated user variants are 1 ref slot.
+            DefKind::Variant(_) => is_flat_gc_migrated_ty_struct(ctx, ty),
             _ => false,
         },
+        // Phase 5e.5: migrated option/result are 1 ref slot.
+        InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
+            is_flat_gc_migrated_ty_struct(ctx, ty)
+        }
         _ => false,
     }
 }
 
-fn is_scalar_list_ty_struct(
+/// Phase 5e.5: structural mirror of `is_flat_gc_migrated_ty` (method
+/// form on `BlockLowering`) for use in free-function contexts. Both
+/// MUST agree for a given Ty so that DTR eligibility, slot-type
+/// allocation, and codegen storage-type rules stay in lockstep.
+pub(crate) fn is_flat_gc_migrated_ty_struct(
     ctx: &crate::context::CompilerContext,
     ty: crate::types::Ty,
-    seen: &mut std::collections::HashSet<crate::DefId>,
+) -> bool {
+    let mut visiting = HashSet::new();
+    is_flat_gc_migrated_ty_struct_inner(ctx, ty, &mut visiting)
+}
+
+fn is_flat_gc_migrated_ty_struct_inner(
+    ctx: &crate::context::CompilerContext,
+    ty: crate::types::Ty,
+    visiting: &mut HashSet<crate::DefId>,
+) -> bool {
+    match ctx.ty_kind(ty) {
+        InternedTyKind::Option(inner) => {
+            let inner = *inner;
+            let mut seen = HashSet::new();
+            if is_scalar_list_ty_struct(ctx, inner, &mut seen) {
+                return false;
+            }
+            if let InternedTyKind::Adt(d) = ctx.ty_kind(inner) {
+                if matches!(ctx.defs.kind(*d), DefKind::Record(_)) && is_dtr_record_struct(ctx, *d)
+                {
+                    return false;
+                }
+            }
+            is_flat_gc_payload_ty_struct(ctx, inner, visiting)
+        }
+        InternedTyKind::Result { ok, err } => {
+            let ok_ok = match ok {
+                Some(t) => is_flat_gc_payload_ty_struct(ctx, *t, visiting),
+                None => true,
+            };
+            let err_ok = match err {
+                Some(t) => is_flat_gc_payload_ty_struct(ctx, *t, visiting),
+                None => true,
+            };
+            ok_ok && err_ok
+        }
+        InternedTyKind::Adt(d) => {
+            let d = *d;
+            let cases = match ctx.defs.as_variant(d) {
+                Some(v) => v.cases.clone(),
+                None => return false,
+            };
+            if !visiting.insert(d) {
+                return true;
+            }
+            let result = cases.iter().all(|&c| {
+                if let DefKind::VariantCase(case) = ctx.defs.kind(c) {
+                    match case.payload {
+                        None => true,
+                        Some(p) => is_flat_gc_payload_ty_struct(ctx, p, visiting),
+                    }
+                } else {
+                    false
+                }
+            });
+            visiting.remove(&d);
+            result
+        }
+        _ => false,
+    }
+}
+
+fn is_flat_gc_payload_ty_struct(
+    ctx: &crate::context::CompilerContext,
+    ty: crate::types::Ty,
+    visiting: &mut HashSet<crate::DefId>,
+) -> bool {
+    match ctx.ty_kind(ty) {
+        InternedTyKind::Bool
+        | InternedTyKind::S8
+        | InternedTyKind::S16
+        | InternedTyKind::S32
+        | InternedTyKind::S64
+        | InternedTyKind::U8
+        | InternedTyKind::U16
+        | InternedTyKind::U32
+        | InternedTyKind::U64
+        | InternedTyKind::F32
+        | InternedTyKind::F64
+        | InternedTyKind::Char
+        | InternedTyKind::String => true,
+        InternedTyKind::List(_) => {
+            let mut seen = HashSet::new();
+            is_scalar_list_ty_struct(ctx, ty, &mut seen)
+        }
+        // Phase 5e.7: tuple payloads — typed `(ref null $tuple_<n>)`.
+        InternedTyKind::Tuple(_) => true,
+        InternedTyKind::Adt(d) => match ctx.defs.kind(*d) {
+            DefKind::Enum(_) => true,
+            DefKind::Record(_) => is_dtr_record_struct(ctx, *d),
+            DefKind::Variant(_) => is_flat_gc_migrated_ty_struct_inner(ctx, ty, visiting),
+            _ => false,
+        },
+        InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
+            is_flat_gc_migrated_ty_struct_inner(ctx, ty, visiting)
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn is_scalar_list_ty_struct(
+    ctx: &crate::context::CompilerContext,
+    ty: crate::types::Ty,
+    seen: &mut HashSet<crate::DefId>,
 ) -> bool {
     let elem = match ctx.ty_kind(ty) {
         InternedTyKind::List(e) => *e,
@@ -111,11 +298,17 @@ fn is_scalar_list_ty_struct(
     if matches!(
         ctx.ty_kind(elem),
         InternedTyKind::Bool
-        | InternedTyKind::S8 | InternedTyKind::S16 | InternedTyKind::S32
-        | InternedTyKind::U8 | InternedTyKind::U16 | InternedTyKind::U32
-        | InternedTyKind::S64 | InternedTyKind::U64
-        | InternedTyKind::F32 | InternedTyKind::F64
-        | InternedTyKind::Char
+            | InternedTyKind::S8
+            | InternedTyKind::S16
+            | InternedTyKind::S32
+            | InternedTyKind::U8
+            | InternedTyKind::U16
+            | InternedTyKind::U32
+            | InternedTyKind::S64
+            | InternedTyKind::U64
+            | InternedTyKind::F32
+            | InternedTyKind::F64
+            | InternedTyKind::Char
     ) || matches!(ctx.ty_kind(elem), InternedTyKind::Adt(d) if matches!(ctx.defs.kind(*d), DefKind::Enum(_)))
     {
         return true;
@@ -128,26 +321,20 @@ fn is_scalar_list_ty_struct(
     if matches!(ctx.ty_kind(elem), InternedTyKind::String) {
         return true;
     }
-    if let InternedTyKind::Option(inner) = ctx.ty_kind(elem) {
-        let inner_ty = *inner;
-        let inner_fits = matches!(
-            ctx.ty_kind(inner_ty),
-            InternedTyKind::Bool
-            | InternedTyKind::S8 | InternedTyKind::S16 | InternedTyKind::S32
-            | InternedTyKind::U8 | InternedTyKind::U16 | InternedTyKind::U32
-            | InternedTyKind::F32 | InternedTyKind::Char
-        ) || matches!(
-            ctx.ty_kind(inner_ty),
-            InternedTyKind::Adt(d) if matches!(ctx.defs.kind(*d), DefKind::Enum(_))
-        );
-        if inner_fits {
-            return true;
-        }
+    // Phase 5e.5 Stage 8a: list<FlatGcStruct> elements (option /
+    // result / user variant) — element is a typed supertype ref.
+    if is_flat_gc_migrated_ty_struct(ctx, elem) {
+        return true;
     }
     if let InternedTyKind::Adt(d) = ctx.ty_kind(elem) {
         if matches!(ctx.defs.kind(*d), DefKind::Record(_)) {
             return is_dtr_record_struct_inner(ctx, *d, seen);
         }
+    }
+    // Phase 5e.7: list<tuple<…>> — element is a typed `(ref null
+    // $tuple_<n>)`.
+    if matches!(ctx.ty_kind(elem), InternedTyKind::Tuple(_)) {
+        return true;
     }
     false
 }
@@ -173,7 +360,7 @@ enum IterableKind {
 
 /// State for the block lowering pass.
 pub(crate) struct BlockLowering<'a> {
-    ctx: &'a CompilerContext,
+    pub(crate) ctx: &'a CompilerContext,
     /// DefId of the component being lowered (for block naming).
     component_id: DefId,
 
@@ -227,7 +414,7 @@ pub(crate) struct BlockLowering<'a> {
 
     // Records the parent SlotId at the position where `@children` appears
     // in the component body. Set when we lower `LirNodeKind::ChildrenSlot`;
-    // read into `LirComponent.children_root_slot` after body lowering
+    // read into `LirResource.children_root_slot` after body lowering
     // finishes. `None` means non-container component.
     children_root_slot: Option<LirSlotId>,
 
@@ -261,7 +448,7 @@ pub(crate) struct BlockLowering<'a> {
 
     // One entry per for-loop lowered, keyed by ForId. Populated by
     // `lower_for` via a pre-pass over the for's body. Drained into
-    // `LirComponent.for_contexts` when the component finishes.
+    // `LirResource.for_contexts` when the component finishes.
     for_contexts: HashMap<ForId, ForContext>,
 
     // Monotonic counter for synthesizing stable if-label names. No
@@ -273,7 +460,7 @@ pub(crate) struct BlockLowering<'a> {
     // lowering. Used to allocate `SlotKind::BoundaryField` slots
     // whose `(boundary_id, field_idx)` pairs come from
     // `tree_shape.node_field` keyed by `LirNode.id`. Populated in
-    // `lower_component` and moved into the resulting `LirComponent`
+    // `lower_component` and moved into the resulting `LirResource`
     // when lowering finishes.
     tree_shape: ComponentTreeShape,
 
@@ -317,6 +504,142 @@ pub(crate) struct BlockLowering<'a> {
     ifcond_binding_data: HashMap<u32, StructuralBindingInfo>,
     forlist_binding_data: HashMap<u32, StructuralBindingInfo>,
     derivedsig_binding_data: HashMap<u32, StructuralBindingInfo>,
+
+    // Phase 1.2: per-signal storage layout, computed up-front at the
+    // start of `lower_component` (see option (a) routing rule in the
+    // refactor plan). The same value is re-stamped onto
+    // `LirResource.signal_layout` at end-of-lowering — codegen reads
+    // that copy. Emit sites consult `signal_mem_only_slot(sig_idx)` to
+    // decide whether a memory-backed signal can be inline-expanded via
+    // `signals_inline` helpers, or whether it still passes through as
+    // `LirOp::Signal*` (struct-backed / dual-backed / base-addr-blocked
+    // cases — see the Phase 1.2 report).
+    pub(crate) signal_layout_early: crate::lir::SignalLayout,
+
+    // Phase 0.3p: the resource-wide `(ref null $Comp)` self-ref slot
+    // backing wasm param 0 of every component-bound function. Allocated
+    // at the START of `lower_component` so any `CallBlock` emit site
+    // during per-block lowering can prepend it as the first arg to
+    // forward `self` to the callee explicitly. The stamping pass at the
+    // end of `lower_component` still walks every block to populate
+    // `implicit_self` from this slot.
+    pub(crate) resource_self_ref_slot: Option<LirSlotId>,
+
+    // Phase 3.3: monotonic cursor consumed by `lower_mount_component`
+    // when assigning parent-retention field indices. Matches what the
+    // codegen-time `parent_retention_cursor` used to do in
+    // `next_mount_retention_target`, but driven at lowering time so the
+    // emitted `LirOp::StructSetSym` carries an absolute field index.
+    // Per-component (one BlockLowering instance per component).
+    pub(super) parent_retention_cursor: u32,
+
+    /// Phase 1.1c-d: handler bodies recorded during the structural walk
+    /// but emitted LATER, after `register_derived_signal_effects` and
+    /// `emit_per_boundary_signal_updates` finalize `effects_by_signal`.
+    /// At that point each `LirStatement::SignalWrite` can emit
+    /// `CallBlock` directly (one per update_block resolved from
+    /// `effects_by_signal[signal]`) for component-local signals, and
+    /// `LirOp::TriggerEffects` only for globals (legacy global-fanout
+    /// helper). Replaces the post-pass rewrite.
+    deferred_handler_bodies: Vec<DeferredHandlerBody>,
+
+    /// Phase 1.1c-d: derived-signal update bodies (the
+    /// `SignalWriteExpr + trigger` pair) recorded during
+    /// `register_derived_signal_effects` and emitted in the same
+    /// deferred sweep as handler bodies. Pre-allocates the
+    /// `update_block` BlockId so structural-binding registration and
+    /// `effects` push can complete before the body materialises.
+    deferred_derived_bodies: Vec<DeferredDerivedBody>,
+
+    /// Phase 1.1c-d: when set, the next `finish_block`/`finish_block_named`/
+    /// `finish_block_with_name` call REUSES this BlockId rather than
+    /// allocating a fresh one via `ctx.alloc_block_id()`. Consumed
+    /// (taken) on use. Lets deferred handler/derived-body emission
+    /// produce blocks whose ids were pre-allocated at structural-walk
+    /// time so other lowering state (PushHandlerId, effects array,
+    /// PendingBinding) can reference them while the body is still
+    /// pending.
+    pending_block_id_override: Option<BlockId>,
+
+    /// Task #105 (1): Pre-allocated `BlockId` stack. Pushed by
+    /// `start_block` (eager allocation) and popped by `finish_block`
+    /// (consumed as the new block's id). Net behavior unchanged: same
+    /// ids assigned in the same order as the previous lazy scheme. The
+    /// `pending_block_id_override` field still wins when set, to keep
+    /// the deferred-body emission path's pre-allocated ids intact.
+    pending_block_ids: Vec<BlockId>,
+
+    /// Task #105 B2: slots allocated during the in-progress block's
+    /// lowering. Drained into `LirBlock.slots` at `finish_block` time.
+    /// Pushed/popped via `block_slots_stack` mirroring the `current_ops`
+    /// / `current_block_locals` pattern. Only Temp + WasmParam kinds
+    /// land here; Memory + BoundaryField stay on `self.slots` (component
+    /// vec) with `LirSlotId::Resource` ids.
+    current_block_slots: Vec<LirSlotInfo>,
+    block_slots_stack: Vec<Vec<LirSlotInfo>>,
+    /// Per-block Temp-local counter, reset on each `start_block`.
+    current_block_local_idx: u32,
+    block_local_idx_stack: Vec<u32>,
+
+    /// Phase 1.1c-d: signal → update-block dispatch map built once after
+    /// `emit_per_boundary_signal_updates` finalises `self.effects`.
+    /// Read by `emit_trigger_for_signal` to produce direct `CallBlock`s
+    /// during deferred body emission. `None` until phase 3 begins.
+    signal_to_update_blocks: Option<HashMap<DefId, Vec<BlockId>>>,
+
+    /// Phase 1.1c-d: lazily-allocated shared dummy parent slot used as
+    /// the second arg to every `CallBlock` into a per-(boundary,
+    /// signal) dispatch block. Allocated on first call from
+    /// `deferred_dummy_parent_slot`.
+    deferred_dummy_parent_slot_cache: Option<LirSlotId>,
+}
+
+/// Phase 1.1c-d: a handler body captured during the structural walk and
+/// re-emitted in the deferred sweep. Snapshots the env state the body
+/// observes so loop-var locals, outer for-item slots, and enclosing
+/// boundary refs resolve identically to today's inline lowering.
+struct DeferredHandlerBody {
+    /// The pre-allocated BlockId that the handler body will occupy.
+    /// References to this id (e.g. `LirOp::PushHandlerId`, the
+    /// `input_binding_handlers` map) are already live by the time the
+    /// body emits.
+    block_id: BlockId,
+    /// Debug name to stamp via `ctx.set_block_name`.
+    debug_name: BlockDebugName,
+    /// Handler statements to lower at deferred-emit time.
+    body: Vec<LirStatement>,
+    /// `Some(target)` for input-binding-synthesized handlers; recorded
+    /// into `input_binding_handlers` keyed by `block_id`.
+    input_binding_target: Option<DefId>,
+    /// Env snapshot: `local_bindings` entries live at structural-walk
+    /// time. Restored (additively) during deferred emission so for-loop
+    /// loop-vars resolve identically.
+    local_bindings: HashMap<LocalId, (LirSlotId, Ty, LirBindingMode)>,
+    /// Env snapshot: `outer_item_field_slots` at capture time.
+    outer_item_field_slots: HashMap<LocalId, (Ty, LirSlotId, LirBindingMode)>,
+    /// Env snapshot: enclosing for stack (innermost last).
+    for_stack: Vec<ForId>,
+    /// Env snapshot: enclosing iter-body refs (parallel to `for_stack`).
+    for_iter_body_stack: Vec<TreeBoundaryId>,
+    /// Env snapshot: for-item → iter-body mapping.
+    for_item_iter_body: HashMap<LocalId, TreeBoundaryId>,
+}
+
+/// Phase 1.1c-d: a derived-signal update body captured during
+/// `register_derived_signal_effects` and re-emitted in the deferred
+/// sweep. The body is structurally trivial (`SignalWriteExpr` +
+/// trigger), but the trigger emit must dispatch via `CallBlock`s
+/// resolved from `effects_by_signal[target]`, hence the deferral.
+struct DeferredDerivedBody {
+    block_id: BlockId,
+    debug_name: BlockDebugName,
+    /// Target signal the derived effect writes; also the signal whose
+    /// downstream effects must fire after the write.
+    target: DefId,
+    /// Recompute expression. Interned at deferral time, but the
+    /// `ExprId` lives in `self.exprs` so it stays valid through the
+    /// later emission.
+    expr_id: ExprId,
 }
 
 #[derive(Debug, Clone)]
@@ -359,7 +682,7 @@ struct StructuralBindingInfo {
 }
 
 impl<'a> BlockLowering<'a> {
-    pub(crate) fn new(ctx: &'a CompilerContext, tree: &'a TreeLirComponent) -> Self {
+    pub(crate) fn new(ctx: &'a CompilerContext, tree: &'a TreeLirResource) -> Self {
         Self {
             ctx,
             component_id: tree.def_id,
@@ -408,6 +731,19 @@ impl<'a> BlockLowering<'a> {
             ifcond_binding_data: HashMap::new(),
             forlist_binding_data: HashMap::new(),
             derivedsig_binding_data: HashMap::new(),
+            signal_layout_early: crate::lir::SignalLayout::default(),
+            resource_self_ref_slot: None,
+            parent_retention_cursor: 0,
+            deferred_handler_bodies: Vec::new(),
+            deferred_derived_bodies: Vec::new(),
+            pending_block_id_override: None,
+            pending_block_ids: Vec::new(),
+            current_block_slots: Vec::new(),
+            block_slots_stack: Vec::new(),
+            current_block_local_idx: 0,
+            block_local_idx_stack: Vec::new(),
+            signal_to_update_blocks: None,
+            deferred_dummy_parent_slot_cache: None,
         }
     }
 
@@ -865,7 +1201,7 @@ impl<'a> BlockLowering<'a> {
                 binding_to_signal.insert(pb.binding_id, s);
             }
         }
-        let mut signals_used: std::collections::HashSet<DefId> = std::collections::HashSet::new();
+        let mut signals_used: HashSet<DefId> = HashSet::new();
         let old_effects = std::mem::take(&mut self.effects);
         let mut spliced: Vec<LirBlockEffect> = Vec::with_capacity(old_effects.len());
         for e in old_effects {
@@ -934,9 +1270,14 @@ impl<'a> BlockLowering<'a> {
         // inline updates touch the resulting tree.
         for &structural_block in structural_call_blocks {
             let dummy_parent = self.alloc_temp_slot_named("structural_dispatch_parent");
+            // Phase 0.3p: callee expects `(self_ref, parent_i32, …)`;
+            // prepend the resource self-ref slot explicitly. The
+            // legacy `dummy_parent` becomes wasm-arg 1.
+            let self_ref = self.resource_self_ref_slot.expect("self-ref slot");
             self.emit(LirOp::CallBlock {
                 block: structural_block,
-                parent: dummy_parent,
+                args: vec![self_ref, dummy_parent],
+                result: None,
             });
         }
 
@@ -991,10 +1332,25 @@ impl<'a> BlockLowering<'a> {
                             slot: info.elem_mem_slot,
                             to: target,
                         });
-                        self.emit(LirOp::SetAttribute {
-                            node: target,
-                            name: info.name_id,
-                            expr: info.expr_id,
+                        // Phase 2.2b: lower SetAttribute to a stack-push
+                        // sequence + CallFunction against
+                        // dom_imports.set_attribute. The legacy emit arm
+                        // pushed (node-local, name-ptr, name-len,
+                        // attr-value-variant) directly onto the wasm
+                        // stack; mirror that order via Push* ops so the
+                        // emitted bytes are identical.
+                        self.emit(LirOp::PushSlot { slot: target });
+                        self.emit(LirOp::PushStringPtr {
+                            string_id: info.name_id,
+                        });
+                        self.emit(LirOp::PushStringLen {
+                            string_id: info.name_id,
+                        });
+                        self.emit(LirOp::PushExprAsAttrValue { expr: info.expr_id });
+                        self.emit(LirOp::CallFunction {
+                            func: self.ctx.dom_imports().set_attribute,
+                            args: vec![],
+                            result: None,
                         });
                     }
                     // Inline DynamicText bindings the same way:
@@ -1028,9 +1384,14 @@ impl<'a> BlockLowering<'a> {
                             slot: info.text_mem_slot,
                             to: target,
                         });
-                        self.emit(LirOp::SetTextContent {
-                            node: target,
-                            expr: info.expr_id,
+                        // Phase 2.2b: stack-push (node, expr-as-string)
+                        // then call dom_imports.set_text_content.
+                        self.emit(LirOp::PushSlot { slot: target });
+                        self.emit(LirOp::PushExprAsString { expr: info.expr_id });
+                        self.emit(LirOp::CallFunction {
+                            func: self.ctx.dom_imports().set_text_content,
+                            args: vec![],
+                            result: None,
                         });
                     }
                 }
@@ -1121,7 +1482,11 @@ impl<'a> BlockLowering<'a> {
                                     },
                                     LirOp::CallBlock {
                                         block: branch_block,
-                                        parent: dummy_parent,
+                                        args: vec![
+                                            self.resource_self_ref_slot.expect("self-ref slot"),
+                                            dummy_parent,
+                                        ],
+                                        result: None,
                                     },
                                 ];
                                 let label = self.next_if_label();
@@ -1195,7 +1560,11 @@ impl<'a> BlockLowering<'a> {
                                 },
                                 LirOp::CallBlock {
                                     block: iter_block,
-                                    parent: dummy_parent,
+                                    args: vec![
+                                        self.resource_self_ref_slot.expect("self-ref slot"),
+                                        dummy_parent,
+                                    ],
+                                    result: None,
                                 },
                                 LirOp::IncrSlot { slot: idx_slot },
                                 LirOp::GeU {
@@ -1233,10 +1602,53 @@ impl<'a> BlockLowering<'a> {
         // match the block's signature. The slot's value is unused.
         let dummy_param = self.alloc_temp_slot_named("walker_param_unused");
 
+        // Compute every enclosing ForIterBody by walking up via
+        // parent_link + iter_to_anchor. Structural call blocks dispatched
+        // from this walker (e.g. an if-update block whose mount/unmount
+        // sub-blocks expect outer iter-bodies in scope) need those iter-
+        // body refs available in current_boundary_locals at the call
+        // site. The walker hierarchy itself was descended through, so by
+        // induction every parent walker can supply its own enclosing
+        // iter-bodies forward.
+        let mut iter_to_anchor: HashMap<TreeBoundaryId, TreeBoundaryId> = HashMap::new();
+        for tb in &self.tree_shape.boundaries {
+            if let TreeBoundaryKind::ForAnchor { iter_body_idx, .. } = tb.kind {
+                iter_to_anchor.insert(TreeBoundaryId(iter_body_idx), tb.id);
+            }
+        }
+        let mut enclosing_iter_bodies: Vec<TreeBoundaryId> = Vec::new();
+        let mut cur = boundary_id;
+        loop {
+            let pl = self.tree_shape.boundaries[cur.index()].parent_link;
+            let next = match pl {
+                Some((p, _)) => Some(p),
+                None => iter_to_anchor.get(&cur).copied(),
+            };
+            match next {
+                Some(p) => {
+                    if matches!(
+                        self.tree_shape.boundaries[p.index()].kind,
+                        TreeBoundaryKind::ForIterBody { .. }
+                    ) && p != boundary_id
+                    {
+                        enclosing_iter_bodies.push(p);
+                    }
+                    cur = p;
+                }
+                None => break,
+            }
+        }
+
         let block_id = self.finish_block_with_name(BlockDebugName::update(sig.0));
         if let Some(b) = self.blocks.iter_mut().find(|b| b.id == block_id) {
             b.params = vec![dummy_param];
-            b.boundary_params = vec![boundary_id];
+            let mut bp = vec![boundary_id];
+            for ib in enclosing_iter_bodies {
+                if !bp.contains(&ib) {
+                    bp.push(ib);
+                }
+            }
+            b.boundary_params = bp;
         }
         block_id
     }
@@ -1298,20 +1710,26 @@ impl<'a> BlockLowering<'a> {
             .collect();
 
         for (_tree_id, dependencies, target, expr) in derived {
-            // Build the update block: SignalWriteExpr { signal: target, expr }
-            // followed by TriggerEffects { signal: target }. The write stores
-            // the new value but does NOT implicitly trigger observers —
-            // LirStatement::SignalWrite lowering emits both ops, and the
-            // derived-signal effect must do the same for chained
-            // propagation (derived→derived→text) to work.
+            // Phase 1.1c-d: pre-allocate the update_block id and DEFER
+            // the body. The body still computes `SignalWriteExpr +
+            // trigger` but the trigger has to dispatch via `CallBlock`
+            // through `effects_by_signal[target]` — that map is only
+            // finalised after `emit_per_boundary_signal_updates` runs.
+            // The deferred sweep at the end of `lower_component`
+            // resolves the call targets and emits the body into the
+            // pre-allocated block id.
             let expr_id = self.intern_expr(&expr);
-            self.start_block();
-            self.emit(LirOp::SignalWriteExpr {
-                signal: target,
-                expr: expr_id,
+            let update_block = self.ctx.alloc_block_id();
+            self.next_block += 1;
+            let debug_name = BlockDebugName::kind("derived-update");
+            self.ctx
+                .set_block_name(self.component_id, update_block, debug_name.clone());
+            self.deferred_derived_bodies.push(DeferredDerivedBody {
+                block_id: update_block,
+                debug_name,
+                target,
+                expr_id,
             });
-            self.emit(LirOp::TriggerEffects { signal: target });
-            let update_block = self.finish_block_named("derived-update");
 
             self.effects.push(LirBlockEffect {
                 id: self.effects.len() as u32,
@@ -1341,11 +1759,7 @@ impl<'a> BlockLowering<'a> {
 
     /// Find a signal's type by its DefId.
     fn find_signal_type(&self, signal_def_id: DefId) -> Option<Ty> {
-        if let Some(s) = self
-            .tree_signals
-            .iter()
-            .find(|s| s.def_id == signal_def_id)
-        {
+        if let Some(s) = self.tree_signals.iter().find(|s| s.def_id == signal_def_id) {
             return Some(s.ty);
         }
         // Phase 6: globals — fall back to the property's type from defs.
@@ -1355,38 +1769,130 @@ impl<'a> BlockLowering<'a> {
     }
 
     /// Convert a Ty to SlotValType for WASM local declaration.
+    /// Delegates to the module-level [`ty_to_slot_val_type`] free
+    /// function — the canonical, frontend-neutral entry point. The
+    /// flow frontend calls the free function directly so both code
+    /// paths stay byte-identical with the DTR migration's predicates.
     fn ty_to_slot_val_type(&self, ty: Ty) -> LirSlotValType {
-        // Phase 5b-v.3: scalar lists are typed GC array refs.
-        if self.is_scalar_list_ty(ty) {
-            return LirSlotValType::RefNullForListGc(ty);
-        }
-        // Phase 5b-v.3 / 5d preview: option<list<scalar>> collapses
-        // to a single nullable ref of the inner list's array type.
-        // Storage-wise this is the same as `list<scalar>` itself —
-        // none == null, some(arr) == arr.
-        if let InternedTyKind::Option(inner_ty) = self.ctx.ty_kind(ty) {
-            if self.is_scalar_list_ty(*inner_ty) {
-                return LirSlotValType::RefNullForListGc(*inner_ty);
-            }
-        }
-        // Phase 5e.1: DTR records have a single GC ref internal repr.
-        if let InternedTyKind::Adt(d) = self.ctx.ty_kind(ty) {
-            if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) {
-                let mut seen = HashSet::new();
-                if self.is_dtr_record_ty(ty, &mut seen) {
-                    return LirSlotValType::RefNullForRecord(ty);
-                }
-            }
-        }
-        match self.ctx.ty_kind(ty) {
-            InternedTyKind::F32 => LirSlotValType::F32,
-            InternedTyKind::F64 => LirSlotValType::F64,
-            InternedTyKind::S64 | InternedTyKind::U64 => LirSlotValType::I64,
-            _ => LirSlotValType::I32,
-        }
+        ty_to_slot_val_type(self.ctx, ty)
     }
 
-    pub(crate) fn lower_component(&mut self, tree: &TreeLirComponent) -> LirComponent {
+    /// Phase 1.2 routing helper: returns `Some(MemSlot)` iff the given
+    /// signal index has **only** linear-memory backing in
+    /// `self.signal_layout_early` — no GC-struct slot. Dual-backed
+    /// (`gc + mem`) and struct-only signals return `None` and the caller
+    /// continues to emit `LirOp::Signal*` (struct-backed lowering lands
+    /// in Phase 1.1c — see task #62; dual-backed routing follows
+    /// `project_signal_storage_dual.md` once flavor identification is in
+    /// place). See `signals_inline::signal_mem_slot`.
+    fn signal_mem_only_slot(&self, sig_idx: usize) -> Option<crate::lir::signal_layout::MemSlot> {
+        let storage = self.signal_layout_early.signals.get(sig_idx)?;
+        if storage.gc.is_some() {
+            // Dual-backed or struct-only — Phase 1.2 conservative skip.
+            return None;
+        }
+        storage.mem
+    }
+
+    /// Phase 1.2 routing helper for `InitSignalDefault`. Returns
+    /// `Some(ops)` only when:
+    ///   - the signal is memory-only (no GC backing), AND
+    ///   - `lower_init_signal_default_to_memory` actually expands the
+    ///     type (today: i32-zero path; F32/F64/I64 zero-init paths bail
+    ///     because no const-materialize LirOp exists yet — Phase 1.1c).
+    /// `None` means the caller keeps emitting `LirOp::InitSignalDefault`.
+    fn try_lower_init_signal_default_inline(
+        &mut self,
+        sig_idx: usize,
+        signal_ty: Ty,
+    ) -> Option<Vec<LirOp>> {
+        let mem = self.signal_mem_only_slot(sig_idx)?;
+        let next_slot = &mut self.next_slot;
+        let next_local_idx = &mut self.next_local_idx;
+        let slots = &mut self.slots;
+        let mut alloc = |val_ty: LirSlotValType| -> LirSlotId {
+            let id = LirSlotId::resource(*next_slot);
+            *next_slot += 1;
+            let local_idx = *next_local_idx;
+            *next_local_idx += 1;
+            slots.push(LirSlotInfo {
+                id,
+                kind: LirSlotKind::Temp { local_idx },
+                val_ty,
+                name: None,
+            });
+            id
+        };
+        crate::lower_to_lir::signals_inline::lower_init_signal_default_to_memory(
+            self.ctx, signal_ty, mem, /* base_addr */ 0, &mut alloc,
+        )
+    }
+
+    pub(crate) fn lower_component(&mut self, tree: &TreeLirResource) -> LirResource {
+        // Phase 0.3p: allocate the resource-wide self-ref slot UP-FRONT
+        // so every `CallBlock` emit site during per-block lowering can
+        // forward `self` as an explicit first arg. The slot kind is
+        // `WasmParam{idx:0}` — wasm param 0 of every component-bound
+        // function — and its val_ty is `(ref null $Comp_<def_id>)`.
+        // The end-of-lowering stamping pass walks every block to set
+        // `implicit_self` from this slot.
+        {
+            use crate::lir::block::{LirSlotInfo, LirSlotKind, LirSlotValType};
+            let id = LirSlotId::resource(self.slots.len() as u32);
+            self.slots.push(LirSlotInfo {
+                id,
+                kind: LirSlotKind::WasmParam { idx: 0 },
+                val_ty: LirSlotValType::RefNullForComponent(tree.def_id),
+                name: Some(format!("self_ref_{}", id.legacy_u32())),
+            });
+            self.next_slot = self.slots.len() as u32;
+            self.resource_self_ref_slot = Some(id);
+        }
+
+        // Phase 1.2: compute signal layout up-front so emit sites can
+        // consult per-signal backing (gc vs. memory) while building the
+        // block ops. `compute_signal_layout` walks only `component.signals`
+        // (parallel to `tree.signals`) and `LirLayoutContext`; nothing
+        // populated later in lowering feeds it, so safe to move here.
+        // The same value is re-stamped onto `LirResource.signal_layout`
+        // at the end of lowering (the canonical store codegen reads).
+        {
+            let tmp_resource = LirResource {
+                def_id: tree.def_id,
+                name: tree.name,
+                span: tree.span,
+                is_export: tree.is_export,
+                blocks: Vec::new(),
+                constructor_block: BlockId(0),
+                mount_block: BlockId(0),
+                internal_constructor_block: None,
+                internal_constructor_self_ref_slot: None,
+                internal_unmount_block: None,
+                export_constructor_block: None,
+                export_mount_block: None,
+                export_unmount_block: None,
+                effects: Vec::new(),
+                slots: Vec::new(),
+                strings: Vec::new(),
+                exprs: Vec::new(),
+                signals: tree.signals.clone(),
+                children_root_slot: None,
+                input_binding_handlers: HashMap::new(),
+                for_contexts: Vec::new(),
+                effects_by_signal: HashMap::new(),
+                body_tree: Vec::new(),
+                tree_shape: Default::default(),
+                struct_types: Vec::new(),
+                array_types: Vec::new(),
+                signal_layout: crate::lir::SignalLayout::default(),
+                internal_lifecycle_scratch: crate::lir::InternalLifecycleScratch::default(),
+                comp_struct_layout: crate::lir::node::ComponentStructLayout::default(),
+            };
+            let mut sig_layout_ctx = LirLayoutContext::new(self.ctx);
+            self.signal_layout_early =
+                crate::lir::compute_signal_layout(&tmp_resource, &mut sig_layout_ctx);
+        }
+
         // Synthesize the typed mount-tree shape up-front so slot
         // allocation during body lowering can build
         // `SlotKind::BoundaryField` slots that reference fields the
@@ -1404,25 +1910,39 @@ impl<'a> BlockLowering<'a> {
                     // primitive. For memory/range iterables it stays an
                     // I32 ptr.
                     match iter_src {
-                        IterSource::ListGc => match ctx.ty_kind(ty) {
-                            InternedTyKind::F32 => LirSlotValType::F32,
-                            InternedTyKind::F64 => LirSlotValType::F64,
-                            InternedTyKind::S64 | InternedTyKind::U64 => LirSlotValType::I64,
-                            InternedTyKind::Adt(_) => {
-                                // Record element → typed record ref;
-                                // enum/variant elements still i32.
-                                if let InternedTyKind::Adt(d) = ctx.ty_kind(ty) {
-                                    if matches!(ctx.defs.kind(*d), DefKind::Record(_)) {
-                                        LirSlotValType::RefNullForRecord(ty)
-                                    } else {
-                                        LirSlotValType::I32
+                        IterSource::ListGc => {
+                            // Phase 5e.5 Stage 7e: FlatGcStruct
+                            // elements (option / result / user variant)
+                            // store a typed supertype ref.
+                            if is_flat_gc_migrated_ty_struct(ctx, ty) {
+                                LirSlotValType::RefNullForFlatGc(ty)
+                            } else {
+                                match ctx.ty_kind(ty) {
+                                    InternedTyKind::F32 => LirSlotValType::F32,
+                                    InternedTyKind::F64 => LirSlotValType::F64,
+                                    InternedTyKind::S64 | InternedTyKind::U64 => {
+                                        LirSlotValType::I64
                                     }
-                                } else {
-                                    LirSlotValType::I32
+                                    InternedTyKind::Adt(d) => {
+                                        if matches!(ctx.defs.kind(*d), DefKind::Record(_)) {
+                                            LirSlotValType::RefNullForRecord(ty)
+                                        } else {
+                                            LirSlotValType::I32
+                                        }
+                                    }
+                                    InternedTyKind::List(_)
+                                        if is_scalar_list_ty_struct(
+                                            ctx,
+                                            ty,
+                                            &mut HashSet::new(),
+                                        ) =>
+                                    {
+                                        LirSlotValType::RefNullForListGc(ty)
+                                    }
+                                    _ => LirSlotValType::I32,
                                 }
                             }
-                            _ => LirSlotValType::I32,
-                        },
+                        }
                         IterSource::ListMemory | IterSource::Range => LirSlotValType::I32,
                     }
                 },
@@ -1453,21 +1973,30 @@ impl<'a> BlockLowering<'a> {
                     );
                     // Phase 5e.1: DTR records — recognise structurally,
                     // mirroring is_scalar_list_ty's record branch.
-                    let elem_is_dtr_record = if let InternedTyKind::List(e) =
-                        ctx.ty_kind(iterable_expr.ty)
-                    {
-                        let elem_ty = *e;
-                        if let InternedTyKind::Adt(d) = ctx.ty_kind(elem_ty) {
-                            matches!(ctx.defs.kind(*d), DefKind::Record(_))
-                                && is_dtr_record_struct(ctx, *d)
+                    let elem_is_dtr_record =
+                        if let InternedTyKind::List(e) = ctx.ty_kind(iterable_expr.ty) {
+                            let elem_ty = *e;
+                            if let InternedTyKind::Adt(d) = ctx.ty_kind(elem_ty) {
+                                matches!(ctx.defs.kind(*d), DefKind::Record(_))
+                                    && is_dtr_record_struct(ctx, *d)
+                            } else {
+                                false
+                            }
                         } else {
                             false
-                        }
-                    } else {
-                        false
-                    };
+                        };
 
-                    if is_component_signal && (elem_is_scalar || elem_is_dtr_record) {
+                    // Phase 5e.5 Stage 7e: FlatGcStruct (option /
+                    // result / user variant) elements — typed GC array.
+                    let elem_is_flat_gc =
+                        if let InternedTyKind::List(e) = ctx.ty_kind(iterable_expr.ty) {
+                            is_flat_gc_migrated_ty_struct(ctx, *e)
+                        } else {
+                            false
+                        };
+                    if is_component_signal
+                        && (elem_is_scalar || elem_is_dtr_record || elem_is_flat_gc)
+                    {
                         IterSource::ListGc
                     } else {
                         IterSource::ListMemory
@@ -1492,6 +2021,41 @@ impl<'a> BlockLowering<'a> {
 
         // Finish mount block
         let mount_block = self.finish_block_named("mount");
+
+        // Phase 0.3i: the mount-internal wasm function signature is
+        // `(self_ref, root: i32) -> ...`. `parent_slot` is exactly the
+        // `root` parameter (wasm local 1) — historically it was a Temp
+        // slot, with a prologue copy from wasm local 1 into its
+        // dedicated local. Promote it to `WasmParam { idx: 1 }` so
+        // `slot_local` resolves it to wasm local 1 directly and no
+        // prologue copy is needed. Other Temp slots with a higher
+        // `local_idx` get decremented by one so the post-promotion
+        // local space stays packed (lifecycle.rs declares one wasm
+        // local per Temp slot in compacted `local_idx` order).
+        let promoted_local_idx = {
+            let info = &self.slots[parent_slot.legacy_u32() as usize];
+            match info.kind {
+                LirSlotKind::Temp { local_idx } => local_idx,
+                _ => panic!(
+                    "Phase 0.3i: parent_slot expected Temp kind, got {:?}",
+                    info.kind
+                ),
+            }
+        };
+        self.slots[parent_slot.legacy_u32() as usize].kind = LirSlotKind::WasmParam { idx: 1 };
+        for s in self.slots.iter_mut() {
+            if let LirSlotKind::Temp { local_idx } = &mut s.kind {
+                if *local_idx > promoted_local_idx {
+                    *local_idx -= 1;
+                }
+            }
+        }
+        self.next_local_idx -= 1;
+        // Register the param slot as the first wasm-level param of the
+        // mount block (after the implicit `self` ref at wasm local 0).
+        if let Some(block) = self.blocks.iter_mut().find(|b| b.id == mount_block) {
+            block.params = vec![parent_slot];
+        }
 
         // Register derived-signal effects: each `UpdateKind::DerivedSignal`
         // in the tree becomes a self-contained update block that
@@ -1543,7 +2107,19 @@ impl<'a> BlockLowering<'a> {
 
         self.boundary_dep_index = Some(dep_index);
 
-        let mut component = LirComponent {
+        // Phase 1.1c-d: build the signal → update-block dispatch map
+        // from the now-finalised `self.effects`, then drain the
+        // deferred handler / derived-update body queues. Each
+        // `SignalWrite` inside a deferred body emits `CallBlock`
+        // sequences directly (via `emit_trigger_for_signal`) for
+        // component-local signals, eliminating the post-pass that
+        // used to rewrite `LirOp::TriggerEffects` after the fact.
+        // Global-block-owned signals stay on `TriggerEffects` so the
+        // global-fanout helper in `signal_emit.rs` continues to fire.
+        self.build_signal_to_update_blocks_for_deferred();
+        self.emit_deferred_bodies();
+
+        let mut component = LirResource {
             def_id: tree.def_id,
             name: tree.name,
             span: tree.span,
@@ -1551,6 +2127,12 @@ impl<'a> BlockLowering<'a> {
             blocks: std::mem::take(&mut self.blocks),
             constructor_block,
             mount_block,
+            internal_constructor_block: None,
+            internal_constructor_self_ref_slot: None,
+            internal_unmount_block: None,
+            export_constructor_block: None,
+            export_mount_block: None,
+            export_unmount_block: None,
             effects: std::mem::take(&mut self.effects),
             slots: std::mem::take(&mut self.slots),
             strings: std::mem::take(&mut self.strings),
@@ -1569,7 +2151,18 @@ impl<'a> BlockLowering<'a> {
             effects_by_signal: HashMap::new(),
             body_tree: tree.body.clone(),
             tree_shape: std::mem::take(&mut self.tree_shape),
+            // Stage 2: populated below from `tree_shape` via
+            // `struct_types::project_tree_shape`. Both representations
+            // coexist until Stage 3 rewrites consumers.
+            struct_types: Vec::new(),
+            array_types: Vec::new(),
+            signal_layout: crate::lir::SignalLayout::default(),
+            internal_lifecycle_scratch: crate::lir::InternalLifecycleScratch::default(),
+            comp_struct_layout: crate::lir::node::ComponentStructLayout::default(),
         };
+        let (st, at) = crate::lir::struct_types::project_tree_shape(&component.tree_shape);
+        component.struct_types = st;
+        component.array_types = at;
 
         // Bitwise structural dedupe of per-(boundary, signal)
         // update blocks. Two `update_b<b>_s<s>` blocks with identical
@@ -1579,9 +2172,48 @@ impl<'a> BlockLowering<'a> {
         // canonical survivor, and duplicate blocks are removed.
         dedupe_update_blocks(self.ctx, &mut component);
 
+        // Stage 4 of lir-resource-flatten: allocate parallel typed
+        // slots for every block's `boundary_params`. The slots back
+        // those WASM params into the LIR slot space so the Stage 3
+        // rewriter can resolve `LoadHandle` / `StoreHandle` against
+        // BoundaryField slots whose binding came from a function
+        // param (not a `BindBoundaryLocal`-emitted op). Block-fn
+        // codegen copies each WASM boundary-param local into its
+        // slot at the function prologue.
+        allocate_boundary_param_slots(&mut component);
+
+        // Stage 3 of lir-resource-flatten: rewrite LoadHandle /
+        // StoreHandle on BoundaryField slots into explicit
+        // BoundaryStructGet / BoundaryStructSet ops with the
+        // boundary-ref slot resolved at lowering time. Codegen for
+        // the new ops avoids the chain walk entirely; sites we
+        // can't statically resolve (boundary_params, before Stage 4)
+        // continue through the legacy LoadHandle/StoreHandle
+        // codegen path.
+        let _rewrites =
+            crate::lir::boundary_rewrite::rewrite_boundary_field_loadstore(&mut component);
+        // Stage 5b verification: opt-in count of BoundaryField
+        // LoadHandle/StoreHandle still in the IR. Set
+        // `YEL_DEBUG_BOUNDARY_FIELD=1` to print per-resource counts;
+        // any nonzero figure means the chain walk is still active.
+        if std::env::var_os("YEL_DEBUG_BOUNDARY_FIELD").is_some() {
+            let remaining =
+                crate::lir::boundary_rewrite::count_remaining_boundary_field_loadstore(&component);
+            eprintln!(
+                "[lir] resource {:?}: rewrote {} BoundaryField loads/stores, {} remain",
+                component.def_id, _rewrites, remaining
+            );
+        }
+
         // Populate per-block structural metadata that codegen would
         // otherwise recompute by re-walking the op tree on every emit.
         populate_block_structural_metadata(self.ctx, &mut component);
+
+        // Phase 0.3d (lir-resource-flatten plan): cache the per-valtype
+        // flat-scratch counts for the codegen-synthesized internal
+        // lifecycle wrappers. Codegen still recomputes locally and
+        // cross-checks via `debug_assert_eq!`.
+        populate_internal_lifecycle_scratch(self.ctx, &mut component);
 
         // Build the inverted dependency index: signal DefId → effect ids.
         for effect in &component.effects {
@@ -1594,27 +2226,169 @@ impl<'a> BlockLowering<'a> {
             }
         }
 
+        // Phase 1.1c-d: the legacy post-pass `rewrite_trigger_effects_to_callblocks`
+        // has been replaced by emit-at-source in
+        // `emit_trigger_for_signal`. Component-local signals already
+        // emit `CallBlock` sequences directly during deferred handler /
+        // derived-update body emission (see `emit_deferred_bodies`).
+        // Only global-block-owned signals continue to emit
+        // `LirOp::TriggerEffects` — Phase 1.1c-e will fold that into a
+        // direct global-fanout call.
+
+        // Phase 1.1a: stamp per-signal storage layout onto the resulting
+        // resource. Phase 1.2 moved the computation to the start of
+        // `lower_component` (so emit sites can consult it) — re-use the
+        // cached value here. Codegen reads `component.signal_layout`.
+        component.signal_layout = std::mem::take(&mut self.signal_layout_early);
+
+        // Phase 0.3f: derive the component-struct field layout
+        // (signals → retention → self-handle → tree-root) so neutral
+        // LIR ops can name `$Comp_<i>` fields without consulting the
+        // codegen-side `GcTypeLayout`.
+        populate_comp_struct_layout(&mut component);
+
+        // Phase 0.3g: synthesize the internal constructor block. This
+        // wraps the user `constructor_block` with the memory-slot
+        // zero-init that codegen's `generate_constructor_internal_for`
+        // used to inline. Codegen walks this block in the same
+        // emission context as the legacy inline path.
+        synth_internal_constructor_block(self.ctx, &mut component);
+
+        // Phase 0.3h: synthesize the internal unmount block — the
+        // detach-every-DOM-handle walk that codegen previously
+        // emitted inline in `generate_unmount_internal_for`.
+        synth_internal_unmount_block(self.ctx, &mut component);
+
+        // Phase 0.3j / Phase 0.3p: stamp mount-block lifecycle fields
+        // so codegen's `generate_block_function` can emit it like any
+        // other block. The mount signature is
+        // `(self_ref: ref $Comp, root: i32) -> ()|i32` — wasm param 0
+        // is the typed self ref. Phase 0.3p moved the
+        // `WasmParam{idx:0}` self-ref slot allocation to the START of
+        // `lower_component` so per-block lowering can forward `self`
+        // through explicit `CallBlock` args. The slot now lives at
+        // `self.resource_self_ref_slot`; reuse it here.
+        {
+            let self_ref_slot = self
+                .resource_self_ref_slot
+                .expect("resource_self_ref_slot allocated at top of lower_component");
+            let children_root = component.children_root_slot;
+            let mount_block_id = component.mount_block;
+            if let Some(mb) = component.blocks.iter_mut().find(|b| b.id == mount_block_id) {
+                mb.implicit_self = Some(self_ref_slot);
+                mb.return_slot = children_root;
+            }
+            // Phase 0.3o: stamp the shared `self_ref_slot` onto every
+            // block whose `implicit_self` is still `None` so codegen
+            // can resolve `current_self_local` uniformly via
+            // `block.implicit_self`. Lifecycle blocks (ctor / unmount
+            // / mount) already had their own `implicit_self` set by
+            // their respective synth passes — leave those untouched.
+            for block in component.blocks.iter_mut() {
+                if block.implicit_self.is_none() {
+                    block.implicit_self = Some(self_ref_slot);
+                }
+            }
+        }
+
+        // Phase 0.3m: synthesize host-facing export-wrapper blocks
+        // (constructor / mount / unmount) for exported components.
+        // These have `implicit_self: None` (no leading wasm self-ref
+        // param — host wrappers receive raw i32 handles), so they're
+        // added AFTER the stamp-implicit_self pass above.
+        synth_export_lifecycle_blocks(self.ctx, &mut component);
+
+        // Phase 1.1c-l (#97): synthesize per-(this-component, global-signal)
+        // fanout blocks for the gc-only scalar shape. Writer-side
+        // (`inline_signal_write_or_init_from_expr` Path B) consults the
+        // ctx-side table at write time; missing entries mean the writer
+        // falls back to the legacy `LirOp::TriggerEffects` path.
+        synth_global_fanout_blocks(self.ctx, &mut component);
+
+        // Register this component's lifecycle BlockIds in the ctx
+        // so parents that mount it can resolve callee BlockIds at
+        // lowering time. (BlockId is now module-wide unique, so a
+        // single BlockId fully identifies the callee function.)
+        self.ctx.register_component_lifecycle_blocks(
+            component.def_id,
+            crate::context::ComponentLifecycleBlocks {
+                internal_constructor_block: component.internal_constructor_block,
+                mount_block: component.mount_block,
+            },
+        );
+
         component
     }
 
     /// Generate the constructor block that initializes signals and memory slots.
-    fn generate_constructor_block(&mut self, tree: &TreeLirComponent) -> BlockId {
+    fn generate_constructor_block(&mut self, tree: &TreeLirResource) -> BlockId {
         self.start_block();
 
         // Initialize each signal
         for (i, signal) in tree.signals.iter().enumerate() {
             if let Some(default_expr) = &signal.default {
-                // Signal has a default value - intern the expression and emit InitSignal
+                // Phase 1.1c-g: with the user constructor_block now a
+                // real wasm function (no clone-into-synth), inlining
+                // `InitSignal` → `EvalExprToSlots` + `StructSetSym`
+                // is safe — the `rec: resource_self_ref_slot` (WasmParam
+                // {idx:0}) op resolves to wasm-local 0 of THIS function,
+                // which is the self-ref the internal_ctor passed.
+                //
+                // Mirror the SignalWriteExpr inline gating: only
+                // **composite** (option/result/variant-with-payload/record),
+                // component-local, gc-only signals inline. Scalars use
+                // the legacy InitSignal path — its codegen already
+                // resolves rec via the ambient `current_self_local`,
+                // which now points at the user_ctor's own wasm-local 0.
+                // Dual-backed (gc + mem) and global-block signals also
+                // keep the legacy op (Phase 1.1c-f holdouts).
                 let expr_id = self.intern_expr(default_expr);
-                self.emit(LirOp::InitSignal {
-                    signal_idx: i as u32,
-                    expr: expr_id,
-                });
+                // Phase 1.1c-i: route through unified inline helper.
+                let inlined = self.inline_signal_write_or_init_from_expr(
+                    signal.def_id,
+                    signal.ty,
+                    Some(expr_id),
+                );
+                if matches!(inlined, InlineResult::NotHandled) {
+                    self.emit(LirOp::InitSignal {
+                        signal_idx: i as u32,
+                        expr: expr_id,
+                    });
+                }
             } else {
-                // No default - emit InitSignalDefault to set zero/empty
-                self.emit(LirOp::InitSignalDefault {
-                    signal_idx: i as u32,
-                });
+                // No default - emit InitSignalDefault to set zero/empty.
+                //
+                // Phase 1.2 routing: if the signal is **only** memory-backed
+                // (no GC-struct slot), inline-expand via the helper. Otherwise
+                // (struct-backed or dual-backed) keep emitting the legacy op
+                // until Phase 1.1c (#62) provides the wasm-type-section-index
+                // accessor needed to inline struct-backed sites.
+                //
+                // Phase 1.1c-i: also route through the unified helper with
+                // `value=None` so default-init paths share the inline shape
+                // once the helper handles them. Today both inline helpers
+                // bail for default-init (returning false / None), so the
+                // legacy op still emits. Wiring matches the SignalWriteExpr
+                // sites' template so future helper extensions flip a single
+                // gate.
+                let unified_inlined = self.inline_signal_write_or_init_from_expr(
+                    signal.def_id,
+                    signal.ty,
+                    None,
+                );
+                if matches!(unified_inlined, InlineResult::NotHandled) {
+                    if let Some(inlined) =
+                        self.try_lower_init_signal_default_inline(i, signal.ty)
+                    {
+                        for op in inlined {
+                            self.emit(op);
+                        }
+                    } else {
+                        self.emit(LirOp::InitSignalDefault {
+                            signal_idx: i as u32,
+                        });
+                    }
+                }
             }
         }
 
@@ -1655,11 +2429,7 @@ impl<'a> BlockLowering<'a> {
                         } else {
                             None
                         };
-                        self.emit(LirOp::MountComponent {
-                            component_def: *component_def,
-                            parent: parent_slot,
-                            children_root,
-                        });
+                        self.lower_mount_component(*component_def, parent_slot, children_root);
                         if let Some(cr) = children_root {
                             for child in children {
                                 self.lower_node(child, cr);
@@ -1672,25 +2442,36 @@ impl<'a> BlockLowering<'a> {
                 // Regular HTML element or builtin element (VStack, Text, Button, etc.)
                 let elem_slot = self.alloc_temp_slot_named(format!("elem_{}", tag));
                 let tag_id = self.intern_string(tag);
-                self.emit(LirOp::CreateElement {
-                    tag: tag_id,
-                    result: elem_slot,
+                // Phase 2.2b: stack-push (tag-ptr, tag-len) then call
+                // dom_imports.create_element; result lands in elem_slot.
+                self.emit(LirOp::PushStringPtr { string_id: tag_id });
+                self.emit(LirOp::PushStringLen { string_id: tag_id });
+                self.emit(LirOp::CallFunction {
+                    func: self.ctx.dom_imports().create_element,
+                    args: vec![],
+                    result: Some(elem_slot),
                 });
 
                 // Append to parent
-                self.emit(LirOp::AppendChild {
-                    parent: parent_slot,
-                    child: elem_slot,
+                self.emit(LirOp::CallFunction {
+                    func: self.ctx.dom_imports().append_child,
+                    args: vec![parent_slot, elem_slot],
+                    result: None,
                 });
 
                 // Static bindings (attributes set at creation time)
                 for binding in static_bindings {
                     let name_id = self.intern_string(&binding.name);
                     let expr_id = self.intern_expr(&binding.value);
-                    self.emit(LirOp::SetAttribute {
-                        node: elem_slot,
-                        name: name_id,
-                        expr: expr_id,
+                    // Phase 2.2b: SetAttribute as stack-push + CallFunction.
+                    self.emit(LirOp::PushSlot { slot: elem_slot });
+                    self.emit(LirOp::PushStringPtr { string_id: name_id });
+                    self.emit(LirOp::PushStringLen { string_id: name_id });
+                    self.emit(LirOp::PushExprAsAttrValue { expr: expr_id });
+                    self.emit(LirOp::CallFunction {
+                        func: self.ctx.dom_imports().set_attribute,
+                        args: vec![],
+                        result: None,
                     });
                 }
 
@@ -1739,10 +2520,15 @@ impl<'a> BlockLowering<'a> {
                                 let name_id = self.intern_string(prop_name);
 
                                 // Set initial attribute value during mount
-                                self.emit(LirOp::SetAttribute {
-                                    node: elem_slot,
-                                    name: name_id,
-                                    expr: expr_id,
+                                // Phase 2.2b: stack-push + CallFunction.
+                                self.emit(LirOp::PushSlot { slot: elem_slot });
+                                self.emit(LirOp::PushStringPtr { string_id: name_id });
+                                self.emit(LirOp::PushStringLen { string_id: name_id });
+                                self.emit(LirOp::PushExprAsAttrValue { expr: expr_id });
+                                self.emit(LirOp::CallFunction {
+                                    func: self.ctx.dom_imports().set_attribute,
+                                    args: vec![],
+                                    result: None,
                                 });
 
                                 // Effect-target handle is already
@@ -1797,10 +2583,24 @@ impl<'a> BlockLowering<'a> {
                 for handler in handlers {
                     let handler_block = self.lower_handler(handler);
                     let event_id = self.intern_string(&handler.event);
-                    self.emit(LirOp::AddEventListener {
-                        node: elem_slot,
-                        event: event_id,
+                    // Phase 2.2b: stack-push (node, event-ptr, event-len,
+                    // handler-id) then call dom_imports.add_event_listener.
+                    // The handler-id encoding stays in codegen (depends
+                    // on per-component handle global + local-id table).
+                    self.emit(LirOp::PushSlot { slot: elem_slot });
+                    self.emit(LirOp::PushStringPtr {
+                        string_id: event_id,
+                    });
+                    self.emit(LirOp::PushStringLen {
+                        string_id: event_id,
+                    });
+                    self.emit(LirOp::PushHandlerId {
                         handler: handler_block,
+                    });
+                    self.emit(LirOp::CallFunction {
+                        func: self.ctx.dom_imports().add_event_listener,
+                        args: vec![],
+                        result: None,
                     });
                 }
 
@@ -1813,13 +2613,23 @@ impl<'a> BlockLowering<'a> {
             LirNodeKind::StaticText(text) => {
                 let text_slot = self.alloc_temp_slot_named("text_slot");
                 let content_id = self.intern_string(text);
-                self.emit(LirOp::CreateText {
-                    content: content_id,
-                    result: text_slot,
+                // Phase 2.2b: stack-push (content-ptr, content-len) + call
+                // dom_imports.create_text.
+                self.emit(LirOp::PushStringPtr {
+                    string_id: content_id,
                 });
-                self.emit(LirOp::AppendChild {
-                    parent: parent_slot,
-                    child: text_slot,
+                self.emit(LirOp::PushStringLen {
+                    string_id: content_id,
+                });
+                self.emit(LirOp::CallFunction {
+                    func: self.ctx.dom_imports().create_text,
+                    args: vec![],
+                    result: Some(text_slot),
+                });
+                self.emit(LirOp::CallFunction {
+                    func: self.ctx.dom_imports().append_child,
+                    args: vec![parent_slot, text_slot],
+                    result: None,
                 });
             }
 
@@ -1864,10 +2674,17 @@ impl<'a> BlockLowering<'a> {
                 };
                 let expr_id = self.intern_expr(&expr);
 
-                // Create text node with initial dynamic content
-                self.emit(LirOp::CreateTextDynamic {
-                    expr: expr_id,
-                    result: text_slot,
+                // Create text node with initial dynamic content.
+                // Phase 2.2b: emit_expr_as_string fat-pointer push +
+                // call dom_imports.create_text (legacy
+                // CreateTextDynamic arm targets IMPORT_CREATE_TEXT —
+                // the stringified payload feeds the same import as the
+                // static-text variant).
+                self.emit(LirOp::PushExprAsString { expr: expr_id });
+                self.emit(LirOp::CallFunction {
+                    func: self.ctx.dom_imports().create_text,
+                    args: vec![],
+                    result: Some(text_slot),
                 });
 
                 // Store handle in memory for effect updates
@@ -1885,9 +2702,10 @@ impl<'a> BlockLowering<'a> {
                 // a `BoundaryField` `LoadHandle` — no iter-rec stash.
 
                 // Append to parent
-                self.emit(LirOp::AppendChild {
-                    parent: parent_slot,
-                    child: text_slot,
+                self.emit(LirOp::CallFunction {
+                    func: self.ctx.dom_imports().append_child,
+                    args: vec![parent_slot, text_slot],
+                    result: None,
                 });
 
                 // Register the binding for the per-(boundary, signal)
@@ -2054,13 +2872,23 @@ impl<'a> BlockLowering<'a> {
         // Create anchor comment — insertion point for branch content.
         let anchor_slot = self.alloc_temp_slot_named("anchor_slot");
         let anchor_text = self.intern_string("if");
-        self.emit(LirOp::CreateComment {
-            content: anchor_text,
-            result: anchor_slot,
+        // Phase 2.2b: stack-push (text-ptr, text-len) + call
+        // dom_imports.create_comment.
+        self.emit(LirOp::PushStringPtr {
+            string_id: anchor_text,
         });
-        self.emit(LirOp::AppendChild {
-            parent: parent_slot,
-            child: anchor_slot,
+        self.emit(LirOp::PushStringLen {
+            string_id: anchor_text,
+        });
+        self.emit(LirOp::CallFunction {
+            func: self.ctx.dom_imports().create_comment,
+            args: vec![],
+            result: Some(anchor_slot),
+        });
+        self.emit(LirOp::CallFunction {
+            func: self.ctx.dom_imports().append_child,
+            args: vec![parent_slot, anchor_slot],
+            result: None,
         });
         self.emit(LirOp::StoreHandle {
             slot: anchor_field_slot,
@@ -2160,12 +2988,19 @@ impl<'a> BlockLowering<'a> {
                 .get(&if_node_id)
                 .map(|nfr| nfr.owning_boundary)
                 .unwrap_or(TreeBoundaryId(u32::MAX));
+            // Snapshot the enclosing iter-body stack so the update
+            // block can declare them as boundary_params. Branch mount/
+            // unmount blocks include every outer iter-body; the update
+            // block must propagate those forward via CallBlock.
+            let iter_body_stack_snapshot: Vec<TreeBoundaryId> =
+                self.for_iter_body_stack.iter().rev().copied().collect();
             let update_block = self.create_if_update_block_flat(
                 &flat_branches,
                 &branch_mount_unmount,
                 parent_field_slot,
                 active_flag,
                 owning_boundary,
+                &iter_body_stack_snapshot,
             );
             self.effects.push(LirBlockEffect {
                 id: self.effects.len() as u32,
@@ -2245,7 +3080,11 @@ impl<'a> BlockLowering<'a> {
             });
             tail_ops.push(LirOp::CallBlock {
                 block: mount_block,
-                parent: parent_slot,
+                args: vec![
+                    self.resource_self_ref_slot.expect("self-ref slot"),
+                    parent_slot,
+                ],
+                result: None,
             });
             tail_ops.push(LirOp::StoreI32 {
                 slot: active_flag,
@@ -2285,7 +3124,11 @@ impl<'a> BlockLowering<'a> {
                 },
                 LirOp::CallBlock {
                     block: mount_block,
-                    parent: parent_slot,
+                    args: vec![
+                        self.resource_self_ref_slot.expect("self-ref slot"),
+                        parent_slot,
+                    ],
+                    result: None,
                 },
                 LirOp::StoreI32 {
                     slot: active_flag,
@@ -2321,6 +3164,7 @@ impl<'a> BlockLowering<'a> {
         parent_field_slot: LirSlotId,
         active_flag: LirSlotId,
         owning_boundary: TreeBoundaryId,
+        outer_iter_bodies: &[TreeBoundaryId],
     ) -> BlockId {
         self.start_block();
 
@@ -2412,7 +3256,11 @@ impl<'a> BlockLowering<'a> {
                 cond: cmp,
                 then_ops: vec![LirOp::CallBlock {
                     block: unmount_block,
-                    parent: parent_slot,
+                    args: vec![
+                        self.resource_self_ref_slot.expect("self-ref slot"),
+                        parent_slot,
+                    ],
+                    result: None,
                 }],
                 else_ops: vec![],
                 name: Some(format!("if{}_upd_unmb{}", label, k - 1)),
@@ -2443,7 +3291,11 @@ impl<'a> BlockLowering<'a> {
                     },
                     LirOp::CallBlock {
                         block: mount_block,
-                        parent: parent_slot,
+                        args: vec![
+                            self.resource_self_ref_slot.expect("self-ref slot"),
+                            parent_slot,
+                        ],
+                        result: None,
                     },
                 ],
                 else_ops: vec![],
@@ -2479,7 +3331,18 @@ impl<'a> BlockLowering<'a> {
         let block = self.finish_block_named("if-update");
         if let Some(b) = self.blocks.iter_mut().find(|b| b.id == block) {
             b.params = vec![dummy_param];
-            b.boundary_params = vec![owning_boundary];
+            // owning_boundary first (the if's immediate enclosing
+            // boundary), then every outer iter-body so calls into
+            // branch mount/unmount blocks (which declare the full iter-
+            // body stack in their own boundary_params) can be satisfied
+            // via current_boundary_locals.
+            let mut bp = vec![owning_boundary];
+            for &ib in outer_iter_bodies {
+                if !bp.contains(&ib) {
+                    bp.push(ib);
+                }
+            }
+            b.boundary_params = bp;
         }
         block
     }
@@ -2544,13 +3407,22 @@ impl<'a> BlockLowering<'a> {
         // Create anchor comment for this for-loop
         let anchor_slot = self.alloc_temp_slot_named("anchor_slot");
         let anchor_text = self.intern_string("for");
-        self.emit(LirOp::CreateComment {
-            content: anchor_text,
-            result: anchor_slot,
+        // Phase 2.2b: stack-push + CallFunction.
+        self.emit(LirOp::PushStringPtr {
+            string_id: anchor_text,
         });
-        self.emit(LirOp::AppendChild {
-            parent: parent_slot,
-            child: anchor_slot,
+        self.emit(LirOp::PushStringLen {
+            string_id: anchor_text,
+        });
+        self.emit(LirOp::CallFunction {
+            func: self.ctx.dom_imports().create_comment,
+            args: vec![],
+            result: Some(anchor_slot),
+        });
+        self.emit(LirOp::CallFunction {
+            func: self.ctx.dom_imports().append_child,
+            args: vec![parent_slot, anchor_slot],
+            result: None,
         });
 
         // Store parent and anchor for effects/updates
@@ -2580,40 +3452,26 @@ impl<'a> BlockLowering<'a> {
         // path needs the materializer to produce (ptr, len) for the
         // legacy path. Easiest: only use ListGc when the element is a
         // *single-slot* GC value (not a string fat-pointer).
-        let elem_is_string = matches!(
-            self.ctx.ty_kind(item_ty),
-            InternedTyKind::String
-        );
+        let elem_is_string = matches!(self.ctx.ty_kind(item_ty), InternedTyKind::String);
+        // Stage 4a/4b/6 of typed-GC migration: every list-typed
+        // iterable now produces a typed GC array ref. Phase 6 migrated
+        // signals (component AND global) to typed GC struct fields;
+        // Stage 4b plumbs string-element body iteration through a
+        // per-iter memory scratch buffer; Stage 6 made
+        // `list.filter(...)` return a typed array ref. So `is_gc_list`
+        // is unconditionally true for any `list<_>` iterable
+        // regardless of producer kind.
         let is_gc_list = match &iterable_kind {
-            IterableKind::Signal(def_id) => {
+            IterableKind::Signal(_) | IterableKind::Expr { .. } => {
                 self.is_scalar_list_ty(iterable.ty)
-                    && !elem_is_string
-                    && self.tree_signals.iter().any(|s| s.def_id == *def_id)
-            }
-            // Phase 5e.6: only list literals (`for x in [a, b, c]`) and
-            // field reads on DTR records (`for x in item.subitems`)
-            // produce a typed GC array — those iterate via the GC path.
-            // Global-property reads, stdlib calls, etc. still produce
-            // canonical (ptr, len) and use the legacy memory walk.
-            // String-element lists keep legacy memory iteration since
-            // the body expects (ptr, len) per element.
-            IterableKind::Expr { .. } => {
-                if !self.is_scalar_list_ty(iterable.ty) || elem_is_string {
-                    false
-                } else {
-                    match &iterable.kind {
-                        LirExprKind::ListConstruct { .. }
-                        | LirExprKind::ListStatic { .. } => true,
-                        LirExprKind::Field { base, .. } => {
-                            let mut seen = HashSet::new();
-                            self.is_dtr_record_ty(base.ty, &mut seen)
-                        }
-                        _ => false,
-                    }
-                }
             }
             _ => false,
         };
+        // Stage 4b helper: string elements need a per-iter mem buffer
+        // so the body's Local read in Ptr-binding mode does
+        // `load_fat_ptr` from a stable address. ArrayGetItemFatToMem
+        // writes (ptr, len) into the buf each iteration.
+        let is_string_elem_gc = is_gc_list && elem_is_string;
         let list_ty = iterable.ty;
 
         // For ranges, reserve the scratch buf now — before pre-pass
@@ -2626,6 +3484,14 @@ impl<'a> BlockLowering<'a> {
                 Some(self.alloc_memory_slot_named(4, format!("for{}_range_item_buf", for_id.0)))
             }
             _ => None,
+        };
+        // Stage 4b: per-iter scratch buf for string-element GC iter.
+        // 8 bytes = ptr (4) + len (4). The body reads via load_fat_ptr
+        // from this buf address (binding_mode = Ptr).
+        let string_item_buf: Option<LirSlotId> = if is_string_elem_gc {
+            Some(self.alloc_memory_slot_named(8, format!("for{}_string_item_buf", for_id.0)))
+        } else {
+            None
         };
 
         // Collect outer items from local_bindings (for nested for-loops)
@@ -2684,7 +3550,10 @@ impl<'a> BlockLowering<'a> {
             .cloned()
             .expect("ForContext populated above");
 
-        let item_binding_mode = if is_gc_list {
+        // Stage 4b: string-element GC iter keeps Ptr mode so the body's
+        // Local read does `load_fat_ptr` from the per-iter
+        // `string_item_buf` address held in `item_ptr`.
+        let item_binding_mode = if is_gc_list && !is_string_elem_gc {
             LirBindingMode::Value
         } else {
             LirBindingMode::Ptr
@@ -2736,6 +3605,7 @@ impl<'a> BlockLowering<'a> {
                 &update_iterable_kind,
                 element_size,
                 is_gc_list,
+                is_string_elem_gc,
                 list_ty,
                 mount_block,
                 unmount_block,
@@ -2794,7 +3664,11 @@ impl<'a> BlockLowering<'a> {
         // item slot holds a record GC ref (the result of `array.get`).
         // For scalar GC lists, it's an unboxed scalar (i32/i64/f32/f64
         // as appropriate). For memory/range lists it's an i32 ptr.
-        let item_ptr = if is_gc_list {
+        // Stage 4b: for string-element GC iter the slot holds the
+        // address of `string_item_buf`, populated each iter via
+        // `ArrayGetItemFatToMem`. The body reads via `load_fat_ptr`
+        // (binding_mode = Ptr).
+        let item_ptr = if is_gc_list && !is_string_elem_gc {
             self.alloc_temp_slot_typed_named(self.ty_to_slot_val_type(item_ty), "init_item_ptr")
         } else {
             self.alloc_temp_slot_named("init_item_ptr")
@@ -2808,34 +3682,38 @@ impl<'a> BlockLowering<'a> {
         // Load list or range based on iterable kind
         match &iterable_kind {
             IterableKind::Signal(signal_def_id) => {
-                if is_gc_list {
-                    self.emit(LirOp::LoadListGc {
-                        signal: *signal_def_id,
-                        ref_result: list_ref_slot.unwrap(),
-                        len_result: list_len,
-                    });
-                } else {
-                    self.emit(LirOp::LoadList {
-                        signal: *signal_def_id,
-                        ptr_result: list_ptr,
-                        len_result: list_len,
-                    });
-                }
+                // Stage 5: post Stage 4a, every list-typed signal
+                // (component or global) iterates via the GC path.
+                // `is_gc_list` is unconditionally true for `list<_>`
+                // signals because `is_scalar_list_ty` covers every
+                // element kind.
+                debug_assert!(
+                    is_gc_list,
+                    "Signal-iterable for-loop reached the legacy memory \
+                     path post-Stage-4a; is_scalar_list_ty must be true \
+                     for every list-typed signal"
+                );
+                self.emit(LirOp::LoadListGc {
+                    signal: *signal_def_id,
+                    ref_result: list_ref_slot.unwrap(),
+                    len_result: list_len,
+                });
             }
             IterableKind::Expr { expr_id } => {
-                if is_gc_list {
-                    self.emit(LirOp::EvalListExprGc {
-                        expr: *expr_id,
-                        ref_result: list_ref_slot.unwrap(),
-                        len_result: list_len,
-                    });
-                } else {
-                    self.emit(LirOp::EvalListExpr {
-                        expr: *expr_id,
-                        ptr_result: list_ptr,
-                        len_result: list_len,
-                    });
-                }
+                // Stage 6: every list-typed iterable (literal, Field,
+                // Call) goes through the GC path post Stage 6 (filter
+                // returns typed array, ListConstruct/ListStatic produce
+                // typed arrays, Field on DTR record returns typed ref).
+                debug_assert!(
+                    is_gc_list,
+                    "Expr-iterable for-loop reached the legacy memory \
+                     path post-Stage-6 — every list_ty is GC-typed"
+                );
+                self.emit(LirOp::EvalListExprGc {
+                    expr: *expr_id,
+                    ref_result: list_ref_slot.unwrap(),
+                    len_result: list_len,
+                });
             }
             IterableKind::Range {
                 start,
@@ -2906,6 +3784,20 @@ impl<'a> BlockLowering<'a> {
             result: break_cond,
         });
 
+        // Initial-mount insertion anchor — starts at the for's
+        // `<#comment>` anchor node so iter[0] inserts immediately
+        // after it, then advances to each iter's wrapper after the
+        // mount block returns. This is what keeps the for-loop's
+        // children inside its slot when the parent has later siblings
+        // (a Button after the for, the canonical case). The mount
+        // block returns its wrapper as the block result, which the
+        // CallBlock3 below stores into this slot.
+        let init_insert_anchor = self.alloc_temp_slot_named("init_insert_anchor");
+        self.emit(LirOp::CopySlot {
+            from: anchor_slot,
+            to: init_insert_anchor,
+        });
+
         // Build loop body ops
         // Order: compute item ptr, do work, increment, then compute break condition for NEXT iteration
         let mut loop_body = Vec::new();
@@ -2938,6 +3830,25 @@ impl<'a> BlockLowering<'a> {
                     result: item_ptr,
                 });
             }
+            _ if is_string_elem_gc => {
+                // Stage 4b: string element via per-iter mem buf.
+                // item_ptr <- buf address (computed once via
+                // GetSlotAddress, but for ranges this is done in the
+                // Range branch above; here we set it once before the
+                // loop … wait, loop_body runs every iter — we want
+                // GetSlotAddress in the *initial-mount loop_body* so
+                // that subsequent iters reuse the same buf address).
+                loop_body.push(LirOp::GetSlotAddress {
+                    mem_slot: string_item_buf.unwrap(),
+                    result: item_ptr,
+                });
+                loop_body.push(LirOp::ArrayGetItemFatToMem {
+                    arr: list_ref_slot.unwrap(),
+                    idx: index,
+                    list_ty,
+                    buf_addr_slot: item_ptr,
+                });
+            }
             _ if is_gc_list => {
                 // Phase 5b-v.3: GC-list item — read element directly.
                 loop_body.push(LirOp::ArrayGetItem {
@@ -2948,13 +3859,14 @@ impl<'a> BlockLowering<'a> {
                 });
             }
             _ => {
-                // For lists: item_ptr = list_ptr + index * element_size
-                loop_body.push(LirOp::ComputeItemPtr {
-                    base: list_ptr,
-                    index,
-                    element_size,
-                    result: item_ptr,
-                });
+                // Stage 7: post Stage 6 the only iterables that aren't
+                // is_gc_list are Range (handled by the dedicated branch
+                // above). Anything reaching this fallthrough is a
+                // synthesis bug.
+                unreachable!(
+                    "for-loop body iter: non-GC, non-range iterable \
+                     post-Stage-6"
+                );
             }
         }
 
@@ -3011,11 +3923,19 @@ impl<'a> BlockLowering<'a> {
                 from: item_value_for_record,
             });
         }
-        loop_body.push(LirOp::CallBlock2 {
+        loop_body.push(LirOp::CallBlock {
             block: mount_block,
-            param0: parent_slot,
-            param1: item_ptr,
-            result: None,
+            args: vec![
+                self.resource_self_ref_slot.expect("self-ref slot"),
+                parent_slot,
+                item_ptr,
+                init_insert_anchor,
+            ],
+            // Mount block returns its wrapper. Capture into
+            // `init_insert_anchor` so the next iter inserts right
+            // after this iter's wrapper, threading the insertion
+            // point forward through the for's slot.
+            result: Some(init_insert_anchor),
         });
         // Publish the per-iteration iter-body ref into the for-anchor's
         // typed children-array. Fan-out walks read iter-body refs out
@@ -3081,6 +4001,126 @@ impl<'a> BlockLowering<'a> {
     /// Phase 5b-v.3 / 5e.1: true iff `ty` is a `list<T>` where T migrates
     /// to a typed GC `(array (mut <elem>))`. Includes primitive scalars
     /// and DTR records.
+    /// Phase 5e.5: structural mirror of
+    /// `WasmPackageBuilder::flat_gc_migrated` (in `wasm/repr.rs`). Both
+    /// sides MUST return the same value for any given Ty so that LIR
+    /// slot allocation and WASM codegen agree on whether an
+    /// option/result/variant is a single GC ref slot or a multi-slot
+    /// flat shape.
+    ///
+    /// Currently admits:
+    /// - **6a `option<T>`** for non-i32-fit primitives (s64/u64/f32/f64).
+    /// - **6b `option<string>`** — payload is a `(ref null $fat_value)`
+    ///   field on the some-case subtype.
+    /// - **6e `result<T,E>`** — same predicate applied to both arms.
+    /// - **6f user variants** — all case payloads are migrate-friendly.
+    ///
+    /// "Migrate-friendly" payload Ty: None, primitive scalar, string,
+    /// DTR record, scalar list, or recursively migrated option / result
+    /// / variant. Bounded recursion (YEL has no recursive variants).
+    fn is_flat_gc_migrated_ty(&self, ty: Ty) -> bool {
+        let mut visiting = HashSet::new();
+        self.is_flat_gc_migrated_ty_inner(ty, &mut visiting)
+    }
+
+    fn is_flat_gc_migrated_ty_inner(&self, ty: Ty, visiting: &mut HashSet<DefId>) -> bool {
+        match self.ctx.ty_kind(ty) {
+            InternedTyKind::Option(inner) => {
+                let inner = *inner;
+                // Mirror of `WasmPackageBuilder::flat_gc_migrated`: reject
+                // option<inner> when inner already has a single-GC-ref
+                // internal repr (scalar list, tuple, record). Those
+                // ref-collapse via `option_collapses_to_ref` on the
+                // wasm side — registering FlatGcStruct would be unused.
+                if self.is_scalar_list_ty(inner) {
+                    return false;
+                }
+                match self.ctx.ty_kind(inner) {
+                    InternedTyKind::Tuple(_) => return false,
+                    InternedTyKind::Adt(d)
+                        if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) =>
+                    {
+                        return false;
+                    }
+                    _ => {}
+                }
+                self.is_flat_gc_payload_ty(inner, visiting)
+            }
+            InternedTyKind::Result { ok, err } => {
+                let ok_ok = match ok {
+                    Some(t) => self.is_flat_gc_payload_ty(*t, visiting),
+                    None => true,
+                };
+                let err_ok = match err {
+                    Some(t) => self.is_flat_gc_payload_ty(*t, visiting),
+                    None => true,
+                };
+                ok_ok && err_ok
+            }
+            InternedTyKind::Adt(def_id) => {
+                let def_id = *def_id;
+                let cases = match self.ctx.defs.as_variant(def_id) {
+                    Some(v) => v.cases.clone(),
+                    None => return false,
+                };
+                if !visiting.insert(def_id) {
+                    return true; // recursive — optimistically accept
+                }
+                let result = cases.iter().all(|&c| {
+                    if let DefKind::VariantCase(case) = self.ctx.defs.kind(c) {
+                        match case.payload {
+                            None => true,
+                            Some(p) => self.is_flat_gc_payload_ty(p, visiting),
+                        }
+                    } else {
+                        false
+                    }
+                });
+                visiting.remove(&def_id);
+                result
+            }
+            _ => false,
+        }
+    }
+
+    /// Phase 5e.5: full admission. Every payload shape that codegen
+    /// can express as one struct field flows through the typed GC
+    /// path — primitives (any width), strings, scalar lists, DTR
+    /// records, enums, recursively migrated option/result/variant.
+    /// Linear memory is reserved for WIT lift/lower boundaries; all
+    /// internal value flow uses GC.
+    fn is_flat_gc_payload_ty(&self, ty: Ty, visiting: &mut HashSet<DefId>) -> bool {
+        match self.ctx.ty_kind(ty) {
+            InternedTyKind::Bool
+            | InternedTyKind::S8
+            | InternedTyKind::S16
+            | InternedTyKind::S32
+            | InternedTyKind::S64
+            | InternedTyKind::U8
+            | InternedTyKind::U16
+            | InternedTyKind::U32
+            | InternedTyKind::U64
+            | InternedTyKind::F32
+            | InternedTyKind::F64
+            | InternedTyKind::Char
+            | InternedTyKind::String => true,
+            InternedTyKind::List(_) => self.is_scalar_list_ty(ty),
+            InternedTyKind::Adt(d) => match self.ctx.defs.kind(*d) {
+                DefKind::Enum(_) => true,
+                DefKind::Record(_) => {
+                    let mut seen = HashSet::new();
+                    self.is_dtr_record_ty(ty, &mut seen)
+                }
+                DefKind::Variant(_) => self.is_flat_gc_migrated_ty_inner(ty, visiting),
+                _ => false,
+            },
+            InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
+                self.is_flat_gc_migrated_ty_inner(ty, visiting)
+            }
+            _ => false,
+        }
+    }
+
     fn is_scalar_list_ty(&self, ty: Ty) -> bool {
         let elem = match self.ctx.ty_kind(ty) {
             InternedTyKind::List(e) => *e,
@@ -3106,8 +4146,7 @@ impl<'a> BlockLowering<'a> {
         }
         // Phase 5e.2: nested lists — list<list<...>> where inner is
         // itself GC-eligible recursively.
-        if matches!(self.ctx.ty_kind(elem), InternedTyKind::List(_))
-            && self.is_scalar_list_ty(elem)
+        if matches!(self.ctx.ty_kind(elem), InternedTyKind::List(_)) && self.is_scalar_list_ty(elem)
         {
             return true;
         }
@@ -3115,33 +4154,12 @@ impl<'a> BlockLowering<'a> {
         if matches!(self.ctx.ty_kind(elem), InternedTyKind::String) {
             return true;
         }
-        // Phase 5e.5: option<scalar-i32-fits> reuses $fat_value as box
-        // (disc + payload, both i32). Conservative: only allow option
-        // wrapping single-i32 inner types (bool/narrow ints/s32/u32/
-        // char/enum/f32). The detailed canonical-flat check is on the
-        // codegen side; here we approximate structurally.
-        if let InternedTyKind::Option(inner) = self.ctx.ty_kind(elem) {
-            let inner_ty = *inner;
-            let inner_fits = matches!(
-                self.ctx.ty_kind(inner_ty),
-                InternedTyKind::Bool
-                    | InternedTyKind::S8
-                    | InternedTyKind::S16
-                    | InternedTyKind::S32
-                    | InternedTyKind::U8
-                    | InternedTyKind::U16
-                    | InternedTyKind::U32
-                    | InternedTyKind::F32
-                    | InternedTyKind::Char
-            ) || matches!(
-                self.ctx.ty_kind(inner_ty),
-                InternedTyKind::Adt(d) if matches!(self.ctx.defs.kind(*d), DefKind::Enum(_))
-            );
-            if inner_fits {
-                return true;
-            }
+        // Phase 5e.5 Stage 8a: list<FlatGcStruct> — element is a typed
+        // supertype ref.
+        if self.is_flat_gc_migrated_ty(elem) {
+            return true;
         }
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         self.is_dtr_record_ty(elem, &mut seen)
     }
 
@@ -3201,8 +4219,21 @@ impl<'a> BlockLowering<'a> {
             InternedTyKind::List(_) => self.is_scalar_list_ty(ty),
             InternedTyKind::Adt(d) => match self.ctx.defs.kind(*d) {
                 DefKind::Record(_) => self.is_dtr_record_ty(ty, seen),
+                // Phase 5e.5: a migrated user variant occupies 1
+                // nullable supertype-ref slot — admissible as a DTR
+                // field. Non-migrated variants stay multi-slot and
+                // disqualify the parent record.
+                DefKind::Variant(_) => self.is_flat_gc_migrated_ty(ty),
                 _ => false,
             },
+            // Phase 5e.5: migrated `option<T>` / `result<T,E>` are
+            // single-ref-slot like records. Allow them as DTR fields
+            // so records containing migrated options take the GC
+            // struct path (`struct.new $<rec>_record`) instead of the
+            // legacy `record_ctor` memory path.
+            InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
+                self.is_flat_gc_migrated_ty(ty)
+            }
             _ => false,
         }
     }
@@ -3272,6 +4303,15 @@ impl<'a> BlockLowering<'a> {
         } else {
             self.alloc_temp_slot_named("item_ptr")
         };
+        // 3rd param: DOM-handle of the node to insert THIS iter's
+        // wrapper after. The caller threads it forward — initial-mount
+        // / diff-grow-tail seed it with the for's `<#comment>` anchor
+        // and advance to each freshly-mounted wrapper before the next
+        // call. Using `insert-after` rather than `append-child` is the
+        // bug fix that keeps new iters inside the for-loop's slot when
+        // the parent has later siblings (a `Button` after the for, the
+        // canonical case).
+        let block_insert_anchor = self.alloc_temp_slot_named("insert_anchor");
 
         // Allocate the iteration's host-fragment wrapper element
         // (`yel-frag`). Body content gets appended into the wrapper
@@ -3282,12 +4322,15 @@ impl<'a> BlockLowering<'a> {
         // multiple top-level siblings). Replaces the prior
         // "first DOM op = root_handle" heuristic.
         let wrapper_slot = self.alloc_temp_slot_named("iter_wrapper");
-        self.emit(LirOp::CreateFragment {
-            result: wrapper_slot,
+        self.emit(LirOp::CallFunction {
+            func: self.ctx.dom_imports().create_fragment,
+            args: vec![],
+            result: Some(wrapper_slot),
         });
-        self.emit(LirOp::AppendChild {
-            parent: block_parent,
-            child: wrapper_slot,
+        self.emit(LirOp::CallFunction {
+            func: self.ctx.dom_imports().insert_after,
+            args: vec![block_parent, wrapper_slot, block_insert_anchor],
+            result: None,
         });
         // Stash the wrapper into iter-body field 1 (the `wrapper`
         // DomHandle). The for-item-unmount block reads this field
@@ -3315,10 +4358,7 @@ impl<'a> BlockLowering<'a> {
             // type. For typed records / GC arrays the boundary field
             // stores a typed ref, so the loaded local must match.
             let temp_slot = if matches!(*outer_mode, LirBindingMode::Value) {
-                self.alloc_temp_slot_typed_named(
-                    self.ty_to_slot_val_type(*outer_ty),
-                    "temp_slot",
-                )
+                self.alloc_temp_slot_typed_named(self.ty_to_slot_val_type(*outer_ty), "temp_slot")
             } else {
                 self.alloc_temp_slot_named("temp_slot")
             };
@@ -3390,7 +4430,7 @@ impl<'a> BlockLowering<'a> {
         // iter-body boundary's `root_handle` field (emitted above) instead
         // of returning it.
         if let Some(block) = self.blocks.iter_mut().find(|b| b.id == block_id) {
-            block.params = vec![block_parent, item_ptr_slot];
+            block.params = vec![block_parent, item_ptr_slot, block_insert_anchor];
             // Boundary chain: own iter-body first, followed by every
             // enclosing for's iter-body (innermost-first). Lets reads
             // of `outer_item_field_slots` BoundaryField slots resolve via
@@ -3423,7 +4463,12 @@ impl<'a> BlockLowering<'a> {
             for (outer_id, (_, _, outer_mode)) in outer_item_field_slots {
                 block.local_modes.insert(*outer_id, *outer_mode);
             }
-            block.return_slot = None;
+            // Return the iteration's wrapper as the block result so
+            // the caller can use it as the `insert_anchor` for the
+            // NEXT iteration. This walks the insertion point forward
+            // through the for's slot, keeping iter[N] right after
+            // iter[N-1] and never falling off the end of the parent.
+            block.return_slot = Some(wrapper_slot);
         }
 
         block_id
@@ -3436,7 +4481,11 @@ impl<'a> BlockLowering<'a> {
 
         // Single-param block: takes the node to remove.
         let node_slot = self.alloc_temp_slot_named("node");
-        self.emit(LirOp::Remove { node: node_slot });
+        self.emit(LirOp::CallFunction {
+            func: self.ctx.dom_imports().remove,
+            args: vec![node_slot],
+            result: None,
+        });
 
         let block_id = self.finish_block_named("for-item-unmount");
         if let Some(block) = self.blocks.iter_mut().find(|b| b.id == block_id) {
@@ -3470,6 +4519,7 @@ impl<'a> BlockLowering<'a> {
         iterable: &IterableKind,
         element_size: u32,
         is_gc_list: bool,
+        is_string_elem_gc: bool,
         list_ty: Ty,
         mount_block: BlockId,
         unmount_block: BlockId,
@@ -3508,10 +4558,7 @@ impl<'a> BlockLowering<'a> {
                 InternedTyKind::List(e) => *e,
                 _ => list_ty,
             };
-            self.alloc_temp_slot_typed_named(
-                self.ty_to_slot_val_type(item_ty),
-                "upd_item_ptr",
-            )
+            self.alloc_temp_slot_typed_named(self.ty_to_slot_val_type(item_ty), "upd_item_ptr")
         } else {
             self.alloc_temp_slot_named("upd_item_ptr")
         };
@@ -3560,34 +4607,23 @@ impl<'a> BlockLowering<'a> {
             // Re-evaluate iterable for (new_list_ptr/ref, new_len).
             match iterable {
                 IterableKind::Signal(signal) => {
-                    if is_gc_list {
-                        ops.push(LirOp::LoadListGc {
-                            signal: *signal,
-                            ref_result: new_list_ref_slot.unwrap(),
-                            len_result: new_len,
-                        });
-                    } else {
-                        ops.push(LirOp::LoadList {
-                            signal: *signal,
-                            ptr_result: new_list_ptr,
-                            len_result: new_len,
-                        });
-                    }
+                    // Stage 5: see lower_for — list-typed signals are
+                    // always GC-iterated post Stage 4a.
+                    debug_assert!(is_gc_list);
+                    ops.push(LirOp::LoadListGc {
+                        signal: *signal,
+                        ref_result: new_list_ref_slot.unwrap(),
+                        len_result: new_len,
+                    });
                 }
                 IterableKind::Expr { expr_id } => {
-                    if is_gc_list {
-                        ops.push(LirOp::EvalListExprGc {
-                            expr: *expr_id,
-                            ref_result: new_list_ref_slot.unwrap(),
-                            len_result: new_len,
-                        });
-                    } else {
-                        ops.push(LirOp::EvalListExpr {
-                            expr: *expr_id,
-                            ptr_result: new_list_ptr,
-                            len_result: new_len,
-                        });
-                    }
+                    // Stage 6: see lower_for — Expr iterables always GC.
+                    debug_assert!(is_gc_list);
+                    ops.push(LirOp::EvalListExprGc {
+                        expr: *expr_id,
+                        ref_result: new_list_ref_slot.unwrap(),
+                        len_result: new_len,
+                    });
                 }
                 IterableKind::Range {
                     start,
@@ -3698,7 +4734,11 @@ impl<'a> BlockLowering<'a> {
                 },
                 LirOp::CallBlock {
                     block: unmount_block,
-                    parent: unmount_root,
+                    args: vec![
+                        self.resource_self_ref_slot.expect("self-ref slot"),
+                        unmount_root,
+                    ],
+                    result: None,
                 },
                 LirOp::IncrSlot { slot: index },
                 LirOp::GeU {
@@ -3727,6 +4767,80 @@ impl<'a> BlockLowering<'a> {
             ops.push(LirOp::StoreHandle {
                 slot: publish_children_slot,
                 from: new_arr_slot,
+            });
+
+            // Compute the mount-tail's insertion anchor — the DOM
+            // handle that the FIRST mount-tail iter must insert
+            // after. Two cases:
+            //   - min_len == 0: extending from empty, anchor is the
+            //     for's `<#comment>` node (ForAnchor field 1).
+            //   - min_len > 0: anchor is the wrapper of the LAST
+            //     surviving iter (the `index = min_len - 1` slot of
+            //     `new_arr`, which `ChildrenArrayCopy` just populated
+            //     with survivors).
+            // Implemented as: seed from comment, then walk
+            // `new_arr[0..min_len)` advancing through each survivor's
+            // wrapper. Adds one bounded loop pre-mount but keeps the
+            // mount-tail ops linear and avoids a per-iter conditional.
+            let for_anchor_node_field = self.alloc_boundary_field_slot_named(
+                for_anchor_id,
+                1,
+                format!("for{}_anchor_dom_handle", for_ctx.id.0),
+            );
+            let upd_insert_anchor = self.alloc_temp_slot_named("upd_insert_anchor");
+            ops.push(LirOp::LoadHandle {
+                slot: for_anchor_node_field,
+                to: upd_insert_anchor,
+            });
+            // Walk survivors [0..min_len) — each iteration overwrites
+            // upd_insert_anchor with the current iter-body's wrapper
+            // (field 1). When the walk exits, upd_insert_anchor points
+            // at the last survivor's wrapper, which is exactly where
+            // iter[min_len] must insert after.
+            let walk_iter_body = self.alloc_temp_slot_typed_named(
+                LirSlotValType::RefNullForBoundary(iter_body_id),
+                format!("for{}_anchor_walk_iter_body", for_ctx.id.0),
+            );
+            let walk_wrapper_field = self.alloc_boundary_field_slot_named(
+                iter_body_id,
+                1,
+                format!("for{}_anchor_walk_wrapper", for_ctx.id.0),
+            );
+            ops.push(LirOp::SetSlot {
+                slot: index,
+                value: 0,
+            });
+            ops.push(LirOp::GeU {
+                index,
+                len: min_len,
+                result: break_cond,
+            });
+            let walk_body = vec![
+                LirOp::ChildrenArrayGet {
+                    anchor_boundary: for_anchor_id,
+                    arr: new_arr_slot,
+                    idx: index,
+                    result: walk_iter_body,
+                },
+                LirOp::BindBoundaryLocal {
+                    boundary_id: iter_body_id,
+                    slot: walk_iter_body,
+                },
+                LirOp::LoadHandle {
+                    slot: walk_wrapper_field,
+                    to: upd_insert_anchor,
+                },
+                LirOp::IncrSlot { slot: index },
+                LirOp::GeU {
+                    index,
+                    len: min_len,
+                    result: break_cond,
+                },
+            ];
+            ops.push(LirOp::Loop {
+                break_cond,
+                body_ops: walk_body,
+                name: Some(format!("for{}_diff_anchor_walk", for_ctx.id.0)),
             });
 
             // Mount tail [min_len, new_len): struct.new_default + call
@@ -3760,6 +4874,22 @@ impl<'a> BlockLowering<'a> {
                         result: item_ptr,
                     });
                 }
+                _ if is_string_elem_gc => {
+                    // Stage 4b: same pattern as initial-mount — write
+                    // the per-iter (ptr, len) pair to the update-block-
+                    // local mem buf, body reads via load_fat_ptr.
+                    let upd_string_buf = self.alloc_memory_slot_named(8, "upd_string_item_buf");
+                    mount_body.push(LirOp::GetSlotAddress {
+                        mem_slot: upd_string_buf,
+                        result: item_ptr,
+                    });
+                    mount_body.push(LirOp::ArrayGetItemFatToMem {
+                        arr: new_list_ref_slot.unwrap(),
+                        idx: index,
+                        list_ty,
+                        buf_addr_slot: item_ptr,
+                    });
+                }
                 _ if is_gc_list => {
                     mount_body.push(LirOp::ArrayGetItem {
                         arr: new_list_ref_slot.unwrap(),
@@ -3769,12 +4899,10 @@ impl<'a> BlockLowering<'a> {
                     });
                 }
                 _ => {
-                    mount_body.push(LirOp::ComputeItemPtr {
-                        base: new_list_ptr,
-                        index,
-                        element_size,
-                        result: item_ptr,
-                    });
+                    unreachable!(
+                        "for-update body iter: non-GC, non-range iterable \
+                         post-Stage-6"
+                    );
                 }
             }
             // Allocate fresh iter-body boundary for this iteration (see
@@ -3817,11 +4945,18 @@ impl<'a> BlockLowering<'a> {
                     from: update_item_value,
                 });
             }
-            mount_body.push(LirOp::CallBlock2 {
+            mount_body.push(LirOp::CallBlock {
                 block: mount_block,
-                param0: parent_slot,
-                param1: item_ptr,
-                result: None,
+                args: vec![
+                    self.resource_self_ref_slot.expect("self-ref slot"),
+                    parent_slot,
+                    item_ptr,
+                    upd_insert_anchor,
+                ],
+                // Mount block returns its wrapper. Capture into
+                // upd_insert_anchor so the next mount-tail iter
+                // inserts after this iter's wrapper.
+                result: Some(upd_insert_anchor),
             });
             mount_body.push(LirOp::ChildrenArraySet {
                 anchor_boundary: for_anchor_id,
@@ -4042,10 +5177,17 @@ impl<'a> BlockLowering<'a> {
         self.start_block();
         let block_parent = self.alloc_temp_slot_named("parent");
 
-        // Load for-loop items from memory at start of block
+        // Load for-loop items from memory at start of block. Phase
+        // 5e.5 Stage 7e: type the temp slot from the outer item's Ty
+        // (when bound by Value) so list<FlatGcStruct> elements arrive
+        // as the typed supertype ref.
         let mut loaded_items: HashMap<LocalId, LirSlotId> = HashMap::new();
-        for (local_id, _ty, mem_slot, _mode) in &outer_items_snapshot {
-            let temp_slot = self.alloc_temp_slot_named("temp_slot");
+        for (local_id, outer_ty, mem_slot, mode) in &outer_items_snapshot {
+            let temp_slot = if matches!(*mode, LirBindingMode::Value) {
+                self.alloc_temp_slot_typed_named(self.ty_to_slot_val_type(*outer_ty), "temp_slot")
+            } else {
+                self.alloc_temp_slot_named("temp_slot")
+            };
             self.emit(LirOp::LoadHandle {
                 slot: *mem_slot,
                 to: temp_slot,
@@ -4070,13 +5212,15 @@ impl<'a> BlockLowering<'a> {
             // regardless of body shape (Element-first, If-first,
             // For-first, or multiple top-level siblings).
             let wrapper_slot = self.alloc_temp_slot_named("branch_wrapper");
-            self.emit(LirOp::CreateFragment {
-                result: wrapper_slot,
+            self.emit(LirOp::CallFunction {
+                func: self.ctx.dom_imports().create_fragment,
+                args: vec![],
+                result: Some(wrapper_slot),
             });
-            self.emit(LirOp::InsertAfter {
-                parent: block_parent,
-                node: wrapper_slot,
-                anchor: anchor_temp,
+            self.emit(LirOp::CallFunction {
+                func: self.ctx.dom_imports().insert_after,
+                args: vec![block_parent, wrapper_slot, anchor_temp],
+                result: None,
             });
             // Stash the wrapper into the IfBranch boundary's `wrapper`
             // field (BoundaryField slot, passed as `content_mem`).
@@ -4112,8 +5256,12 @@ impl<'a> BlockLowering<'a> {
 
         // Load for-loop items from memory (unmount might need them for cleanup)
         let mut unmount_loaded_items: HashMap<LocalId, LirSlotId> = HashMap::new();
-        for (local_id, _ty, mem_slot, _mode) in &outer_items_snapshot {
-            let temp_slot = self.alloc_temp_slot_named("temp_slot");
+        for (local_id, outer_ty, mem_slot, mode) in &outer_items_snapshot {
+            let temp_slot = if matches!(*mode, LirBindingMode::Value) {
+                self.alloc_temp_slot_typed_named(self.ty_to_slot_val_type(*outer_ty), "temp_slot")
+            } else {
+                self.alloc_temp_slot_named("temp_slot")
+            };
             self.emit(LirOp::LoadHandle {
                 slot: *mem_slot,
                 to: temp_slot,
@@ -4130,7 +5278,11 @@ impl<'a> BlockLowering<'a> {
             });
 
             // Remove it from DOM
-            self.emit(LirOp::Remove { node: node_temp });
+            self.emit(LirOp::CallFunction {
+                func: self.ctx.dom_imports().remove,
+                args: vec![node_temp],
+                result: None,
+            });
         }
 
         let unmount_block = self.finish_block_named("if-branch-unmount");
@@ -4163,20 +5315,43 @@ impl<'a> BlockLowering<'a> {
     // parameter under a longer name.
     #[allow(clippy::too_many_arguments)]
     /// Lower an event handler to a block.
+    ///
+    /// Phase 1.1c-d: the body is NOT emitted here. The BlockId is
+    /// pre-allocated and the body (plus a snapshot of the for-loop
+    /// env it observes) is queued onto `deferred_handler_bodies`.
+    /// `lower_component` drains the queue AFTER
+    /// `register_derived_signal_effects` and
+    /// `emit_per_boundary_signal_updates` have finalised
+    /// `effects_by_signal`, so every `SignalWrite` in the handler
+    /// body can emit `CallBlock` directly into the resolved
+    /// update blocks instead of going through `LirOp::TriggerEffects`
+    /// + a post-pass rewrite.
     fn lower_handler(&mut self, handler: &LirHandler) -> BlockId {
-        self.start_block();
-
-        // Lower handler body statements
-        for stmt in &handler.body {
-            self.lower_statement(stmt);
-        }
-
-        let block_id = self.finish_block_with_name(BlockDebugName::handle(&handler.event));
+        let block_id = self.ctx.alloc_block_id();
+        // Keep `next_block` advancing for parity with the normal
+        // allocation path.
+        self.next_block += 1;
+        // Stamp the debug name eagerly so codegen / DOT renderers
+        // observe the same metadata regardless of when the body emits.
+        let debug_name = BlockDebugName::handle(&handler.event);
+        self.ctx
+            .set_block_name(self.component_id, block_id, debug_name.clone());
         // Record input-binding metadata so codegen emits the DOM-value
         // coercion + signal-write preamble at the top of the block.
         if let Some(target) = handler.input_binding_target {
             self.input_binding_handlers.insert(block_id, target);
         }
+        self.deferred_handler_bodies.push(DeferredHandlerBody {
+            block_id,
+            debug_name,
+            body: handler.body.clone(),
+            input_binding_target: handler.input_binding_target,
+            local_bindings: self.local_bindings.clone(),
+            outer_item_field_slots: self.outer_item_field_slots.clone(),
+            for_stack: self.for_stack.clone(),
+            for_iter_body_stack: self.for_iter_body_stack.clone(),
+            for_item_iter_body: self.for_item_iter_body.clone(),
+        });
         block_id
     }
 
@@ -4193,92 +5368,37 @@ impl<'a> BlockLowering<'a> {
                 self.emit(LirOp::DropExpr { expr: expr_id });
             }
             LirStatement::SignalWrite { signal, value } => {
-                // For composite signal types (option, result, variant with
-                // payload, record, tuple, enum) the canonical-ABI flat shape
-                // is multi-slot. A single-SlotId `SignalWrite` op cannot hold
-                // them, so emit via `SignalWriteExpr` which stores each flat
-                // slot directly from the expression's stack values.
+                // Phase 1.1c-i: unified inline helper handles every
+                // signal case (component-local gc-only / dual-backed /
+                // mem-only, plus global-block-owned gc-only). The
+                // helper emits EvalExprToSlots + StructSetSym /
+                // memory-store sequences against existing primitives.
+                // For the few remaining cases the helper can't yet
+                // express (pointer-typed globals, mem-only with
+                // unsupported type kinds), we fall back to the legacy
+                // `LirOp::SignalWriteExpr` op which dispatches via
+                // codegen's `emit_signal_store` / `emit_global_*` path.
                 let signal_ty = self.find_signal_type(*signal);
-                // Only Option/Result/Variant-with-payload need the flat-slot
-                // store path today. Records and tuples are pointer-passed
-                // and already work through the single-slot SignalWrite path.
-                // Enums (Adt without payload cases) also fit a single i32.
-                let is_composite = match signal_ty.map(|ty| self.ctx.ty_kind(ty)) {
-                    Some(InternedTyKind::Option(_)) => true,
-                    Some(InternedTyKind::Result { .. }) => true,
-                    Some(InternedTyKind::Adt(def_id)) => {
-                        if let Some(var_def) = self.ctx.defs.as_variant(*def_id) {
-                            let cases = var_def.cases.clone();
-                            cases.iter().any(|&c| {
-                                if let DefKind::VariantCase(case) = self.ctx.defs.kind(c) {
-                                    case.payload.is_some()
-                                } else {
-                                    false
-                                }
-                            })
-                        } else {
-                            // Phase 2 GC migration: route record-typed
-                            // SignalWrites through SignalWriteExpr so
-                            // primitive-only records take the GC path
-                            // (struct.new at the source, struct.set at
-                            // the destination) — bypassing the i32
-                            // slot allocation that would cause a type
-                            // mismatch with the ref-typed component
-                            // field. Non-POR records keep their legacy
-                            // memory path via the same SignalWriteExpr
-                            // route, which dispatches on signal_in_struct.
-                            self.ctx.defs.as_record(*def_id).is_some()
-                        }
-                    }
-                    _ => false,
+                let value_expr = self.intern_expr(value);
+                let inlined = if let Some(ty) = signal_ty {
+                    self.inline_signal_write_or_init_from_expr(*signal, ty, Some(value_expr))
+                } else {
+                    InlineResult::NotHandled
                 };
-                if is_composite {
-                    let value_expr = self.intern_expr(value);
+                if matches!(inlined, InlineResult::NotHandled) {
                     self.emit(LirOp::SignalWriteExpr {
                         signal: *signal,
                         expr: value_expr,
                     });
-                    self.emit(LirOp::TriggerEffects { signal: *signal });
-                } else {
-                    // Allocate typed slot based on signal type. String and
-                    // list values are fat pointers (ptr, len) = 2 i32 slots;
-                    // the EvalExpr store path writes to both `value_slot`
-                    // and `value_slot + 1`, so we must RESERVE the second
-                    // slot here or it collides with the next allocation's
-                    // local — causing either silent data corruption (next
-                    // slot also i32) or WASM validation failure (next slot
-                    // typed f32/f64/i64).
-                    // Phase 5b-v.3: scalar lists are now single-slot GC array refs
-                    // (not fat pointers). Only string/non-scalar list still
-                    // need the companion `len` slot.
-                    let is_fat_ptr = matches!(
-                        signal_ty.map(|ty| self.ctx.ty_kind(ty)),
-                        Some(InternedTyKind::String)
-                    ) || matches!(
-                        signal_ty,
-                        Some(ty) if matches!(self.ctx.ty_kind(ty), InternedTyKind::List(_))
-                            && !self.is_scalar_list_ty(ty)
-                    );
-                    let val_ty = signal_ty
-                        .map(|ty| self.ty_to_slot_val_type(ty))
-                        .unwrap_or(LirSlotValType::I32);
-                    let value_slot = self.alloc_temp_slot_typed(val_ty);
-                    if is_fat_ptr {
-                        // Companion slot for the len half of the fat pointer.
-                        // Not referenced by name — EvalExpr computes
-                        // `value_slot + 1` at emit time.
-                        let _len_slot = self.alloc_temp_slot_typed(LirSlotValType::I32);
-                    }
-                    let value_expr = self.intern_expr(value);
-                    self.emit(LirOp::EvalExpr {
-                        expr: value_expr,
-                        result: value_slot,
-                    });
-                    self.emit(LirOp::SignalWrite {
-                        signal: *signal,
-                        value: value_slot,
-                    });
-                    self.emit(LirOp::TriggerEffects { signal: *signal });
+                }
+                // Phase 1.1c-l (#97): skip trigger if Path B already
+                // emitted inline `CallBlock`s to per-observer fanout
+                // blocks (otherwise the legacy `LirOp::TriggerEffects`
+                // would call the legacy fanout helper on top → double
+                // fire). For `Handled` / `NotHandled` the trigger still
+                // emits as before.
+                if !matches!(inlined, InlineResult::HandledAndTriggered) {
+                    self.emit_trigger_for_signal(*signal);
                 }
             }
             LirStatement::If {
@@ -4397,6 +5517,14 @@ impl<'a> BlockLowering<'a> {
                     self.collect_deps_recursive(p, deps);
                 }
             }
+            // Phase 5e.5: discriminant test / payload extraction —
+            // both are pure reads of the base expression's deps.
+            LirExprKind::IsCase { base, .. } => {
+                self.collect_deps_recursive(base, deps);
+            }
+            LirExprKind::VariantField { base, .. } => {
+                self.collect_deps_recursive(base, deps);
+            }
             // List/Record constructs - collect deps from elements/fields
             LirExprKind::ListConstruct { elements, .. } => {
                 for elem in elements {
@@ -4471,6 +5599,17 @@ impl<'a> BlockLowering<'a> {
     // === Helper methods ===
 
     fn start_block(&mut self) {
+        // Task #105 (1): pre-allocate the BlockId at start so other
+        // lowering state can reference it before the body is fully
+        // emitted. If a deferred override is set, reuse it here so we
+        // don't burn a fresh id; otherwise allocate now.
+        let id = if let Some(pre) = self.pending_block_id_override.take() {
+            pre
+        } else {
+            self.ctx.alloc_block_id()
+        };
+        self.pending_block_ids.push(id);
+
         // Save any in-progress ops to the stack
         if !self.current_ops.is_empty() {
             self.ops_stack.push(std::mem::take(&mut self.current_ops));
@@ -4483,10 +5622,30 @@ impl<'a> BlockLowering<'a> {
                 .push(std::mem::take(&mut self.current_block_locals));
         }
         self.current_block_locals = Vec::new();
+
+        // Task #105 B2: save in-progress slots + local_idx counter onto
+        // their stacks; reset for the new block.
+        if !self.current_block_slots.is_empty() {
+            self.block_slots_stack
+                .push(std::mem::take(&mut self.current_block_slots));
+        }
+        self.current_block_slots = Vec::new();
+        self.block_local_idx_stack.push(self.current_block_local_idx);
+        self.current_block_local_idx = 0;
     }
 
     fn finish_block(&mut self) -> BlockId {
-        let id = BlockId(self.next_block);
+        // Task #105 (1): consume the BlockId pushed by `start_block`.
+        // The deferred-override path is handled in `start_block` now,
+        // so by the time we get here the pending stack already has the
+        // correct id.
+        let id = self
+            .pending_block_ids
+            .pop()
+            .expect("finish_block without matching start_block");
+        // Keep `next_block` advancing as a local counter for any
+        // legacy fingerprinting that may still inspect it; module-wide
+        // uniqueness is supplied by the ctx-side allocator.
         self.next_block += 1;
 
         let ops = std::mem::take(&mut self.current_ops);
@@ -4522,6 +5681,9 @@ impl<'a> BlockLowering<'a> {
             mount_component_count: 0,
             mount_component_children: Vec::new(),
             boundary_params: Vec::new(),
+            boundary_param_slots: Vec::new(),
+            implicit_self: None,
+            slots: std::mem::take(&mut self.current_block_slots),
         });
 
         // Restore previous ops from stack
@@ -4531,6 +5693,10 @@ impl<'a> BlockLowering<'a> {
 
         // Restore previous block locals from stack
         self.current_block_locals = self.block_locals_stack.pop().unwrap_or_default();
+
+        // Task #105 B2: restore parent block's slot accumulator + idx.
+        self.current_block_slots = self.block_slots_stack.pop().unwrap_or_default();
+        self.current_block_local_idx = self.block_local_idx_stack.pop().unwrap_or(0);
 
         id
     }
@@ -4548,11 +5714,181 @@ impl<'a> BlockLowering<'a> {
         id
     }
 
-    fn emit(&mut self, op: LirOp) {
+    pub(crate) fn emit(&mut self, op: LirOp) {
         self.current_ops.push(op);
     }
 
-    #[allow(dead_code)]
+    /// Phase 1.1c-d: build the component-local dispatch index from
+    /// `self.effects` (finalised after `emit_per_boundary_signal_updates`).
+    /// For every effect's dependency signal that is NOT owned by a
+    /// global block, record the effect's update_block. The deferred
+    /// emission sweep reads this map via `emit_trigger_for_signal` to
+    /// inline `CallBlock` sequences at every signal-write emit site.
+    fn build_signal_to_update_blocks_for_deferred(&mut self) {
+        let mut map: HashMap<DefId, Vec<BlockId>> = HashMap::new();
+        for effect in &self.effects {
+            for &dep in &effect.dependencies {
+                if self.ctx.defs.owning_global_block(dep).is_some() {
+                    // Globals keep `TriggerEffects` so the global-fanout
+                    // helper still fires across every observing component.
+                    continue;
+                }
+                map.entry(dep).or_default().push(effect.update_block);
+            }
+        }
+        self.signal_to_update_blocks = Some(map);
+    }
+
+    /// Phase 1.1c-d: drain `deferred_handler_bodies` and
+    /// `deferred_derived_bodies`, emitting each body into its
+    /// pre-allocated BlockId. The body uses the captured env snapshot
+    /// (for-loop locals, iter-body refs) so loop-var resolution
+    /// matches the legacy inline lowering. Every SignalWrite inside
+    /// the body now goes through `emit_trigger_for_signal`, which
+    /// emits `CallBlock` directly for component-local signals.
+    fn emit_deferred_bodies(&mut self) {
+        let handlers = std::mem::take(&mut self.deferred_handler_bodies);
+        for d in handlers {
+            self.emit_deferred_handler_body(d);
+        }
+        let derived = std::mem::take(&mut self.deferred_derived_bodies);
+        for d in derived {
+            self.emit_deferred_derived_body(d);
+        }
+    }
+
+    fn emit_deferred_handler_body(&mut self, d: DeferredHandlerBody) {
+        // Restore (additively) the env snapshot the handler observed at
+        // structural-walk time. `local_bindings` and
+        // `outer_item_field_slots` are merged in so any entries the
+        // outer walk already cleared (e.g. for-loop locals whose
+        // owning block was finished) are re-introduced for the body's
+        // duration. We swap-out the snapshot afterward so the
+        // post-emit state is unchanged from the caller's POV.
+        let saved_local_bindings = std::mem::replace(&mut self.local_bindings, d.local_bindings);
+        let saved_outer_item_field_slots =
+            std::mem::replace(&mut self.outer_item_field_slots, d.outer_item_field_slots);
+        let saved_for_stack = std::mem::replace(&mut self.for_stack, d.for_stack);
+        let saved_for_iter_body_stack =
+            std::mem::replace(&mut self.for_iter_body_stack, d.for_iter_body_stack);
+        let saved_for_item_iter_body =
+            std::mem::replace(&mut self.for_item_iter_body, d.for_item_iter_body);
+
+        self.pending_block_id_override = Some(d.block_id);
+        self.start_block();
+        for stmt in &d.body {
+            self.lower_statement(stmt);
+        }
+        let _ = self.finish_block_with_name(d.debug_name);
+        // input_binding_handlers was already populated in lower_handler
+        // at structural-walk time; nothing to do here.
+        let _ = d.input_binding_target;
+
+        // Restore.
+        self.local_bindings = saved_local_bindings;
+        self.outer_item_field_slots = saved_outer_item_field_slots;
+        self.for_stack = saved_for_stack;
+        self.for_iter_body_stack = saved_for_iter_body_stack;
+        self.for_item_iter_body = saved_for_item_iter_body;
+    }
+
+    fn emit_deferred_derived_body(&mut self, d: DeferredDerivedBody) {
+        self.pending_block_id_override = Some(d.block_id);
+        self.start_block();
+        // Phase 1.1c-i: route through unified inline helper.
+        let signal_ty = self.find_signal_type(d.target);
+        let inlined = if let Some(ty) = signal_ty {
+            self.inline_signal_write_or_init_from_expr(d.target, ty, Some(d.expr_id))
+        } else {
+            InlineResult::NotHandled
+        };
+        if matches!(inlined, InlineResult::NotHandled) {
+            self.emit(LirOp::SignalWriteExpr {
+                signal: d.target,
+                expr: d.expr_id,
+            });
+        }
+        // See SignalWrite call site above for the
+        // `HandledAndTriggered` suppression rationale.
+        if !matches!(inlined, InlineResult::HandledAndTriggered) {
+            self.emit_trigger_for_signal(d.target);
+        }
+        let _ = self.finish_block_with_name(d.debug_name);
+    }
+
+    /// Phase 1.1c-d: emit the "trigger downstream effects" sequence for
+    /// a SignalWrite at emit time. When `signal_to_update_blocks` has
+    /// been built (deferred handler/derived body emission), this emits
+    /// `CallBlock` directly into each resolved per-(boundary, signal)
+    /// update block — bypassing the legacy `LirOp::TriggerEffects` op
+    /// and the post-pass rewrite that used to expand it.
+    ///
+    /// For global-block-owned signals (not present in
+    /// `signal_to_update_blocks`) and for the legacy in-walk emission
+    /// path that runs before the map is built (transitional — should
+    /// reach zero once every emit site is on the deferred path), the
+    /// helper falls back to emitting `LirOp::TriggerEffects { signal }`
+    /// so the global-fanout helper in `signal_emit.rs` continues to
+    /// fire.
+    fn emit_trigger_for_signal(&mut self, signal: DefId) {
+        if self.signal_to_update_blocks.is_some() {
+            let blocks_opt = self
+                .signal_to_update_blocks
+                .as_ref()
+                .and_then(|m| m.get(&signal).cloned());
+            if let Some(blocks) = blocks_opt {
+                let self_ref = self
+                    .resource_self_ref_slot
+                    .expect("resource_self_ref_slot allocated at top of lower_component");
+                let dummy_parent = self.deferred_dummy_parent_slot();
+                for b in blocks {
+                    self.emit(LirOp::CallBlock {
+                        block: b,
+                        args: vec![self_ref, dummy_parent],
+                        result: None,
+                    });
+                }
+                return;
+            }
+            // Not in the component-local dispatch map — must be a
+            // global (or a signal with no observers). Keep
+            // `TriggerEffects` so the global-fanout helper still fires.
+            self.emit(LirOp::TriggerEffects { signal });
+            return;
+        }
+        // Pre-deferred-phase fallback. Phase 1.1c-d aims to eliminate
+        // this path entirely (only globals should still emit
+        // TriggerEffects, and those flow through the same helper above),
+        // but leave the safety net in place so structural emits that
+        // somehow reach here don't silently drop the trigger.
+        self.emit(LirOp::TriggerEffects { signal });
+    }
+
+    /// Phase 1.1c-d: lazily-allocated shared dummy-i32 parent slot
+    /// passed as the second `CallBlock` arg to every per-(boundary,
+    /// signal) dispatch block. The block ignores the value (its body
+    /// reads ambient state from `$self`); the wasm signature still
+    /// requires an i32, so a single never-written zero-initialised
+    /// Temp local satisfies every dispatch call. Allocated once per
+    /// component on first use.
+    fn deferred_dummy_parent_slot(&mut self) -> LirSlotId {
+        if let Some(id) = self.deferred_dummy_parent_slot_cache {
+            return id;
+        }
+        let id = LirSlotId::resource(self.next_slot);
+        self.next_slot += 1;
+        let local_idx = self.next_local_idx;
+        self.next_local_idx += 1;
+        self.slots.push(LirSlotInfo {
+            id,
+            kind: LirSlotKind::Temp { local_idx },
+            val_ty: LirSlotValType::I32,
+            name: Some(format!("trigger_dispatch_parent_{}", id.legacy_u32())),
+        });
+        self.deferred_dummy_parent_slot_cache = Some(id);
+        id
+    }
+
     fn alloc_temp_slot(&mut self) -> LirSlotId {
         self.alloc_temp_slot_typed(LirSlotValType::I32)
     }
@@ -4561,10 +5897,15 @@ impl<'a> BlockLowering<'a> {
     /// into the WASM name section as `$<name>` so WAT output reads
     /// `local.get $iter_record_ptr` instead of `local.get 97`. Prefer
     /// this at every semantic allocation site.
-    fn alloc_temp_slot_named(&mut self, name: impl Into<String>) -> LirSlotId {
+    pub(crate) fn alloc_temp_slot_named(&mut self, name: impl Into<String>) -> LirSlotId {
         let id = self.alloc_temp_slot_typed(LirSlotValType::I32);
-        if let Some(info) = self.slots.iter_mut().find(|s| s.id == id) {
-            info.name = Some(format!("{}_{}", name.into(), id.0));
+        let name_str = format!("{}_{}", name.into(), id.legacy_u32());
+        // Task #105 B2: slot may have landed in either current_block_slots
+        // or self.slots depending on whether we were inside a block.
+        if let Some(info) = self.current_block_slots.iter_mut().find(|s| s.id == id) {
+            info.name = Some(name_str);
+        } else if let Some(info) = self.slots.iter_mut().find(|s| s.id == id) {
+            info.name = Some(name_str);
         }
         id
     }
@@ -4572,21 +5913,643 @@ impl<'a> BlockLowering<'a> {
     /// Alloc a temp slot with both a non-default WASM value type and a
     /// debug name. Used by GC-ref slots where both the `val_ty`
     /// (determining the WASM local type) and a readable name matter.
-    #[allow(dead_code)]
-    fn alloc_temp_slot_typed_named(
+    pub(crate) fn alloc_temp_slot_typed_named(
         &mut self,
         val_ty: LirSlotValType,
         name: impl Into<String>,
     ) -> LirSlotId {
         let id = self.alloc_temp_slot_typed(val_ty);
-        if let Some(info) = self.slots.iter_mut().find(|s| s.id == id) {
-            info.name = Some(format!("{}_{}", name.into(), id.0));
+        let name_str = format!("{}_{}", name.into(), id.legacy_u32());
+        // Task #105 B2: search both stores.
+        if let Some(info) = self.current_block_slots.iter_mut().find(|s| s.id == id) {
+            info.name = Some(name_str);
+        } else if let Some(info) = self.slots.iter_mut().find(|s| s.id == id) {
+            info.name = Some(name_str);
         }
         id
     }
 
+    /// Phase 1.1c-i: unified inline signal-write / signal-init helper.
+    ///
+    /// Handles every signal case via existing LIR primitives — no
+    /// dedicated `SignalWrite[Expr]` / `InitSignal[Default]` op:
+    ///   * component-local gc-only signals → `EvalExprToSlots` +
+    ///     `StructSetSym` against `ComponentStruct`.
+    ///   * component-local dual-backed (gc + mem) → above plus
+    ///     `lower_signal_write_to_memory` for the mem half.
+    ///   * component-local mem-only signals → `EvalExprToSlots` +
+    ///     `lower_signal_write_to_memory`.
+    ///   * global-block-owned signals (gc-only today; pointer-typed
+    ///     globals fall through to caller) → `GlobalGet` of
+    ///     `GlobalBlockSelf(block)` + `StructSetSym` against
+    ///     `GlobalsStruct(block)`.
+    ///
+    /// `value` = `Some(expr_id)` evaluates the expression; `None`
+    /// emits a default-init store (today: gc fields rely on
+    /// `struct.new_default` having already zero-initialised them so
+    /// the helper just skips emission — same behavior the deleted
+    /// `LirOp::InitSignalDefault` arm had for the struct case).
+    ///
+    /// Returns `InlineResult::Handled` when the helper fully handled
+    /// the GC-struct/memory write — caller should still call
+    /// `emit_trigger_for_signal` to dispatch observers.
+    /// Returns `InlineResult::HandledAndTriggered` when the helper also
+    /// emitted inline `CallBlock`s to per-(observer, signal) fanout
+    /// blocks — caller must SKIP `emit_trigger_for_signal` so the
+    /// legacy global-fanout helper isn't called as well.
+    /// Returns `InlineResult::NotHandled` when the helper does not
+    /// know how to lower this case (caller falls back to legacy
+    /// `LirOp::SignalWriteExpr` / `LirOp::InitSignal*` op).
+    fn inline_signal_write_or_init_from_expr(
+        &mut self,
+        signal_def: DefId,
+        signal_ty: Ty,
+        value: Option<ExprId>,
+    ) -> InlineResult {
+        // Phase 1.1c-i recovery: helper temporarily disabled — defer to
+        // legacy LirOp::SignalWriteExpr / InitSignal paths whose codegen
+        // is known to validate. Re-enable + fix in follow-up.
+        //
+        // Stage 1: scalar i32 gc-only single-slot component-local signals
+        // are now inlined here. All other shapes still bail to caller.
+        {
+            // Skip tuples (typed-ref shape today's helper can't express).
+            if !matches!(self.ctx.ty_kind(signal_ty), InternedTyKind::Tuple(_)) {
+                if let Some(expr_id) = value {
+                    let local_idx_opt =
+                        self.tree_signals.iter().position(|s| s.def_id == signal_def);
+                    let is_global =
+                        self.ctx.defs.owning_global_block(signal_def).is_some();
+                    if let (Some(sig_idx), false) = (local_idx_opt, is_global) {
+                        if let Some(storage) =
+                            self.signal_layout_early.signals.get(sig_idx).copied()
+                        {
+                            // Strict scalar-i32 predicate: only accept
+                            // primitive integer/bool/char scalars whose
+                            // wasm storage shape is exactly one i32.
+                            // Crucially we exclude `list<scalar>` even
+                            // though it's single-slot, because its
+                            // single slot is a typed-array ref, not an
+                            // i32 (the lir_slot_val_ty_for_signal_field
+                            // helper returns the I32 fallback for it).
+                            let kind = self.ctx.ty_kind(signal_ty);
+                            let is_scalar_i32 = matches!(
+                                kind,
+                                InternedTyKind::Bool
+                                    | InternedTyKind::S8
+                                    | InternedTyKind::S16
+                                    | InternedTyKind::S32
+                                    | InternedTyKind::U8
+                                    | InternedTyKind::U16
+                                    | InternedTyKind::U32
+                                    | InternedTyKind::Char
+                            );
+                            let is_scalar_f64 = matches!(kind, InternedTyKind::F64);
+                            let is_scalar_f32 = matches!(kind, InternedTyKind::F32);
+                            let is_scalar_i64 = matches!(
+                                kind,
+                                InternedTyKind::S64 | InternedTyKind::U64
+                            );
+                            let single_slot_gc = storage
+                                .gc
+                                .map(|gc| gc.field_count == 1)
+                                .unwrap_or(false);
+                            if (is_scalar_i32 || is_scalar_f64 || is_scalar_f32 || is_scalar_i64)
+                                && storage.gc.is_some()
+                                && single_slot_gc
+                                && storage.mem.is_none()
+                            {
+                                let gc = storage.gc.unwrap();
+                                let (scratch_ty, scratch_name) = if is_scalar_f64 {
+                                    (LirSlotValType::F64, "signal_scratch_f64")
+                                } else if is_scalar_f32 {
+                                    (LirSlotValType::F32, "signal_scratch_f32")
+                                } else if is_scalar_i64 {
+                                    (LirSlotValType::I64, "signal_scratch_i64")
+                                } else {
+                                    (LirSlotValType::I32, "signal_scratch_i32")
+                                };
+                                let scratch = self.alloc_temp_slot_typed_named(
+                                    scratch_ty,
+                                    scratch_name,
+                                );
+                                let self_ref = self
+                                    .resource_self_ref_slot
+                                    .expect("resource_self_ref_slot allocated at top of lower_component");
+                                self.emit(LirOp::EvalExpr {
+                                    expr: expr_id,
+                                    result: scratch,
+                                });
+                                self.emit(LirOp::StructSetSym {
+                                    ty_ref: crate::lir::block::LirTypeRef::ComponentStruct,
+                                    field: gc.field_start,
+                                    rec: self_ref,
+                                    value: scratch,
+                                });
+                                return InlineResult::Handled;
+                            }
+                            // Multi-slot gc-only fat-pointer (String,
+                            // non-typed-array list<T>). Restricted to
+                            // field_count == 2 so typed-array lists
+                            // (single ref slot) continue to fall through —
+                            // they need typed scratch the helper can't
+                            // express yet without a dedicated slot val_ty.
+                            let is_string = matches!(kind, InternedTyKind::String);
+                            let is_list = matches!(kind, InternedTyKind::List(_));
+                            let multi_slot_gc = storage
+                                .gc
+                                .map(|gc| gc.field_count == 2)
+                                .unwrap_or(false);
+                            if (is_string || is_list)
+                                && storage.gc.is_some()
+                                && multi_slot_gc
+                                && storage.mem.is_none()
+                            {
+                                let gc = storage.gc.unwrap();
+                                let count = gc.field_count;
+                                let first_val_ty =
+                                    crate::lir::signal_layout::lir_slot_val_ty_for_signal_field(
+                                        self.ctx, signal_ty, 0,
+                                    );
+                                let dest_first = self.alloc_temp_slot_typed_named(
+                                    first_val_ty,
+                                    "signal_scratch_multi_first",
+                                );
+                                for i in 1..count {
+                                    let vt = crate::lir::signal_layout::lir_slot_val_ty_for_signal_field(
+                                        self.ctx, signal_ty, i,
+                                    );
+                                    let _ = self.alloc_temp_slot_typed(vt);
+                                }
+                                let self_ref = self
+                                    .resource_self_ref_slot
+                                    .expect("resource_self_ref_slot allocated at top of lower_component");
+                                self.emit(LirOp::EvalExprToSlots {
+                                    expr: expr_id,
+                                    dest_first_slot: dest_first,
+                                });
+                                for i in 0..count {
+                                    let val = LirSlotId::resource(dest_first.legacy_u32() + i);
+                                    self.emit(LirOp::StructSetSym {
+                                        ty_ref: crate::lir::block::LirTypeRef::ComponentStruct,
+                                        field: gc.field_start + i,
+                                        rec: self_ref,
+                                        value: val,
+                                    });
+                                }
+                                return InlineResult::Handled;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Part 1: forcing-function panic was attempted here to surface
+        // every unhandled shape. After enabling inline emission for
+        // F32 scalars and multi-slot gc-only fat-pointer (String,
+        // list<T> non-typed-array), the following shapes still fall
+        // through and must be inlined to reach the final state
+        // before the legacy SignalWriteExpr/InitSignal/TriggerEffects
+        // ops can be deleted (Part 3):
+        //   - Adt(record) dual-backed (gc + mem)
+        //   - Tuple dual-backed (gc + mem)
+        //   - Global S32 scalar (signal_layout_early.signals = None
+        //     for globals; needs separate global field-path resolution)
+        //   - Global List(T) (likewise; plus typed-array allocation)
+        // These shapes require lowering memory writes and global
+        // struct accesses + cross-component effect fanout (the user
+        // identified the global-fanout case as the most likely
+        // "can't inline without major restructure"). Bail to caller
+        // (legacy LirOp::SignalWriteExpr / InitSignal path) for now.
+        //
+        // Phase 1.1c-l (#97): narrow gate — fall through to Path B
+        // ONLY for the gc-only-scalar global-signal shape AND ONLY
+        // when every component observing this signal has registered
+        // a fanout block via `synth_global_fanout_blocks` (which means
+        // the observer was lowered FIRST AND all its observing effects
+        // matched the supported simple shape). Other shapes still bail
+        // to the caller, preserving the legacy `LirOp::SignalWriteExpr`
+        // / `LirOp::TriggerEffects` path.
+        // Task #103: previously this site gated ALL of Path A + Path B
+        // on `collect_global_fanout_blocks_if_ready` returning Some —
+        // which meant Path A (component-local) never ran at all
+        // (locals always fail `is_inlineable_global`). Restore the
+        // legacy bail-on-None for Path A by routing locals through a
+        // separate early NotHandled return, then continue into Path B
+        // where `fanout_blocks` becomes a per-return-site decision:
+        // Some → emit inline CallBlocks + HandledAndTriggered;
+        // None  → write was inlined, caller still owns trigger →
+        //         return Handled. Empty `Some(vec![])` (gate passed
+        // but no observer effects matched simple-shape) collapses to
+        // None so the legacy `LirOp::TriggerEffects` still fires.
+        let local_idx_probe = self.tree_signals.iter().position(|s| s.def_id == signal_def);
+        let global_block_probe = self.ctx.defs.owning_global_block(signal_def);
+        let fanout_blocks: Option<Vec<(DefId, BlockId)>> = if global_block_probe.is_some() {
+            match collect_global_fanout_blocks_if_ready(self.ctx, signal_def, signal_ty, value) {
+                Some(blocks) if blocks.is_empty() => None,
+                other => other,
+            }
+        } else {
+            // Component-local signal: legacy gate preserved.
+            // Path A's inline emission for locals was always reached
+            // pre-#103 (the fanout check returned `Some` only for
+            // globals, so locals fell through). We keep that exact
+            // behavior by gating Path A entry on the same predicate
+            // the legacy bail used.
+            if !is_inlineable_global(self.ctx, signal_def, signal_ty) {
+                // Pre-#103: this `is_none()` arm returned NotHandled
+                // unconditionally — so Path A code that follows
+                // never executed for locals. Preserve that.
+                let _ = (local_idx_probe, global_block_probe);
+                return InlineResult::NotHandled;
+            }
+            None
+        };
+        let local_idx = self.tree_signals.iter().position(|s| s.def_id == signal_def);
+        let global_block = self.ctx.defs.owning_global_block(signal_def);
+
+        // Field-count (=ABI slot count) for the value's type. Same
+        // source of truth on the codegen side — drives both the GC
+        // struct field span and the EvalExprToSlots dest layout.
+        let field_count =
+            crate::lir::signal_layout::slot_count_for_signal_ty(self.ctx, signal_ty);
+        if field_count == 0 {
+            // Unit-typed signal — nothing to write. The default-init
+            // case is a no-op (struct.new_default already zeroed any
+            // struct field); the value case has no observable effect.
+            return InlineResult::Handled;
+        }
+
+        // Task #100: tuple-typed signals now route inline. The
+        // `LirSlotValType::RefNullForTuple(ty)` variant types the
+        // scratch slot as `(ref null $tuple_<i>_<j>)`; codegen
+        // resolves the heap-type idx via
+        // `record_gc_types.tuple_struct_type_idx`. The EvalExprToSlots
+        // path lowers a `TupleConstruct` to `struct.new $tup_idx`
+        // (see `wasm/expr.rs::TupleConstruct`), producing a typed
+        // tuple ref directly — no flat-fields construction step.
+        //
+        // option<tuple> / list<tuple> would have similar issues but
+        // they're not exercised by today's tests; defer until needed.
+
+        // Path A: component-local signal.
+        if let Some(sig_idx) = local_idx {
+            let storage = match self.signal_layout_early.signals.get(sig_idx).copied() {
+                Some(s) => s,
+                None => return InlineResult::NotHandled,
+            };
+
+            // Default-init for gc-backed signals.
+            //
+            // Task #99: inline FlatGcStruct case-0 materialization via
+            // StructNewDefaultSym + StructSetSym. For other gc-only
+            // shapes (scalars, fat-pointer string/list), the parent
+            // `struct.new_default $Comp` already zeroed every field
+            // — default-init is a no-op. Dual-backed (gc + mem) signals
+            // still need a memory zero-init pass that this branch does
+            // not emit; bail so the legacy `InitSignalDefault` op runs.
+            if value.is_none() {
+                if storage.mem.is_some() {
+                    // Dual-backed: legacy op also zeroes the mem half.
+                    // Keep it for now to preserve semantics.
+                    return InlineResult::NotHandled;
+                }
+                let Some(gc) = storage.gc else {
+                    // gc-less mem-only signal (no fields here). The
+                    // legacy `InitSignalDefault` arm handles those via
+                    // its memory branch — bail.
+                    return InlineResult::NotHandled;
+                };
+                // FlatGcStruct shape = option<T>/result<T,E>/variant<…>
+                // where every payload is flat-gc-compatible. The
+                // codegen-side `InternalRepr::FlatGcStruct` mirrors this
+                // predicate (see repr.rs line 118).
+                let kind = self.ctx.ty_kind(signal_ty);
+                let is_flat_gc_shape = matches!(
+                    kind,
+                    InternedTyKind::Option(_) | InternedTyKind::Result { .. }
+                ) || matches!(kind, InternedTyKind::Adt(d)
+                    if matches!(self.ctx.defs.kind(*d), DefKind::Variant(_)));
+                if is_flat_gc_shape && is_flat_gc_migrated_ty_struct(self.ctx, signal_ty) {
+                    // Allocate scratch typed as the parent supertype ref.
+                    let scratch = self.alloc_temp_slot_typed_named(
+                        LirSlotValType::RefNullForFlatGc(signal_ty),
+                        "signal_init_flat_gc_case0",
+                    );
+                    let self_ref = self
+                        .resource_self_ref_slot
+                        .expect("resource_self_ref_slot allocated at top of lower_component");
+                    // struct.new_default $<sup>_<case0> → scratch
+                    self.emit(LirOp::StructNewDefaultSym {
+                        ty_ref: crate::lir::block::LirTypeRef::FlatGcCase(signal_ty, 0),
+                        result: scratch,
+                    });
+                    // <self_ref>.<field> = scratch
+                    self.emit(LirOp::StructSetSym {
+                        ty_ref: crate::lir::block::LirTypeRef::ComponentStruct,
+                        field: gc.field_start,
+                        rec: self_ref,
+                        value: scratch,
+                    });
+                    return InlineResult::Handled;
+                }
+                // Other gc-only shapes (scalar i32/i64/f32/f64,
+                // string fat-pointer, list fat-pointer, typed-array
+                // ref, record GcRef, etc.): the component's
+                // `struct.new_default` zeroed every field already, so
+                // a default-init store is observably a no-op.
+                return InlineResult::Handled;
+            }
+            let expr_id = value.unwrap();
+
+            // Allocate per-field scratch slots with the correct
+            // per-field val_ty (uses lir_slot_val_ty_for_signal_field
+            // for parity with codegen's storage_valtypes; today this
+            // matches the "first = natural, rest = i32" heuristic for
+            // the only multi-field shape (FatPointer = [i32, i32]),
+            // but the helper is forward-compatible).
+            // First slot uses the natural slot val_ty (handles ref types
+            // for GcRef / GcArrayRef / FlatGcStruct / FatPointer-first).
+            // Companion slots for fat-pointer types (string / non-typed-
+            // array list) are always I32 — those are the only multi-slot
+            // shapes today.
+            let first_val_ty = self.ty_to_slot_val_type(signal_ty);
+            let dest_first = self.alloc_temp_slot_typed(first_val_ty);
+            for _ in 1..field_count {
+                let _companion = self.alloc_temp_slot_typed(LirSlotValType::I32);
+            }
+
+            self.emit(LirOp::EvalExprToSlots {
+                expr: expr_id,
+                dest_first_slot: dest_first,
+            });
+
+            let mut wrote_any = false;
+            if let Some(gc) = storage.gc {
+                let self_ref = self
+                    .resource_self_ref_slot
+                    .expect("resource_self_ref_slot allocated at top of lower_component");
+                for i in 0..gc.field_count {
+                    let val = LirSlotId::resource(dest_first.legacy_u32() + i);
+                    self.emit(LirOp::StructSetSym {
+                        ty_ref: crate::lir::block::LirTypeRef::ComponentStruct,
+                        field: gc.field_start + i,
+                        rec: self_ref,
+                        value: val,
+                    });
+                }
+                wrote_any = true;
+            }
+            if let Some(mem) = storage.mem {
+                let value_slots: Vec<LirSlotId> = (0..field_count)
+                    .map(|i| LirSlotId::resource(dest_first.legacy_u32() + i))
+                    .collect();
+                let next_slot = &mut self.next_slot;
+                let next_local_idx = &mut self.next_local_idx;
+                let slots = &mut self.slots;
+                let mut alloc = |val_ty: LirSlotValType| -> LirSlotId {
+                    let id = LirSlotId::resource(*next_slot);
+                    *next_slot += 1;
+                    let local_idx = *next_local_idx;
+                    *next_local_idx += 1;
+                    slots.push(LirSlotInfo {
+                        id,
+                        kind: LirSlotKind::Temp { local_idx },
+                        val_ty,
+                        name: None,
+                    });
+                    id
+                };
+                let mem_ops = crate::lower_to_lir::signals_inline::lower_signal_write_to_memory(
+                    self.ctx,
+                    signal_ty,
+                    mem,
+                    /* base_addr */ 0,
+                    &value_slots,
+                    &mut alloc,
+                );
+                if let Some(ops) = mem_ops {
+                    for op in ops {
+                        self.emit(op);
+                    }
+                    wrote_any = true;
+                } else if !wrote_any {
+                    return InlineResult::NotHandled;
+                }
+            }
+            return if wrote_any {
+                InlineResult::Handled
+            } else {
+                InlineResult::NotHandled
+            };
+        }
+
+        // Path B: global-block-owned signal. Only gc-backed (non-
+        // pointer-typed) globals are inlined; pointer-typed globals
+        // (records / tuples) fall through to the caller so the legacy
+        // memory path keeps emitting via `LirOp::SignalWriteExpr`'s
+        // codegen arm. Today's stdlib has no migrated-but-pointer-
+        // typed global property, so this gate matches `global_in_struct`.
+        if let Some(block_def) = global_block {
+            // Field path on the globals struct: sum of slot_counts of
+            // prior properties + this property's slots. Pointer-typed
+            // properties contribute 0 slots and stay on the memory path.
+            let Some(block) = self.ctx.defs.as_global(block_def) else {
+                return InlineResult::NotHandled;
+            };
+            let mut field_start: u32 = 0;
+            let mut prop_slot_count: Option<u32> = None;
+            for &prop_id in &block.properties {
+                let prop_ty = self
+                    .ctx
+                    .defs
+                    .type_of(prop_id)
+                    .unwrap_or(crate::types::Ty::ERROR);
+                let count = crate::lir::signal_layout::slot_count_for_signal_ty(
+                    self.ctx, prop_ty,
+                );
+                if prop_id == signal_def {
+                    prop_slot_count = Some(count);
+                    break;
+                }
+                field_start += count;
+            }
+            let count = match prop_slot_count {
+                Some(c) if c > 0 => c,
+                // Pointer-typed (count==0 via slot_count_for_signal_ty
+                // is not actually emitted for records; the codegen
+                // dispatches on signal_storage_valtypes which for
+                // pointer-typed is empty). Conservative bail.
+                _ => return InlineResult::NotHandled,
+            };
+            // Pointer-typed globals (records/tuples): the codegen-side
+            // `global_in_struct` consults `property_field_paths`. We
+            // approximate by checking `is_pointer_repr` — same gate
+            // SignalLayout uses for the mem half.
+            let mut layout_ctx = LirLayoutContext::new(self.ctx);
+            if layout_ctx.is_pointer_repr(signal_ty) {
+                // Phase 1.1c-101: inline the linear-memory write via
+                // `MemConstGlobalProp` + typed-store, then emit the
+                // fanout CallBlocks (signal-type-agnostic). The
+                // pointer-typed canonical ABI is a single i32 (the
+                // pointer to the heap-allocated record / tuple); we
+                // evaluate the value expr into one scratch slot and
+                // hand it to `lower_signal_write_to_global_memory`,
+                // which delegates to `lower_signal_write_to_memory`
+                // and rewrites the resulting `MemConst { addr }` to
+                // `MemConstGlobalProp { signal_def, offset: addr }`
+                // so codegen resolves the absolute address from
+                // `global_property_addrs` (no per-component base).
+                let expr_id = match value {
+                    Some(e) => e,
+                    None => return InlineResult::NotHandled,
+                };
+                let prop_size = layout_ctx.size_of(signal_ty);
+                let dest = self.alloc_temp_slot_typed(LirSlotValType::I32);
+                self.emit(LirOp::EvalExprToSlots {
+                    expr: expr_id,
+                    dest_first_slot: dest,
+                });
+                let value_slots = vec![dest];
+                let next_slot = &mut self.next_slot;
+                let next_local_idx = &mut self.next_local_idx;
+                let slots = &mut self.slots;
+                let mut alloc = |val_ty: LirSlotValType| -> LirSlotId {
+                    let id = LirSlotId::resource(*next_slot);
+                    *next_slot += 1;
+                    let local_idx = *next_local_idx;
+                    *next_local_idx += 1;
+                    slots.push(LirSlotInfo {
+                        id,
+                        kind: LirSlotKind::Temp { local_idx },
+                        val_ty,
+                        name: None,
+                    });
+                    id
+                };
+                let ops = crate::lower_to_lir::signals_inline::lower_signal_write_to_global_memory(
+                    self.ctx,
+                    signal_ty,
+                    signal_def,
+                    prop_size,
+                    &value_slots,
+                    &mut alloc,
+                );
+                let Some(ops) = ops else {
+                    return InlineResult::NotHandled;
+                };
+                for op in ops {
+                    self.emit(op);
+                }
+                // Fanout: emit a CallBlock per observing component's
+                // synthesized fanout block (same pattern as scalar
+                // globals — fanout body is type-agnostic). Task #103:
+                // when no fanout blocks were synthesized, the inline
+                // write still happened above; return `Handled` so the
+                // caller emits `LirOp::TriggerEffects` (no double-fire
+                // because we skipped the inline CallBlocks).
+                if let Some(blocks) = &fanout_blocks {
+                    let dummy_parent = self.deferred_dummy_parent_slot();
+                    for (_observer_comp, fanout_block_id) in blocks {
+                        self.emit(LirOp::CallBlock {
+                            block: *fanout_block_id,
+                            args: vec![dummy_parent],
+                            result: None,
+                        });
+                    }
+                    return InlineResult::HandledAndTriggered;
+                }
+                return InlineResult::Handled;
+            }
+
+            // Default-init for globals: the globals_init function in
+            // codegen handles allocation + defaults; this helper is
+            // only ever called from emit sites, where value is always
+            // Some(expr). Defensive bail.
+            let expr_id = match value {
+                Some(e) => e,
+                None => return InlineResult::NotHandled,
+            };
+
+            // Load the globals-struct ref into a typed scratch slot.
+            let rec_slot = self.alloc_temp_slot_typed_named(
+                LirSlotValType::RefNullForGlobalBlock(block_def),
+                "globals_block_self",
+            );
+            self.emit(LirOp::GlobalGet {
+                gref: crate::lir::block::LirGlobalRef::GlobalBlockSelf(block_def),
+                result: rec_slot,
+            });
+
+            // Per-field scratch slots. Task #103: the first slot must
+            // use the *natural* slot val_ty (handles ref types for
+            // GcRef / GcArrayRef / FlatGcStruct / FatPointer-first) so
+            // EvalExprToSlots' typed result matches. The signal-only
+            // mirror returns I32 for list / record refs, which would
+            // mismatch a `(ref $array)` literal at the EvalExprToSlots
+            // boundary. Use the proper `ty_to_slot_val_type` for
+            // field 0 and keep the signal-mirror for fat-pointer
+            // companion fields (always I32).
+            let first_val_ty = self.ty_to_slot_val_type(signal_ty);
+            let dest_first = self.alloc_temp_slot_typed(first_val_ty);
+            for i in 1..count {
+                let vt = crate::lir::signal_layout::lir_slot_val_ty_for_signal_field(
+                    self.ctx, signal_ty, i,
+                );
+                let _companion = self.alloc_temp_slot_typed(vt);
+            }
+
+            self.emit(LirOp::EvalExprToSlots {
+                expr: expr_id,
+                dest_first_slot: dest_first,
+            });
+            for i in 0..count {
+                let val = LirSlotId::resource(dest_first.legacy_u32() + i);
+                self.emit(LirOp::StructSetSym {
+                    ty_ref: crate::lir::block::LirTypeRef::GlobalsStruct(block_def),
+                    field: field_start + i,
+                    rec: rec_slot,
+                    value: val,
+                });
+            }
+
+            // Phase 1.1c-l (#97): emit a `CallBlock` to each observing
+            // component's synthesized fanout block. The dummy-i32 parent
+            // slot satisfies the fanout block's `(i32)->()` wasm signature;
+            // the fanout body walks the observer's registry and dispatches
+            // to live instance update_blocks. Returning
+            // `HandledAndTriggered` suppresses the caller's
+            // `emit_trigger_for_signal` (which would otherwise emit the
+            // legacy `LirOp::TriggerEffects` and double-fire).
+            //
+            // Task #103: when no fanout blocks were synthesized, the
+            // inline write above still ran; return `Handled` so the
+            // caller emits `LirOp::TriggerEffects` (legacy fanout).
+            if let Some(blocks) = &fanout_blocks {
+                let dummy_parent = self.deferred_dummy_parent_slot();
+                for (_observer_comp, fanout_block_id) in blocks {
+                    self.emit(LirOp::CallBlock {
+                        block: *fanout_block_id,
+                        args: vec![dummy_parent],
+                        result: None,
+                    });
+                }
+                return InlineResult::HandledAndTriggered;
+            }
+            return InlineResult::Handled;
+        }
+
+        // Neither local nor global — caller surfaces error.
+        InlineResult::NotHandled
+    }
+
     fn alloc_temp_slot_typed(&mut self, val_ty: LirSlotValType) -> LirSlotId {
-        let id = LirSlotId(self.next_slot);
+        // Task #105 B2: per-block storage migration deferred — too many
+        // lowering-side sites still do `self.slots[slot.legacy_u32()]`
+        // direct lookups (e.g. blocks.rs:2036 parent_slot promotion).
+        // Until those are threaded through a slot_info dispatch helper,
+        // keep allocations on the component vec.
+        let id = LirSlotId::resource(self.next_slot);
         self.next_slot += 1;
         let local_idx = self.next_local_idx;
         self.next_local_idx += 1;
@@ -4600,7 +6563,7 @@ impl<'a> BlockLowering<'a> {
     }
 
     fn alloc_memory_slot(&mut self, size: u32) -> LirSlotId {
-        let id = LirSlotId(self.next_slot);
+        let id = LirSlotId::resource(self.next_slot);
         self.next_slot += 1;
 
         // Align to 4 bytes
@@ -4694,7 +6657,22 @@ impl<'a> BlockLowering<'a> {
         field_idx: u32,
         name: impl Into<String>,
     ) -> LirSlotId {
-        let id = LirSlotId(self.next_slot);
+        // Phase 5e.5 Stage 7e: when the TreeFieldDecl carries a non-I32
+        // val_ty (e.g., `LoopVar { val_ty: RefNullForFlatGc(_) }` for
+        // list<FlatGcStruct> iteration), propagate it to the slot so
+        // local-type emission and SignalRead paths see the correct
+        // ref shape. Other field kinds keep the default I32.
+        let val_ty = self
+            .tree_shape
+            .boundaries
+            .get(boundary_id.0 as usize)
+            .and_then(|b| b.fields.get(field_idx as usize))
+            .and_then(|f| match f {
+                crate::lir::block::TreeFieldDecl::LoopVar { val_ty, .. } => Some(*val_ty),
+                _ => None,
+            })
+            .unwrap_or(LirSlotValType::I32);
+        let id = LirSlotId::resource(self.next_slot);
         self.next_slot += 1;
         self.slots.push(LirSlotInfo {
             id,
@@ -4702,7 +6680,7 @@ impl<'a> BlockLowering<'a> {
                 boundary_id,
                 field_idx,
             },
-            val_ty: LirSlotValType::I32,
+            val_ty,
             name: Some(name.into()),
         });
         id
@@ -4746,11 +6724,70 @@ impl<'a> BlockLowering<'a> {
 
 use crate::lir::layout::{max_flat_counts, FlatValTypeCounts};
 
+/// Stage 4 of lir-resource-flatten: for every block whose
+/// `boundary_params` is non-empty and `boundary_param_slots` is still
+/// empty, allocate one typed temp slot per boundary id (val_ty =
+/// `RefNullForBoundary(b_id)`) and write the slot ids into
+/// `boundary_param_slots`. Codegen's per-block prologue
+/// (`block_fn.rs`) copies each WASM boundary-param local into the
+/// slot's local; the Stage 3 boundary-rewrite pass uses these slots
+/// to seed its `current_boundary_locals` map so every BoundaryField
+/// LoadHandle / StoreHandle reachable in the block resolves to an
+/// explicit `BoundaryStructGet` / `Set` op.
+pub(crate) fn allocate_boundary_param_slots(component: &mut LirResource) {
+    use crate::lir::block::{LirSlotInfo, LirSlotKind, LirSlotValType};
+
+    // First, count the next free local_idx by walking existing Temp
+    // slots — we append new locals to the end of the LIR-frame's
+    // local space.
+    let mut next_local: u32 = component
+        .slots
+        .iter()
+        .filter_map(|s| match s.kind {
+            LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+
+    // Allocate slots and patch up each block in turn.
+    let block_ids_with_bp: Vec<usize> = component
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| {
+            if !b.boundary_params.is_empty() && b.boundary_param_slots.is_empty() {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for block_idx in block_ids_with_bp {
+        let bps = component.blocks[block_idx].boundary_params.clone();
+        let mut slot_ids: Vec<LirSlotId> = Vec::with_capacity(bps.len());
+        for b_id in bps {
+            let slot_id = LirSlotId::resource(component.slots.len() as u32);
+            let local_idx = next_local;
+            next_local += 1;
+            component.slots.push(LirSlotInfo {
+                id: slot_id,
+                kind: LirSlotKind::Temp { local_idx },
+                val_ty: LirSlotValType::RefNullForBoundary(b_id),
+                name: Some(format!("bp_ref_{}", b_id.0)),
+            });
+            slot_ids.push(slot_id);
+        }
+        component.blocks[block_idx].boundary_param_slots = slot_ids;
+    }
+}
+
 /// Walks every block in `component` and fills in the structural metadata
 /// fields on each `LirBlock`.
 pub(crate) fn populate_block_structural_metadata(
     ctx: &CompilerContext,
-    component: &mut LirComponent,
+    component: &mut LirResource,
 ) {
     let mut layout_ctx = LirLayoutContext::new(ctx);
     // Snapshot what we need to read from the component while iterating
@@ -4778,11 +6815,1203 @@ pub(crate) fn populate_block_structural_metadata(
     }
 }
 
+/// Phase 0.3d (lir-resource-flatten plan): compute per-valtype
+/// flat-scratch counts for the codegen-synthesized internal lifecycle
+/// wrappers and stamp them onto `component.internal_lifecycle_scratch`.
+///
+/// The values mirror the historical codegen-side computation in
+/// `generate_constructor_internal_for`:
+///   * `ctor`: max per-valtype canonical-ABI flat count across all
+///     non-Func signals on the component.
+///   * `mount`: copied from `component.mount_block`'s
+///     `max_flat_scratch_counts` — already populated by
+///     `populate_block_structural_metadata`. Mount-internal codegen
+///     reads this same value today.
+///   * `unmount`: zero (the current internal unmount body emits no
+///     flat-slot stores).
+///
+/// Pure additive: codegen still recomputes locally and cross-checks
+/// via `debug_assert_eq!` in debug builds.
+/// Phase 0.3f: compute the `$Comp_<i>` struct field-index layout from
+/// already-populated `signal_layout` + per-block `mount_component_count`,
+/// matching the codegen-side field order in
+/// `gc_types::emit_component_struct_type`: signals → parent-retention
+/// → self-handle → tree-root.
+pub(crate) fn populate_comp_struct_layout(component: &mut LirResource) {
+    use crate::lir::node::ComponentStructLayout;
+
+    // 1. Signal field count = sum of gc.field_count.
+    let signal_field_count: u32 = component
+        .signal_layout
+        .signals
+        .iter()
+        .filter_map(|s| s.gc.map(|g| g.field_count))
+        .sum();
+
+    // 2. Parent-retention count: total `MountComponent` sites across
+    //    all blocks (outside for-loop bodies). Mirrors
+    //    codegen's `compute_mount_retention_counts`.
+    let parent_retention_count: u32 = component
+        .blocks
+        .iter()
+        .map(|b| b.mount_component_count)
+        .sum();
+    let parent_retention_field_base = if parent_retention_count > 0 {
+        Some(signal_field_count)
+    } else {
+        None
+    };
+
+    // 3. Self-handle always present, just after retention region.
+    let self_handle_field_idx = signal_field_count + parent_retention_count;
+
+    // 4. Tree-root field present iff component has a body tree.
+    //    Mirrors codegen's `layout.tree_root_type_idx.map(...)`.
+    let has_tree_root = !component.tree_shape.boundaries.is_empty();
+    let tree_root_field_idx = if has_tree_root {
+        Some(self_handle_field_idx + 1)
+    } else {
+        None
+    };
+
+    component.comp_struct_layout = ComponentStructLayout {
+        parent_retention_count,
+        parent_retention_field_base,
+        self_handle_field_idx,
+        tree_root_field_idx,
+    };
+}
+
+/// Phase 0.3g: synthesize the internal constructor block on
+/// `LirResource`. The synthesized block is the full body of the
+/// internal-ctor wasm function:
+///   1. allocate the component's `$Comp_<i>` GC struct → self_ref
+///   2. tree-root field init (when component has a body tree)
+///   3. `CallBlock` into the user constructor_block, passing the
+///      freshly-allocated self_ref as the wasm self-ref param
+///   4. memory-slot zero-init
+///
+/// Allocates a new Temp slot for the self ref with valtype
+/// `RefNullForComponent(def_id)`; codegen sets `current_self_local`
+/// to its wasm-local index so InitSignal/SignalRead/etc. emitted
+/// inside the block resolve self correctly. Codegen still emits the
+/// trailing `local.get self_ref; return` because that's the
+/// function's return value, not an op in the body.
+pub(crate) fn synth_internal_constructor_block(ctx: &CompilerContext, component: &mut LirResource) {
+    use crate::lir::block::{LirBlock, LirSlotInfo, LirSlotKind, LirSlotValType, LirTypeRef};
+
+    // Skip components with no real body (e.g. the module carrier).
+    if component.def_id == crate::ids::DefId::INVALID {
+        return;
+    }
+    let ctor_block_id = component.constructor_block;
+    if !component.blocks.iter().any(|b| b.id == ctor_block_id) {
+        return;
+    }
+
+    // 1. Allocate the self_ref Temp slot. `declare_function_locals`
+    //    declares locals in local_idx-sorted order; assign the next
+    //    free local_idx so the order stays contiguous.
+    let next_local_idx: u32 = component
+        .slots
+        .iter()
+        .filter_map(|s| match s.kind {
+            LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let self_ref_slot = LirSlotId::resource(component.slots.len() as u32);
+    component.slots.push(LirSlotInfo {
+        id: self_ref_slot,
+        kind: LirSlotKind::Temp {
+            local_idx: next_local_idx,
+        },
+        val_ty: LirSlotValType::RefNullForComponent(component.def_id),
+        name: None,
+    });
+
+    let mut ops: Vec<LirOp> = Vec::new();
+
+    // 2. Allocate $Comp struct into self_ref.
+    ops.push(LirOp::StructNewDefaultSym {
+        ty_ref: LirTypeRef::ComponentStruct,
+        result: self_ref_slot,
+    });
+
+    // 3. Tree-root field init (only when component has a body tree).
+    if let Some(tree_root_field_idx) = component.comp_struct_layout.tree_root_field_idx {
+        let root_idx = component.tree_shape.root_idx as usize;
+        if let Some(root_boundary) = component.tree_shape.boundaries.get(root_idx) {
+            ops.push(LirOp::StructSetNewDefault {
+                struct_ty: LirTypeRef::ComponentStruct,
+                field: tree_root_field_idx,
+                rec: self_ref_slot,
+                field_ty: LirTypeRef::TreeBoundary(root_boundary.id),
+            });
+        }
+    }
+
+    // 4. Phase 1.1c-g: call into the user constructor_block as a
+    //    real wasm function, forwarding the freshly-allocated
+    //    self_ref. The user ctor's wasm sig is
+    //    `[SelfRef, LegacyI32] -> ()` (per `ui_block_calling_conv`'s
+    //    fallback for blocks with no `params` / `boundary_params`);
+    //    we therefore push self_ref + a dummy parent i32 as args.
+    //    No clone — the user ctor body runs against its own wasm
+    //    locals, so any future inline of `InitSignal` →
+    //    `StructSetSym{rec: WasmParam{idx:0}}` resolves to the same
+    //    self-ref the caller passed.
+    let dummy_parent_local_idx: u32 = component
+        .slots
+        .iter()
+        .filter_map(|s| match s.kind {
+            LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let dummy_parent_slot = LirSlotId::resource(component.slots.len() as u32);
+    component.slots.push(LirSlotInfo {
+        id: dummy_parent_slot,
+        kind: LirSlotKind::Temp {
+            local_idx: dummy_parent_local_idx,
+        },
+        val_ty: LirSlotValType::I32,
+        name: Some("internal_ctor_dummy_parent".to_string()),
+    });
+    ops.push(LirOp::CallBlock {
+        block: ctor_block_id,
+        args: vec![self_ref_slot, dummy_parent_slot],
+        result: None,
+    });
+
+    // 5. Memory-slot zero-init.
+    for slot in &component.slots {
+        if let LirSlotKind::Memory { offset, .. } = slot.kind {
+            ops.push(LirOp::ZeroI32Mem { addr: offset });
+        }
+    }
+
+    // Allocate a module-wide unique BlockId.
+    let new_block_id = ctx.alloc_block_id();
+    let mut new_block = LirBlock::new(new_block_id);
+    new_block.ops = ops;
+    // Phase 0.3j: self-ref slot is the just-allocated Temp slot that the
+    // first `StructNewDefaultSym` op writes into; return_slot makes the
+    // function emit `local.get <self_ref>` before `End`.
+    new_block.implicit_self = Some(self_ref_slot);
+    new_block.return_slot = Some(self_ref_slot);
+    // Phase 1.1c-g: the user constructor_block now owns the
+    // `InitSignal`/`InitSignalDefault` ops (no clone), so the
+    // composite-signal flat-slot scratch counts move there. The
+    // synth block only does GC struct.new + (optional) tree-root
+    // init + CallBlock + memory zero-init — none of which need
+    // flat-slot scratch.
+    new_block.max_flat_scratch_counts = (0, 0, 0, 0);
+    component.blocks.push(new_block);
+    component.internal_constructor_block = Some(new_block_id);
+    component.internal_constructor_self_ref_slot = Some(self_ref_slot);
+
+    // Stamp the ctor scratch onto the user constructor_block, which
+    // now executes its own InitSignal/InitSignalDefault ops as a
+    // standalone wasm function.
+    let ctor_scratch = component.internal_lifecycle_scratch.ctor;
+    if let Some(user_ctor) = component.blocks.iter_mut().find(|b| b.id == ctor_block_id) {
+        user_ctor.max_flat_scratch_counts = ctor_scratch;
+    }
+}
+
+/// Phase 0.3h: synthesize the internal unmount block. Codegen
+/// previously walked `component.slots` inline and emitted a detach
+/// sequence (`load DOM handle; call $remove`) per detachable slot;
+/// this pass produces the same sequence as `LirOp`s in a new
+/// `LirBlock`. The detach is expressed entirely via existing neutral
+/// primitives:
+///   - memory slot: `I32Const(offset)` → addr slot,
+///     `LoadI32Addr` → handle slot, `PushSlot`, `CallFunction(dom.remove)`
+///   - boundary field (DomHandle role + reachable from tree root):
+///     `BoundaryRefFromSelf` → ref slot, `BoundaryStructGet` → handle
+///     slot, `PushSlot`, `CallFunction(dom.remove)`
+pub(crate) fn synth_internal_unmount_block(ctx: &CompilerContext, component: &mut LirResource) {
+    use crate::lir::block::{LirBlock, LirSlotInfo, LirSlotKind, LirSlotValType, TreeBoundaryKind};
+
+    if component.def_id == crate::ids::DefId::INVALID {
+        return;
+    }
+
+    let remove_fn = ctx.dom_imports().remove;
+    let mut ops: Vec<LirOp> = Vec::new();
+
+    // Helper: allocate a fresh Temp slot of `val_ty`, assigning
+    // local_idx past the current max. Mirrors `synth_internal_constructor_block`.
+    fn alloc_slot(component: &mut LirResource, val_ty: LirSlotValType) -> LirSlotId {
+        let next_local_idx: u32 = component
+            .slots
+            .iter()
+            .filter_map(|s| match s.kind {
+                LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let id = LirSlotId::resource(component.slots.len() as u32);
+        component.slots.push(LirSlotInfo {
+            id,
+            kind: LirSlotKind::Temp {
+                local_idx: next_local_idx,
+            },
+            val_ty,
+            name: None,
+        });
+        id
+    }
+
+    // Walk slots. For each Memory slot, emit the detach sequence.
+    let mem_slots: Vec<u32> = component
+        .slots
+        .iter()
+        .filter_map(|s| match s.kind {
+            LirSlotKind::Memory { offset, .. } => Some(offset),
+            _ => None,
+        })
+        .collect();
+    for offset in mem_slots {
+        let addr_slot = alloc_slot(component, LirSlotValType::I32);
+        let handle_slot = alloc_slot(component, LirSlotValType::I32);
+        ops.push(LirOp::I32Const {
+            value: offset as i32,
+            result: addr_slot,
+        });
+        ops.push(LirOp::LoadI32Addr {
+            addr: addr_slot,
+            result: handle_slot,
+        });
+        ops.push(LirOp::PushSlot { slot: handle_slot });
+        ops.push(LirOp::CallFunction {
+            func: remove_fn,
+            args: Vec::new(),
+            result: None,
+        });
+    }
+
+    // BoundaryField slots: detachable iff role == DomHandle AND
+    // reachable from tree root (skip ForIterBody fields and orphans).
+    let boundary_detaches: Vec<(crate::ids::TreeBoundaryId, u32)> = component
+        .slots
+        .iter()
+        .filter_map(|s| match s.kind {
+            LirSlotKind::BoundaryField {
+                boundary_id,
+                field_idx,
+            } => Some((boundary_id, field_idx)),
+            _ => None,
+        })
+        .filter(|(boundary_id, field_idx)| {
+            // Role == DomHandle?
+            let is_dom_handle = component
+                .struct_types
+                .get(boundary_id.index())
+                .and_then(|s| s.fields.get(*field_idx as usize))
+                .map(|f| matches!(f.role, crate::lir::struct_types::LirFieldRole::DomHandle))
+                .unwrap_or(false);
+            if !is_dom_handle {
+                return false;
+            }
+            // Reachable from tree root (walk parent chain until Root).
+            let mut cur = *boundary_id;
+            loop {
+                let kind = component
+                    .struct_types
+                    .get(cur.index())
+                    .map(|s| s.kind.clone());
+                if matches!(kind, Some(TreeBoundaryKind::Root)) {
+                    return true;
+                }
+                let parent = component
+                    .struct_types
+                    .get(cur.index())
+                    .and_then(|s| s.parent);
+                match parent {
+                    Some(p) => cur = crate::ids::TreeBoundaryId(p.parent.0),
+                    None => return false,
+                }
+            }
+        })
+        .collect();
+    for (boundary_id, field_idx) in boundary_detaches {
+        let ref_slot = alloc_slot(component, LirSlotValType::RefNullForBoundary(boundary_id));
+        let handle_slot = alloc_slot(component, LirSlotValType::I32);
+        ops.push(LirOp::BoundaryRefFromSelf {
+            boundary_id,
+            result: ref_slot,
+        });
+        ops.push(LirOp::BoundaryStructGet {
+            boundary_id,
+            field_idx,
+            rec: ref_slot,
+            result: handle_slot,
+        });
+        ops.push(LirOp::PushSlot { slot: handle_slot });
+        ops.push(LirOp::CallFunction {
+            func: remove_fn,
+            args: Vec::new(),
+            result: None,
+        });
+    }
+
+    // Phase 0.3j: allocate a WasmParam{idx:0} slot holding the typed
+    // self ref. `slot_local` resolves it to wasm local 0 directly.
+    let self_ref_slot = LirSlotId::resource(component.slots.len() as u32);
+    component.slots.push(LirSlotInfo {
+        id: self_ref_slot,
+        kind: LirSlotKind::WasmParam { idx: 0 },
+        val_ty: LirSlotValType::RefNullForComponent(component.def_id),
+        name: None,
+    });
+
+    let new_block_id = ctx.alloc_block_id();
+    let mut new_block = LirBlock::new(new_block_id);
+    new_block.ops = ops;
+    new_block.implicit_self = Some(self_ref_slot);
+    // unmount has no scratch + no return value.
+    component.blocks.push(new_block);
+    component.internal_unmount_block = Some(new_block_id);
+}
+
+/// Phase 0.3m: synthesize the three host-facing export-wrapper blocks
+/// (constructor / mount / unmount) for exported components. Codegen
+/// walks these via `generate_block_function` instead of inlining the
+/// equivalent wasm in `lifecycle.rs`. Non-exported components retain
+/// the inline fallback path.
+pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &mut LirResource) {
+    use crate::lir::block::{
+        LirBlock, LirGlobalRef, LirSlotInfo, LirSlotKind, LirSlotValType, LirTypeRef,
+    };
+
+    if !component.is_export {
+        return;
+    }
+    if component.def_id == crate::ids::DefId::INVALID {
+        return;
+    }
+
+    // Helper: next local_idx past current max Temp.
+    fn next_local_idx(component: &LirResource) -> u32 {
+        component
+            .slots
+            .iter()
+            .filter_map(|s| match s.kind {
+                LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+    fn alloc_temp(component: &mut LirResource, val_ty: LirSlotValType, name: &str) -> LirSlotId {
+        let local_idx = next_local_idx(component);
+        let id = LirSlotId::resource(component.slots.len() as u32);
+        component.slots.push(LirSlotInfo {
+            id,
+            kind: LirSlotKind::Temp { local_idx },
+            val_ty,
+            name: Some(name.to_string()),
+        });
+        id
+    }
+    let next_block_id = |_component: &LirResource| -> BlockId { ctx.alloc_block_id() };
+
+    let def_id = component.def_id;
+    let self_handle_field = component.comp_struct_layout.self_handle_field_idx;
+    let internal_ctor = component
+        .internal_constructor_block
+        .expect("synth_export: internal_constructor_block must be set");
+    let internal_unmount = component
+        .internal_unmount_block
+        .expect("synth_export: internal_unmount_block must be set");
+    let mount_block = component.mount_block;
+    let children_root = component.children_root_slot;
+
+    // === 1. Export constructor block ===
+    // Signature: () -> i32 (host handle).
+    {
+        let self_ref = alloc_temp(
+            component,
+            LirSlotValType::RefNullForComponent(def_id),
+            "export_ctor_self_ref",
+        );
+        let handle = alloc_temp(component, LirSlotValType::I32, "export_ctor_handle");
+        let idx_scratch = alloc_temp(component, LirSlotValType::I32, "export_ctor_idx_scratch");
+        let arr_scratch = alloc_temp(
+            component,
+            LirSlotValType::RefNullForSharedHandleArray,
+            "export_ctor_arr_scratch",
+        );
+        let host_handle = alloc_temp(component, LirSlotValType::I32, "export_ctor_host_handle");
+
+        let ops = vec![
+            LirOp::CallBlock {
+                block: internal_ctor,
+                args: Vec::new(),
+                result: Some(self_ref),
+            },
+            LirOp::RegistryAlloc {
+                component: def_id,
+                ref_slot: self_ref,
+                idx_scratch,
+                arr_scratch,
+                result_handle: handle,
+            },
+            LirOp::CallResourceNew {
+                component: def_id,
+                handle,
+                result: host_handle,
+            },
+            LirOp::StructSetSym {
+                ty_ref: LirTypeRef::ComponentStruct,
+                field: self_handle_field,
+                rec: self_ref,
+                value: host_handle,
+            },
+        ];
+
+        let block_id = next_block_id(component);
+        let mut block = LirBlock::new(block_id);
+        block.ops = ops;
+        block.params = Vec::new();
+        block.implicit_self = None;
+        block.return_slot = Some(host_handle);
+        component.blocks.push(block);
+        component.export_constructor_block = Some(block_id);
+    }
+
+    // === 2. Export mount block ===
+    // Signature: (handle: i32, root: i32) -> i32|().
+    {
+        let handle_param_idx = LirSlotId::resource(component.slots.len() as u32);
+        component.slots.push(LirSlotInfo {
+            id: handle_param_idx,
+            kind: LirSlotKind::WasmParam { idx: 0 },
+            val_ty: LirSlotValType::I32,
+            name: Some("export_mount_handle".to_string()),
+        });
+        let root_param_idx = LirSlotId::resource(component.slots.len() as u32);
+        component.slots.push(LirSlotInfo {
+            id: root_param_idx,
+            kind: LirSlotKind::WasmParam { idx: 1 },
+            val_ty: LirSlotValType::I32,
+            name: Some("export_mount_root".to_string()),
+        });
+        let self_ref = alloc_temp(
+            component,
+            LirSlotValType::RefNullForComponent(def_id),
+            "export_mount_self_ref",
+        );
+        // Container components: allocate a Temp i32 slot to receive
+        // the children-root id from the internal mount call.
+        let result_slot = if children_root.is_some() {
+            Some(alloc_temp(
+                component,
+                LirSlotValType::I32,
+                "export_mount_result",
+            ))
+        } else {
+            None
+        };
+
+        let mut ops = vec![
+            LirOp::RegistryLookupToSelfRef {
+                component: def_id,
+                handle: handle_param_idx,
+                result: self_ref,
+            },
+            LirOp::GlobalSet {
+                gref: LirGlobalRef::CurrentHandle(def_id),
+                value: handle_param_idx,
+            },
+            LirOp::CallBlock {
+                block: mount_block,
+                args: vec![self_ref, root_param_idx],
+                result: result_slot,
+            },
+        ];
+        // Phase 0.3o: avoid an unused-variable warning when there's no
+        // result slot but we still want the explicit form.
+        let _ = &mut ops;
+
+        let block_id = next_block_id(component);
+        let mut block = LirBlock::new(block_id);
+        block.ops = ops;
+        block.params = vec![handle_param_idx, root_param_idx];
+        block.implicit_self = None;
+        block.return_slot = result_slot;
+        component.blocks.push(block);
+        component.export_mount_block = Some(block_id);
+    }
+
+    // === 3. Export unmount block ===
+    // Signature: (handle: i32) -> ().
+    {
+        let handle_param_idx = LirSlotId::resource(component.slots.len() as u32);
+        component.slots.push(LirSlotInfo {
+            id: handle_param_idx,
+            kind: LirSlotKind::WasmParam { idx: 0 },
+            val_ty: LirSlotValType::I32,
+            name: Some("export_unmount_handle".to_string()),
+        });
+        let self_ref = alloc_temp(
+            component,
+            LirSlotValType::RefNullForComponent(def_id),
+            "export_unmount_self_ref",
+        );
+
+        let ops = vec![
+            LirOp::RegistryLookupToSelfRef {
+                component: def_id,
+                handle: handle_param_idx,
+                result: self_ref,
+            },
+            LirOp::CallBlock {
+                block: internal_unmount,
+                args: vec![self_ref],
+                result: None,
+            },
+        ];
+
+        let block_id = next_block_id(component);
+        let mut block = LirBlock::new(block_id);
+        block.ops = ops;
+        block.params = vec![handle_param_idx];
+        block.implicit_self = None;
+        block.return_slot = None;
+        component.blocks.push(block);
+        component.export_unmount_block = Some(block_id);
+    }
+}
+
+/// Phase 1.1c-l (#97): writer-side gate predicate. Returns `Some(observer_list)`
+/// when every component that *could* observe `signal_def` has already been
+/// lowered AND (either has a registered fanout block for this signal OR
+/// has no qualifying observers). The returned list contains only the
+/// components with a registered fanout BlockId — those whose update
+/// blocks the writer must call.
+///
+/// Returns `None` when:
+///   * the signal is not a gc-only scalar global (other shapes still
+///     route through the legacy `LirOp::TriggerEffects` path);
+///   * `value` is `None` (default-init writes aren't supported in Path B);
+///   * any component in `ctx.defs.components()` has NOT yet been lowered
+///     (no `component_lifecycle_blocks` entry), in which case we can't
+///     determine whether it observes the signal — bail to legacy.
+fn collect_global_fanout_blocks_if_ready(
+    ctx: &CompilerContext,
+    signal_def: DefId,
+    signal_ty: Ty,
+    value: Option<ExprId>,
+) -> Option<Vec<(DefId, BlockId)>> {
+    if value.is_none() {
+        return None;
+    }
+    if !is_inlineable_global(ctx, signal_def, signal_ty) {
+        return None;
+    }
+    let mut blocks: Vec<(DefId, BlockId)> = Vec::new();
+    for comp_def in ctx.defs.components() {
+        // If this component hasn't finished lowering yet, we can't
+        // tell whether it observes the signal — bail.
+        if ctx.lookup_component_lifecycle_blocks(comp_def).is_none() {
+            return None;
+        }
+        if let Some(bid) = ctx.lookup_global_fanout_block(comp_def, signal_def) {
+            blocks.push((comp_def, bid));
+        }
+    }
+    Some(blocks)
+}
+
+/// Phase 1.1c-l (#97): synthesize per-(observing-component, global-signal)
+/// fanout LirBlocks. One block is registered for each `(this component,
+/// global_signal)` pair where:
+///   * the signal is a scalar `gc-only` global (i32/i64/f32/f64);
+///   * every effect of this component that observes the signal has
+///     "simple shape" (empty `params` AND empty `boundary_param_slots`).
+/// Otherwise the pair is skipped — the writer side will fall back to
+/// emitting `LirOp::TriggerEffects` (legacy fanout helper).
+///
+/// The synthesized block walks this component's registry array (same
+/// shape as `generate_global_fanout_for` in codegen) and calls each
+/// observing effect's update_block with `(inst, dummy_parent)`.
+///
+/// Mirror of `synth_internal_constructor_block`'s per-component
+/// invocation: runs from `lower_component` after the user-effect blocks
+/// have been finalized so `effects` / `effects_by_signal` are stable.
+pub(crate) fn synth_global_fanout_blocks(
+    ctx: &CompilerContext,
+    component: &mut LirResource,
+) {
+    if component.def_id == crate::ids::DefId::INVALID {
+        return;
+    }
+
+    // Snapshot the observed global-signal list (need stable iteration
+    // order — borrow `component.effects_by_signal` only here).
+    let mut observed_globals: Vec<(DefId, Vec<u32>)> = component
+        .effects_by_signal
+        .iter()
+        .filter(|(sig_def, _)| ctx.defs.owning_global_block(**sig_def).is_some())
+        .map(|(sig_def, effect_ids)| (*sig_def, effect_ids.clone()))
+        .collect();
+    observed_globals.sort_by_key(|(sig, _)| sig.0);
+
+    for (signal_def, effect_ids) in observed_globals {
+        // Gate 1: signal must be gc-only scalar (i32/i64/f32/f64).
+        let signal_ty = match ctx.defs.type_of(signal_def) {
+            Some(t) => t,
+            None => continue,
+        };
+        if !is_inlineable_global(ctx, signal_def, signal_ty) {
+            continue;
+        }
+
+        // Gate 2: every observing effect's update block params must be
+        // all-i32 (each slot has val_ty == I32). i32 params become
+        // `i32.const 0` placeholders in the fanout call — mirrors what
+        // the legacy `generate_global_fanout_for` does. Non-i32 params
+        // (typed refs, f32, etc.) require real values and would need a
+        // separate resolution path; bail.
+        let mut all_simple = true;
+        for &eid in &effect_ids {
+            let effect = match component.effects.iter().find(|e| e.id == eid) {
+                Some(e) => e,
+                None => {
+                    all_simple = false;
+                    break;
+                }
+            };
+            let update_block = component
+                .blocks
+                .iter()
+                .find(|b| b.id == effect.update_block);
+            let simple = match update_block {
+                Some(b) => b.params.iter().all(|slot_id| {
+                    matches!(
+                        component.slots[slot_id.legacy_u32() as usize].val_ty,
+                        crate::lir::block::LirSlotValType::I32
+                    )
+                }),
+                None => false,
+            };
+            if !simple {
+                all_simple = false;
+                break;
+            }
+        }
+        if !all_simple {
+            continue;
+        }
+
+        // All gates passed — synthesize the fanout block. Allocate the
+        // typed scratch slots and emit the loop.
+        let fanout_block_id = ctx.alloc_block_id();
+        synth_one_global_fanout_block(
+            ctx,
+            component,
+            signal_def,
+            &effect_ids,
+            fanout_block_id,
+        );
+        ctx.register_global_fanout_block(component.def_id, signal_def, fanout_block_id);
+    }
+}
+
+/// Predicate: signal is owned by a global block AND its type is a
+/// single-slot scalar (bool / sN / uN / char → i32; sN/uN 64 → i64;
+/// f32; f64). Excludes list, string, record, tuple, option/result,
+/// variant — those need the legacy memory/pointer paths.
+fn is_gc_only_scalar_global(
+    ctx: &CompilerContext,
+    signal_def: DefId,
+    signal_ty: Ty,
+) -> bool {
+    if ctx.defs.owning_global_block(signal_def).is_none() {
+        return false;
+    }
+    let kind = ctx.ty_kind(signal_ty);
+    matches!(
+        kind,
+        InternedTyKind::Bool
+            | InternedTyKind::S8
+            | InternedTyKind::S16
+            | InternedTyKind::S32
+            | InternedTyKind::U8
+            | InternedTyKind::U16
+            | InternedTyKind::U32
+            | InternedTyKind::S64
+            | InternedTyKind::U64
+            | InternedTyKind::Char
+            | InternedTyKind::F32
+            | InternedTyKind::F64
+    )
+}
+
+/// Phase 1.1c-102: predicate widening — accepts any non-unit-typed
+/// global property. Path A (gc-only scalar) and Path B's pointer-repr
+/// branch still apply; the new shapes (string/list fat-ptr, typed-array
+/// list<scalar>, option/result/variant single-ref) route through Path
+/// B's `EvalExprToSlots` + `StructSetSym` loop against
+/// `LirTypeRef::GlobalsStruct(block_def)`, which is signal-type-agnostic
+/// (it just writes N fields starting at the property's field_start).
+fn is_inlineable_global(
+    ctx: &CompilerContext,
+    signal_def: DefId,
+    signal_ty: Ty,
+) -> bool {
+    if ctx.defs.owning_global_block(signal_def).is_none() {
+        return false;
+    }
+    crate::lir::signal_layout::slot_count_for_signal_ty(ctx, signal_ty) > 0
+}
+
+/// Emit the synth-fanout block body. Mirrors
+/// `generate_global_fanout_for`'s WASM shape but uses LIR ops:
+///   idx = 0
+///   if registry is null → return
+///   loop:
+///     if idx >= registry_len → break
+///     entry = registry[idx]
+///     if entry is not null:
+///       inst = entry.inst (anyref → ref.cast to typed component)
+///       if inst is not null:
+///         for each effect: CallBlock(update, [inst, dummy_parent])
+///     idx += 1
+fn synth_one_global_fanout_block(
+    ctx: &CompilerContext,
+    component: &mut LirResource,
+    signal_def: DefId,
+    effect_ids: &[u32],
+    fanout_block_id: BlockId,
+) {
+    use crate::lir::block::{
+        LirBlock, LirGlobalRef, LirOp, LirSlotInfo, LirSlotKind, LirSlotValType, LirTypeRef,
+    };
+
+    let comp_def = component.def_id;
+
+    // Slot allocator local to this synth — appends fresh Temp slots
+    // to `component.slots` with contiguous local_idx (after the
+    // current max).
+    fn alloc_slot(
+        component: &mut LirResource,
+        val_ty: LirSlotValType,
+        name: Option<String>,
+    ) -> LirSlotId {
+        let next_local_idx: u32 = component
+            .slots
+            .iter()
+            .filter_map(|s| match s.kind {
+                LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let id = LirSlotId::resource(component.slots.len() as u32);
+        component.slots.push(LirSlotInfo {
+            id,
+            kind: LirSlotKind::Temp {
+                local_idx: next_local_idx,
+            },
+            val_ty,
+            name,
+        });
+        id
+    }
+
+    // Wasm param 0: dummy i32 parent (ignored, here for sig parity
+    // with `block_1param`). The block has `implicit_self: None` and
+    // no `params` vec — it's called as `(i32) -> ()` from the writer.
+    let dummy_parent =
+        alloc_slot(component, LirSlotValType::I32, Some(format!("fanout_dummy_parent_s{}", signal_def.0)));
+
+    // Loop scratch + cached values.
+    let idx_slot = alloc_slot(
+        component,
+        LirSlotValType::I32,
+        Some(format!("fanout_idx_s{}", signal_def.0)),
+    );
+    let registry_slot = alloc_slot(
+        component,
+        LirSlotValType::RefNullForSharedHandleArray,
+        Some(format!("fanout_registry_s{}", signal_def.0)),
+    );
+    let registry_isnull = alloc_slot(
+        component,
+        LirSlotValType::I32,
+        Some(format!("fanout_reg_isnull_s{}", signal_def.0)),
+    );
+    let len_slot = alloc_slot(
+        component,
+        LirSlotValType::I32,
+        Some(format!("fanout_len_s{}", signal_def.0)),
+    );
+    let break_cond = alloc_slot(
+        component,
+        LirSlotValType::I32,
+        Some(format!("fanout_break_s{}", signal_def.0)),
+    );
+    let entry_slot = alloc_slot(
+        component,
+        LirSlotValType::RefNullForSharedHandle,
+        Some(format!("fanout_entry_s{}", signal_def.0)),
+    );
+    let entry_isnull = alloc_slot(
+        component,
+        LirSlotValType::I32,
+        Some(format!("fanout_entry_isnull_s{}", signal_def.0)),
+    );
+    // Task #98: `$handle.$inst` is anyref; load it here before
+    // `ref.cast` narrows to the typed component ref.
+    let inst_anyref = alloc_slot(
+        component,
+        LirSlotValType::AnyRef,
+        Some(format!("fanout_inst_anyref_s{}", signal_def.0)),
+    );
+    let inst_typed = alloc_slot(
+        component,
+        LirSlotValType::RefNullForComponent(comp_def),
+        Some(format!("fanout_inst_s{}", signal_def.0)),
+    );
+
+    // Outer ops: idx = 0; load registry; null-guard.
+    let mut outer: Vec<LirOp> = Vec::new();
+    outer.push(LirOp::I32Const {
+        value: 0,
+        result: idx_slot,
+    });
+    outer.push(LirOp::GlobalGet {
+        gref: LirGlobalRef::Registry(comp_def),
+        result: registry_slot,
+    });
+    outer.push(LirOp::RefIsNull {
+        from: registry_slot,
+        result: registry_isnull,
+    });
+    // If registry is null → early return.
+    outer.push(LirOp::If {
+        cond: registry_isnull,
+        then_ops: vec![LirOp::Return],
+        else_ops: Vec::new(),
+        name: Some(format!("fanout_s{}_reg_null_guard", signal_def.0)),
+    });
+
+    // Inner: if entry is not null, load `entry.$inst` (anyref), then
+    // cast to the typed component ref. The $handle struct's `$inst`
+    // field is at index 0 (see `emit_shared_handle_types`).
+    let mut inner_if_entry: Vec<LirOp> = Vec::new();
+    inner_if_entry.push(LirOp::StructGetSym {
+        ty_ref: LirTypeRef::SharedHandleStruct,
+        field: 0,
+        rec: entry_slot,
+        result: inst_anyref,
+    });
+    inner_if_entry.push(LirOp::RefCast {
+        from: inst_anyref,
+        ty_ref: LirTypeRef::OtherComponentStruct(comp_def),
+        result: inst_typed,
+    });
+
+    // Task #98: collect all boundary ids referenced by observing effects'
+    // boundary_param_slots, in deterministic order. We'll resolve each by
+    // walking the chain `inst_typed` → tree_root → ... → boundary, allocate
+    // a temp slot for each, and emit `BindBoundaryLocal` so the subsequent
+    // `CallBlock`'s auto-resolve picks up the typed ref via `local.get`.
+    let mut needed_boundaries: Vec<TreeBoundaryId> = Vec::new();
+    for &eid in effect_ids {
+        let effect = match component.effects.iter().find(|e| e.id == eid) {
+            Some(e) => e,
+            None => continue,
+        };
+        let update_block = component
+            .blocks
+            .iter()
+            .find(|b| b.id == effect.update_block);
+        if let Some(b) = update_block {
+            let ids: Vec<TreeBoundaryId> =
+                b.boundary_param_ids_from_slots(&component.slots).collect();
+            for b_id in ids {
+                if !needed_boundaries.contains(&b_id) {
+                    needed_boundaries.push(b_id);
+                }
+            }
+        }
+    }
+
+    // Resolve each boundary. For root we read `inst_typed.tree_root_field`.
+    // For non-root, walk the parent-link chain to root, then descend.
+    let tree_root_field_idx = component
+        .comp_struct_layout
+        .tree_root_field_idx
+        .unwrap_or_else(|| {
+            panic!(
+                "synth_one_global_fanout_block: component {:?} has no tree_root_field_idx but \
+                 its effect needs boundary refs — comp without a body tree cannot supply \
+                 boundary params",
+                comp_def
+            )
+        });
+
+    // Cache: boundary_id -> slot holding its ref.
+    let mut boundary_slot_for: std::collections::HashMap<TreeBoundaryId, LirSlotId> =
+        std::collections::HashMap::new();
+
+    // Iteratively resolve. For each needed boundary, recursively make sure
+    // its parent is resolved first (or fetch from root directly).
+    fn resolve_chain(
+        b_id: TreeBoundaryId,
+        component: &mut LirResource,
+        comp_def: DefId,
+        signal_def: DefId,
+        inst_typed: LirSlotId,
+        tree_root_field_idx: u32,
+        boundary_slot_for: &mut std::collections::HashMap<TreeBoundaryId, LirSlotId>,
+        ops_out: &mut Vec<crate::lir::block::LirOp>,
+    ) -> LirSlotId {
+        use crate::lir::block::{LirOp, LirSlotInfo, LirSlotKind, LirSlotValType, LirTypeRef};
+        if let Some(&s) = boundary_slot_for.get(&b_id) {
+            return s;
+        }
+
+        // Determine parent link from the struct_types registry.
+        let parent_link = component
+            .struct_types
+            .get(b_id.index())
+            .and_then(|s| s.parent);
+
+        // Allocate a slot for this boundary's typed ref.
+        fn alloc_slot_local(
+            component: &mut LirResource,
+            val_ty: LirSlotValType,
+            name: Option<String>,
+        ) -> LirSlotId {
+            let next_local_idx: u32 = component
+                .slots
+                .iter()
+                .filter_map(|s| match s.kind {
+                    LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            let id = LirSlotId::resource(component.slots.len() as u32);
+            component.slots.push(LirSlotInfo {
+                id,
+                kind: LirSlotKind::Temp { local_idx: next_local_idx },
+                val_ty,
+                name,
+            });
+            id
+        }
+
+        let dest = alloc_slot_local(
+            component,
+            LirSlotValType::RefNullForBoundary(b_id),
+            Some(format!("fanout_b{}_s{}", b_id.0, signal_def.0)),
+        );
+
+        match parent_link {
+            None => {
+                // Root boundary — read inst_typed.tree_root_field.
+                ops_out.push(LirOp::StructGetSym {
+                    ty_ref: LirTypeRef::OtherComponentStruct(comp_def),
+                    field: tree_root_field_idx,
+                    rec: inst_typed,
+                    result: dest,
+                });
+            }
+            Some(link) => {
+                // Recursively resolve parent.
+                let parent_b_id = TreeBoundaryId(link.parent.0);
+                let parent_slot = resolve_chain(
+                    parent_b_id,
+                    component,
+                    comp_def,
+                    signal_def,
+                    inst_typed,
+                    tree_root_field_idx,
+                    boundary_slot_for,
+                    ops_out,
+                );
+                // Read this boundary's ref off the parent's SubBoundary field.
+                ops_out.push(LirOp::StructGetSym {
+                    ty_ref: LirTypeRef::TreeBoundary(parent_b_id),
+                    field: link.field_idx,
+                    rec: parent_slot,
+                    result: dest,
+                });
+            }
+        }
+        // BindBoundaryLocal so subsequent CallBlock's auto-resolve via
+        // `current_boundary_locals[b_id]` returns `local.get <dest_local>`.
+        ops_out.push(LirOp::BindBoundaryLocal {
+            boundary_id: b_id,
+            slot: dest,
+        });
+        boundary_slot_for.insert(b_id, dest);
+        dest
+    }
+
+    for b_id in &needed_boundaries {
+        resolve_chain(
+            *b_id,
+            component,
+            comp_def,
+            signal_def,
+            inst_typed,
+            tree_root_field_idx,
+            &mut boundary_slot_for,
+            &mut inner_if_entry,
+        );
+    }
+
+    // Dispatch each observing effect. The wasm signature of an effect
+    // update block depends on its boundary_param_slots:
+    //   * empty boundary_param_slots (legacy default): sig is
+    //     `(self_ref, i32)` — pass `[inst_typed, dummy_parent]`.
+    //   * non-empty boundary_param_slots: sig is `(self_ref, b1, b2, ...)`
+    //     — pass `[inst_typed]`; CallBlock's intra-comp auto-resolve
+    //     pushes each boundary ref via `current_boundary_locals` which
+    //     our `BindBoundaryLocal` ops above just populated.
+    for &eid in effect_ids {
+        let Some(effect) = component.effects.iter().find(|e| e.id == eid) else {
+            continue;
+        };
+        let callee_block = component
+            .blocks
+            .iter()
+            .find(|b| b.id == effect.update_block);
+        // ABI per `block_fn.rs`:
+        //   * if !params.is_empty() — wasm sig is
+        //     `(self_ref, p0, ..., pN, b0, ..., bM)`. We push
+        //     `[inst_typed, dummy_i32, dummy_i32, ...]`; boundary refs
+        //     auto-pushed by CallBlock's intra-comp resolve.
+        //   * elif boundary_param_slots empty (legacy default) — sig is
+        //     `(self_ref, i32)`. Push `[inst_typed, dummy_parent]`.
+        //   * elif boundary_param_slots non-empty (params empty case) —
+        //     sig is `(self_ref, b0, ..., bM)`. Push `[inst_typed]`;
+        //     boundary refs auto-pushed.
+        let mut args = vec![inst_typed];
+        if let Some(b) = callee_block {
+            if !b.params.is_empty() {
+                for _ in 0..b.params.len() {
+                    args.push(dummy_parent);
+                }
+            } else if b.boundary_param_slots.is_empty() {
+                args.push(dummy_parent);
+            }
+        } else {
+            args.push(dummy_parent);
+        }
+        inner_if_entry.push(LirOp::CallBlock {
+            block: effect.update_block,
+            args,
+            result: None,
+        });
+    }
+
+    // Loop body: check break, load entry, branch on null, increment.
+    let mut loop_body: Vec<LirOp> = Vec::new();
+    loop_body.push(LirOp::GlobalGet {
+        gref: LirGlobalRef::RegistryLen(comp_def),
+        result: len_slot,
+    });
+    loop_body.push(LirOp::GeU {
+        index: idx_slot,
+        len: len_slot,
+        result: break_cond,
+    });
+    // ArrayGetTyped (registry, idx) → entry. The array element type
+    // is `ref null $handle` (shared), keyed by SharedHandleArray.
+    loop_body.push(LirOp::ArrayGetTyped {
+        ty_ref: LirTypeRef::SharedHandleArray,
+        arr: registry_slot,
+        idx: idx_slot,
+        result: entry_slot,
+    });
+    loop_body.push(LirOp::RefIsNull {
+        from: entry_slot,
+        result: entry_isnull,
+    });
+    // If entry is NOT null → branch (use If with negated arm).
+    // Easiest: use If with then=empty, else=inner_if_entry.
+    loop_body.push(LirOp::If {
+        cond: entry_isnull,
+        then_ops: Vec::new(),
+        else_ops: inner_if_entry,
+        name: Some(format!("fanout_s{}_entry_guard", signal_def.0)),
+    });
+    // Increment idx.
+    loop_body.push(LirOp::IncrSlot { slot: idx_slot });
+
+    outer.push(LirOp::Loop {
+        break_cond,
+        body_ops: loop_body,
+        name: Some(format!("fanout_s{}_loop", signal_def.0)),
+    });
+
+    // Build the block.
+    let mut block = LirBlock::new(fanout_block_id);
+    block.ops = outer;
+    block.params = vec![dummy_parent];
+    block.implicit_self = None;
+    block.return_slot = None;
+    block.max_flat_scratch_counts = (0, 0, 0, 0);
+    component.blocks.push(block);
+
+    ctx.set_block_name(
+        comp_def,
+        fanout_block_id,
+        BlockDebugName {
+            kind: std::borrow::Cow::Owned(format!("global-fanout-s{}", signal_def.0)),
+            signal: None,
+        },
+    );
+}
+
+pub(crate) fn populate_internal_lifecycle_scratch(
+    ctx: &CompilerContext,
+    component: &mut LirResource,
+) {
+    use crate::lir::InternalLifecycleScratch;
+    use crate::types::InternedTyKind;
+
+    let mut layout_ctx = LirLayoutContext::new(ctx);
+    let mut ctor_counts: FlatValTypeCounts = (0, 0, 0, 0);
+    for s in &component.signals {
+        if matches!(ctx.ty_kind(s.ty), InternedTyKind::Func { .. }) {
+            continue;
+        }
+        let c = layout_ctx.canonical_flat_valtype_counts(s.ty);
+        ctor_counts = max_flat_counts(ctor_counts, c);
+    }
+
+    let mount_counts = component
+        .get_block(component.mount_block)
+        .max_flat_scratch_counts;
+
+    component.internal_lifecycle_scratch = InternalLifecycleScratch {
+        ctor: ctor_counts,
+        mount: mount_counts,
+        unmount: (0, 0, 0, 0),
+    };
+}
+
+/// Phase 3.3: MountComponent was deleted. Each mount site now
+/// emits a sequence anchored by `LirOp::RegistryAlloc { component, .. }`
+/// (exactly one per mount expansion). Recognize that as the marker.
 fn count_mount_sites(ops: &[LirOp]) -> u32 {
     let mut n = 0u32;
     for op in ops {
         match op {
-            LirOp::MountComponent { .. } => n += 1,
+            LirOp::RegistryAlloc { .. } => n += 1,
             LirOp::If {
                 then_ops, else_ops, ..
             } => {
@@ -4801,9 +8030,9 @@ fn count_mount_sites(ops: &[LirOp]) -> u32 {
 fn collect_mount_children(ops: &[LirOp], out: &mut Vec<DefId>) {
     for op in ops {
         match op {
-            LirOp::MountComponent { component_def, .. } => {
-                if !out.contains(component_def) {
-                    out.push(*component_def);
+            LirOp::RegistryAlloc { component, .. } => {
+                if !out.contains(component) {
+                    out.push(*component);
                 }
             }
             LirOp::If {
@@ -4914,10 +8143,10 @@ fn compute_flat_scratch_counts(
                 mf32 = mf32.max(c);
                 mf64 = mf64.max(d);
             }
-            LirOp::CreateTextDynamic { expr, .. }
-            | LirOp::SetTextContent { expr, .. }
-            | LirOp::SetAttribute { expr, .. }
+            LirOp::PushExprAsString { expr }
+            | LirOp::PushExprAsAttrValue { expr }
             | LirOp::EvalExpr { expr, .. }
+            | LirOp::EvalExprToSlots { expr, .. }
             | LirOp::DropExpr { expr } => {
                 let e = &exprs[expr.0 as usize];
                 if expr_contains_composite_field_load(e, ctx, layout_ctx) {
@@ -5266,6 +8495,15 @@ fn expr_contains_composite_field_load(
                 || expr_contains_composite_field_load(end, ctx, layout_ctx)
         }
         LirExprKind::Closure { .. } => false,
+        // Phase 5e.5: IsCase / VariantField on a migrated parent are
+        // single-slot ref ops — never produce a multi-slot composite
+        // load. Recurse into base in case the base contains one.
+        LirExprKind::IsCase { base, .. } => {
+            expr_contains_composite_field_load(base, ctx, layout_ctx)
+        }
+        LirExprKind::VariantField { base, .. } => {
+            expr_contains_composite_field_load(base, ctx, layout_ctx)
+        }
         LirExprKind::Local(_)
         | LirExprKind::Def(_)
         | LirExprKind::Literal(_)
@@ -5275,3 +8513,12 @@ fn expr_contains_composite_field_load(
         | LirExprKind::ListStatic { .. } => false,
     }
 }
+
+// Phase 1.1c-d: `rewrite_trigger_effects_to_callblocks` and its helper
+// `rewrite_ops` deleted. Replaced by emit-at-source in
+// `BlockLowering::emit_trigger_for_signal` — every `SignalWrite` inside
+// a deferred handler or derived-update body emits the dispatch
+// `CallBlock`s directly into the resolved per-(boundary, signal)
+// update blocks. Only global-block-owned signals still emit
+// `LirOp::TriggerEffects`, and those flow through the existing
+// global-fanout helper in `signal_emit.rs::generate_global_fanout_for`.

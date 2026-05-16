@@ -113,6 +113,7 @@ fn compile_fixture(source: &str) -> Result<CompileOutputs, String> {
         name,
         version,
         global_defaults: lir_globals,
+        wasm_opt_args: None,
     };
     let wasm = codegen::generate_wasm_module(&module, ctx, &wasm_options)
         .map_err(|e| format!("WASM generation: {}", e))?;

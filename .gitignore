@@ -15,6 +15,13 @@ target
 
 **/*.wasm
 
+# Local experimental flow-graph frontend stack — gitignored until
+# it stabilises and graduates from prototype.
+crates/yel-flow-core/
+crates/yel-flow-lsp/
+crates/floc/
+yel-flow-editor/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

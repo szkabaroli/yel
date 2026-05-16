@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::definitions::{Definitions, Namespace};
 use crate::diagnostic::Diagnostics;
+use crate::dom_imports::DomImports;
 use crate::ids::{BlockId, DefId};
 use crate::interner::{Interner, Name};
 use crate::known::KnownDefinitions;
@@ -26,6 +27,11 @@ pub struct CompilerContext {
     pub defs: Definitions,
     /// Known builtin definitions.
     pub known: KnownDefinitions,
+    /// DefId table for `meshx-ui/dom` WIT imports. `None` until
+    /// `lookup_known_definitions` has run; afterwards always `Some`.
+    /// Phase 2.2 will emit `LirOp::CallFunction` against these DefIds;
+    /// codegen resolves them back to wasm import indices.
+    dom_imports: Option<DomImports>,
     /// Source file management.
     pub source_map: SourceMap,
     /// Accumulated diagnostics.
@@ -34,6 +40,44 @@ pub struct CompilerContext {
     /// structured `BlockDebugName`. Uses RefCell for interior
     /// mutability since blocks are named during lowering.
     block_names: RefCell<HashMap<(DefId, BlockId), BlockDebugName>>,
+    /// Module-wide BlockId counter. Allocated via `alloc_block_id`
+    /// so every block across every `LirResource` in a compilation
+    /// gets a unique id. Lets codegen key `block_func_indices` by
+    /// `BlockId` alone (no component index tuple) and lets
+    /// `LirOp::CallBlock` call across components uniformly.
+    block_id_counter: std::cell::Cell<u32>,
+    /// Per-component lifecycle BlockId table populated as
+    /// `LirResource`s are lowered. Lets the THIR→LIR mount-site
+    /// lowering (`lower_mount_component`) resolve a child
+    /// component's `internal_constructor_block` and `mount_block`
+    /// to global BlockIds without needing the child's full
+    /// `LirResource` in hand. Requires children to be lowered
+    /// before parents (which is the source/typeck-resolved order
+    /// in current pipelines).
+    component_lifecycle_blocks: RefCell<HashMap<DefId, ComponentLifecycleBlocks>>,
+    /// Phase 1.1c-l (#97): per-(observing component, global signal) fanout
+    /// block table. Populated by `synth_global_fanout_blocks` during each
+    /// observing component's lowering. Consulted by
+    /// `inline_signal_write_or_init_from_expr` when deciding whether to
+    /// inline a global signal write — if every component observing this
+    /// signal has registered a fanout block here (and the signal shape is
+    /// gc-only scalar), the writer emits `CallBlock` per observer and
+    /// suppresses the legacy `LirOp::TriggerEffects` emission. Otherwise
+    /// the writer falls through to the legacy path.
+    ///
+    /// Key: `(observing_component_def_id, global_signal_def_id)`. Value:
+    /// module-wide BlockId allocated via `alloc_block_id`.
+    global_fanout_blocks: RefCell<HashMap<(DefId, DefId), BlockId>>,
+}
+
+/// Snapshot of the lifecycle BlockIds for a lowered component,
+/// captured at `lower_component` return time and consulted by
+/// `lower_mount_component` when a parent mounts this component as
+/// a child.
+#[derive(Debug, Clone, Copy)]
+pub struct ComponentLifecycleBlocks {
+    pub internal_constructor_block: Option<BlockId>,
+    pub mount_block: BlockId,
 }
 
 /// Structured debug name for a lowered block. Stored once at lowering
@@ -103,7 +147,11 @@ impl CompilerContext {
             known: KnownDefinitions::new(),
             source_map: SourceMap::new(),
             diagnostics: Diagnostics::new(),
+            dom_imports: None,
             block_names: RefCell::new(HashMap::new()),
+            block_id_counter: std::cell::Cell::new(0),
+            component_lifecycle_blocks: RefCell::new(HashMap::new()),
+            global_fanout_blocks: RefCell::new(HashMap::new()),
         }
     }
 
@@ -116,7 +164,11 @@ impl CompilerContext {
             known: KnownDefinitions::new(),
             source_map: SourceMap::new(),
             diagnostics: Diagnostics::new(),
+            dom_imports: None,
             block_names: RefCell::new(HashMap::new()),
+            block_id_counter: std::cell::Cell::new(0),
+            component_lifecycle_blocks: RefCell::new(HashMap::new()),
+            global_fanout_blocks: RefCell::new(HashMap::new()),
         }
     }
 
@@ -284,6 +336,26 @@ impl CompilerContext {
     }
 
     // ========================================================================
+    // DOM imports
+    // ========================================================================
+
+    /// Set the DOM import DefId table. Called once during
+    /// `lookup_known_definitions`.
+    pub fn set_dom_imports(&mut self, imports: DomImports) {
+        self.dom_imports = Some(imports);
+    }
+
+    /// Get the DOM import DefId table. Panics if called before
+    /// `lookup_known_definitions` — every compilation pipeline initialises
+    /// the stdlib before any LIR/codegen runs, so missing imports here
+    /// is a programmer error, not a recoverable condition.
+    pub fn dom_imports(&self) -> &DomImports {
+        self.dom_imports
+            .as_ref()
+            .expect("dom_imports not initialised — call lookup_known_definitions(ctx) first")
+    }
+
+    // ========================================================================
     // Diagnostics
     // ========================================================================
 
@@ -326,6 +398,71 @@ impl CompilerContext {
         block_id: BlockId,
     ) -> Option<BlockDebugName> {
         self.block_names.borrow().get(&(comp_def_id, block_id)).cloned()
+    }
+
+    // ========================================================================
+    // Module-wide BlockId allocation
+    // ========================================================================
+
+    /// Allocate a fresh, module-wide unique `BlockId`. Lowering passes
+    /// route every block creation through this so that `block_func_indices`
+    /// can be keyed by `BlockId` alone.
+    pub fn alloc_block_id(&self) -> BlockId {
+        let id = BlockId(self.block_id_counter.get());
+        self.block_id_counter.set(id.0 + 1);
+        id
+    }
+
+    /// Record a freshly-lowered component's lifecycle BlockIds so
+    /// parents that mount it can look up the callee BlockIds at lowering
+    /// time. Called from `lower_component` after `synth_internal_*`
+    /// passes run.
+    pub fn register_component_lifecycle_blocks(
+        &self,
+        def_id: DefId,
+        blocks: ComponentLifecycleBlocks,
+    ) {
+        self.component_lifecycle_blocks
+            .borrow_mut()
+            .insert(def_id, blocks);
+    }
+
+    /// Look up a previously-registered component's lifecycle BlockIds.
+    pub fn lookup_component_lifecycle_blocks(
+        &self,
+        def_id: DefId,
+    ) -> Option<ComponentLifecycleBlocks> {
+        self.component_lifecycle_blocks.borrow().get(&def_id).copied()
+    }
+
+    /// Phase 1.1c-l (#97): register the synthesized fanout block for an
+    /// (observing component, global signal) pair. Called from
+    /// `synth_global_fanout_blocks` once per (comp, signal) where a
+    /// fanout block was emitted.
+    pub fn register_global_fanout_block(
+        &self,
+        observing_comp: DefId,
+        global_signal: DefId,
+        block_id: BlockId,
+    ) {
+        self.global_fanout_blocks
+            .borrow_mut()
+            .insert((observing_comp, global_signal), block_id);
+    }
+
+    /// Phase 1.1c-l (#97): look up a previously-registered fanout
+    /// BlockId. Returns `None` if the observing component was not yet
+    /// lowered, or if its observers did not match the supported "simple
+    /// shape" criteria.
+    pub fn lookup_global_fanout_block(
+        &self,
+        observing_comp: DefId,
+        global_signal: DefId,
+    ) -> Option<BlockId> {
+        self.global_fanout_blocks
+            .borrow()
+            .get(&(observing_comp, global_signal))
+            .copied()
     }
 }
 

@@ -14,3 +14,4 @@ wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+wasmparser.workspace = true

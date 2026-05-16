@@ -1,6 +1,20 @@
 package yel:ui@0.1.0;
 
 interface dom {
+    // Color value — mirrors the language-level `color` primitive's
+    // builtin variant (see `register_builtin_variants` in yel-core).
+    // The host can render named cases as CSS keywords and `rgba` as a
+    // CSS rgba(r,g,b,a/255) string.
+    variant color {
+        red,
+        green,
+        blue,
+        white,
+        black,
+        transparent,
+        rgba(tuple<u8, u8, u8, u8>),
+    }
+
     // Variant for attribute values - allows host to do type conversion
     variant attribute-value {
         %str(string),
@@ -16,16 +30,13 @@ interface dom {
         %f32(f32),
         %f64(f64),
         %char(char),
+        %color(color),
     }
 
     // Node creation
     create-element: func(tag: string) -> u32;
     create-text: func(content: string) -> u32;
     create-comment: func(content: string) -> u32;
-    // Layout-neutral wrapper element used by `for` iterations and `if`
-    // branches to group their content under a single DOM root, so a
-    // single `remove` cascades on teardown. Hosts typically map this
-    // to a custom element with `display: contents` semantics.
     create-fragment: func() -> u32;
 
     // Node manipulation

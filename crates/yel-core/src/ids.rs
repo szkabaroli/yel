@@ -204,7 +204,7 @@ impl fmt::Display for IfId {
 /// Identifier for a per-component tree boundary in the concrete-typed
 /// mount-tree. One id per emitted boundary struct (component root, each
 /// `if` anchor, each branch, each `for` anchor, each iter body). Stable
-/// per `LirComponent`.
+/// per `LirResource`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize)]
 pub struct TreeBoundaryId(pub u32);
 

@@ -38,16 +38,16 @@ syn = "2.0"
 prettyplease = "0.2"
 
 # WebAssembly
-wasm-encoder = "0.225"
-wasmparser = "0.225"
-wasmprinter = "0.225"
-wit-parser = "0.225"
-wit-component = { version = "0.225", features = ["dummy-module"] }
-wasm-metadata = "0.225"
-wit-encoder = { version = "0.225", features = ["from-parser"] }
+wasm-encoder = "0.248"
+wasmparser = "0.248"
+wasmprinter = "0.248"
+wit-parser = "0.248"
+wit-component = { version = "0.248", features = ["dummy-module"] }
+wasm-metadata = "0.248"
+wit-encoder = { version = "0.248", features = ["from-parser"] }
 wit-bindgen = "0.51"
-wasmtime = { version = "40", features = ["component-model"] }
-wasmtime-wasi = "40"
+wasmtime = { version = "=44.0.0", features = ["component-model", "wave"] }
+wasmtime-wasi = "=44.0.0"
 
 # Utilities
 semver = "1.0"

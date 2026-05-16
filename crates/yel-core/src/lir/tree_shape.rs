@@ -34,7 +34,6 @@ pub enum IterSource {
     /// `for x in some_signal` where `some_signal: list<...>` is stored
     /// as a typed GC array. Item bound directly to the array element
     /// value (Phase 5b-v.3+).
-    #[allow(dead_code)]
     ListGc,
 }
 

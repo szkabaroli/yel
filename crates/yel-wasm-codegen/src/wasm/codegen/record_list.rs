@@ -3,7 +3,7 @@
 //! and shared across all components that need them.
 
 use wasm_encoder::{BlockType, Function, Instruction, ValType};
-use yel_core::lir::{LirComponent, LirExpr, LirExprKind};
+use yel_core::lir::{LirResource, LirExpr, LirExprKind};
 use yel_core::types::InternedTyKind;
 use yel_core::ids::LocalId;
 use yel_core::{DefId, DefKind, Ty};
@@ -315,47 +315,106 @@ impl<'a> WasmPackageBuilder<'a> {
     pub(super) fn generate_filter_function(
         &mut self,
         _filter_id: usize,
-        _elem_ty: Ty,
-        elem_size: u32,
+        list_ty: Ty,
+        _elem_size: u32,
         param: (LocalId, Ty),
         predicate: LirExpr,
-        alloc_idx: u32,
-        component: &LirComponent,
+        _alloc_idx: u32,
+        component: &LirResource,
         layout: &MemoryLayout,
     ) -> Result<Function, CodegenError> {
-        // Extract captured signals from predicate
+        // Stage 6 of typed-GC migration: filter operates entirely in
+        // typed-GC space. Param 0 is `(ref null $list_arr)` (was
+        // src_ptr+src_len), captured signals are passed in their
+        // `signal_storage_valtypes` shape (was always coerced to
+        // canonical (ptr, len) i32s for fat types). Result is one
+        // `(ref null $list_arr)` (was result_ptr+result_count).
+        let elem_ty = match self.ctx.ty_kind(list_ty) {
+            InternedTyKind::List(e) => *e,
+            _ => {
+                return Err(CodegenError::InvalidIR(format!(
+                    "filter: list_ty {:?} is not a list type",
+                    list_ty
+                )));
+            }
+        };
+        let arr_type_idx = *self
+            .record_gc_types
+            .list_array_type_idx
+            .get(&list_ty)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "filter: missing list_array_type_idx for {:?}",
+                    list_ty
+                ))
+            })?;
+        let arr_ref_ty = ValType::Ref(wasm_encoder::RefType {
+            nullable: true,
+            heap_type: wasm_encoder::HeapType::Concrete(arr_type_idx),
+        });
+
+        // Extract captured signals from predicate.
         let mut captured_signals: Vec<(DefId, Ty)> = Vec::new();
         self.extract_signal_reads(&predicate, &mut captured_signals);
 
-        // Calculate param count: src_ptr, src_len + captured signals (strings/lists need 2)
-        let mut next_param_idx: u32 = 2; // After src_ptr, src_len
+        // Build param slot map: param 0 is src_arr; captured signals
+        // start at param 1, each consuming `signal_storage_valtypes`
+        // slots. `is_fat_ptr` in the captured-signal map means "occupies
+        // 2 consecutive locals", which post Stage 6 only happens for
+        // String signals (FatPointer repr). Typed list signals collapse
+        // to 1 typed ref slot.
+        let mut next_param_idx: u32 = 1; // After src_arr
         let mut captured_signal_map = std::collections::HashMap::new();
         for (def_id, ty) in &captured_signals {
-            let is_fat_ptr = matches!(
-                self.ctx.ty_kind(*ty),
-                InternedTyKind::String | InternedTyKind::List(_)
-            );
+            let storage = self.signal_storage_valtypes(*ty);
+            let is_fat_ptr = storage.len() == 2;
             captured_signal_map.insert(*def_id, (next_param_idx, is_fat_ptr));
-            next_param_idx += if is_fat_ptr { 2 } else { 1 };
+            next_param_idx += storage.len() as u32;
         }
 
-        // Locals start after all params: result_ptr, result_count, loop_index, item_ptr
-        let result_ptr_local = next_param_idx;
-        let result_count_local = next_param_idx + 1;
-        let loop_index_local = next_param_idx + 2;
-        let item_ptr_local = next_param_idx + 3;
+        // Stage 6: typed-GC body. Item is `array.get`'d directly to its
+        // element type (typed ref for records / tuples / FlatGcStruct
+        // / nested lists / strings-as-$fat_value, scalar for prims).
+        // Locals: src_len i32, scratch_arr (ref), result_count i32,
+        // loop_index i32, item_local (typed elem), final_arr (ref).
+        let src_len_local = next_param_idx;
+        let scratch_arr_local = next_param_idx + 1;
+        let result_count_local = next_param_idx + 2;
+        let loop_index_local = next_param_idx + 3;
+        let item_local = next_param_idx + 4;
+        let final_arr_local = next_param_idx + 5;
 
-        let mut func = Function::new([(4, ValType::I32)]);
+        // Element local type matches the array element storage type.
+        let item_val_ty = super::super::gc_types::list_element_storage_type_pub(
+            self.ctx,
+            elem_ty,
+            &self.record_gc_types,
+        );
 
-        // Allocate result buffer: src_len * elem_size
-        func.instruction(&Instruction::LocalGet(1)); // src_len
-        func.instruction(&Instruction::I32Const(elem_size as i32));
-        func.instruction(&Instruction::I32Mul);
-        func.instruction(&Instruction::I32Const(4)); // alignment
-        func.instruction(&Instruction::Call(alloc_idx));
-        func.instruction(&Instruction::LocalSet(result_ptr_local));
+        let local_decls: Vec<(u32, ValType)> = vec![
+            (1, ValType::I32),       // src_len
+            (1, arr_ref_ty),         // scratch_arr
+            (1, ValType::I32),       // result_count
+            (1, ValType::I32),       // loop_index
+            (1, item_val_ty),        // item
+            (1, arr_ref_ty),         // final_arr
+        ];
+        let mut func = Function::new(local_decls);
 
-        // Initialize result_count = 0, loop_index = 0
+        // src_len = array.len(src_arr)
+        func.instruction(&Instruction::LocalGet(0));
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::LocalSet(src_len_local));
+
+        // scratch_arr = array.new_default $list_arr (src_len) — full
+        // capacity. Survivors fill [0..result_count]; final tightening
+        // copies just that prefix into a right-sized array via
+        // array.copy.
+        func.instruction(&Instruction::LocalGet(src_len_local));
+        func.instruction(&Instruction::ArrayNewDefault(arr_type_idx));
+        func.instruction(&Instruction::LocalSet(scratch_arr_local));
+
+        // result_count = 0; loop_index = 0
         func.instruction(&Instruction::I32Const(0));
         func.instruction(&Instruction::LocalSet(result_count_local));
         func.instruction(&Instruction::I32Const(0));
@@ -365,71 +424,53 @@ impl<'a> WasmPackageBuilder<'a> {
         func.instruction(&Instruction::Block(BlockType::Empty));
         func.instruction(&Instruction::Loop(BlockType::Empty));
 
-        // Check break condition: loop_index >= src_len
+        // break: loop_index >= src_len
         func.instruction(&Instruction::LocalGet(loop_index_local));
-        func.instruction(&Instruction::LocalGet(1)); // src_len
+        func.instruction(&Instruction::LocalGet(src_len_local));
         func.instruction(&Instruction::I32GeU);
         func.instruction(&Instruction::BrIf(1));
 
-        // Compute item_ptr = src_ptr + loop_index * elem_size
-        func.instruction(&Instruction::LocalGet(0)); // src_ptr
+        // item = array.get $list_arr (src_arr, loop_index)
+        func.instruction(&Instruction::LocalGet(0));
         func.instruction(&Instruction::LocalGet(loop_index_local));
-        func.instruction(&Instruction::I32Const(elem_size as i32));
-        func.instruction(&Instruction::I32Mul);
-        func.instruction(&Instruction::I32Add);
-        func.instruction(&Instruction::LocalSet(item_ptr_local));
+        func.instruction(&Instruction::ArrayGet(arr_type_idx));
+        func.instruction(&Instruction::LocalSet(item_local));
 
-        // Set up captured locals for predicate emission
+        // Set up captured locals for predicate emission. Bind the iter
+        // param to `item_local` with `Value` mode — the predicate's
+        // accesses (Index, Field, IsCase, etc.) work against the typed
+        // ref / unboxed scalar directly.
         let (param_local_id, _param_ty) = param;
         let old_captured = self.current_block_captured_locals.take();
-        let mut captured_map = std::collections::HashMap::new();
-        captured_map.insert(param_local_id, item_ptr_local);
-        self.current_block_captured_locals = Some(captured_map);
-
-        // Filter closures route the item param via the captured-locals
-        // map and the slot holds an item-ptr address — `BindingMode::Ptr`
-        // (the default when no mode is registered) preserves today's
-        // typed-load behavior. Stash and clear `current_block_local_modes`
-        // so any outer-scope `Value` entries don't accidentally apply
-        // here.
         let old_modes = self.current_block_local_modes.take();
+        let mut captured_map = std::collections::HashMap::new();
+        let mut local_modes = std::collections::HashMap::new();
+        captured_map.insert(param_local_id, item_local);
+        local_modes.insert(param_local_id, yel_core::lir::LirBindingMode::Value);
+        self.current_block_captured_locals = Some(captured_map);
+        self.current_block_local_modes = Some(local_modes);
 
-        // Set up captured signals mapping
+        // Captured signals mapping (typed-shape, see above).
         let old_signal_map = self.current_filter_captured_signals.take();
         self.current_filter_captured_signals = Some(captured_signal_map);
 
-        // Emit predicate expression using the full emit_expr (result on stack: 0 or 1)
+        // Emit predicate (result on stack: i32 0 or 1).
         self.emit_expr(&mut func, &predicate, component, layout)?;
 
-        // Restore state
         self.current_block_captured_locals = old_captured;
         self.current_block_local_modes = old_modes;
         self.current_filter_captured_signals = old_signal_map;
 
-        // If predicate is true, copy item to result
+        // if predicate { array.set scratch_arr result_count item; result_count++ }
         func.instruction(&Instruction::If(BlockType::Empty));
-
-        // dest_ptr = result_ptr + result_count * elem_size
-        func.instruction(&Instruction::LocalGet(result_ptr_local));
+        func.instruction(&Instruction::LocalGet(scratch_arr_local));
         func.instruction(&Instruction::LocalGet(result_count_local));
-        func.instruction(&Instruction::I32Const(elem_size as i32));
-        func.instruction(&Instruction::I32Mul);
-        func.instruction(&Instruction::I32Add);
-
-        // Copy elem_size bytes from item_ptr to dest_ptr
-        func.instruction(&Instruction::LocalGet(item_ptr_local)); // src
-        func.instruction(&Instruction::I32Const(elem_size as i32));
-        func.instruction(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-
-        // result_count++
+        func.instruction(&Instruction::LocalGet(item_local));
+        func.instruction(&Instruction::ArraySet(arr_type_idx));
         func.instruction(&Instruction::LocalGet(result_count_local));
         func.instruction(&Instruction::I32Const(1));
         func.instruction(&Instruction::I32Add);
         func.instruction(&Instruction::LocalSet(result_count_local));
-
         func.instruction(&Instruction::End); // end if
 
         // loop_index++
@@ -443,10 +484,110 @@ impl<'a> WasmPackageBuilder<'a> {
         func.instruction(&Instruction::End); // end loop
         func.instruction(&Instruction::End); // end block
 
-        // Return (result_ptr, result_count)
-        func.instruction(&Instruction::LocalGet(result_ptr_local));
+        // Tighten: final_arr = array.new_default(result_count);
+        // array.copy(final_arr, 0, scratch_arr, 0, result_count);
+        // return final_arr.
         func.instruction(&Instruction::LocalGet(result_count_local));
+        func.instruction(&Instruction::ArrayNewDefault(arr_type_idx));
+        func.instruction(&Instruction::LocalSet(final_arr_local));
+        // array.copy (dst, dst_idx, src, src_idx, count)
+        func.instruction(&Instruction::LocalGet(final_arr_local));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalGet(scratch_arr_local));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalGet(result_count_local));
+        func.instruction(&Instruction::ArrayCopy {
+            array_type_index_dst: arr_type_idx,
+            array_type_index_src: arr_type_idx,
+        });
+        // Return the typed final array.
+        func.instruction(&Instruction::LocalGet(final_arr_local));
         func.instruction(&Instruction::End);
+        Ok(func)
+    }
+
+    /// Generate `list_append_$listTy(src, elem) -> new_list`.
+    ///
+    /// Immutable append: allocates a new GC array of length src.len()+1,
+    /// copies the source elements into [0..src.len()), writes `elem`
+    /// into index src.len(), and returns the new array.
+    ///
+    /// Signature: `(ref null $list_arr, <elem-storage>) -> (ref null $list_arr)`.
+    /// `src` is unwrapped via `array.len` directly — a null receiver
+    /// traps inside `array.len`, matching the rest of the typed-array
+    /// path (filter, index, etc.). Source code today never produces a
+    /// null list (every list signal is initialized to `[]` or a default).
+    pub(super) fn generate_list_append_function(
+        &mut self,
+        list_ty: Ty,
+    ) -> Result<Function, CodegenError> {
+        let elem_ty = match self.ctx.ty_kind(list_ty) {
+            InternedTyKind::List(e) => *e,
+            _ => {
+                return Err(CodegenError::InvalidIR(format!(
+                    "append: list_ty {:?} is not a list type",
+                    list_ty
+                )));
+            }
+        };
+        let arr_type_idx = *self
+            .record_gc_types
+            .list_array_type_idx
+            .get(&list_ty)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "append: missing list_array_type_idx for {:?}",
+                    list_ty
+                ))
+            })?;
+        let arr_ref_ty = ValType::Ref(wasm_encoder::RefType {
+            nullable: true,
+            heap_type: wasm_encoder::HeapType::Concrete(arr_type_idx),
+        });
+
+        // Params: 0 = src (ref null $arr), 1 = elem (<elem-storage>).
+        // Locals: src_len i32, new_arr (ref null $arr).
+        let src_len_local = 2u32;
+        let new_arr_local = 3u32;
+        let local_decls: Vec<(u32, ValType)> = vec![
+            (1, ValType::I32),
+            (1, arr_ref_ty),
+        ];
+        let mut func = Function::new(local_decls);
+
+        // src_len = array.len(src)
+        func.instruction(&Instruction::LocalGet(0));
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::LocalSet(src_len_local));
+
+        // new_arr = array.new_default $arr (src_len + 1)
+        func.instruction(&Instruction::LocalGet(src_len_local));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::ArrayNewDefault(arr_type_idx));
+        func.instruction(&Instruction::LocalSet(new_arr_local));
+
+        // array.copy new_arr [0 ..] <- src [0 .. src_len]
+        func.instruction(&Instruction::LocalGet(new_arr_local));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalGet(0));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalGet(src_len_local));
+        func.instruction(&Instruction::ArrayCopy {
+            array_type_index_dst: arr_type_idx,
+            array_type_index_src: arr_type_idx,
+        });
+
+        // array.set new_arr[src_len] = elem (param 1)
+        func.instruction(&Instruction::LocalGet(new_arr_local));
+        func.instruction(&Instruction::LocalGet(src_len_local));
+        func.instruction(&Instruction::LocalGet(1));
+        func.instruction(&Instruction::ArraySet(arr_type_idx));
+
+        // return new_arr
+        func.instruction(&Instruction::LocalGet(new_arr_local));
+        func.instruction(&Instruction::End);
+        let _ = elem_ty; // referenced only for the type-section param shape upstream
         Ok(func)
     }
 }

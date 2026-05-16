@@ -498,7 +498,7 @@ pub fn emit_f32_to_string() -> Function {
 
     // Check if negative: is_negative = value < 0
     func.instruction(&Instruction::LocalGet(0)); // value
-    func.instruction(&Instruction::F32Const(0.0));
+    func.instruction(&Instruction::F32Const(wasm_encoder::Ieee32::from(0.0)));
     func.instruction(&Instruction::F32Lt);
     func.instruction(&Instruction::LocalSet(1)); // is_negative
 
@@ -522,7 +522,7 @@ pub fn emit_f32_to_string() -> Function {
     func.instruction(&Instruction::LocalGet(3)); // int_part
     func.instruction(&Instruction::F32ConvertI32S);
     func.instruction(&Instruction::F32Sub); // abs_value - int_part
-    func.instruction(&Instruction::F32Const(100.0));
+    func.instruction(&Instruction::F32Const(wasm_encoder::Ieee32::from(100.0)));
     func.instruction(&Instruction::F32Mul);
     func.instruction(&Instruction::F32Nearest); // round
     func.instruction(&Instruction::I32TruncF32S);

@@ -6,7 +6,7 @@
 use wasm_encoder::{Function, Instruction, ValType};
 use yel_core::DefId;
 use yel_core::ids::BlockId;
-use yel_core::lir::{LirComponent, LirExpr, LirExprKind};
+use yel_core::lir::{LirExpr, LirExprKind, LirResource};
 use yel_core::types::InternedTyKind;
 
 use super::super::CodegenError;
@@ -19,7 +19,7 @@ impl<'a> WasmPackageBuilder<'a> {
         func: &mut Function,
         addr: i32,
         expr: &LirExpr,
-        component: &LirComponent,
+        component: &LirResource,
         layout: &MemoryLayout,
         scratch: crate::wasm::FlatScratchBases,
     ) -> Result<(), CodegenError> {
@@ -103,12 +103,19 @@ impl<'a> WasmPackageBuilder<'a> {
     /// f32[..], f64[..]. Each slot maps to a local at `base_of(valtype) +
     /// index_among_same_valtype_slots`. The caller pre-reserves enough
     /// locals for the widest composite it might store.
+    ///
+    /// **Boundary only.** Reachable when `signal_in_struct` is `false`
+    /// — i.e. a Zero / unit-typed component-local signal that has no
+    /// backing struct field. Every value-bearing signal now lives in
+    /// the component struct via FlatGcStruct / GcRef / GcArrayRef /
+    /// FatPointer / Scalar, so the linear-memory store path is dead
+    /// for non-zero signals.
     pub(super) fn emit_flat_slot_store(
         &mut self,
         func: &mut Function,
         addr: i32,
         expr: &LirExpr,
-        component: &LirComponent,
+        component: &LirResource,
         layout: &MemoryLayout,
         scratch: crate::wasm::FlatScratchBases,
     ) -> Result<(), CodegenError> {
@@ -321,7 +328,15 @@ impl<'a> WasmPackageBuilder<'a> {
         let component = &self.components[comp_idx];
 
         // Root: load $self.tree.
-        if boundary_id.0 == component.tree_shape.root_idx {
+        // Stage 5d: read the kind from the resource registry instead
+        // of comparing against `tree_shape.root_idx`. The root struct
+        // is the unique entry whose `kind == TreeBoundaryKind::Root`.
+        let is_root = component
+            .struct_types
+            .get(boundary_id.index())
+            .map(|s| matches!(s.kind, yel_core::lir::block::TreeBoundaryKind::Root))
+            .unwrap_or(false);
+        if is_root {
             let comp_struct_ty = gc.component_struct_type_idx.ok_or_else(|| {
                 CodegenError::InvalidIR(
                     "emit_boundary_ref: missing component_struct_type_idx".into(),
@@ -349,14 +364,21 @@ impl<'a> WasmPackageBuilder<'a> {
         // walk the parent chain once at the call site, NOT per slot
         // access. The callee receives the ref as a function param and
         // accesses fields via `local.get` thereafter (O(1)).
+        // Stage 5d: parent link from struct_types registry.
         let component = &self.components[comp_idx];
-        let boundary = &component.tree_shape.boundaries[boundary_id.index()];
-        let (parent_id, field_idx) = boundary.parent_link.ok_or_else(|| {
+        let parent_link = component
+            .struct_types
+            .get(boundary_id.index())
+            .and_then(|s| s.parent)
+            .map(|p| (yel_core::ids::TreeBoundaryId(p.parent.0), p.field_idx));
+        let (parent_id, field_idx) = parent_link.ok_or_else(|| {
+            let in_scope: Vec<_> = self.current_boundary_locals.keys().collect();
             CodegenError::InvalidIR(format!(
                 "emit_boundary_ref: boundary {} has no parent_link and is not in \
                  scope. ForIterBody can only be reached via a fan-out callback \
-                 that supplies the iter-body ref via `current_boundary_locals`.",
-                boundary_id
+                 that supplies the iter-body ref via `current_boundary_locals`. \
+                 In-scope locals: {:?}",
+                boundary_id, in_scope
             ))
         })?;
         // Recurse to push parent ref, then read this boundary's
@@ -376,68 +398,6 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(())
     }
 
-    /// Emit `struct.get` of `field_idx` on the boundary's struct ref,
-    /// leaving the field's value on the stack. The boundary ref is
-    /// fetched via `emit_boundary_ref` (root → `$self.tree`; inner →
-    /// in-scope local).
-    #[allow(dead_code)]
-    pub(crate) fn emit_boundary_field_load(
-        &self,
-        func: &mut Function,
-        comp_idx: usize,
-        boundary_id: yel_core::ids::TreeBoundaryId,
-        field_idx: u32,
-    ) -> Result<(), CodegenError> {
-        self.emit_boundary_ref(func, comp_idx, boundary_id)?;
-        func.instruction(&Instruction::RefAsNonNull);
-        let struct_ty = *self.gc_layouts[comp_idx]
-            .tree_struct_type_idx
-            .get(&boundary_id)
-            .ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "emit_boundary_field_load: no struct idx for boundary {}",
-                    boundary_id
-                ))
-            })?;
-        func.instruction(&Instruction::StructGet {
-            struct_type_index: struct_ty,
-            field_index: field_idx,
-        });
-        Ok(())
-    }
-
-    /// Emit `struct.set` of `field_idx` on the boundary's struct ref,
-    /// reading the value to store from `value_local`. We stage the
-    /// boundary ref BEFORE pushing the value because `struct.set` is
-    /// `(ref, val) -> ()` — boundary first, value second.
-    #[allow(dead_code)]
-    pub(crate) fn emit_boundary_field_store(
-        &self,
-        func: &mut Function,
-        comp_idx: usize,
-        boundary_id: yel_core::ids::TreeBoundaryId,
-        field_idx: u32,
-        value_local: u32,
-    ) -> Result<(), CodegenError> {
-        self.emit_boundary_ref(func, comp_idx, boundary_id)?;
-        func.instruction(&Instruction::RefAsNonNull);
-        func.instruction(&Instruction::LocalGet(value_local));
-        let struct_ty = *self.gc_layouts[comp_idx]
-            .tree_struct_type_idx
-            .get(&boundary_id)
-            .ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "emit_boundary_field_store: no struct idx for boundary {}",
-                    boundary_id
-                ))
-            })?;
-        func.instruction(&Instruction::StructSet {
-            struct_type_index: struct_ty,
-            field_index: field_idx,
-        });
-        Ok(())
-    }
-
     /// Push the host's WIT resource handle (the i32 returned by
     /// `[resource-new]X`) for `component`'s current instance onto the
     /// stack. Sources it from the trailing `$self_handle` field on
@@ -446,7 +406,7 @@ impl<'a> WasmPackageBuilder<'a> {
     pub(crate) fn emit_self_handle_load(
         &self,
         func: &mut Function,
-        component: &yel_core::lir::LirComponent,
+        component: &yel_core::lir::LirResource,
     ) -> Result<(), CodegenError> {
         let comp_idx = self.comp_idx_of(component).ok_or_else(|| {
             CodegenError::InvalidIR(
@@ -704,7 +664,7 @@ impl<'a> WasmPackageBuilder<'a> {
         comp_idx: usize,
         signal_idx: usize,
         expr: &LirExpr,
-        component: &LirComponent,
+        component: &LirResource,
         layout: &MemoryLayout,
         scratch: crate::wasm::FlatScratchBases,
     ) -> Result<(), CodegenError> {
@@ -714,16 +674,13 @@ impl<'a> WasmPackageBuilder<'a> {
                 "emit_signal_struct_store_from_expr: missing component struct type idx".into(),
             )
         })?;
-        let field_path: Vec<u32> = gc_layout
-            .signal_field_paths
-            .get(signal_idx)
-            .cloned()
-            .ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "emit_signal_struct_store_from_expr: no field path for signal {}",
-                    signal_idx
-                ))
-            })?;
+        if component.signal_layout.signals.get(signal_idx).is_none() {
+            return Err(CodegenError::InvalidIR(format!(
+                "emit_signal_struct_store_from_expr: no field path for signal {}",
+                signal_idx
+            )));
+        }
+        let field_path: Vec<u32> = component.signal_layout.signal_field_path(signal_idx);
         let slot_valtypes = self.signal_storage_valtypes(expr.ty);
         if slot_valtypes.len() != field_path.len() {
             return Err(CodegenError::InvalidIR(format!(
@@ -742,7 +699,10 @@ impl<'a> WasmPackageBuilder<'a> {
             return Ok(());
         }
 
-        // Single-slot fast path: push self, emit expr (1 value), set.
+        // Single-slot fast path: push self, emit expr, set. Stage 6
+        // removed the filter bridge — `list.filter(...)` now returns
+        // a typed array ref directly, so no canonical→typed un-
+        // materializer call is needed here.
         if slot_valtypes.len() == 1 {
             self.emit_self_ref(func, comp_idx)?;
             self.emit_expr(func, expr, component, layout)?;
@@ -782,7 +742,8 @@ impl<'a> WasmPackageBuilder<'a> {
         func: &mut Function,
         comp_idx: usize,
         signal_idx: usize,
-        component: &LirComponent,
+        component: &LirResource,
+        block: &yel_core::lir::LirBlock,
         value_slot: yel_core::lir::block::LirSlotId,
         local_offset: u32,
     ) -> Result<(), CodegenError> {
@@ -792,17 +753,14 @@ impl<'a> WasmPackageBuilder<'a> {
                 "emit_signal_struct_store_from_slot: missing component struct type idx".into(),
             )
         })?;
-        let field_path: Vec<u32> = gc_layout
-            .signal_field_paths
-            .get(signal_idx)
-            .cloned()
-            .ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "emit_signal_struct_store_from_slot: no field path for signal {}",
-                    signal_idx
-                ))
-            })?;
-        let base_local = slot_local(component, value_slot) + local_offset;
+        if component.signal_layout.signals.get(signal_idx).is_none() {
+            return Err(CodegenError::InvalidIR(format!(
+                "emit_signal_struct_store_from_slot: no field path for signal {}",
+                signal_idx
+            )));
+        }
+        let field_path: Vec<u32> = component.signal_layout.signal_field_path(signal_idx);
+        let base_local = slot_local(component, block, value_slot, local_offset);
         for (i, &field_idx) in field_path.iter().enumerate() {
             self.emit_self_ref(func, comp_idx)?;
             func.instruction(&Instruction::LocalGet(base_local + i as u32));
@@ -811,6 +769,51 @@ impl<'a> WasmPackageBuilder<'a> {
                 field_index: field_idx,
             });
         }
+        Ok(())
+    }
+
+    /// Phase 5e.5: emit a default-constant store for a FlatGcStruct
+    /// signal — `<self_ref>; struct.new_default $<case_sub>; struct.set
+    /// $Comp <field>`. The signal's storage field is the supertype
+    /// `(ref null $sup)`; `case_sub_idx` is the subtype index for the
+    /// case to materialize as the default (typically case 0 — None /
+    /// Ok / first declared variant case — matching legacy zero-byte
+    /// memory semantics).
+    pub(super) fn emit_signal_struct_store_const_default(
+        &self,
+        func: &mut Function,
+        comp_idx: usize,
+        signal_idx: usize,
+        case_sub_idx: u32,
+    ) -> Result<(), CodegenError> {
+        let gc_layout = &self.gc_layouts[comp_idx];
+        let struct_ty = gc_layout.component_struct_type_idx.ok_or_else(|| {
+            CodegenError::InvalidIR(
+                "emit_signal_struct_store_const_default: missing component struct type idx".into(),
+            )
+        })?;
+        let component = &self.components[comp_idx];
+        if component.signal_layout.signals.get(signal_idx).is_none() {
+            return Err(CodegenError::InvalidIR(format!(
+                "emit_signal_struct_store_const_default: no field path for signal {}",
+                signal_idx
+            )));
+        }
+        let field_path: Vec<u32> = component.signal_layout.signal_field_path(signal_idx);
+        if field_path.len() != 1 {
+            return Err(CodegenError::InvalidIR(format!(
+                "emit_signal_struct_store_const_default: FlatGcStruct signal must have \
+                 exactly one ref field (got {} field path entries) for signal {}",
+                field_path.len(),
+                signal_idx,
+            )));
+        }
+        self.emit_self_ref(func, comp_idx)?;
+        func.instruction(&Instruction::StructNewDefault(case_sub_idx));
+        func.instruction(&Instruction::StructSet {
+            struct_type_index: struct_ty,
+            field_index: field_path[0],
+        });
         Ok(())
     }
 
@@ -831,16 +834,14 @@ impl<'a> WasmPackageBuilder<'a> {
                 "emit_signal_struct_read: missing component struct type idx".into(),
             )
         })?;
-        let field_path: Vec<u32> = gc_layout
-            .signal_field_paths
-            .get(signal_idx)
-            .cloned()
-            .ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "emit_signal_struct_read: no field path for signal {}",
-                    signal_idx
-                ))
-            })?;
+        let component = &self.components[comp_idx];
+        if component.signal_layout.signals.get(signal_idx).is_none() {
+            return Err(CodegenError::InvalidIR(format!(
+                "emit_signal_struct_read: no field path for signal {}",
+                signal_idx
+            )));
+        }
+        let field_path: Vec<u32> = component.signal_layout.signal_field_path(signal_idx);
         for &field_idx in &field_path {
             self.emit_self_ref(func, comp_idx)?;
             func.instruction(&Instruction::StructGet {
@@ -945,7 +946,7 @@ impl<'a> WasmPackageBuilder<'a> {
         func: &mut Function,
         prop_def_id: DefId,
         expr: &LirExpr,
-        component: &LirComponent,
+        component: &LirResource,
         layout: &MemoryLayout,
         scratch: crate::wasm::FlatScratchBases,
     ) -> Result<(), CodegenError> {
@@ -996,18 +997,19 @@ impl<'a> WasmPackageBuilder<'a> {
 
     /// Same as `emit_global_struct_store_from_expr` but the value is
     /// already in consecutive WASM locals starting at
-    /// `slot_local(component, value_slot) + local_offset`.
+    /// `slot_local(component, value_slot, local_offset)`.
     pub(crate) fn emit_global_struct_store_from_slot(
         &self,
         func: &mut Function,
         prop_def_id: DefId,
-        component: &LirComponent,
+        component: &LirResource,
+        block: &yel_core::lir::LirBlock,
         value_slot: yel_core::lir::block::LirSlotId,
         local_offset: u32,
     ) -> Result<(), CodegenError> {
         let (struct_ty, self_global, field_path) =
             self.resolve_global_struct_target(prop_def_id)?;
-        let base_local = slot_local(component, value_slot) + local_offset;
+        let base_local = slot_local(component, block, value_slot, local_offset);
         for (i, &field_idx) in field_path.iter().enumerate() {
             func.instruction(&Instruction::GlobalGet(self_global));
             func.instruction(&Instruction::RefAsNonNull);
@@ -1049,9 +1051,7 @@ impl<'a> WasmPackageBuilder<'a> {
             if let Some(effect_ids) = component.effects_by_signal.get(&signal) {
                 for &eid in effect_ids {
                     if let Some(effect) = component.effects.iter().find(|e| e.id == eid)
-                        && let Some(&fi) = self
-                            .block_func_indices
-                            .get(&(local_comp_idx, effect.update_block))
+                        && let Some(&fi) = self.block_func_indices.get(&effect.update_block)
                     {
                         // Caller-side: assemble the call's args to
                         // match the callee's actual signature.
@@ -1075,19 +1075,27 @@ impl<'a> WasmPackageBuilder<'a> {
                         // signature with 1 implicit i32 parent;
                         // otherwise the dynamic shape uses
                         // exactly `params.len()` i32 args.
-                        let (n_i32_args, boundary_refs): (u32, &[_]) = match update_block {
-                            Some(b) if !b.params.is_empty() => {
-                                (b.params.len() as u32, b.boundary_params.as_slice())
-                            }
-                            Some(b) if !b.boundary_params.is_empty() => {
-                                (0, b.boundary_params.as_slice())
-                            }
-                            _ => (1, &[]),
+                        // Stage 5c: derive boundary-id list from the
+                        // callee's `boundary_param_slots` (each
+                        // slot's val_ty carries the id). Same data
+                        // as `boundary_params`, independent of that
+                        // field.
+                        let component_slots: &[_] = &component.slots;
+                        let (n_i32_args, boundary_ids): (u32, Vec<_>) = match update_block {
+                            Some(b) if !b.params.is_empty() => (
+                                b.params.len() as u32,
+                                b.boundary_param_ids_from_slots(component_slots).collect(),
+                            ),
+                            Some(b) if !b.boundary_param_slots.is_empty() => (
+                                0,
+                                b.boundary_param_ids_from_slots(component_slots).collect(),
+                            ),
+                            _ => (1, Vec::new()),
                         };
                         for _ in 0..n_i32_args {
                             func.instruction(&Instruction::I32Const(0));
                         }
-                        for &b_id in boundary_refs {
+                        for b_id in boundary_ids {
                             self.emit_boundary_ref(func, local_comp_idx, b_id)?;
                         }
                         func.instruction(&Instruction::Call(fi));
@@ -1179,13 +1187,16 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Build the chain of (boundary, parent_field_idx) walks from
         // boundary_id back up to root.
+        // Stage 5d: walk parent chain via the resource registry.
         let mut chain: Vec<(yel_core::ids::TreeBoundaryId, u32)> = Vec::new();
         let mut cur = boundary_id;
-        while let Some((parent, field_idx)) =
-            component.tree_shape.boundaries[cur.index()].parent_link
+        while let Some(p) = component
+            .struct_types
+            .get(cur.index())
+            .and_then(|s| s.parent)
         {
-            chain.push((cur, field_idx));
-            cur = parent;
+            chain.push((cur, p.field_idx));
+            cur = yel_core::ids::TreeBoundaryId(p.parent.0);
         }
         // `cur` is now the root.
 
@@ -1220,7 +1231,12 @@ impl<'a> WasmPackageBuilder<'a> {
         for (b, fidx) in chain.iter().rev() {
             // We just pushed the parent-of-`b` ref. Fetch `b`'s ref
             // from that parent's SubBoundary field.
-            let parent_link = component.tree_shape.boundaries[b.index()].parent_link;
+            // Stage 5d: parent link from registry.
+            let parent_link = component
+                .struct_types
+                .get(b.index())
+                .and_then(|s| s.parent)
+                .map(|p| (yel_core::ids::TreeBoundaryId(p.parent.0), p.field_idx));
             let (parent_id, _) = parent_link.ok_or_else(|| {
                 CodegenError::InvalidIR(format!(
                     "global fanout boundary chain: missing parent_link for {}",
@@ -1264,7 +1280,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 .iter()
                 .filter_map(|eid| {
                     let effect = comp.effects.iter().find(|e| e.id == *eid)?;
-                    let fi = self.block_func_indices.get(&(ci, effect.update_block))?;
+                    let fi = self.block_func_indices.get(&effect.update_block)?;
                     Some((*fi, effect.update_block))
                 })
                 .collect();
@@ -1358,13 +1374,17 @@ impl<'a> WasmPackageBuilder<'a> {
             // before `emit_boundary_ref` runs — we reserve a
             // function-scratch local lazily on first use.
             for (effect_func_idx, block_id) in &observing_effects {
+                // Stage 5c: derive boundary-id list from slots.
                 let block = comp.blocks.iter().find(|b| b.id == *block_id);
-                let (n_i32_args, boundary_refs): (u32, &[_]) = match block {
-                    Some(b) if !b.params.is_empty() => {
-                        (b.params.len() as u32, b.boundary_params.as_slice())
+                let (n_i32_args, boundary_ids): (u32, Vec<_>) = match block {
+                    Some(b) if !b.params.is_empty() => (
+                        b.params.len() as u32,
+                        b.boundary_param_ids_from_slots(&comp.slots).collect(),
+                    ),
+                    Some(b) if !b.boundary_param_slots.is_empty() => {
+                        (0, b.boundary_param_ids_from_slots(&comp.slots).collect())
                     }
-                    Some(b) if !b.boundary_params.is_empty() => (0, b.boundary_params.as_slice()),
-                    _ => (1, &[]),
+                    _ => (1, Vec::new()),
                 };
 
                 // Push self ref.
@@ -1391,7 +1411,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 // We don't have `current_self_local` set here because
                 // this helper runs outside any per-component emit
                 // scope, so we inline the chain manually.
-                for &b_id in boundary_refs {
+                for &b_id in &boundary_ids {
                     self.emit_boundary_chain_from_self_inline(
                         &mut func,
                         ci,

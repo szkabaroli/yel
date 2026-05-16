@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use wasm_encoder::{Function, Instruction, ValType};
-use yel_core::ids::BlockId;
 use yel_core::Ty;
+use yel_core::ids::BlockId;
 
 use super::super::CodegenError;
 use super::super::{MemoryLayout, WasmPackageBuilder};
@@ -13,7 +13,10 @@ use super::constants::{HANDLER_ID_HANDLE_SHIFT, HANDLER_ID_LOCAL_MASK};
 use super::scratch::{i32_narrow_store_for, mem_arg};
 
 impl<'a> WasmPackageBuilder<'a> {
-    pub(super) fn generate_dispatch(&mut self, layouts: &[MemoryLayout]) -> Result<Function, CodegenError> {
+    pub(super) fn generate_dispatch(
+        &mut self,
+        layouts: &[MemoryLayout],
+    ) -> Result<Function, CodegenError> {
         // Param 0: encoded handler_id `(handle << 16) | local_id` —
         // upper 16 bits identify the host resource handle (registry
         // index), lower 16 bits the per-component AddEventListener
@@ -122,12 +125,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     owner_comp_idx
                 ))
             })?;
-            self.emit_registry_lookup(
-                &mut func,
-                *owner_comp_idx,
-                handle_local,
-                self_ref_local,
-            )?;
+            self.emit_registry_lookup(&mut func, *owner_comp_idx, handle_local, self_ref_local)?;
             // Set `current_self_local` so `emit_self_ref` calls inside
             // the binding-setter struct.set + trigger fan-out source
             // self from the registry-resolved ref, not the singleton.
@@ -150,12 +148,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 let (target_addr, target_ty) =
                     if let Some(sig_idx) = self.signal_index_in(component, target_def_id) {
                         (layout.signal_addr(sig_idx), component.signals[sig_idx].ty)
-                    } else if self
-                        .ctx
-                        .defs
-                        .owning_global_block(target_def_id)
-                        .is_some()
-                    {
+                    } else if self.ctx.defs.owning_global_block(target_def_id).is_some() {
                         let ty = self
                             .ctx
                             .defs
@@ -214,21 +207,18 @@ impl<'a> WasmPackageBuilder<'a> {
                         .signal_index_in(component, target_def_id)
                         .map(|si| self.signal_in_struct(*owner_comp_idx, si))
                         .unwrap_or(false);
-                    let target_in_global_struct = self
-                        .ctx
-                        .defs
-                        .owning_global_block(target_def_id)
-                        .is_some()
-                        && self.global_in_struct(target_def_id);
+                    let target_in_global_struct =
+                        self.ctx.defs.owning_global_block(target_def_id).is_some()
+                            && self.global_in_struct(target_def_id);
                     if target_in_comp_struct {
-                        let sig_idx = self
-                            .signal_index_in(component, target_def_id)
-                            .ok_or_else(|| {
-                                CodegenError::InternalError(
+                        let sig_idx =
+                            self.signal_index_in(component, target_def_id)
+                                .ok_or_else(|| {
+                                    CodegenError::InternalError(
                                     "dispatch: target_in_comp_struct but signal_index_in missing"
                                         .into(),
                                 )
-                            })?;
+                                })?;
                         let gc = &self.gc_layouts[*owner_comp_idx];
                         let struct_ty = gc.component_struct_type_idx.ok_or_else(|| {
                             CodegenError::InternalError(format!(
@@ -236,7 +226,9 @@ impl<'a> WasmPackageBuilder<'a> {
                                 owner_comp_idx
                             ))
                         })?;
-                        let field_idx = gc.signal_field_paths[sig_idx][0];
+                        let field_idx = self.components[*owner_comp_idx]
+                            .signal_layout
+                            .signal_field_path(sig_idx)[0];
                         // Stack: <self_ref>, <coerced value> → struct.set
                         self.emit_self_ref(&mut func, *owner_comp_idx)?;
                         self.emit_coerce_f64_to_value(&mut func, target_ty, PARAM_SLOT0_I64)?;
@@ -258,14 +250,13 @@ impl<'a> WasmPackageBuilder<'a> {
                                         .into(),
                                 )
                             })?;
-                        let &layout_idx = self.global_block_def_to_idx.get(&block_id).ok_or_else(
-                            || {
+                        let &layout_idx =
+                            self.global_block_def_to_idx.get(&block_id).ok_or_else(|| {
                                 CodegenError::InternalError(format!(
                                     "dispatch: global block {:?} has no globals layout entry",
                                     block_id
                                 ))
-                            },
-                        )?;
+                            })?;
                         let gl = &self.globals_layouts[layout_idx];
                         let block = self.ctx.defs.as_global(block_id).ok_or_else(|| {
                             CodegenError::InternalError(format!(
@@ -311,7 +302,7 @@ impl<'a> WasmPackageBuilder<'a> {
             // typed self ref directly. Multi-instance-correct: the
             // handle in the encoded handler_id picks the right
             // instance, dispatch routes its ref into the handler.
-            if let Some(&func_idx) = self.block_func_indices.get(&(*owner_comp_idx, *block_id)) {
+            if let Some(&func_idx) = self.block_func_indices.get(block_id) {
                 func.instruction(&Instruction::LocalGet(self_ref_local));
                 func.instruction(&Instruction::I32Const(0));
                 func.instruction(&Instruction::Call(func_idx));
@@ -325,84 +316,6 @@ impl<'a> WasmPackageBuilder<'a> {
 
         func.instruction(&Instruction::End);
         Ok(func)
-    }
-
-    /// Coerce the `input-value` payload (in dispatch-local params
-    /// `s0`/`s1`/`s2`) into the target signal's declared type and
-    /// store it at `target_addr`. Emits a nested pattern-match over
-    /// the input-value inner discriminant (param_s0). For supported
-    /// `(inner_arm, target_type)` pairs this is straightforward: the
-    /// `number(f64)` arm reinterprets `s1` as f64 and applies the
-    /// appropriate narrowing instruction; the `text(string)` arm
-    /// uses a runtime parser to coerce the string to the target type.
-    ///
-    /// Unsupported pairings (e.g. `boolean(bool)` into a numeric
-    /// target) are rejected at codegen time — the handler is
-    /// registered on `input` events, so a host dispatching the wrong
-    /// payload is a bug, and silently no-oping would hide it.
-    #[allow(dead_code)]
-    pub(super) fn emit_input_binding_store(
-        &self,
-        func: &mut Function,
-        target_addr: i32,
-        target_ty: Ty,
-        param_s0: u32,
-        param_s1: u32,
-        param_s2: u32,
-    ) -> Result<(), CodegenError> {
-        use wasm_encoder::BlockType;
-
-        // First, extract the f64 representation of s1 into a fresh
-        // local — needed for the number(f64) arm. This avoids having
-        // to re-bitcast inside nested arms.
-        //
-        // Structure:
-        //   if s0 == 1: number arm
-        //     coerce f64 -> target_ty, store
-        //   elif s0 == 0: text arm
-        //     runtime parse string -> target_ty, store
-        //   elif s0 == 2: boolean arm (only for bool target)
-        //     store (s1 low32) at target_addr
-        //   else: unreachable
-
-        // number(f64) arm
-        func.instruction(&Instruction::LocalGet(param_s0));
-        func.instruction(&Instruction::I32Const(1));
-        func.instruction(&Instruction::I32Eq);
-        func.instruction(&Instruction::If(BlockType::Empty));
-        self.emit_coerce_f64_and_store(func, target_addr, target_ty, param_s1)?;
-        func.instruction(&Instruction::Else);
-
-        // text(string) arm
-        func.instruction(&Instruction::LocalGet(param_s0));
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::I32Eq);
-        func.instruction(&Instruction::If(BlockType::Empty));
-        self.emit_coerce_text_and_store(func, target_addr, target_ty, param_s1, param_s2)?;
-        func.instruction(&Instruction::Else);
-
-        // boolean(bool) arm — only valid target is bool.
-        use yel_core::types::InternedTyKind;
-        if matches!(self.ctx.ty_kind(target_ty), InternedTyKind::Bool) {
-            func.instruction(&Instruction::I32Const(target_addr));
-            // Truncate i64 -> i32, then non-zero check.
-            func.instruction(&Instruction::LocalGet(param_s1));
-            func.instruction(&Instruction::I32WrapI64);
-            func.instruction(&Instruction::I32Const(0));
-            func.instruction(&Instruction::I32Ne);
-            func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
-        } else {
-            // Boolean payload on a non-bool signal is a host bug; we
-            // emit an unreachable so mismatches trip at runtime rather
-            // than silently no-op. This matches the No-Silent-Fallbacks
-            // policy: a mis-routed event is not something we want to
-            // paper over.
-            func.instruction(&Instruction::Unreachable);
-        }
-
-        func.instruction(&Instruction::End); // end text arm
-        func.instruction(&Instruction::End); // end number arm
-        Ok(())
     }
 
     /// Coerce a `f64` (bit-reinterpreted from the joined i64 slot) to
@@ -507,39 +420,5 @@ impl<'a> WasmPackageBuilder<'a> {
             }
         }
         Ok(())
-    }
-
-    /// Coerce a string (ptr, len) from `(param_s1 low32, param_s2)`
-    /// to `target_ty` and store it at `target_addr`. Uses runtime
-    /// parsers for numeric targets; for a `string` target the DOM
-    /// string is written verbatim.
-    #[allow(dead_code)]
-    pub(super) fn emit_coerce_text_and_store(
-        &self,
-        _func: &mut Function,
-        _target_addr: i32,
-        target_ty: Ty,
-        _param_s1: u32,
-        _param_s2: u32,
-    ) -> Result<(), CodegenError> {
-        // Text-input → non-string target is a type mismatch by design:
-        // numeric signals must be driven by `<input type="number">`
-        // (delivers `input-value::number(f64)`); boolean signals by
-        // `<input type="checkbox">` (delivers `boolean(bool)`). We
-        // don't parse strings into numbers in the guest — that would
-        // re-introduce the host-coupling Shape A was meant to avoid.
-        // Fail loudly so the user fixes the input-element type.
-        //
-        // String-target-from-text-input is also rejected today — the
-        // DOM-owned pointer isn't copied into guest memory and would
-        // dangle after dispatch. Separate fix (string copy in the
-        // host-value path) pending.
-        Err(CodegenError::InvalidIR(format!(
-            "binding-setter: `text(string)` input payload cannot target {:?}. \
-             Numeric targets need `<input type=\"number\">` (delivers `number(f64)`), \
-             boolean targets need `<input type=\"checkbox\">` (delivers `boolean(bool)`). \
-             String targets from text inputs are not yet wired (DOM-pointer lifetime).",
-            self.ctx.ty_kind(target_ty)
-        )))
     }
 }

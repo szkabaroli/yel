@@ -5,6 +5,7 @@
 
 use crate::context::CompilerContext;
 use crate::definitions::{ComponentDef, DefKind, EnumDef, FieldDef, FunctionDef, Namespace, VariantCaseDef, VariantDef};
+use crate::dom_imports::register_dom_imports;
 use crate::ids::{DefId, FieldIdx, VariantIdx};
 use crate::source::Span;
 use crate::types::{InternedTyKind, Ty};
@@ -25,6 +26,12 @@ pub fn lookup_known_definitions(ctx: &mut CompilerContext) {
 
     // Register builtin functions
     register_builtin_functions(ctx);
+
+    // Pre-allocate DefIds for the `meshx-ui/dom` WIT imports. Phase 2.2
+    // will lower UI-specific LirOps to `LirOp::CallFunction` against
+    // these DefIds; codegen maps them back to wasm import indices.
+    let dom_imports = register_dom_imports(ctx);
+    ctx.set_dom_imports(dom_imports);
 }
 
 fn register_builtin_types(ctx: &mut CompilerContext) {
@@ -332,6 +339,15 @@ fn register_builtin_functions(ctx: &mut CompilerContext) {
         "starts_with",
         &[Ty::STRING, Ty::STRING],
         Ty::BOOL,
+    ));
+
+    // append: func(list<T>, T) -> list<T>
+    // Generic function — element type is resolved at call site by typeck.
+    ctx.known.functions.append = Some(register_function(
+        ctx,
+        "append",
+        &[Ty::ERROR, Ty::ERROR],
+        Ty::ERROR,
     ));
 }
 

@@ -7,13 +7,17 @@ use crate::context::CompilerContext;
 use crate::diagnostic::Diagnostic;
 use crate::hir::{lower_file, HirComponent};
 use crate::ids::DefId;
-use crate::lir::{lower_component as lower_to_lir, lower_globals, LirComponent, LirExpr};
+use crate::lir::{lower_component as lower_to_lir, lower_globals, LirExpr, LirResource};
 use crate::source::{SourceId, Span};
 use crate::stdlib_lookup::lookup_known_definitions;
 use crate::syntax::ast::File;
 use crate::syntax::parser::{parse_file_with_source_id, CatchedError, ParseError};
-use crate::thir::{type_check, type_check_globals, ThirComponent, ThirExpr};
+use crate::thir::{
+    type_check, type_check_globals, type_check_globals_structured, ThirComponent, ThirExpr,
+    ThirGlobal,
+};
 
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Result type for compilation.
@@ -108,7 +112,11 @@ fn parse_error_to_diagnostic(e: &ParseError, source_id: SourceId) -> Diagnostic 
                 diag.with_span(Span::new(source_id, 0, 1))
             }
         }
-        ParseError::UnexpectedRule { expected, found, span } => {
+        ParseError::UnexpectedRule {
+            expected,
+            found,
+            span,
+        } => {
             let diag = Diagnostic::error(format!("expected {}, found {}", expected, found));
             if let Some(s) = span {
                 diag.with_span(*s)
@@ -120,7 +128,9 @@ fn parse_error_to_diagnostic(e: &ParseError, source_id: SourceId) -> Diagnostic 
             Diagnostic::error(format!("missing required element: {}", what))
         }
         ParseError::InvalidCallBase { span } => {
-            let diag = Diagnostic::error("invalid call base: only identifiers and member expressions can be called");
+            let diag = Diagnostic::error(
+                "invalid call base: only identifiers and member expressions can be called",
+            );
             if let Some(s) = span {
                 diag.with_span(*s)
             } else {
@@ -177,7 +187,9 @@ impl Compiler {
                 Ok(result.file)
             }
             Err(e) => {
-                self.ctx.diagnostics.push(parse_error_to_diagnostic(&e, source_id));
+                self.ctx
+                    .diagnostics
+                    .push(parse_error_to_diagnostic(&e, source_id));
                 Err(e.into())
             }
         }
@@ -201,7 +213,9 @@ impl Compiler {
                 Ok(result.file)
             }
             Err(e) => {
-                self.ctx.diagnostics.push(parse_error_to_diagnostic(&e, source_id));
+                self.ctx
+                    .diagnostics
+                    .push(parse_error_to_diagnostic(&e, source_id));
                 Err(e.into())
             }
         }
@@ -226,7 +240,9 @@ impl Compiler {
                 Ok(result.file)
             }
             Err(e) => {
-                self.ctx.diagnostics.push(parse_error_to_diagnostic(&e, source_id));
+                self.ctx
+                    .diagnostics
+                    .push(parse_error_to_diagnostic(&e, source_id));
                 Err(e.into())
             }
         }
@@ -271,23 +287,31 @@ impl Compiler {
     }
 
     /// Lower a THIR component to LIR.
-    pub fn lower_to_lir(&self, thir: &ThirComponent) -> LirComponent {
+    pub fn lower_to_lir(&self, thir: &ThirComponent) -> LirResource {
         lower_to_lir(thir, &self.ctx)
     }
 
     /// Type check all global-singleton property defaults.
-    pub fn type_check_globals(&mut self) -> std::collections::HashMap<DefId, ThirExpr> {
+    pub fn type_check_globals(&mut self) -> HashMap<DefId, ThirExpr> {
         type_check_globals(&mut self.ctx)
+    }
+
+    /// Phase 1.1c-k: type-check all global blocks, producing one
+    /// [`ThirGlobal`] per global declaration with signalck dependency
+    /// analysis already attached. Next phase (1.1c-l) will drive global
+    /// fanout lowering from these structures.
+    pub fn type_check_globals_structured(&mut self) -> Vec<ThirGlobal> {
+        type_check_globals_structured(&mut self.ctx)
     }
 
     /// Lower type-checked global property defaults to LIR.
     pub fn lower_globals_to_lir(
         &self,
-        thir_defaults: &std::collections::HashMap<DefId, ThirExpr>,
-    ) -> std::collections::HashMap<DefId, LirExpr> {
+        thir_defaults: &HashMap<DefId, ThirExpr>,
+    ) -> HashMap<DefId, LirExpr> {
         lower_globals(thir_defaults, &self.ctx)
     }
-    
+
     /// Check if there were any errors.
     pub fn has_errors(&self) -> bool {
         self.ctx.has_errors()
@@ -419,7 +443,9 @@ mod tests {
     fn test_parse_empty_source() {
         // Empty sources are now legal: they parse to a file with no components.
         let mut compiler = Compiler::new();
-        let file = compiler.parse("").expect("empty source should parse successfully");
+        let file = compiler
+            .parse("")
+            .expect("empty source should parse successfully");
         assert!(file.components.is_empty());
     }
 
@@ -463,7 +489,11 @@ mod tests {
         let hir = compiler.lower_to_hir(&file);
 
         assert_eq!(hir.len(), 2);
-        assert!(!compiler.has_errors(), "diagnostics: {}", compiler.render_diagnostics());
+        assert!(
+            !compiler.has_errors(),
+            "diagnostics: {}",
+            compiler.render_diagnostics()
+        );
     }
 
     // ========================================================================
@@ -540,11 +570,19 @@ mod tests {
 
         let person_id = compiler.ctx.lookup_type("Person").unwrap();
         let name_interned = compiler.ctx.intern("name");
-        let (field_idx, _) = compiler.ctx.defs.find_field(person_id, name_interned).unwrap();
+        let (field_idx, _) = compiler
+            .ctx
+            .defs
+            .find_field(person_id, name_interned)
+            .unwrap();
         assert_eq!(field_idx.index(), 0);
 
         let age_interned = compiler.ctx.intern("age");
-        let (field_idx, _) = compiler.ctx.defs.find_field(person_id, age_interned).unwrap();
+        let (field_idx, _) = compiler
+            .ctx
+            .defs
+            .find_field(person_id, age_interned)
+            .unwrap();
         assert_eq!(field_idx.index(), 1);
     }
 
@@ -569,7 +607,11 @@ mod tests {
         let hir = compiler.lower_to_hir(&file);
 
         assert_eq!(hir.len(), 1);
-        assert!(!compiler.has_errors(), "Should not have errors: {}", compiler.render_diagnostics());
+        assert!(
+            !compiler.has_errors(),
+            "Should not have errors: {}",
+            compiler.render_diagnostics()
+        );
     }
 
     #[test]
@@ -741,7 +783,11 @@ mod tests {
         assert!(!compiler.has_errors());
 
         let thir = compiler.type_check(&hir[0]);
-        assert!(!compiler.has_errors(), "Type check failed: {}", compiler.render_diagnostics());
+        assert!(
+            !compiler.has_errors(),
+            "Type check failed: {}",
+            compiler.render_diagnostics()
+        );
 
         // Component should have one Text node
         assert_eq!(thir.body.len(), 1);
@@ -1058,5 +1104,4 @@ mod tests {
 
         assert_eq!(hir.len(), 1);
     }
-
 }

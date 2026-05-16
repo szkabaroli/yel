@@ -45,6 +45,32 @@ enum Commands {
         /// Package name for generated code
         #[arg(short, long, default_value = "yel_app")]
         package: String,
+
+        /// Run Binaryen's `wasm-opt` on the core module before
+        /// component-encoding. All trailing args after `--` are
+        /// forwarded verbatim to `wasm-opt` (e.g.
+        /// `yelc compile foo.yel -- -O3 --enable-gc --type-merging`).
+        /// Requires `wasm-opt` on PATH.
+        #[arg(long = "opt", default_value_t = false)]
+        opt: bool,
+
+        /// Release build: validated wasm-opt pass stack +
+        /// strip component-level custom sections (name, producers).
+        /// Equivalent to `--opt -- --type-ssa --type-merging --gufa
+        /// -O3 --gufa -Oz --converge --closed-world --enable-gc
+        /// --enable-reference-types --enable-multivalue
+        /// --enable-bulk-memory --enable-bulk-memory-opt`, followed by
+        /// stripping non-essential custom sections. Requires
+        /// `wasm-opt` and `wasm-tools` on PATH. Mutually exclusive
+        /// with `--opt`.
+        #[arg(long = "release", default_value_t = false, conflicts_with = "opt")]
+        release: bool,
+
+        /// Trailing args forwarded to `wasm-opt` (only used with
+        /// `--opt`). Pass via `-- -O3 --enable-gc ...` so clap stops
+        /// flag parsing first.
+        #[arg(last = true, allow_hyphen_values = true, num_args = 0..)]
+        wasm_opt_args: Vec<String>,
     },
 
     /// Parse and dump AST
@@ -104,14 +130,86 @@ fn main() -> Result<()> {
             files,
             output,
             package,
-        } => compile(files, output, package),
+            opt,
+            release,
+            wasm_opt_args,
+        } => compile(files, output, package, opt, release, wasm_opt_args),
         Commands::Ast { file, pretty, json } => dump_ast(file, pretty, json),
         Commands::Ir { file, pretty, json } => dump_lir(file, pretty, json),
         Commands::Check { files } => check(files),
     }
 }
 
-fn compile(files: Vec<PathBuf>, output: OutputFormat, _package: String) -> Result<()> {
+/// Validated wasm-opt incantation for `--release`. Each arg sent
+/// individually so wasm-opt sees them as discrete tokens. Pass order
+/// matters: type-ssa specializes, type-merging dedupes, gufa
+/// propagates, -O3/-Oz prune, --converge re-runs to fixpoint.
+const RELEASE_WASM_OPT_ARGS: &[&str] = &[
+    "--type-ssa",
+    "--type-merging",
+    "--gufa",
+    "-O3",
+    "--gufa",
+    "-Oz",
+    "--converge",
+    "--closed-world",
+    "--enable-gc",
+    "--enable-reference-types",
+    "--enable-multivalue",
+    "--enable-bulk-memory",
+    "--enable-bulk-memory-opt",
+];
+
+/// Strip non-essential custom sections from a component to shed
+/// debug names. Shells out to `wasm-tools strip` which understands
+/// component nesting (wasm-opt doesn't see the outer component).
+fn strip_custom_sections(input: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Write;
+    use std::process::Command;
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_dir = std::env::temp_dir();
+    let in_path = tmp_dir.join(format!("yelc-strip-in-{}-{}.wasm", pid, nanos));
+    let out_path = tmp_dir.join(format!("yelc-strip-out-{}-{}.wasm", pid, nanos));
+    {
+        let mut f = std::fs::File::create(&in_path).context("create strip input tempfile")?;
+        f.write_all(input).context("write strip input tempfile")?;
+    }
+    let output = Command::new("wasm-tools")
+        .arg("strip")
+        .arg("--all")
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&out_path)
+        .output();
+    let result = match output {
+        Ok(out) if out.status.success() => std::fs::read(&out_path).context("read strip output"),
+        Ok(out) => Err(anyhow::anyhow!(
+            "wasm-tools strip failed (status {}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        )),
+        Err(e) => Err(anyhow::anyhow!(
+            "wasm-tools strip: failed to spawn (is it on PATH?): {}",
+            e
+        )),
+    };
+    let _ = std::fs::remove_file(&in_path);
+    let _ = std::fs::remove_file(&out_path);
+    result
+}
+
+fn compile(
+    files: Vec<PathBuf>,
+    output: OutputFormat,
+    _package: String,
+    opt: bool,
+    release: bool,
+    wasm_opt_args: Vec<String>,
+) -> Result<()> {
     let mut compiler = Compiler::new();
 
     // Collect all LIR components and package info
@@ -203,17 +301,31 @@ fn compile(files: Vec<PathBuf>, output: OutputFormat, _package: String) -> Resul
         OutputFormat::Wasm => {
             use std::io::Write;
 
+            let effective_opt_args: Option<Vec<String>> = if release {
+                Some(RELEASE_WASM_OPT_ARGS.iter().map(|s| s.to_string()).collect())
+            } else if opt {
+                Some(wasm_opt_args.clone())
+            } else {
+                None
+            };
             let wasm_options = codegen::WasmWithWitOptions {
                 namespace: wit_options.namespace.clone(),
                 name: wit_options.name.clone(),
                 version: wit_options.version.clone(),
                 global_defaults: lir_globals.clone(),
+                wasm_opt_args: effective_opt_args,
             };
             let wasm_bytes = codegen::generate_wasm_module(&module, ctx, &wasm_options)
                 .map_err(|e| anyhow::anyhow!("WASM generation error: {}", e))?;
 
+            let final_bytes = if release {
+                strip_custom_sections(&wasm_bytes)?
+            } else {
+                wasm_bytes
+            };
+
             std::io::stdout()
-                .write_all(&wasm_bytes)
+                .write_all(&final_bytes)
                 .context("Failed to write WASM output")?;
         }
         OutputFormat::Dot => {

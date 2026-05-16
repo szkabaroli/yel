@@ -73,6 +73,7 @@ fn compile_to_component(source: &str) -> Vec<u8> {
         name,
         version,
         global_defaults: lir_globals,
+        wasm_opt_args: None,
     };
     codegen::generate_wasm_module(&module, compiler.context(), &opts).expect("wasm codegen")
 }
@@ -152,7 +153,7 @@ impl CoreModule {
         let mut out = Vec::new();
         for payload in Parser::new(0).parse_all(&self.bytes) {
             if let Payload::ImportSection(reader) = payload.expect("core parse") {
-                for i in reader {
+                for i in reader.into_imports() {
                     let i = i.expect("import");
                     out.push((i.module.to_string(), i.name.to_string()));
                 }
@@ -687,7 +688,7 @@ fn parse_import_func_types(bytes: &[u8]) -> std::collections::HashMap<(String, S
     let mut out = std::collections::HashMap::new();
     for payload in Parser::new(0).parse_all(bytes) {
         if let Payload::ImportSection(reader) = payload.expect("parse") {
-            for i in reader {
+            for i in reader.into_imports() {
                 let i = i.expect("import");
                 if let wasmparser::TypeRef::Func(type_idx) = i.ty
                     && let Some(sig) = types.get(type_idx as usize)

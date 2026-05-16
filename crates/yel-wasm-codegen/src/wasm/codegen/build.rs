@@ -8,21 +8,24 @@
 //! - Data section for string literals
 //! - Name section for debugging
 
+use std::collections::{HashMap, HashSet};
+
 use wasm_encoder::{
-    CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
-    Instruction, MemoryType, Module, TypeSection, ValType,
+    CodeSection, DataSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
+    HeapType, ImportSection, Instruction, MemorySection, MemoryType, Module, RefType, StartSection,
+    TypeSection, ValType,
 };
+
+use yel_core::lir::{LirExpr, LirResource, align_to};
+use yel_core::types::InternedTyKind;
 use yel_core::{DefId, Ty};
 
 use super::super::CodegenError;
-use crate::wasm::AllocatorFuncs;
-use yel_core::lir::{LirComponent, LirExpr, LirSlotValType, align_to};
-use yel_core::types::InternedTyKind;
-
 use super::super::runtime::{self, RuntimeFunctions};
 use super::super::{ImportLayout, MemoryLayout, WasmPackageBuilder, to_kebab_case, to_wit_name};
-
 use super::scratch::{compute_mount_retention_counts, merge_max_slot_counts, push_valtype_locals};
+use crate::wasm::gc_types::{GlobalsBlockLayout, emit_globals_struct_type};
+use crate::wasm::{AllocatorFuncs, FlatScratchBases};
 
 impl<'a> WasmPackageBuilder<'a> {
     pub(crate) fn build_core_module(&mut self) -> Result<Module, CodegenError> {
@@ -41,11 +44,11 @@ impl<'a> WasmPackageBuilder<'a> {
         // emission). Note the import layout now covers *all* components so
         // non-exported components' callbacks are also registered as imports
         // — their bodies can still invoke them from event handlers etc.
-        let exported_components: Vec<&LirComponent> = exported_indices
+        let exported_components: Vec<&LirResource> = exported_indices
             .iter()
             .map(|&i| &self.components[i])
             .collect();
-        let all_components: Vec<&LirComponent> = self.components.iter().collect();
+        let all_components: Vec<&LirResource> = self.components.iter().collect();
 
         // Type section
         let mut types = TypeSection::new();
@@ -132,7 +135,7 @@ impl<'a> WasmPackageBuilder<'a> {
             .function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
         // Type 25: (i32 x 5) -> i32 - for record ctor with 5 params
         types.ty().function([ValType::I32; 5], [ValType::I32]);
-        // Type 26: () -> (i32, i32) - for if block results in list_get_opt
+        // Type 26: () -> (i32, i32) - pre-interned multi-value if-block result shape
         types.ty().function([], [ValType::I32, ValType::I32]);
         // Type 27: (f32) -> (i32, i32) - for f32_to_string
         types
@@ -152,9 +155,22 @@ impl<'a> WasmPackageBuilder<'a> {
             .ty()
             .function([ValType::I32; 5], [ValType::I32, ValType::I32]);
         // Type 31: set-attribute with attribute-value variant (canonical ABI flattened)
-        // (node, name_ptr, name_len, discrim, payload_i64, payload_i32) -> ()
-        // The canonical ABI joins variant payloads: i64 slot for (ptr,len)/i64/f64, i32 slot for i32/f32
-        // Variant cases: 0=str, 1=bool, 2=s8, 3=s16, 4=s32, 5=s64, 6=u8, 7=u16, 8=u32, 9=u64, 10=f32, 11=f64, 12=char
+        // (node, name_ptr, name_len, discrim,
+        //  payload_i64, payload_i32_slot1, payload_i32_slot2,
+        //  payload_i32_slot3, payload_i32_slot4) -> ()
+        //
+        // The canonical ABI joins variant payloads slot-wise: slot 0 is
+        // i64 (covers s64/u64/f64 reinterpreted/widened ints), slot 1
+        // is i32 (string len, color disc, packed u8s), and slots 2-4
+        // are i32 (extra color rgba bytes). Earlier we had only slots
+        // 0-1; the trailing three i32s were added in Phase 7 for the
+        // `color(color)` case whose inner variant payload (`rgba` of
+        // tuple<u8,u8,u8,u8>`) flattens to 5 i32 slots, expanding the
+        // join.
+        //
+        // Variant cases: 0=str, 1=bool, 2=s8, 3=s16, 4=s32, 5=s64,
+        //                6=u8, 7=u16, 8=u32, 9=u64, 10=f32, 11=f64,
+        //                12=char, 13=color.
         types.ty().function(
             [
                 ValType::I32,
@@ -162,6 +178,9 @@ impl<'a> WasmPackageBuilder<'a> {
                 ValType::I32,
                 ValType::I32,
                 ValType::I64,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
                 ValType::I32,
             ],
             [],
@@ -270,6 +289,12 @@ impl<'a> WasmPackageBuilder<'a> {
             list_ctor_types.insert((elem_ty, count), idx);
         }
 
+        // List-append helper type indices are interned later — after
+        // `emit_program_record_types` populates `list_array_type_idx`.
+        // See the late-intern block below.
+        let mut list_append_types: std::collections::HashMap<Ty, u32> =
+            std::collections::HashMap::new();
+
         // Precompute callback import type indices. Every callback takes the
         // component's resource handle as the implicit first `i32` param,
         // followed by its declared params (flattened via canonical ABI), and
@@ -322,26 +347,13 @@ impl<'a> WasmPackageBuilder<'a> {
             }
         }
 
-        // Precompute filter function type indices. Signature:
-        // (i32 x param_count) -> (i32, i32), where param_count = 2 (src ptr+len)
-        // plus each captured signal (strings/lists contribute 2, others 1).
+        // Stage 6: filter type interning is deferred until after
+        // `emit_program_record_types` populates `record_gc_types.
+        // list_array_type_idx`. The filter signature is now
+        // `(ref null $list_arr, ...captured signal storage slots) ->
+        // (ref null $list_arr)`. The Vec is filled below at the
+        // deferred site and consulted at function-section emit time.
         let mut filter_types: Vec<u32> = Vec::with_capacity(self.filter_calls.len());
-        for (filter_idx, (_, _, _, _, predicate)) in self.filter_calls.iter().enumerate() {
-            let mut captured_signals: Vec<(DefId, Ty)> = Vec::new();
-            self.extract_signal_reads(predicate, &mut captured_signals);
-            let mut param_count: usize = 2; // src_ptr, src_len
-            for (_, ty) in &captured_signals {
-                let is_fat_ptr = matches!(
-                    self.ctx.ty_kind(*ty),
-                    InternedTyKind::String | InternedTyKind::List(_)
-                );
-                param_count += if is_fat_ptr { 2 } else { 1 };
-            }
-            let params = vec![ValType::I32; param_count];
-            let results = vec![ValType::I32, ValType::I32];
-            let idx = intern_type(params, results, format!("type-filter-{}", filter_idx));
-            filter_types.push(idx);
-        }
 
         // Pre-register `() -> (slots…)` function types for every
         // multi-slot ternary in the program. Populated by a one-time
@@ -430,16 +442,77 @@ impl<'a> WasmPackageBuilder<'a> {
         // Phase 6: globals migrate alongside components — global-block
         // property list types route through the same typed GC array
         // path, so we no longer need to exclude them.
+        // Phase 7 cleanup: seed every reachable LirExpr's `ty` —
+        // including nested sub-expressions inside Box<LirExpr> /
+        // Vec<LirExpr> children. Sub-expressions like
+        // `[true, false][0]` inside an `if` condition have their
+        // ListConstruct stored inline, not in `component.exprs`, so a
+        // top-level-only walk misses them, leaving the typed GC array
+        // unregistered in `list_array_type_idx` and forcing
+        // `ListConstruct` to error on the missing GcArrayRef route.
+        // The downstream `gc_types` walker is HashSet-deduped, so
+        // over-seeding is harmless.
         let mut extra_seed_tys: Vec<yel_core::Ty> = Vec::new();
+        fn walk_expr(e: &yel_core::lir::LirExpr, out: &mut Vec<yel_core::Ty>) {
+            use yel_core::lir::LirExprKind as K;
+            out.push(e.ty);
+            match &e.kind {
+                K::Binary { lhs, rhs, .. } => {
+                    walk_expr(lhs, out);
+                    walk_expr(rhs, out);
+                }
+                K::Unary { operand, .. } => walk_expr(operand, out),
+                K::Field { base, .. } => walk_expr(base, out),
+                K::Index { base, index } => {
+                    walk_expr(base, out);
+                    walk_expr(index, out);
+                }
+                K::Call { args, .. } | K::GlobalCall { args, .. } => {
+                    for a in args {
+                        walk_expr(a, out);
+                    }
+                }
+                K::Ternary {
+                    condition,
+                    then_expr,
+                    else_expr,
+                } => {
+                    walk_expr(condition, out);
+                    walk_expr(then_expr, out);
+                    walk_expr(else_expr, out);
+                }
+                K::VariantCtor { payload, .. } => {
+                    if let Some(p) = payload {
+                        walk_expr(p, out);
+                    }
+                }
+                K::IsCase { base, .. } | K::VariantField { base, .. } => walk_expr(base, out),
+                K::ListConstruct { elements, .. } | K::TupleConstruct { elements, .. } => {
+                    for el in elements {
+                        walk_expr(el, out);
+                    }
+                }
+                K::RecordConstruct { fields, .. } => {
+                    for f in fields {
+                        walk_expr(f, out);
+                    }
+                }
+                K::Range { start, end, .. } => {
+                    walk_expr(start, out);
+                    walk_expr(end, out);
+                }
+                K::Local(_)
+                | K::Def(_)
+                | K::Literal(_)
+                | K::SignalRead(_)
+                | K::EnumCase { .. }
+                | K::ListStatic { .. }
+                | K::Closure { .. } => {}
+            }
+        }
         for component in self.components.iter() {
             for expr in &component.exprs {
-                if matches!(
-                    expr.kind,
-                    yel_core::lir::LirExprKind::ListConstruct { .. }
-                        | yel_core::lir::LirExprKind::ListStatic { .. }
-                ) {
-                    extra_seed_tys.push(expr.ty);
-                }
+                walk_expr(expr, &mut extra_seed_tys);
             }
         }
         let (record_types_count, record_gc_types) =
@@ -452,8 +525,91 @@ impl<'a> WasmPackageBuilder<'a> {
         cursor += record_types_count;
         self.record_gc_types = record_gc_types;
 
+        // Stage 6: now that `list_array_type_idx` is populated, intern
+        // the per-filter signatures `(ref null $list_arr, ...captured
+        // signal storage slots) -> (ref null $list_arr)`. Push directly
+        // into the type section because the `intern_type` closure's
+        // borrow on `dyn_types` ended when that vec was flushed earlier.
+        let filter_call_count = self.filter_calls.len();
+        for filter_idx in 0..filter_call_count {
+            let (_, list_ty, _, _, predicate) = self.filter_calls[filter_idx].clone();
+            let arr_type_idx = *self
+                .record_gc_types
+                .list_array_type_idx
+                .get(&list_ty)
+                .ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "filter type registration: missing list_array_type_idx for {:?}",
+                        list_ty
+                    ))
+                })?;
+            let arr_ref = ValType::Ref(wasm_encoder::RefType {
+                nullable: true,
+                heap_type: wasm_encoder::HeapType::Concrete(arr_type_idx),
+            });
+            let mut params: Vec<ValType> = vec![arr_ref];
+            let mut captured_signals: Vec<(DefId, Ty)> = Vec::new();
+            self.extract_signal_reads(&predicate, &mut captured_signals);
+            for (_, ty) in &captured_signals {
+                params.extend(self.signal_storage_valtypes(*ty));
+            }
+            let results = vec![arr_ref];
+            types
+                .ty()
+                .function(params.iter().copied(), results.iter().copied());
+            let idx = cursor;
+            cursor += 1;
+            self.function_type_names
+                .push((idx, format!("type-filter-{}", filter_idx)));
+            filter_types.push(idx);
+        }
+
+        // Intern list-append helper signatures now that the GC type
+        // registry has `list_array_type_idx` for every reachable list
+        // type. One per unique `list<T>` referenced by an `append` call.
+        // Signature: `(ref null $list_arr, <elem-storage>) -> (ref null $list_arr)`.
+        for &list_ty in &self.list_appends.clone() {
+            let elem_ty = match self.ctx.ty_kind(list_ty) {
+                InternedTyKind::List(e) => *e,
+                _ => continue,
+            };
+            let arr_type_idx = *self
+                .record_gc_types
+                .list_array_type_idx
+                .get(&list_ty)
+                .ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "list_append type registration: missing list_array_type_idx for {:?}",
+                        list_ty
+                    ))
+                })?;
+            let arr_ref = ValType::Ref(wasm_encoder::RefType {
+                nullable: true,
+                heap_type: wasm_encoder::HeapType::Concrete(arr_type_idx),
+            });
+            let elem_val_ty = super::super::gc_types::list_element_storage_type_pub(
+                self.ctx,
+                elem_ty,
+                &self.record_gc_types,
+            );
+            types.ty().function([arr_ref, elem_val_ty], [arr_ref]);
+            let idx = cursor;
+            cursor += 1;
+            self.function_type_names
+                .push((idx, format!("type-list-append-{}", list_ty.0)));
+            list_append_types.insert(list_ty, idx);
+        }
+
         for component in self.components.iter() {
             let parent_retention_count = compute_mount_retention_counts(component);
+            // Phase 0.3f cross-check: LIR-side comp_struct_layout
+            // mirrors codegen's field-allocation order. Catch drift in
+            // debug builds.
+            debug_assert_eq!(
+                parent_retention_count, component.comp_struct_layout.parent_retention_count,
+                "comp_struct_layout: parent_retention_count drift for {:?}",
+                component.def_id,
+            );
 
             // Emit the per-component concrete-typed mount-tree GC
             // types: one struct per `TreeBoundary` plus a companion
@@ -462,7 +618,7 @@ impl<'a> WasmPackageBuilder<'a> {
             // exist after Step 6.
             let mut layout = super::super::gc_types::GcTypeLayout::default();
             let tree_types_count = super::super::gc_types::emit_component_tree_types(
-                &component.tree_shape,
+                component,
                 &mut types,
                 cursor,
                 &mut layout,
@@ -489,6 +645,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 &mut types,
                 cursor,
                 &mut layout,
+                component,
             );
             cursor += super::super::gc_types::COMPONENT_TYPE_COUNT;
 
@@ -554,136 +711,104 @@ impl<'a> WasmPackageBuilder<'a> {
             // Blocks with neither `params` nor `boundary_params`
             // follow the legacy single-i32-parent calling convention,
             // honoured here by appending an i32 to the param list.
+            // L3-v2 Phase 2: every per-block function type is now
+            // derived from the block's `CallingConv` — built once via
+            // `ui_block_calling_conv` and consumed by
+            // `register_wasm_function_type`. The inline 150-line
+            // construction has been factored into:
+            //
+            //   * `lir::function::ui_block_calling_conv` (yel-core) —
+            //     encodes UI's "(ref $Comp) self-ref + boundary refs
+            //     + legacy i32 fallback + i32 return" conventions.
+            //   * `WasmPackageBuilder::wasm_function_type_for_conv`
+            //     (codegen/function_type.rs) — converts the conv +
+            //     user params into wasm `(ValType, ValType)` vectors.
+            //
+            // Flow functions will reuse `register_wasm_function_type`
+            // with a `FreeFunction`-shaped conv (no implicit params,
+            // returns derived from the return slot's val_ty).
+            // Phase 0.3l: register lifecycle blocks (mount /
+            // internal ctor / internal unmount) into
+            // `block_dynamic_type_idx` using the already-assigned
+            // internal-tier type indices. This lets the per-block
+            // emission loops below treat them uniformly with user
+            // blocks — no fixed-position carveout, no separate type
+            // lookup path. `ui_block_calling_conv` isn't applicable
+            // here because lifecycle blocks have role-specific
+            // wasm-param shapes (ctor returns the typed ref; mount
+            // takes an extra i32 root param; unmount has only the
+            // self-ref).
+            if let Some(ctor_block_id) = component.internal_constructor_block {
+                let ty_idx = layout.constructor_internal_type_idx.ok_or_else(|| {
+                    CodegenError::InternalError(format!(
+                        "component {:?}: constructor_internal_type_idx not assigned",
+                        component.def_id
+                    ))
+                })?;
+                layout.block_dynamic_type_idx.insert(ctor_block_id, ty_idx);
+            }
+            {
+                let ty_idx = layout.mount_internal_type_idx.ok_or_else(|| {
+                    CodegenError::InternalError(format!(
+                        "component {:?}: mount_internal_type_idx not assigned",
+                        component.def_id
+                    ))
+                })?;
+                layout
+                    .block_dynamic_type_idx
+                    .insert(component.mount_block, ty_idx);
+            }
+            if let Some(unmount_block_id) = component.internal_unmount_block {
+                let ty_idx = layout.unmount_internal_type_idx.ok_or_else(|| {
+                    CodegenError::InternalError(format!(
+                        "component {:?}: unmount_internal_type_idx not assigned",
+                        component.def_id
+                    ))
+                })?;
+                layout
+                    .block_dynamic_type_idx
+                    .insert(unmount_block_id, ty_idx);
+            }
+
             for block in &component.blocks {
                 if block.id == component.mount_block {
                     continue;
                 }
-                let mut param_valtypes: Vec<wasm_encoder::ValType> =
-                    vec![wasm_encoder::ValType::Ref(comp_ref)];
-                for ps in &block.params {
-                    let val_ty = component
-                        .slots
-                        .get(ps.0 as usize)
-                        .map(|s| s.val_ty)
-                        .unwrap_or(LirSlotValType::I32);
-                    let v = match val_ty {
-                        LirSlotValType::I32 => wasm_encoder::ValType::I32,
-                        LirSlotValType::I64 => wasm_encoder::ValType::I64,
-                        LirSlotValType::F32 => wasm_encoder::ValType::F32,
-                        LirSlotValType::F64 => wasm_encoder::ValType::F64,
-                        LirSlotValType::RefNull(idx) => {
-                            wasm_encoder::ValType::Ref(wasm_encoder::RefType {
-                                nullable: true,
-                                heap_type: wasm_encoder::HeapType::Concrete(idx),
-                            })
-                        }
-                        LirSlotValType::RefNullForBoundary(b_id) => {
-                            let ty_idx =
-                                *layout.tree_struct_type_idx.get(&b_id).ok_or_else(|| {
-                                    CodegenError::InvalidIR(format!(
-                                        "dynamic block fn type: missing tree struct type \
-                                         for boundary {:?}",
-                                        b_id
-                                    ))
-                                })?;
-                            wasm_encoder::ValType::Ref(wasm_encoder::RefType {
-                                nullable: true,
-                                heap_type: wasm_encoder::HeapType::Concrete(ty_idx),
-                            })
-                        }
-                        LirSlotValType::RefNullForChildrenArray(anchor_id) => {
-                            let ty_idx =
-                                *layout
-                                    .tree_for_arr_type_idx
-                                    .get(&anchor_id)
-                                    .ok_or_else(|| {
-                                        CodegenError::InvalidIR(format!(
-                                            "dynamic block fn type: missing children-array \
-                                         type for anchor boundary {:?}",
-                                            anchor_id
-                                        ))
-                                    })?;
-                            wasm_encoder::ValType::Ref(wasm_encoder::RefType {
-                                nullable: true,
-                                heap_type: wasm_encoder::HeapType::Concrete(ty_idx),
-                            })
-                        }
-                        LirSlotValType::RefNullForListGc(list_ty) => {
-                            let ty_idx = *self
-                                .record_gc_types
-                                .list_array_type_idx
-                                .get(&list_ty)
-                                .ok_or_else(|| {
-                                    CodegenError::InvalidIR(format!(
-                                        "dynamic block fn type: missing list_array_type_idx \
-                                         for list ty {:?}",
-                                        list_ty
-                                    ))
-                                })?;
-                            wasm_encoder::ValType::Ref(wasm_encoder::RefType {
-                                nullable: true,
-                                heap_type: wasm_encoder::HeapType::Concrete(ty_idx),
-                            })
-                        }
-                        LirSlotValType::RefNullForRecord(record_ty) => {
-                            use yel_core::types::InternedTyKind;
-                            let def_id = match self.ctx.ty_kind(record_ty) {
-                                InternedTyKind::Adt(d) => *d,
-                                _ => {
-                                    return Err(CodegenError::InvalidIR(format!(
-                                        "dynamic block fn type: RefNullForRecord on non-Adt {:?}",
-                                        record_ty
-                                    )));
-                                }
-                            };
-                            let ty_idx = *self
-                                .record_gc_types
-                                .record_type_idx
-                                .get(&def_id)
-                                .ok_or_else(|| {
-                                    CodegenError::InvalidIR(format!(
-                                        "dynamic block fn type: missing record_type_idx \
-                                         for record {:?}",
-                                        def_id
-                                    ))
-                                })?;
-                            wasm_encoder::ValType::Ref(wasm_encoder::RefType {
-                                nullable: true,
-                                heap_type: wasm_encoder::HeapType::Concrete(ty_idx),
-                            })
-                        }
-                    };
-                    param_valtypes.push(v);
+                if Some(block.id) == component.internal_constructor_block {
+                    continue;
                 }
-                for &b_id in &block.boundary_params {
-                    let bty = *layout.tree_struct_type_idx.get(&b_id).ok_or_else(|| {
-                        CodegenError::InvalidIR(format!(
-                            "dynamic block fn type: missing tree struct type for \
-                             boundary {:?}",
-                            b_id
-                        ))
-                    })?;
-                    param_valtypes.push(wasm_encoder::ValType::Ref(wasm_encoder::RefType {
-                        nullable: true,
-                        heap_type: wasm_encoder::HeapType::Concrete(bty),
-                    }));
+                if Some(block.id) == component.internal_unmount_block {
+                    continue;
                 }
-                // Legacy single-implicit-i32-parent fallback: when
-                // neither LIR params nor boundary refs are declared,
-                // the block's calling convention still requires one
-                // i32 (the parent DOM handle).
-                if block.params.is_empty() && block.boundary_params.is_empty() {
-                    param_valtypes.push(wasm_encoder::ValType::I32);
+                // Phase 0.3m: skip synthesized export-wrapper blocks —
+                // those are declared via the fixed-position 3-per-
+                // component slots in the function section below
+                // (types 2, 3/5, 1) and don't get a per-block dynamic
+                // type entry.
+                if Some(block.id) == component.export_constructor_block {
+                    continue;
                 }
-
-                let results: Vec<wasm_encoder::ValType> = if block.return_slot.is_some() {
-                    vec![wasm_encoder::ValType::I32]
-                } else {
-                    vec![]
-                };
-                types.ty().function(param_valtypes, results);
-                layout.block_dynamic_type_idx.insert(block.id, cursor);
-                cursor += 1;
+                if Some(block.id) == component.export_mount_block {
+                    continue;
+                }
+                if Some(block.id) == component.export_unmount_block {
+                    continue;
+                }
+                let conv = yel_core::lir::function::ui_block_calling_conv(
+                    block,
+                    component.def_id,
+                    &component.slots,
+                );
+                let type_idx = self.register_wasm_function_type(
+                    &mut types,
+                    &mut cursor,
+                    &conv,
+                    &block.params,
+                    &component.slots,
+                    &layout,
+                )?;
+                layout.block_dynamic_type_idx.insert(block.id, type_idx);
+                let _ = comp_ref;
             }
 
             gc_layouts.push(layout);
@@ -727,10 +852,10 @@ impl<'a> WasmPackageBuilder<'a> {
         // self-global is emitted later in the global section; type
         // index assignment happens here so the encoder's type-section
         // ordering stays linear with `cursor`.
-        let mut globals_layouts: Vec<crate::wasm::gc_types::GlobalsBlockLayout> = Vec::new();
-        let mut global_block_def_to_idx: std::collections::HashMap<yel_core::DefId, usize> =
-            std::collections::HashMap::new();
-        let global_block_ids: Vec<yel_core::DefId> = self.ctx.defs.globals().collect();
+        let mut globals_layouts: Vec<GlobalsBlockLayout> = Vec::new();
+        let mut global_block_def_to_idx: HashMap<DefId, usize> = HashMap::new();
+        let global_block_ids: Vec<DefId> = self.ctx.defs.globals().collect();
+
         for block_def_id in global_block_ids.iter().copied() {
             let block = self
                 .ctx
@@ -743,7 +868,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     ))
                 })?
                 .clone();
-            let prop_slot_valtypes: Vec<Vec<wasm_encoder::ValType>> = block
+            let prop_slot_valtypes: Vec<Vec<ValType>> = block
                 .properties
                 .iter()
                 .map(|&prop_id| {
@@ -755,12 +880,10 @@ impl<'a> WasmPackageBuilder<'a> {
                     self.signal_storage_valtypes(prop_ty)
                 })
                 .collect();
-            let layout = crate::wasm::gc_types::emit_globals_struct_type(
-                block_def_id,
-                &prop_slot_valtypes,
-                &mut types,
-                cursor,
-            );
+
+            let layout =
+                emit_globals_struct_type(block_def_id, &prop_slot_valtypes, &mut types, cursor);
+
             cursor += 1;
             global_block_def_to_idx.insert(block_def_id, globals_layouts.len());
             globals_layouts.push(layout);
@@ -782,32 +905,88 @@ impl<'a> WasmPackageBuilder<'a> {
             .filter(|&(&ty, _)| self.is_scalar_list_ty(ty))
             .map(|(&ty, &arr_idx)| (ty, arr_idx))
             .collect();
-        let mut materializer_type_by_arr_idx: std::collections::HashMap<u32, u32> =
-            std::collections::HashMap::new();
+        let mut materializer_type_by_arr_idx: HashMap<u32, u32> = HashMap::new();
         for (i, (_, arr_type_idx)) in gc_list_arr_type_idxs.iter().enumerate() {
             let type_idx = cursor + i as u32;
-            let param = ValType::Ref(wasm_encoder::RefType {
+            let param = ValType::Ref(RefType {
                 nullable: true,
-                heap_type: wasm_encoder::HeapType::Concrete(*arr_type_idx),
+                heap_type: HeapType::Concrete(*arr_type_idx),
             });
             types.ty().function([param], [ValType::I32, ValType::I32]);
             materializer_type_by_arr_idx.insert(*arr_type_idx, type_idx);
         }
         // Phase 5e.6: per-array un-materializer types — (i32, i32) → (ref null $arr).
         let unmat_type_base = cursor + gc_list_arr_type_idxs.len() as u32;
-        let mut unmaterializer_type_by_arr_idx: std::collections::HashMap<u32, u32> =
-            std::collections::HashMap::new();
+        let mut unmaterializer_type_by_arr_idx: HashMap<u32, u32> = HashMap::new();
         for (i, (_, arr_type_idx)) in gc_list_arr_type_idxs.iter().enumerate() {
             let type_idx = unmat_type_base + i as u32;
-            let result = ValType::Ref(wasm_encoder::RefType {
+            let result = ValType::Ref(RefType {
                 nullable: true,
-                heap_type: wasm_encoder::HeapType::Concrete(*arr_type_idx),
+                heap_type: HeapType::Concrete(*arr_type_idx),
             });
-            types
-                .ty()
-                .function([ValType::I32, ValType::I32], [result]);
+            types.ty().function([ValType::I32, ValType::I32], [result]);
             unmaterializer_type_by_arr_idx.insert(*arr_type_idx, type_idx);
         }
+
+        // Phase 7: pack_color_to_attr_slots type — only registered if
+        // the program references the language `color` type. Signature:
+        // (ref null $var_color) → (i64 inner_disc, i32 r, i32 g, i32 b, i32 a).
+        // Locate the color Ty (Adt of `known.variants.color`) by
+        // scanning the flat-gc registry rather than constructing a
+        // fresh interned Ty (which would require mutable ctx).
+        let color_def_id = self.ctx.known.variants.color;
+        let color_ty_for_helper = color_def_id.and_then(|d| {
+            self.record_gc_types
+                .flat_gc_super_idx
+                .keys()
+                .copied()
+                .find(|ty| {
+                    matches!(
+                        self.ctx.ty_kind(*ty),
+                    InternedTyKind::Adt(adt_d) if *adt_d == d
+                    )
+                })
+        });
+        let color_super_idx = color_ty_for_helper
+            .and_then(|ty| self.record_gc_types.flat_gc_super_idx.get(&ty).copied());
+        // Use the type section's actual length as the about-to-be-
+        // assigned type index — `cursor` only tracks GC types and
+        // doesn't account for materializer/un-materializer function
+        // types appended just above this point. `types.len()` is the
+        // ground truth.
+        // Phase 7: pack_color_to_attr_slots type — registered only
+        // when the program references the language `color` type.
+        // Signature: `(ref null $var_color) → (i64, i32 ×4)` — 1 i64
+        // for the inner color disc widened, 4 i32s for the rgba
+        // tuple bytes (zero for non-rgba cases).
+        //
+        // Type-section subtype indices advance by `record_types_count`
+        // etc. via `cursor`, while `types.len()` only counts the
+        // number of `types.ty()` calls (one per rec group regardless
+        // of subtype count). The pack_color helper is appended after
+        // the materializer / un-materializer single-sub function
+        // types, so its subtype index is `cursor + materializer_count
+        // + un_materializer_count` = `cursor + 2 * len`.
+        let pack_color_type_idx = if let Some(super_idx) = color_super_idx {
+            let param = ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(super_idx),
+            });
+            let type_idx = cursor + (gc_list_arr_type_idxs.len() as u32) * 2;
+            types.ty().function(
+                [param],
+                [
+                    ValType::I64,
+                    ValType::I32,
+                    ValType::I32,
+                    ValType::I32,
+                    ValType::I32,
+                ],
+            );
+            Some(type_idx)
+        } else {
+            None
+        };
 
         module.section(&types);
 
@@ -924,46 +1103,57 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Create RuntimeFunctions starting after imports + allocator functions (3)
         let filter_count = self.filter_calls.len();
+        let runtime_needs = self.runtime_needs;
+        let list_appends_clone = self.list_appends.clone();
         let runtime_funcs = RuntimeFunctions::new(
             import_layout.num_imports + 3,
+            runtime_needs,
             &concat_arities,
             &self.record_types,
             &self.list_constructs,
+            &list_appends_clone,
             filter_count,
         );
         self.runtime_funcs = Some(runtime_funcs.clone());
 
-        // Local runtime functions (order must match RuntimeFunctions::new):
-        // 1. s32_to_string: type 16 - (i32) -> (i32, i32)
-        functions.function(16);
-        // 2. s64_to_string: type 33 - (i64) -> (i32, i32)
-        functions.function(runtime::types::I64_TO_PTR_LEN);
-        // 3. bool_to_string: type 16 - (i32) -> (i32, i32)
-        functions.function(16);
-        // 4. f32_to_string: type 27 - (f32) -> (i32, i32)
-        functions.function(27);
-        // 4. concat<n> for each required arity (uses cabi_realloc)
+        // Local runtime functions (order MUST match RuntimeFunctions::new
+        // so each `functions.function(type)` lines up with the index that
+        // `new` assigned). Skipped helpers (None) consume neither an
+        // index nor a function-section entry.
+        if runtime_needs.s32_to_string {
+            // type 16 - (i32) -> (i32, i32)
+            functions.function(16);
+        }
+        if runtime_needs.s64_to_string {
+            // type 33 - (i64) -> (i32, i32)
+            functions.function(runtime::types::I64_TO_PTR_LEN);
+        }
+        if runtime_needs.bool_to_string {
+            // type 16 - (i32) -> (i32, i32)
+            functions.function(16);
+        }
+        if runtime_needs.f32_to_string {
+            // type 27 - (f32) -> (i32, i32)
+            functions.function(27);
+        }
+        // concat<n> for each required arity (uses cabi_realloc)
         for &arity in &concat_arities {
             // concat2 = type 17, concat3 = type 18, concat4 = type 19, etc.
-            let type_idx = 15 + arity as u32; // type 17 for concat2, 18 for concat3, etc.
+            let type_idx = 15 + arity as u32;
             functions.function(type_idx);
         }
-        // 4. store_fat_ptr: type 6 - (i32, i32, i32) -> ()
-        functions.function(6);
-        // 5. load_fat_ptr: type 16 - (i32) -> (i32, i32)
-        functions.function(16);
-        // 6. store_option: type 6 - (i32, i32, i32) -> ()
-        functions.function(6);
-        // 7. store_result: type 8 - (i32, i32, i32, i32) -> ()
-        functions.function(8);
-        // 8. list_get: type 9 - (i32, i32, i32, i32) -> i32
-        functions.function(runtime::types::LIST_GET);
-        // 7. list_get_opt: type 17 - (i32, i32, i32, i32) -> (i32, i32)
-        functions.function(runtime::types::LIST_GET_OPT);
-        // 7b. list_get_fat: type 17 - (i32, i32, i32, i32) -> (i32, i32)
-        functions.function(runtime::types::LIST_GET_FAT);
-        // 8. starts_with: type 9 - (i32, i32, i32, i32) -> i32
-        functions.function(runtime::types::I32X4_I32);
+        if runtime_needs.store_fat_ptr {
+            // type 6 - (i32, i32, i32) -> ()
+            functions.function(6);
+        }
+        if runtime_needs.load_fat_ptr {
+            // type 16 - (i32) -> (i32, i32)
+            functions.function(16);
+        }
+        if runtime_needs.starts_with {
+            // type 9 - (i32, i32, i32, i32) -> i32
+            functions.function(runtime::types::I32X4_I32);
+        }
         // 9. Record constructor helpers for each record type
         // For each record: ctor_at (stores at address) + ctor (allocates and returns)
         // Type indices for record ctors are computed dynamically based on field count
@@ -995,8 +1185,20 @@ impl<'a> WasmPackageBuilder<'a> {
             })?;
             functions.function(type_idx);
         }
-        // 11. pack_fat_ptr_to_i64: type 32 - (i32, i32) -> i64
-        functions.function(32);
+        // 10b. List append helpers (one per unique list type).
+        for &list_ty in &self.list_appends {
+            let type_idx = *list_append_types.get(&list_ty).ok_or_else(|| {
+                CodegenError::InternalError(format!(
+                    "missing list append type idx for {:?}",
+                    list_ty
+                ))
+            })?;
+            functions.function(type_idx);
+        }
+        if runtime_needs.pack_fat_ptr_to_i64 {
+            // type 32 - (i32, i32) -> i64
+            functions.function(32);
+        }
 
         // 12. Filter functions: (src_ptr, src_len, [captured_signals...]) -> (result_ptr, result_len)
         // Types were dynamically interned above — look them up by index.
@@ -1037,27 +1239,57 @@ impl<'a> WasmPackageBuilder<'a> {
             self.gc_list_unmaterializer_fn_indices
                 .insert(*arr_type_idx, unmat_base + i as u32);
         }
+        // 13c. Phase 7: pack_color_to_attr_slots — emitted only if the
+        // program references the language `color` type. The function
+        // declaration MUST come right after the un-materializer block
+        // because the type signature was registered there; any later
+        // function-section insertions would shift the function index
+        // away from `materializer_base + 2*len`.
+        // Use functions.len() + (existing imports + allocator + runtime
+        // funcs already declared) to compute the helper's true function
+        // index. The function-index space layout: imports first, then
+        // declared local functions in order. By the time we get here,
+        // every function declared so far in this section gets a
+        // function index = num_imports + functions.len() (where
+        // functions.len() counts only declarations made via
+        // `functions.function(...)`).
+        // Function index = imports + (declarations made so far in
+        // this section). `functions.len()` is reliable because the
+        // function section uses one entry per declared function with
+        // no rec-group bundling.
+        let pack_color_helper_fn_idx_local = pack_color_type_idx.map(|type_idx| {
+            let fn_idx = import_layout.num_imports + functions.len();
+            functions.function(type_idx);
+            self.pack_color_helper_fn_idx = Some(fn_idx);
+            fn_idx
+        });
 
         // For each component: constructor, mount, unmount, getters, setters
         for (comp_idx, component) in self.components.iter().enumerate() {
-            functions.function(2); // constructor: () -> i32
-            // Mount signature depends on whether the component is a
-            // container: container components return the children-root
-            // node id `(i32, i32) -> i32` (type 5); non-containers have
-            // no return `(i32, i32) -> ()` (type 3).
-            let mount_type = if self
-                .ctx
-                .defs
-                .as_component(component.def_id)
-                .map(|c| c.has_children_slot)
-                .unwrap_or(false)
-            {
-                5
-            } else {
-                3
-            };
-            functions.function(mount_type); // mount
-            functions.function(1); // unmount: (self: i32) -> ()
+            // Post-cleanup: export wrappers (ctor / mount / unmount) only
+            // emitted for is_export components. Non-exported components
+            // have no host-facing surface and nothing calls these
+            // wrappers internally — they were dead slots.
+            if component.is_export {
+                functions.function(2); // constructor: () -> i32
+                // Mount signature depends on whether the component is a
+                // container: container components return the children-root
+                // node id `(i32, i32) -> i32` (type 5); non-containers have
+                // no return `(i32, i32) -> ()` (type 3).
+                let mount_type = if self
+                    .ctx
+                    .defs
+                    .as_component(component.def_id)
+                    .map(|c| c.has_children_slot)
+                    .unwrap_or(false)
+                {
+                    5
+                } else {
+                    3
+                };
+                functions.function(mount_type); // mount
+                functions.function(1); // unmount: (self: i32) -> ()
+            }
 
             for (sig_idx, signal) in component.signals.iter().enumerate() {
                 // Skip function-typed signals - they're callbacks, not data properties
@@ -1114,59 +1346,83 @@ impl<'a> WasmPackageBuilder<'a> {
                 functions.function(setter_type);
             }
 
-            // Step 5: internal-tier functions (constructor_internal,
-            // mount_internal, unmount_internal). Indices follow the
-            // getter/setter pairs to preserve every existing exported
-            // index — host-facing exports continue to map to
-            // `comp_func_idx + {0,1,2,3+sig*2,..}`.
-            let gc = &self.gc_layouts[comp_idx];
-            functions.function(gc.constructor_internal_type_idx.ok_or_else(|| {
-                CodegenError::InternalError(format!(
-                    "component {}: constructor_internal_type_idx not assigned",
-                    comp_idx
-                ))
-            })?);
-            functions.function(gc.mount_internal_type_idx.ok_or_else(|| {
-                CodegenError::InternalError(format!(
-                    "component {}: mount_internal_type_idx not assigned",
-                    comp_idx
-                ))
-            })?);
-            functions.function(gc.unmount_internal_type_idx.ok_or_else(|| {
-                CodegenError::InternalError(format!(
-                    "component {}: unmount_internal_type_idx not assigned",
-                    comp_idx
-                ))
-            })?);
+            // Phase 0.3l: internal-tier functions (constructor_internal,
+            // mount_internal, unmount_internal) no longer occupy fixed
+            // per-component positions. They are declared by the per-
+            // block loop below (alongside user blocks) and their wasm
+            // indices are tracked in `block_func_indices`.
         }
 
         // Calculate base function index for block functions
         // = imports + allocator funcs (3) + runtime funcs + materializers + component funcs
-        let mut block_func_base = import_layout.num_imports
+        let first_component_func_local = import_layout.num_imports
             + 3
             + runtime_funcs.count
-            + (gc_list_arr_type_idxs.len() as u32) * 2; // materializers + un-materializers
+            + (gc_list_arr_type_idxs.len() as u32) * 2 // materializers + un-materializers
+            + if pack_color_helper_fn_idx_local.is_some() { 1 } else { 0 };
+        let mut block_func_base = first_component_func_local;
+        // Phase 0.3m: per-component prefix base in the function-index
+        // space — points at the component's exported constructor.
+        // Used by the per-block loop below to record fixed wasm indices
+        // for the synthesized export-wrapper blocks.
+        let mut comp_func_bases_local: Vec<u32> = Vec::with_capacity(self.components.len());
         for component in self.components {
+            comp_func_bases_local.push(block_func_base);
             // Count only data signals (non-callback signals)
             let data_signal_count = component
                 .signals
                 .iter()
                 .filter(|s| !matches!(self.ctx.ty_kind(s.ty), InternedTyKind::Func { .. }))
                 .count() as u32;
-            block_func_base += 6 + (data_signal_count * 2);
+            // Phase 0.3l: lifecycle blocks (internal ctor / mount /
+            // internal unmount) no longer occupy fixed per-component
+            // positions — they now flow through the regular per-block
+            // loop below. Post-cleanup: export wrappers (ctor / mount /
+            // unmount) only exist for is_export components — non-exported
+            // components contribute only 2*N getter/setter pairs.
+            let export_slots = if component.is_export { 3 } else { 0 };
+            block_func_base += export_slots + (data_signal_count * 2);
         }
 
-        // Add block functions for each component
-        // Skip mount block since it's handled by the mount method
+        // Add block functions for each component.
+        // Phase 0.3l: lifecycle blocks (mount / internal ctor / internal
+        // unmount) flow through this loop too — they're registered in
+        // `block_func_indices` like every other block, and the export
+        // wrappers + `MountComponent` op look up their wasm indices
+        // here instead of computing `base + 3 + 2N + {0,1,2}`.
+        // Phase 0.3m: track the running per-block function count
+        // separately from `block_func_indices.len()` because the
+        // synthesized export-wrapper blocks get fixed indices inserted
+        // into the map but DO NOT contribute to the per-block running
+        // counter (they live at the 3 per-component fixed slots
+        // declared earlier in the function section).
+        let mut per_block_running: u32 = 0;
         for (comp_idx, component) in self.components.iter().enumerate() {
             for block in &component.blocks {
-                // Skip mount block - it's generated inline in the mount method
-                if block.id == component.mount_block {
+                // Phase 0.3m: synthesized export-wrapper blocks occupy
+                // the fixed 3 per-component slots declared earlier in
+                // the function section — they don't participate in
+                // the per-block loop. Record their wasm indices in
+                // `block_func_indices` so name-section labels and
+                // intra-component CallBlock dispatch (if any) resolve.
+                if Some(block.id) == component.export_constructor_block {
+                    self.block_func_indices
+                        .insert(block.id, comp_func_bases_local[comp_idx]);
                     continue;
                 }
-                let func_idx = block_func_base + self.block_func_indices.len() as u32;
-                self.block_func_indices
-                    .insert((comp_idx, block.id), func_idx);
+                if Some(block.id) == component.export_mount_block {
+                    self.block_func_indices
+                        .insert(block.id, comp_func_bases_local[comp_idx] + 1);
+                    continue;
+                }
+                if Some(block.id) == component.export_unmount_block {
+                    self.block_func_indices
+                        .insert(block.id, comp_func_bases_local[comp_idx] + 2);
+                    continue;
+                }
+                let func_idx = block_func_base + per_block_running;
+                per_block_running += 1;
+                self.block_func_indices.insert(block.id, func_idx);
                 // Block function types: derived from `block.params.len()`
                 // + `return_slot` flag. Blocks with empty `params` default
                 // to the 1-i32-param signature (update blocks, handlers).
@@ -1199,7 +1455,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // Standalone dispatch function: carries event-value payload as
         // 6 extra core params (outer_disc + 5 joined slots). See
         // `dispatch_type_idx` defined earlier.
-        let dispatch_func_idx = block_func_base + self.block_func_indices.len() as u32;
+        let dispatch_func_idx = block_func_base + per_block_running;
         functions.function(dispatch_type_idx);
         self.dispatch_func_idx = Some(dispatch_func_idx);
 
@@ -1223,7 +1479,7 @@ impl<'a> WasmPackageBuilder<'a> {
             // def table. Memory addresses aren't needed here — we only need
             // to know **which** DefIds are globals so we can register one
             // fanout helper per observed-elsewhere global.
-            let mut seen: std::collections::HashSet<DefId> = std::collections::HashSet::new();
+            let mut seen: HashSet<DefId> = HashSet::new();
             for global_def_id in self.ctx.defs.globals().collect::<Vec<_>>() {
                 let global = match self.ctx.defs.as_global(global_def_id) {
                     Some(g) => g.clone(),
@@ -1253,7 +1509,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Memory section - define memory locally (17 pages minimum)
         // Must come after Function section, before Global section
-        let mut memories = wasm_encoder::MemorySection::new();
+        let mut memories = MemorySection::new();
         memories.memory(MemoryType {
             minimum: 17,
             maximum: None,
@@ -1284,7 +1540,7 @@ impl<'a> WasmPackageBuilder<'a> {
             for &(_comp_idx, cb_def_id) in &precalc_import_layout.unique_callbacks {
                 if let Some(func_def) = self.ctx.defs.as_function(cb_def_id) {
                     let ret_ty = func_def.ret_ty;
-                    if ret_ty == yel_core::types::Ty::UNIT {
+                    if ret_ty == Ty::UNIT {
                         continue;
                     }
                     let flat = self.canonical_flat_valtypes(ret_ty);
@@ -1480,11 +1736,26 @@ impl<'a> WasmPackageBuilder<'a> {
         // Export cabi_realloc (required by canonical ABI for string/list lifting/lowering)
         exports.export("cabi_realloc", ExportKind::Func, alloc_funcs.cabi_realloc);
 
+        // Per-component registry globals — exported only so external
+        // tooling (yel-host's `gc-dump` subcommand) can reach the typed
+        // `(array (ref null $handle))` registry from the host's GC API.
+        // Each export name is `<comp-name>-registry`. wit-component
+        // hides core-module exports from the WIT surface, so these
+        // don't leak into the public component world.
+        for (comp_idx, component) in self.components.iter().enumerate() {
+            let prefix = to_kebab_case(&self.ctx.str(component.name));
+            let registry = self.gc_layouts[comp_idx].registry_global;
+            if let Some(g) = registry {
+                exports.export(&format!("{}-registry", prefix), ExportKind::Global, g);
+            }
+        }
+
         // Component function exports
         let first_component_func = import_layout.num_imports
             + 3
             + runtime_funcs.count
-            + (gc_list_arr_type_idxs.len() as u32) * 2; // materializers + un-materializers
+            + (gc_list_arr_type_idxs.len() as u32) * 2 // materializers + un-materializers
+            + if pack_color_helper_fn_idx_local.is_some() { 1 } else { 0 };
 
         // Pre-compute the function-index base for every component by position.
         // Stored on the builder so MountComponent can look it up directly
@@ -1495,7 +1766,14 @@ impl<'a> WasmPackageBuilder<'a> {
             let mut acc = first_component_func;
             for component in self.components.iter() {
                 self.component_func_bases.push(acc);
-                acc += 6 + (component.signals.len() as u32 * 2);
+                // Phase 0.3l: prefix shrinks from 6+2N to 3+2N — the
+                // 3 internal-tier lifecycle entries now emit through
+                // the per-block loop and are looked up via
+                // `block_func_indices`, not via `func_base + 3 + 2N + k`.
+                // Post-cleanup: export wrappers (3) only emitted for
+                // is_export components — non-exported contribute 2N only.
+                let export_slots = if component.is_export { 3 } else { 0 };
+                acc += export_slots + (component.signals.len() as u32 * 2);
             }
         }
 
@@ -1584,7 +1862,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Start section - runs `globals_init` once at module instantiation,
         // before any export can be invoked. Must come after Export, before Code.
-        module.section(&wasm_encoder::StartSection {
+        module.section(&StartSection {
             function_index: globals_init_func_idx,
         });
 
@@ -1603,38 +1881,36 @@ impl<'a> WasmPackageBuilder<'a> {
             alloc_funcs.free,
         ));
 
-        // Runtime functions (order must match function declarations):
-        // 1. s32_to_string
-        code.function(&runtime::emit_s32_to_string());
-        // 2. s64_to_string
-        code.function(&runtime::emit_s64_to_string());
-        // 3. bool_to_string
-        let (true_ptr, _) = self.strings.get("true").unwrap_or((0, 0));
-        let (false_ptr, _) = self.strings.get("false").unwrap_or((0, 0));
-        code.function(&runtime::emit_bool_to_string(true_ptr, false_ptr));
-        // 4. f32_to_string
-        code.function(&runtime::emit_f32_to_string());
-        // 4. concat<n> for each required arity (uses bulk memory.copy internally)
+        // Runtime functions (order must match function-section declarations
+        // in the type section pass — each `code.function(...)` is gated by
+        // the same `runtime_needs.X` flag used there).
+        if runtime_needs.s32_to_string {
+            code.function(&runtime::emit_s32_to_string());
+        }
+        if runtime_needs.s64_to_string {
+            code.function(&runtime::emit_s64_to_string());
+        }
+        if runtime_needs.bool_to_string {
+            let (true_ptr, _) = self.strings.get("true").unwrap_or((0, 0));
+            let (false_ptr, _) = self.strings.get("false").unwrap_or((0, 0));
+            code.function(&runtime::emit_bool_to_string(true_ptr, false_ptr));
+        }
+        if runtime_needs.f32_to_string {
+            code.function(&runtime::emit_f32_to_string());
+        }
+        // concat<n> for each required arity (uses bulk memory.copy internally)
         for &arity in &concat_arities {
             code.function(&runtime::emit_concat_n(arity, alloc_funcs.cabi_realloc));
         }
-        // 5. store_fat_ptr
-        code.function(&runtime::emit_store_fat_ptr());
-        // 6. load_fat_ptr
-        code.function(&runtime::emit_load_fat_ptr());
-        // 7. store_option (for option signal setters)
-        code.function(&runtime::emit_store_option());
-        // 8. store_result (for result signal setters)
-        code.function(&runtime::emit_store_result());
-        // 9. list_get (bounds-checked index, traps on OOB)
-        code.function(&runtime::emit_list_get());
-        // 8. list_get_opt (safe index, returns option)
-        // The if block inside needs type () -> (i32, i32) for multi-value result
-        code.function(&runtime::emit_list_get_opt(runtime::types::VOID_I32_I32));
-        // 8b. list_get_fat (direct index for 2-slot composite elements)
-        code.function(&runtime::emit_list_get_fat());
-        // 9. starts_with (string prefix check)
-        code.function(&runtime::emit_starts_with());
+        if runtime_needs.store_fat_ptr {
+            code.function(&runtime::emit_store_fat_ptr());
+        }
+        if runtime_needs.load_fat_ptr {
+            code.function(&runtime::emit_load_fat_ptr());
+        }
+        if runtime_needs.starts_with {
+            code.function(&runtime::emit_starts_with());
+        }
         // 10. Record constructor helpers
         let record_types_clone = self.record_types.clone();
         for record_def in record_types_clone {
@@ -1649,8 +1925,14 @@ impl<'a> WasmPackageBuilder<'a> {
         for (elem_ty, count) in list_constructs_clone {
             code.function(&self.generate_list_ctor(elem_ty, count, alloc_funcs.alloc)?);
         }
-        // 11. pack_fat_ptr_to_i64 (packs ptr/len into i64 for variant ABI)
-        code.function(&runtime::emit_pack_fat_ptr_to_i64());
+        // 10b. List append helpers
+        let list_appends_clone = self.list_appends.clone();
+        for list_ty in list_appends_clone {
+            code.function(&self.generate_list_append_function(list_ty)?);
+        }
+        if runtime_needs.pack_fat_ptr_to_i64 {
+            code.function(&runtime::emit_pack_fat_ptr_to_i64());
+        }
 
         // 12. Filter functions (specialized per call site)
         //
@@ -1662,7 +1944,7 @@ impl<'a> WasmPackageBuilder<'a> {
         //             globals resolve via `global_property_addrs`.
         let filter_calls_clone = self.filter_calls.clone();
         let module_carrier_name = self.ctx.intern("<module>");
-        let module_carrier = LirComponent::empty_module_carrier(module_carrier_name);
+        let module_carrier = LirResource::empty_module_carrier(module_carrier_name);
         let module_layout = MemoryLayout::empty_for_module();
         for (filter_id, (comp_idx, elem_ty, elem_size, param, predicate)) in
             filter_calls_clone.iter().enumerate()
@@ -1687,7 +1969,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // Order matches function section declaration above.
         for (ty, arr_type_idx) in &gc_list_arr_type_idxs {
             let elem_ty = match self.ctx.ty_kind(*ty) {
-                yel_core::types::InternedTyKind::List(e) => *e,
+                InternedTyKind::List(e) => *e,
                 _ => {
                     return Err(CodegenError::InternalError(format!(
                         "gc_list materializer: ty {:?} is not a list",
@@ -1700,7 +1982,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // 13b. Phase 5e.6: GC list un-materializer function bodies.
         for (ty, arr_type_idx) in &gc_list_arr_type_idxs {
             let elem_ty = match self.ctx.ty_kind(*ty) {
-                yel_core::types::InternedTyKind::List(e) => *e,
+                InternedTyKind::List(e) => *e,
                 _ => {
                     return Err(CodegenError::InternalError(format!(
                         "gc_list un-materializer: ty {:?} is not a list",
@@ -1709,6 +1991,12 @@ impl<'a> WasmPackageBuilder<'a> {
                 }
             };
             code.function(&self.generate_gc_list_unmaterializer(*arr_type_idx, elem_ty)?);
+        }
+
+        // 13c. Phase 7: pack_color_to_attr_slots body. Order MUST
+        // match the function-section declaration above.
+        if let Some(color_ty) = color_ty_for_helper {
+            code.function(&self.generate_pack_color_to_attr_slots(color_ty)?);
         }
 
         // Release the borrow on exported_components before mutable operations
@@ -1729,20 +2017,33 @@ impl<'a> WasmPackageBuilder<'a> {
 
             let num_signals = component.signals.len();
 
-            code.function(&self.generate_constructor_for(
-                &self.components[comp_idx],
-                &layout,
-                resource_new_idx,
-                comp_idx,
-            )?);
-            // Reset handler counter before mount - dispatch will use same ordering
-            self.reset_handler_counter();
-            code.function(&self.generate_component_mount(comp_idx, &layout)?);
-            code.function(&self.generate_unmount_for(
-                &self.components[comp_idx],
-                &layout,
-                comp_idx,
-            )?);
+            // Phase 0.3m / cleanup: export wrappers are emitted ONLY
+            // for exported components. Non-exported components have no
+            // host-facing WIT surface and nothing internal calls their
+            // exported wrappers (cross-component mount routes through
+            // internal_constructor_block / mount_block via CallBlock).
+            // The 3 inline fallback generators (generate_constructor_for /
+            // generate_component_mount / generate_unmount_for) are
+            // deleted.
+            let _ = resource_new_idx;
+            if component.is_export {
+                let ctor_block = component
+                    .export_constructor_block
+                    .expect("exported component must have export_constructor_block synthesized");
+                code.function(&self.generate_block_function(comp_idx, ctor_block)?);
+                // Reset handler counter before mount - dispatch uses same ordering
+                self.reset_handler_counter();
+                let mount_block = component
+                    .export_mount_block
+                    .expect("exported component must have export_mount_block synthesized");
+                code.function(&self.generate_block_function(comp_idx, mount_block)?);
+                let unmount_block = component
+                    .export_unmount_block
+                    .expect("exported component must have export_unmount_block synthesized");
+                code.function(&self.generate_block_function(comp_idx, unmount_block)?);
+            } else {
+                self.reset_handler_counter();
+            }
 
             for sig_idx in 0..num_signals {
                 let signal_ty = self.components[comp_idx].signals[sig_idx].ty;
@@ -1759,21 +2060,25 @@ impl<'a> WasmPackageBuilder<'a> {
                     alloc_funcs.cabi_realloc,
                 )?);
             }
-
-            // Step 5: internal-tier function bodies, emitted after the
-            // getter/setter pairs to match the FunctionSection
-            // declaration order.
-            code.function(&self.generate_constructor_internal_for(comp_idx)?);
-            code.function(&self.generate_component_mount_internal(comp_idx, &layout)?);
-            code.function(&self.generate_unmount_internal_for(comp_idx)?);
         }
 
-        // Generate block functions for each component
+        // Generate block functions for each component.
+        // Phase 0.3l: includes lifecycle blocks (mount / internal ctor
+        // / internal unmount). Their wasm indices live in
+        // `block_func_indices`, populated during function-section
+        // emission, and the export wrappers + MountComponent op look
+        // them up by block id.
         for comp_idx in 0..self.components.len() {
             let component = &self.components[comp_idx];
             for block in &component.blocks {
-                // Skip mount block - it's generated inline in the mount method
-                if block.id == component.mount_block {
+                // Phase 0.3m: export wrappers were emitted at the
+                // fixed 3 per-component positions above (constructor /
+                // mount / unmount). Skip them here so we don't double-
+                // emit their bodies.
+                if Some(block.id) == component.export_constructor_block
+                    || Some(block.id) == component.export_mount_block
+                    || Some(block.id) == component.export_unmount_block
+                {
                     continue;
                 }
                 code.function(&self.generate_block_function(comp_idx, block.id)?);
@@ -1806,7 +2111,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Data section - emit interned string literals
         if self.strings.size() > 0 {
-            let mut data = wasm_encoder::DataSection::new();
+            let mut data = DataSection::new();
             self.strings.emit(&mut data);
             module.section(&data);
         }
@@ -1857,7 +2162,7 @@ impl<'a> WasmPackageBuilder<'a> {
             func.instruction(&Instruction::GlobalSet(layout.self_global_idx));
         }
 
-        let globals_scratch = crate::wasm::FlatScratchBases {
+        let globals_scratch = FlatScratchBases {
             i32_base: 0,
             i32_count: max_i32,
             i64_base: max_i32,
@@ -1874,7 +2179,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // through `emit_global_struct_store_from_expr`; pointer-typed
         // properties (records/tuples) keep the legacy memory path via
         // `emit_signal_store` against `global_property_addrs`.
-        let mut inits: Vec<(yel_core::DefId, LirExpr)> = Vec::new();
+        let mut inits: Vec<(DefId, LirExpr)> = Vec::new();
         for global_id in self.ctx.defs.globals() {
             let Some(g) = self.ctx.defs.as_global(global_id) else {
                 continue;
@@ -1888,13 +2193,13 @@ impl<'a> WasmPackageBuilder<'a> {
 
         if !inits.is_empty() {
             // Module scope has no owning component. `emit_signal_store` /
-            // `emit_expr` still take a `&LirComponent` + `&MemoryLayout`,
+            // `emit_expr` still take a `&LirResource` + `&MemoryLayout`,
             // but global defaults never reference component-local state.
             // Handing in an empty carrier turns any accidental
             // component-local lookup into a loud failure — matching the
             // No-Silent-Fallbacks rule.
             let carrier_name = self.ctx.intern("<module>");
-            let carrier = LirComponent::empty_module_carrier(carrier_name);
+            let carrier = LirResource::empty_module_carrier(carrier_name);
             let layout = MemoryLayout::empty_for_module();
             self.current_init_scratch_start = Some(0);
             self.current_flat_scratch = Some(globals_scratch);

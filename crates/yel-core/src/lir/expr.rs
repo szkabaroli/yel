@@ -2,7 +2,11 @@
 
 use serde::{Serialize, Deserialize};
 
-use crate::hir::expr::{BinOp, UnaryOp};
+// LIR uses operator semantics from the neutral `crate::ops` module —
+// not from `crate::hir::expr`, because LIR has multiple frontends
+// (HIR/THIR for yel-lang components, the graph IR for the flow
+// frontend) and shouldn't reach into any one of them.
+use crate::ops::{BinOp, UnaryOp};
 use crate::ids::{DefId, FieldIdx, LocalId};
 use crate::types::Ty;
 
@@ -92,6 +96,49 @@ pub enum LirExprKind {
         case_idx: u32,
         /// Payload (if any).
         payload: Option<Box<LirExpr>>,
+    },
+
+    /// Phase 5e.5: discriminant test on an `option<T>` / `result<T,E>` /
+    /// `variant` value. Lowers to a Wasm-GC `ref.test (ref $<parent>_<case>)`
+    /// when the parent is migrated to the subtype-hierarchy GC repr;
+    /// otherwise lowers to the legacy "load discriminant slot, compare
+    /// against case constant" pattern. Result type is always `bool`.
+    ///
+    /// Backed by `LirExprKind::IsCase`'s `case_idx` field; case-index
+    /// conventions match `VariantCtor`:
+    ///   - `option<T>`: 0 = None, 1 = Some.
+    ///   - `result<T,E>`: 0 = Ok, 1 = Err.
+    ///   - User variant: declaration order in `VariantDef::cases`.
+    IsCase {
+        /// The option/result/variant value being tested.
+        base: Box<LirExpr>,
+        /// Case index to test against.
+        case_idx: u32,
+    },
+
+    /// Phase 5e.5: payload extraction from a known case of an option /
+    /// result / variant value. Lowers to `ref.cast (ref $<parent>_<case>);
+    /// struct.get $<parent>_<case> <field_idx>` for migrated parents;
+    /// otherwise to the legacy multi-slot canonical-ABI flat-load.
+    ///
+    /// `case_idx` selects the case the caller has already discriminated
+    /// to (typically via a guarding `IsCase` test). `field_idx` selects
+    /// within the case's payload — for the W3C lowering each case has at
+    /// most a single payload field at index 0, but the field is kept as
+    /// a `u32` for forward compatibility with multi-field payloads.
+    ///
+    /// Codegen emits `struct.get_s` for signed packed payloads (`s8`,
+    /// `s16`) and `struct.get_u` for unsigned packed payloads (`bool`,
+    /// `u8`, `u16`); plain `struct.get` otherwise.
+    VariantField {
+        /// The option/result/variant value.
+        base: Box<LirExpr>,
+        /// Case index whose payload is being read (caller must have
+        /// already discriminated; reading a field from a non-active case
+        /// traps via `ref.cast`'s type-check).
+        case_idx: u32,
+        /// Index within the case's payload (always 0 in YEL today).
+        field_idx: u32,
     },
 
     // ========================================================================

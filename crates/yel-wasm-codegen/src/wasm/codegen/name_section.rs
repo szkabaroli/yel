@@ -7,6 +7,7 @@
 
 use wasm_encoder::{IndirectNameMap, Module, NameMap, NameSection};
 use yel_core::BlockDebugName;
+use yel_core::Ty;
 use yel_core::lir::{LirBlock, LirSlotKind};
 
 /// Build the WASM name-section function name for a block, in the form
@@ -19,10 +20,14 @@ fn build_block_func_name(
     comp_prefix: &str,
     name: &BlockDebugName,
     block: &LirBlock,
+    slots: &[yel_core::lir::LirSlotInfo],
     block_id_raw: u32,
 ) -> String {
     let mut s = format!("{}-{}", comp_prefix, name.kind);
-    for bp in &block.boundary_params {
+    // Stage 5c: derive boundary-id list for the debug suffix from
+    // `boundary_param_slots` (slot val_ty carries the id) instead of
+    // reading the parallel `boundary_params` field. Same labels.
+    for bp in block.boundary_param_ids_from_slots(slots) {
         s.push_str(&format!("-b{}", bp.0));
     }
     if let Some(sig) = name.signal {
@@ -94,7 +99,7 @@ impl<'a> WasmPackageBuilder<'a> {
         type_names.append(23, "type-runtime-concat8");
         type_names.append(24, "type-record-ctor-3"); // 3-field record ctor
         type_names.append(25, "type-record-ctor-5"); // 5-field record ctor
-        type_names.append(26, "type-runtime-void-i32-i32"); // list_get_opt's if-block result
+        type_names.append(26, "type-runtime-void-i32-i32"); // multi-value if-block result shape
         type_names.append(27, "type-f32-to-ptr-len"); // f32_to_string
         type_names.append(28, "type-list-ctor-3");
         type_names.append(29, "type-list-ctor-2");
@@ -137,41 +142,25 @@ impl<'a> WasmPackageBuilder<'a> {
             // self-documenting (`<comp>_tree_root`, `<comp>_if_<id>`,
             // `<comp>_if_<id>_then`, `<comp>_for_<id>`,
             // `<comp>_for_<id>_arr`, `<comp>_for_<id>_iter`).
-            for boundary in &comp.tree_shape.boundaries {
-                let Some(&ty_idx) = gc_layout.tree_struct_type_idx.get(&boundary.id) else {
+            // Stage 5d: walk the resource's struct-type registry and
+            // use its pre-baked `name` field directly. struct_types[i]
+            // corresponds 1:1 to TreeBoundaryId(i) so the type-section
+            // index lookup goes through the same `tree_struct_type_idx`
+            // map but indexed by id without the kind switch.
+            for (i, struct_decl) in comp.struct_types.iter().enumerate() {
+                let bid = yel_core::ids::TreeBoundaryId(i as u32);
+                let Some(&ty_idx) = gc_layout.tree_struct_type_idx.get(&bid) else {
                     continue;
                 };
-                let suffix = match &boundary.kind {
-                    yel_core::lir::block::TreeBoundaryKind::Root => "tree_root".to_string(),
-                    yel_core::lir::block::TreeBoundaryKind::IfAnchor { if_id, .. } => {
-                        format!("if_{}", if_id.0)
-                    }
-                    yel_core::lir::block::TreeBoundaryKind::IfBranch { if_id, branch_idx } => {
-                        match branch_idx {
-                            0 => format!("if_{}_then", if_id.0),
-                            n => format!("if_{}_branch_{}", if_id.0, n),
-                        }
-                    }
-                    yel_core::lir::block::TreeBoundaryKind::ForAnchor { for_id, .. } => {
-                        format!("for_{}", for_id.0)
-                    }
-                    yel_core::lir::block::TreeBoundaryKind::ForIterBody { for_id } => {
-                        format!("for_{}_iter", for_id.0)
-                    }
-                };
-                type_names.append(ty_idx, &format!("{}-{}", comp_name, suffix));
+                type_names.append(ty_idx, &format!("{}-{}", comp_name, struct_decl.name));
             }
             for (anchor_id, &arr_idx) in &gc_layout.tree_for_arr_type_idx {
-                let Some(boundary) = comp
-                    .tree_shape
-                    .boundaries
-                    .iter()
-                    .find(|b| b.id == *anchor_id)
-                else {
+                // Stage 5d: read kind from registry.
+                let Some(struct_decl) = comp.struct_types.get(anchor_id.0 as usize) else {
                     continue;
                 };
                 if let yel_core::lir::block::TreeBoundaryKind::ForAnchor { for_id, .. } =
-                    &boundary.kind
+                    &struct_decl.kind
                 {
                     type_names.append(arr_idx, &format!("{}_for_{}_arr", comp_name, for_id.0));
                 }
@@ -210,7 +199,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     .get_block_name(comp.def_id, *block_id)
                     .unwrap_or_else(|| BlockDebugName::kind("block"));
                 let block = comp.get_block(*block_id);
-                let fn_name = build_block_func_name(&comp_name, &info, block, block_id.0);
+                let fn_name = build_block_func_name(&comp_name, &info, block, &comp.slots, block_id.0);
                 type_names.append(ty_idx, &format!("type-{}", fn_name));
             }
         }
@@ -232,7 +221,11 @@ impl<'a> WasmPackageBuilder<'a> {
                 .replace('-', "_");
             type_names.append(layout.struct_type_idx, &format!("{}-global", block_name));
         }
-        names.types(&type_names);
+        // Subsection write deferred to end of fn — must be emitted in
+        // ascending subsection-id order (1=function, 2=local, 3=label,
+        // 4=type, 6=memory, 7=global, 9=data, 10=field). wasm-opt
+        // refuses out-of-order subsections with `out-of-order name
+        // subsection: <id>` warnings + a parse failure.
 
         // =================================================================
         // Global names - allocator globals, per-for tracking arrays,
@@ -270,7 +263,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 &format!("{}-global-self", block_name),
             );
         }
-        names.globals(&global_names);
+        // Globals subsection: deferred to end-of-fn ordered emission.
 
         // =================================================================
         // Struct field names — surface signal names and the registry
@@ -295,9 +288,11 @@ impl<'a> WasmPackageBuilder<'a> {
             if let Some(struct_ty_idx) = gc_layout.component_struct_type_idx {
                 let mut comp_fields = NameMap::new();
                 for (sig_idx, signal) in comp.signals.iter().enumerate() {
-                    let Some(field_path) = gc_layout.signal_field_paths.get(sig_idx) else {
+                    let fp = comp.signal_layout.signal_field_path(sig_idx);
+                    if fp.is_empty() {
                         continue;
-                    };
+                    }
+                    let field_path = &fp;
                     let sig_name = to_kebab_case(&self.ctx.str(self.ctx.defs.name(signal.def_id)))
                         .replace('-', "_");
                     if field_path.len() == 1 {
@@ -311,10 +306,8 @@ impl<'a> WasmPackageBuilder<'a> {
                 // Trailing retention fields, if any. They follow the
                 // signal fields contiguously per the layout in
                 // `gc_types.rs::emit_component_struct_type`.
-                let total_signal_fields: u32 = gc_layout
-                    .signal_field_paths
-                    .iter()
-                    .map(|p| p.len() as u32)
+                let total_signal_fields: u32 = (0..comp.signals.len())
+                    .map(|i| comp.signal_layout.signal_field_path(i).len() as u32)
                     .sum();
                 for r in 0..gc_layout.parent_retention_count {
                     comp_fields.append(total_signal_fields + r, &format!("retain_{}", r));
@@ -328,26 +321,18 @@ impl<'a> WasmPackageBuilder<'a> {
                 field_names.append(struct_ty_idx, &comp_fields);
             }
 
-            // Phase B.3 boundary struct field names. Mirror the
-            // synthesizer's TreeFieldDecl `name` so WAT is readable.
-            for boundary in &comp.tree_shape.boundaries {
-                let Some(&ty_idx) = gc_layout.tree_struct_type_idx.get(&boundary.id) else {
+            // Stage 5d: boundary struct field names from the
+            // resource registry. struct_types[i].fields[j].name is
+            // already projected from the synthesizer's
+            // `TreeFieldDecl.name` — same labels, no kind switch.
+            for (i, struct_decl) in comp.struct_types.iter().enumerate() {
+                let bid = yel_core::ids::TreeBoundaryId(i as u32);
+                let Some(&ty_idx) = gc_layout.tree_struct_type_idx.get(&bid) else {
                     continue;
                 };
                 let mut bnd_fields = NameMap::new();
-                for (i, decl) in boundary.fields.iter().enumerate() {
-                    let name = match decl {
-                        yel_core::lir::block::TreeFieldDecl::DomHandle { name } => name.clone(),
-                        yel_core::lir::block::TreeFieldDecl::LoopVar { name, .. } => name.clone(),
-                        yel_core::lir::block::TreeFieldDecl::SubBoundary { name, .. } => {
-                            name.clone()
-                        }
-                        yel_core::lir::block::TreeFieldDecl::ChildrenArray { name, .. } => {
-                            name.clone()
-                        }
-                        yel_core::lir::block::TreeFieldDecl::ActiveTag { name } => name.clone(),
-                    };
-                    bnd_fields.append(i as u32, &name);
+                for (fi, field) in struct_decl.fields.iter().enumerate() {
+                    bnd_fields.append(fi as u32, &field.name);
                 }
                 field_names.append(ty_idx, &bnd_fields);
             }
@@ -386,14 +371,14 @@ impl<'a> WasmPackageBuilder<'a> {
                 field_names.append(layout.struct_type_idx, &block_fields);
             }
         }
-        names.fields(&field_names);
+        // Fields subsection: deferred to end-of-fn ordered emission.
 
         // =================================================================
         // Memory names
         // =================================================================
         let mut memory_names = NameMap::new();
         memory_names.append(0, "memory");
-        names.memories(&memory_names);
+        // Memories subsection: deferred to end-of-fn ordered emission.
 
         // =================================================================
         // Function names
@@ -450,19 +435,32 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Runtime function names (local functions, after allocator functions)
         if let Some(ref runtime_funcs) = self.runtime_funcs {
-            func_names.append(runtime_funcs.s32_to_string, "s32_to_string");
-            func_names.append(runtime_funcs.s64_to_string, "s64_to_string");
-            func_names.append(runtime_funcs.bool_to_string, "bool_to_string");
-            func_names.append(runtime_funcs.f32_to_string, "f32_to_string");
-            func_names.append(runtime_funcs.store_fat_ptr, "store_fat_ptr");
-            func_names.append(runtime_funcs.load_fat_ptr, "load_fat_ptr");
-            func_names.append(runtime_funcs.pack_fat_ptr_to_i64, "pack_fat_ptr_to_i64");
-            func_names.append(runtime_funcs.store_option, "store_option");
-            func_names.append(runtime_funcs.store_result, "store_result");
-            func_names.append(runtime_funcs.list_get, "list_get");
-            func_names.append(runtime_funcs.list_get_opt, "list_get_opt");
-            func_names.append(runtime_funcs.list_get_fat, "list_get_fat");
-            func_names.append(runtime_funcs.starts_with, "starts_with");
+            // Name-section entries are skipped for absent helpers —
+            // those weren't allocated an index by demand-driven gating.
+            if let Some(idx) = runtime_funcs.s32_to_string {
+                func_names.append(idx, "s32_to_string");
+            }
+            if let Some(idx) = runtime_funcs.s64_to_string {
+                func_names.append(idx, "s64_to_string");
+            }
+            if let Some(idx) = runtime_funcs.bool_to_string {
+                func_names.append(idx, "bool_to_string");
+            }
+            if let Some(idx) = runtime_funcs.f32_to_string {
+                func_names.append(idx, "f32_to_string");
+            }
+            if let Some(idx) = runtime_funcs.store_fat_ptr {
+                func_names.append(idx, "store_fat_ptr");
+            }
+            if let Some(idx) = runtime_funcs.load_fat_ptr {
+                func_names.append(idx, "load_fat_ptr");
+            }
+            if let Some(idx) = runtime_funcs.pack_fat_ptr_to_i64 {
+                func_names.append(idx, "pack_fat_ptr_to_i64");
+            }
+            if let Some(idx) = runtime_funcs.starts_with {
+                func_names.append(idx, "starts_with");
+            }
             for (&arity, &func_idx) in &runtime_funcs.concat_indices {
                 func_names.append(func_idx, &format!("concat{}", arity));
             }
@@ -477,14 +475,43 @@ impl<'a> WasmPackageBuilder<'a> {
             for (&(_elem_ty, count), &func_idx) in &runtime_funcs.list_ctors {
                 func_names.append(func_idx, &format!("list_ctor_{}", count));
             }
+            // Sort list_appends by func index so NameMap.append sees
+            // monotonically-increasing keys (NameMap requires it).
+            let mut sorted_appends: Vec<(Ty, u32)> = runtime_funcs
+                .list_appends
+                .iter()
+                .map(|(&ty, &fi)| (ty, fi))
+                .collect();
+            sorted_appends.sort_by_key(|(_, fi)| *fi);
+            for (list_ty, func_idx) in sorted_appends {
+                func_names.append(func_idx, &format!("list_append_{}", list_ty.0));
+            }
             for (&call_id, &func_idx) in &runtime_funcs.filter_indices {
                 func_names.append(func_idx, &format!("filter_{}", call_id));
             }
         }
 
-        // Component function names - start after allocator + runtime functions
+        // Component function names - start after allocator + runtime
+        // functions + per-array materializers/un-materializers + the
+        // optional `pack_color_to_attr_slots` helper.
+        let gc_list_helper_count = self
+            .record_gc_types
+            .list_array_type_idx
+            .iter()
+            .filter(|&(&ty, _)| self.is_scalar_list_ty(ty))
+            .count() as u32
+            * 2;
+        let pack_color_count = if self.pack_color_helper_fn_idx.is_some() {
+            1
+        } else {
+            0
+        };
         let first_component_func = if let Some(ref runtime_funcs) = self.runtime_funcs {
-            import_layout.num_imports + 3 + runtime_funcs.count
+            import_layout.num_imports
+                + 3
+                + runtime_funcs.count
+                + gc_list_helper_count
+                + pack_color_count
         } else {
             import_layout.num_imports + 3
         };
@@ -539,8 +566,16 @@ impl<'a> WasmPackageBuilder<'a> {
         // `$for-item-mount-row` instead of `(func (;36;))`. Prefix
         // with the owning component so the same block kind in two
         // components doesn't collide.
-        for ((comp_idx, block_id), &wasm_func_idx) in &self.block_func_indices {
-            let component = &self.components[*comp_idx];
+        for (block_id, &wasm_func_idx) in &self.block_func_indices {
+            // Phase 0.3q: locate the owning component (BlockIds are
+            // module-wide unique so a linear scan suffices).
+            let Some(component) = self
+                .components
+                .iter()
+                .find(|c| c.blocks.iter().any(|b| b.id == *block_id))
+            else {
+                continue;
+            };
             let comp_prefix = to_kebab_case(&self.ctx.str(component.name));
             let info = self
                 .ctx
@@ -548,11 +583,11 @@ impl<'a> WasmPackageBuilder<'a> {
                 .unwrap_or_else(|| BlockDebugName::kind("block"));
 
             let block = component.get_block(*block_id);
-            let name = build_block_func_name(&comp_prefix, &info, block, block_id.0);
+            let name = build_block_func_name(&comp_prefix, &info, block, &component.slots, block_id.0);
             func_names.append(wasm_func_idx, &name);
         }
 
-        names.functions(&func_names);
+        // Functions subsection: deferred to end-of-fn ordered emission.
 
         // =================================================================
         // Local variable names for each function
@@ -562,19 +597,20 @@ impl<'a> WasmPackageBuilder<'a> {
         // Runtime function locals
         // Note: memcpy, alloc, free, cabi_realloc are now imports - their locals are in allocator module
         if let Some(ref runtime_funcs) = self.runtime_funcs {
-            // s32_to_string locals
-            let mut s32_to_string_locals = NameMap::new();
-            s32_to_string_locals.append(0, "value");
-            s32_to_string_locals.append(1, "is_negative");
-            s32_to_string_locals.append(2, "abs_value");
-            s32_to_string_locals.append(3, "digit_count");
-            s32_to_string_locals.append(4, "write_ptr");
-            local_names.append(runtime_funcs.s32_to_string, &s32_to_string_locals);
-
-            // bool_to_string locals
-            let mut bool_to_string_locals = NameMap::new();
-            bool_to_string_locals.append(0, "b");
-            local_names.append(runtime_funcs.bool_to_string, &bool_to_string_locals);
+            if let Some(idx) = runtime_funcs.s32_to_string {
+                let mut s32_to_string_locals = NameMap::new();
+                s32_to_string_locals.append(0, "value");
+                s32_to_string_locals.append(1, "is_negative");
+                s32_to_string_locals.append(2, "abs_value");
+                s32_to_string_locals.append(3, "digit_count");
+                s32_to_string_locals.append(4, "write_ptr");
+                local_names.append(idx, &s32_to_string_locals);
+            }
+            if let Some(idx) = runtime_funcs.bool_to_string {
+                let mut bool_to_string_locals = NameMap::new();
+                bool_to_string_locals.append(0, "b");
+                local_names.append(idx, &bool_to_string_locals);
+            }
         }
 
         // Generate locals for each component's functions
@@ -609,7 +645,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     LirSlotKind::Temp { local_idx } => local_idx,
                     _ => unreachable!(),
                 };
-                let name = s.name.clone().unwrap_or_else(|| format!("slot_{}", s.id.0));
+                let name = s.name.clone().unwrap_or_else(|| format!("slot_{}", s.id.legacy_u32()));
                 mount_locals.append(local_idx + 2, &name);
             }
             // Scratch locals (flat-slot signal-store helpers) come
@@ -672,21 +708,29 @@ impl<'a> WasmPackageBuilder<'a> {
         // (0..param_count), then one local per slot. The slot's
         // local index inside the function is `param_count + slot.id`
         // — see `generate_block_function` for the canonical layout.
-        for ((comp_idx, block_id), &wasm_func_idx) in &self.block_func_indices {
+        for (block_id, &wasm_func_idx) in &self.block_func_indices {
             let mut block_locals = NameMap::new();
-            let component = &self.components[*comp_idx];
+            // Phase 0.3q: locate the owning component.
+            let Some(component) = self
+                .components
+                .iter()
+                .find(|c| c.blocks.iter().any(|b| b.id == *block_id))
+            else {
+                continue;
+            };
             let block = component.get_block(*block_id);
             // Step 4: every block carries an implicit `(ref null
             // $Comp)` self ref at WASM param 0; LIR-declared params
             // start at WASM param 1.
+            // Stage 5c: read counts from `boundary_param_slots`.
+            let boundary_param_count: u32 = block.boundary_param_slots.len() as u32;
             let lir_param_count: u32 = if !block.params.is_empty() {
                 block.params.len() as u32
-            } else if block.boundary_params.is_empty() {
+            } else if boundary_param_count == 0 {
                 1
             } else {
                 0
             };
-            let boundary_param_count: u32 = block.boundary_params.len() as u32;
             let param_count: u32 = lir_param_count + boundary_param_count + 1;
             block_locals.append(0, "self");
             if block.params.is_empty() {
@@ -695,7 +739,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 for (i, slot) in block.params.iter().enumerate() {
                     let name = component
                         .slots
-                        .get(slot.0 as usize)
+                        .get(slot.legacy_u32() as usize)
                         .and_then(|s| s.name.clone())
                         .unwrap_or_else(|| format!("param{}", i));
                     block_locals.append((i as u32) + 1, &name);
@@ -711,7 +755,7 @@ impl<'a> WasmPackageBuilder<'a> {
             local_names.append(wasm_func_idx, &block_locals);
         }
 
-        names.locals(&local_names);
+        // Locals subsection: deferred to end-of-fn ordered emission.
 
         // =================================================================
         // Label names — debug labels for `block` / `loop` / `if`
@@ -740,16 +784,46 @@ impl<'a> WasmPackageBuilder<'a> {
             }
             label_names.append(*wasm_func_idx, &map);
         }
-        names.labels(&label_names);
+        // Labels subsection: deferred to end-of-fn ordered emission.
 
         // =================================================================
         // Data segment names
         // =================================================================
-        if self.strings.size() > 0 {
-            let mut data_names = NameMap::new();
-            data_names.append(0, "string_data");
-            names.data(&data_names);
+        let data_names: Option<NameMap> = if self.strings.size() > 0 {
+            let mut m = NameMap::new();
+            m.append(0, "string_data");
+            Some(m)
+        } else {
+            None
+        };
+
+        // Final ordered emission. The wasm name-section spec requires
+        // subsection IDs to appear in strictly ascending order
+        // (binary spec: each subsection has a `u8` id, ids must be
+        // monotonic). Engine validators (wasmparser, Binaryen) enforce
+        // this; out-of-order subsections fail to parse.
+        //   id 0 = module       — already written at top of fn
+        //   id 1 = function
+        //   id 2 = local
+        //   id 3 = label
+        //   id 4 = type
+        //   id 5 = table        — unused
+        //   id 6 = memory
+        //   id 7 = global
+        //   id 8 = element      — unused
+        //   id 9 = data
+        //   id 10 = field
+        //   id 11 = tag         — unused
+        names.functions(&func_names);
+        names.locals(&local_names);
+        names.labels(&label_names);
+        names.types(&type_names);
+        names.memories(&memory_names);
+        names.globals(&global_names);
+        if let Some(d) = &data_names {
+            names.data(d);
         }
+        names.fields(&field_names);
 
         module.section(&names);
     }

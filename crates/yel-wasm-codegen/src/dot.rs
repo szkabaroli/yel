@@ -10,12 +10,15 @@
 //!
 //! This renderer walks LIR directly and does not depend on any codegen
 //! helpers; emit order is deterministic for snapshot stability.
-use std::fmt::Write;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write,
+};
 
 use yel_core::{
-    CompilerContext,
+    CompilerContext, DefId, InternedTyKind, NodeId, Ty,
     ids::BlockId,
-    lir::{LirComponent, LirOp},
+    lir::{LirNode, LirNodeKind, LirOp, LirResource, StringId, block::TreeBoundaryKind},
 };
 
 use crate::CodegenError;
@@ -49,7 +52,7 @@ impl DotOptions {
 
 /// Render the signal/effect graph for `components` as a DOT document.
 pub fn generate_dot(
-    components: &[LirComponent],
+    components: &[LirResource],
     ctx: &CompilerContext,
     options: &DotOptions,
 ) -> Result<String, CodegenError> {
@@ -66,8 +69,7 @@ pub fn generate_dot(
     // Without this resolution the DOT referenced dangling nodes like
     // `c0_sig_372` — a global property DefId that no component "owns" —
     // producing an unrenderable graph.
-    let mut local_signals: std::collections::HashSet<yel_core::DefId> =
-        std::collections::HashSet::new();
+    let mut local_signals: HashSet<DefId> = HashSet::new();
     for comp in components {
         for sig in &comp.signals {
             local_signals.insert(sig.def_id);
@@ -76,7 +78,7 @@ pub fn generate_dot(
 
     // Referenced-but-not-local signals are globals. Collect them in
     // discovery order so the globals cluster is stable across runs.
-    let mut global_refs: Vec<yel_core::DefId> = Vec::new();
+    let mut global_refs: Vec<DefId> = Vec::new();
     for comp in components {
         for eff in &comp.effects {
             for &d in &eff.dependencies {
@@ -84,7 +86,7 @@ pub fn generate_dot(
                     global_refs.push(d);
                 }
             }
-            let (writes, _) = collect_effect_outputs(comp, eff.update_block, &mut Vec::new());
+            let (writes, _) = collect_effect_outputs(comp, ctx, eff.update_block, &mut Vec::new());
             for w in writes {
                 if !local_signals.contains(&w) && !global_refs.contains(&w) {
                     global_refs.push(w);
@@ -92,7 +94,7 @@ pub fn generate_dot(
             }
         }
         for (_, handler_block) in discover_event_handlers(comp) {
-            let (writes, _) = collect_effect_outputs(comp, handler_block, &mut Vec::new());
+            let (writes, _) = collect_effect_outputs(comp, ctx, handler_block, &mut Vec::new());
             for w in writes {
                 if !local_signals.contains(&w) && !global_refs.contains(&w) {
                     global_refs.push(w);
@@ -128,17 +130,16 @@ pub fn generate_dot(
 /// property first within the cluster.
 fn render_globals(
     out: &mut String,
-    globals: &[yel_core::DefId],
+    globals: &[DefId],
     ctx: &CompilerContext,
     options: &DotOptions,
 ) {
     // Group properties by their owning GlobalDef DefId. Properties without
     // an owner (shouldn't happen for parsed source — guard defensively)
     // land under a synthetic "<orphan>" bucket.
-    let mut owners_in_order: Vec<yel_core::DefId> = Vec::new();
-    let mut by_owner: std::collections::HashMap<yel_core::DefId, Vec<yel_core::DefId>> =
-        std::collections::HashMap::new();
-    let mut orphans: Vec<yel_core::DefId> = Vec::new();
+    let mut owners_in_order: Vec<DefId> = Vec::new();
+    let mut by_owner: HashMap<DefId, Vec<DefId>> = HashMap::new();
+    let mut orphans: Vec<DefId> = Vec::new();
     for &def_id in globals {
         match ctx.defs.as_field(def_id) {
             Some(field) => {
@@ -174,7 +175,7 @@ fn render_globals(
 /// owned-by-global and orphan paths so both get the same styling.
 fn render_global_property_node(
     out: &mut String,
-    def_id: yel_core::DefId,
+    def_id: DefId,
     ctx: &CompilerContext,
     options: &DotOptions,
 ) {
@@ -197,7 +198,7 @@ fn render_global_property_node(
 /// node that renders it. A DefId present in this component's signals maps
 /// to the local cluster node; otherwise it's a module-scope global and
 /// refers to the shared globals cluster.
-fn resolve_signal_ref(comp_idx: usize, comp: &LirComponent, def_id: yel_core::DefId) -> String {
+fn resolve_signal_ref(comp_idx: usize, comp: &LirResource, def_id: DefId) -> String {
     if comp.signals.iter().any(|s| s.def_id == def_id) {
         signal_node_id(comp_idx, def_id.0)
     } else {
@@ -208,7 +209,7 @@ fn resolve_signal_ref(comp_idx: usize, comp: &LirComponent, def_id: yel_core::De
 fn render_component(
     out: &mut String,
     comp_idx: usize,
-    comp: &LirComponent,
+    comp: &LirResource,
     ctx: &CompilerContext,
     options: &DotOptions,
 ) {
@@ -246,7 +247,7 @@ fn render_component(
     // in to a single node (preserving the "what gets called for what
     // update" view at a glance). Per-component because BlockIds are
     // component-local.
-    let mut fn_nodes_seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut fn_nodes_seen: HashSet<u32> = HashSet::new();
 
     // Effect nodes + edges. The yellow effect box is the entry update
     // fn dispatched by the dependency tracker; its label includes the
@@ -351,7 +352,7 @@ fn render_component(
     // (synthesis vs DFS order divergence) silently skip rather than
     // pointing the wrong way.
     let mut handler_cursor: usize = 0;
-    let mut element_to_handler_indices: Vec<(yel_core::NodeId, Vec<usize>)> = Vec::new();
+    let mut element_to_handler_indices: Vec<(NodeId, Vec<usize>)> = Vec::new();
     for elem in &body_elements {
         let mut idxs = Vec::new();
         for ev in &elem.handler_events {
@@ -432,7 +433,7 @@ fn render_component(
 /// the read path (effect → element) and write path (element →
 /// handler → signal) are visible in one diagram.
 struct ElementInfo {
-    node_id: yel_core::NodeId,
+    node_id: NodeId,
     tag: String,
     handler_events: Vec<String>,
     dynamic_binding_ids: Vec<u32>,
@@ -443,10 +444,9 @@ struct ElementInfo {
 /// the `AddEventListener` op order produced by mount-block lowering,
 /// so caller can pair handler events positionally with the flat
 /// `discover_event_handlers` list.
-fn walk_body_elements(nodes: &[yel_core::lir::LirNode]) -> Vec<ElementInfo> {
-    use yel_core::lir::LirNodeKind;
+fn walk_body_elements(nodes: &[LirNode]) -> Vec<ElementInfo> {
     let mut out = Vec::new();
-    fn rec(nodes: &[yel_core::lir::LirNode], out: &mut Vec<ElementInfo>) {
+    fn rec(nodes: &[LirNode], out: &mut Vec<ElementInfo>) {
         for node in nodes {
             match &node.kind {
                 LirNodeKind::Element {
@@ -500,13 +500,14 @@ fn element_node_id(comp_idx: usize, node_id: yel_core::NodeId) -> String {
 /// `<kind>[-b<bid>]*[-s<sid>]` (boundary ids come from
 /// `block.boundary_params`). Falls back to `block_<id>` if no name was
 /// recorded.
-fn block_label(comp: &LirComponent, ctx: &CompilerContext, block_id: BlockId) -> String {
+fn block_label(comp: &LirResource, ctx: &CompilerContext, block_id: BlockId) -> String {
     let Some(info) = ctx.get_block_name(comp.def_id, block_id) else {
         return format!("block_{}", block_id.0);
     };
     let block = comp.get_block(block_id);
     let mut s = info.kind.into_owned();
-    for bp in &block.boundary_params {
+    // Stage 5c: derive boundary-id list from slots.
+    for bp in block.boundary_param_ids_from_slots(&comp.slots) {
         s.push_str(&format!("-b{}", bp.0));
     }
     if let Some(sig) = info.signal {
@@ -531,7 +532,7 @@ fn fn_node_id(comp_idx: usize, block_id: BlockId) -> String {
 fn render_call_chain(
     out: &mut String,
     comp_idx: usize,
-    comp: &LirComponent,
+    comp: &LirResource,
     ctx: &CompilerContext,
     caller_node: &str,
     entry_block: BlockId,
@@ -607,14 +608,14 @@ fn render_call_chain(
 fn render_block_outputs(
     out: &mut String,
     comp_idx: usize,
-    comp: &LirComponent,
+    comp: &LirResource,
     ctx: &CompilerContext,
     block_node_id: &str,
     block_id: BlockId,
     options: &DotOptions,
 ) {
     let block = comp.get_block(block_id);
-    let mut writes: Vec<yel_core::DefId> = Vec::new();
+    let mut writes: Vec<DefId> = Vec::new();
     let mut mutations: Vec<String> = Vec::new();
     walk_ops_shallow(&block.ops, comp, ctx, &mut writes, &mut mutations);
 
@@ -656,9 +657,9 @@ fn render_block_outputs(
 /// `update_b{B}_s{S}` blocks so it's clear whether a generic-named
 /// `update_b3_s12` runs at the root, inside an if-anchor, an if-branch,
 /// a for-anchor, or per-iter inside a for body.
-fn describe_block_local(comp: &LirComponent, ctx: &CompilerContext, block_id: BlockId) -> String {
+fn describe_block_local(comp: &LirResource, ctx: &CompilerContext, block_id: BlockId) -> String {
     let block = comp.get_block(block_id);
-    let mut writes: Vec<yel_core::DefId> = Vec::new();
+    let mut writes: Vec<DefId> = Vec::new();
     let mut mutations: Vec<String> = Vec::new();
     walk_ops_shallow(&block.ops, comp, ctx, &mut writes, &mut mutations);
 
@@ -681,12 +682,13 @@ fn describe_block_local(comp: &LirComponent, ctx: &CompilerContext, block_id: Bl
 /// "if-anchor", "if-branch", "for-anchor", "for-iter-body"). `None` for
 /// blocks that don't take a boundary param (handler / mount / structural
 /// blocks whose role is already in their debug name).
-fn boundary_kind_for_block(comp: &LirComponent, block_id: BlockId) -> Option<(u32, &'static str)> {
-    use yel_core::lir::block::TreeBoundaryKind;
+fn boundary_kind_for_block(comp: &LirResource, block_id: BlockId) -> Option<(u32, &'static str)> {
     let block = comp.get_block(block_id);
-    let bid = *block.boundary_params.first()?;
-    let boundary = comp.tree_shape.boundaries.get(bid.0 as usize)?;
-    let kind = match boundary.kind {
+    // Stage 5c: derive first boundary id from slots.
+    let bid = block.boundary_param_ids_from_slots(&comp.slots).next()?;
+    // Stage 5d: read kind from the resource registry.
+    let struct_decl = comp.struct_types.get(bid.0 as usize)?;
+    let kind = match struct_decl.kind {
         TreeBoundaryKind::Root => "root",
         TreeBoundaryKind::IfAnchor { .. } => "if-anchor",
         TreeBoundaryKind::IfBranch { .. } => "if-branch",
@@ -702,9 +704,9 @@ fn boundary_kind_for_block(comp: &LirComponent, block_id: BlockId) -> Option<(u3
 /// `If` / `Loop` bodies because those are inline within the same block.
 fn walk_ops_shallow(
     ops: &[LirOp],
-    comp: &LirComponent,
+    comp: &LirResource,
     ctx: &CompilerContext,
-    writes: &mut Vec<yel_core::DefId>,
+    writes: &mut Vec<DefId>,
     mutations: &mut Vec<String>,
 ) {
     for op in ops {
@@ -714,37 +716,24 @@ fn walk_ops_shallow(
                     writes.push(*signal);
                 }
             }
-            LirOp::SetTextContent { .. } => {
-                push_unique(mutations, "set text".into());
+            // DOM mutations flow through `CallFunction` against a
+            // `dom_imports` DefId; map the callee back to its entry.
+            LirOp::CallFunction { func: callee, .. } => {
+                let dom = ctx.dom_imports();
+                if *callee == dom.set_text_content {
+                    push_unique(mutations, "set text".into());
+                } else if *callee == dom.create_text {
+                    push_unique(mutations, "create text".into());
+                } else if *callee == dom.set_attribute {
+                    push_unique(mutations, "attr".into());
+                } else if *callee == dom.create_element {
+                    push_unique(mutations, "create element".into());
+                } else if *callee == dom.create_comment {
+                    push_unique(mutations, "create anchor".into());
+                } else if *callee == dom.remove {
+                    push_unique(mutations, "remove dom".into());
+                }
             }
-            LirOp::CreateTextDynamic { .. } => {
-                push_unique(mutations, "create dyn text".into());
-            }
-            LirOp::SetAttribute { name, .. } => {
-                let attr = comp.get_string(*name);
-                push_unique(mutations, format!("attr:{}", attr));
-            }
-            LirOp::CreateElement { tag, .. } => {
-                let t = comp.get_string(*tag);
-                push_unique(mutations, format!("create <{}>", t));
-            }
-            LirOp::CreateText { .. } => {
-                push_unique(mutations, "create text".into());
-            }
-            LirOp::CreateComment { .. } => {
-                push_unique(mutations, "create anchor".into());
-            }
-            LirOp::Remove { .. } => {
-                push_unique(mutations, "remove dom".into());
-            }
-            LirOp::MountComponent { component_def, .. } => {
-                let name = ctx.str(ctx.defs.name(*component_def));
-                push_unique(mutations, format!("mount <{}>", name));
-            }
-            // AppendChild / InsertAfter are pure DOM glue — they only
-            // attach a node already created in this same block. Skip
-            // them; the create label already implies the attachment.
-            LirOp::AppendChild { .. } | LirOp::InsertAfter { .. } => {}
             LirOp::If {
                 then_ops, else_ops, ..
             } => {
@@ -766,7 +755,6 @@ fn collect_call_targets(ops: &[LirOp], out: &mut Vec<BlockId>) {
     for op in ops {
         match op {
             LirOp::CallBlock { block, .. } => out.push(*block),
-            LirOp::CallBlock2 { block, .. } => out.push(*block),
             LirOp::If {
                 then_ops, else_ops, ..
             } => {
@@ -783,7 +771,7 @@ fn collect_call_targets(ops: &[LirOp], out: &mut Vec<BlockId>) {
 
 /// Walk every block in the component looking for `AddEventListener` ops
 /// and return `(event_name, handler_block)` pairs in discovery order.
-fn discover_event_handlers(comp: &LirComponent) -> Vec<(String, BlockId)> {
+fn discover_event_handlers(comp: &LirResource) -> Vec<(String, BlockId)> {
     let mut out = Vec::new();
     for block in &comp.blocks {
         collect_add_event_listener(&block.ops, comp, &mut out);
@@ -793,23 +781,34 @@ fn discover_event_handlers(comp: &LirComponent) -> Vec<(String, BlockId)> {
 
 fn collect_add_event_listener(
     ops: &[LirOp],
-    comp: &LirComponent,
+    _comp: &LirResource,
     out: &mut Vec<(String, BlockId)>,
 ) {
+    // `AddEventListener` is no longer a single op — the event string is
+    // pushed as a `PushStringPtr`/`PushStringLen` pair just before each
+    // `PushHandlerId`, so walk the stream and track the most recent pair.
+    let mut last_event_string: Option<StringId> = None;
     for op in ops {
+        let _ = (op, &mut last_event_string);
         match op {
-            LirOp::AddEventListener { event, handler, .. } => {
-                let event_name = comp.get_string(*event).to_string();
+            LirOp::PushStringPtr { string_id } => {
+                last_event_string = Some(*string_id);
+            }
+            LirOp::PushHandlerId { handler } => {
+                let event_name = last_event_string
+                    .map(|sid| _comp.get_string(sid).to_string())
+                    .unwrap_or_else(|| "".to_string());
                 out.push((event_name, *handler));
+                last_event_string = None;
             }
             LirOp::If {
                 then_ops, else_ops, ..
             } => {
-                collect_add_event_listener(then_ops, comp, out);
-                collect_add_event_listener(else_ops, comp, out);
+                collect_add_event_listener(then_ops, _comp, out);
+                collect_add_event_listener(else_ops, _comp, out);
             }
             LirOp::Loop { body_ops, .. } => {
-                collect_add_event_listener(body_ops, comp, out);
+                collect_add_event_listener(body_ops, _comp, out);
             }
             _ => {}
         }
@@ -836,8 +835,7 @@ fn effect_node_id(comp_idx: usize, effect_id: u32) -> String {
 /// Short human-readable type label. Falls back to `{:?}` debug when the
 /// context doesn't have a prettier rendering — DOT is for humans, so the
 /// tradeoff is mostly cosmetic.
-fn type_label(ctx: &CompilerContext, ty: yel_core::Ty) -> String {
-    use yel_core::types::InternedTyKind;
+fn type_label(ctx: &CompilerContext, ty: Ty) -> String {
     match ctx.ty_kind(ty) {
         InternedTyKind::Bool => "bool".into(),
         InternedTyKind::S8 => "s8".into(),
@@ -879,10 +877,11 @@ fn type_label(ctx: &CompilerContext, ty: yel_core::Ty) -> String {
 /// inside the same block (e.g. an effect that both writes the DOM and
 /// re-stores a derived value) surface in both lists.
 fn collect_effect_outputs(
-    comp: &LirComponent,
+    comp: &LirResource,
+    ctx: &CompilerContext,
     block_id: BlockId,
     visited: &mut Vec<BlockId>,
-) -> (Vec<yel_core::DefId>, Vec<String>) {
+) -> (Vec<DefId>, Vec<String>) {
     // Guard against pathological cycles in CallBlock chains.
     if visited.contains(&block_id) {
         return (Vec::new(), Vec::new());
@@ -892,15 +891,16 @@ fn collect_effect_outputs(
     let block = comp.get_block(block_id);
     let mut writes = Vec::new();
     let mut mutations = Vec::new();
-    walk_ops(&block.ops, comp, visited, &mut writes, &mut mutations);
+    walk_ops(&block.ops, comp, ctx, visited, &mut writes, &mut mutations);
     (writes, mutations)
 }
 
 fn walk_ops(
     ops: &[LirOp],
-    comp: &LirComponent,
+    comp: &LirResource,
+    ctx: &CompilerContext,
     visited: &mut Vec<BlockId>,
-    writes: &mut Vec<yel_core::DefId>,
+    writes: &mut Vec<DefId>,
     mutations: &mut Vec<String>,
 ) {
     for op in ops {
@@ -910,38 +910,35 @@ fn walk_ops(
                     writes.push(*signal);
                 }
             }
-            LirOp::SetTextContent { .. } | LirOp::CreateTextDynamic { .. } => {
-                push_unique(mutations, "text content".into());
-            }
-            LirOp::SetAttribute { name, .. } => {
-                let attr = comp.get_string(*name);
-                push_unique(mutations, format!("attr:{}", attr));
-            }
-            // Structural DOM mutations — if/for branch effects tear down
-            // the previous subtree and build a new one, using these ops
-            // rather than SetText/SetAttr. Surface them under a single
-            // "mount/unmount branch" label instead of the previous opaque
-            // "signal write" fallback.
-            LirOp::CreateElement { .. }
-            | LirOp::CreateText { .. }
-            | LirOp::CreateComment { .. }
-            | LirOp::AppendChild { .. }
-            | LirOp::InsertAfter { .. }
-            | LirOp::Remove { .. }
-            | LirOp::MountComponent { .. } => {
-                push_unique(mutations, "mount/unmount branch".into());
+            // DOM mutations route through `CallFunction` on `dom_imports`
+            // DefIds; classify into text/attr/structural buckets by callee.
+            LirOp::CallFunction { func: callee, .. } => {
+                let dom = ctx.dom_imports();
+                if *callee == dom.set_text_content || *callee == dom.create_text {
+                    push_unique(mutations, "text content".into());
+                } else if *callee == dom.set_attribute {
+                    push_unique(mutations, "attr".into());
+                } else if *callee == dom.create_element
+                    || *callee == dom.create_comment
+                    || *callee == dom.create_fragment
+                    || *callee == dom.append_child
+                    || *callee == dom.insert_after
+                    || *callee == dom.remove
+                {
+                    push_unique(mutations, "mount/unmount branch".into());
+                }
             }
             LirOp::If {
                 then_ops, else_ops, ..
             } => {
-                walk_ops(then_ops, comp, visited, writes, mutations);
-                walk_ops(else_ops, comp, visited, writes, mutations);
+                walk_ops(then_ops, comp, ctx, visited, writes, mutations);
+                walk_ops(else_ops, comp, ctx, visited, writes, mutations);
             }
             LirOp::Loop { body_ops, .. } => {
-                walk_ops(body_ops, comp, visited, writes, mutations);
+                walk_ops(body_ops, comp, ctx, visited, writes, mutations);
             }
             LirOp::CallBlock { block, .. } => {
-                let (inner_writes, inner_mut) = collect_effect_outputs(comp, *block, visited);
+                let (inner_writes, inner_mut) = collect_effect_outputs(comp, ctx, *block, visited);
                 for w in inner_writes {
                     if !writes.contains(&w) {
                         writes.push(w);

@@ -4,14 +4,14 @@
 //! Two `update_b<b>_s<s>` blocks with identical `(boundary_params, ops)`
 //! after canonicalising inner `CallBlock`/`CallBlock2` BlockId
 //! references and slot-id ordering should share one canonical block.
-//! Duplicate blocks are removed from `LirComponent.blocks` and any
-//! `CallBlock` / `CallBlock2` / `AddEventListener` / `LirBlockEffect`
+//! Duplicate blocks are removed from `LirResource.blocks` and any
+//! `CallBlock` / `CallBlock2` / `PushHandlerId` / `LirBlockEffect`
 //! reference is rewritten to point at the canonical survivor.
 //!
 //! Block ids are NOT renumbered — surviving blocks keep their original
 //! `BlockId`. After this pass `BlockId.0` is no longer guaranteed to
-//! equal the block's index in `LirComponent.blocks`, so consumers must
-//! look up via `LirComponent::get_block`, which performs a linear scan
+//! equal the block's index in `LirResource.blocks`, so consumers must
+//! look up via `LirResource::get_block`, which performs a linear scan
 //! fallback.
 
 use std::collections::{HashMap, HashSet};
@@ -21,14 +21,14 @@ use crate::context::CompilerContext;
 use crate::ids::BlockId;
 
 use super::block::{LirBlock, LirBlockEffect, LirOp, LirSlotId};
-use super::node::LirComponent;
+use super::node::LirResource;
 
 /// Run structural dedupe over the per-(boundary, signal) update blocks
 /// of `component`. Only blocks whose recorded name (via
 /// `ctx.get_block_name`) starts with `update_b` are considered as
 /// dedupe candidates; other blocks are left untouched but their
 /// `CallBlock` references into duplicates are still rewritten.
-pub fn dedupe_update_blocks(ctx: &CompilerContext, component: &mut LirComponent) {
+pub fn dedupe_update_blocks(ctx: &CompilerContext, component: &mut LirResource) {
     // Identify dedupe candidates by name prefix.
     let candidates: Vec<BlockId> = component
         .blocks
@@ -54,11 +54,8 @@ pub fn dedupe_update_blocks(ctx: &CompilerContext, component: &mut LirComponent)
     let candidate_set: HashSet<BlockId> = candidates.iter().copied().collect();
 
     // Index blocks by id so the hasher can resolve callees quickly.
-    let block_by_id: HashMap<BlockId, &LirBlock> = component
-        .blocks
-        .iter()
-        .map(|b| (b.id, b))
-        .collect();
+    let block_by_id: HashMap<BlockId, &LirBlock> =
+        component.blocks.iter().map(|b| (b.id, b)).collect();
 
     // Initial hash: 0 for every candidate.
     let mut hash: HashMap<BlockId, u64> = candidates.iter().map(|id| (*id, 0u64)).collect();
@@ -115,7 +112,7 @@ pub fn dedupe_update_blocks(ctx: &CompilerContext, component: &mut LirComponent)
         return;
     }
 
-    // Rewrite all CallBlock / CallBlock2 / AddEventListener references
+    // Rewrite all CallBlock / CallBlock2 / PushHandlerId references
     // across every block (not just candidates).
     for block in component.blocks.iter_mut() {
         rewrite_ops(&mut block.ops, &remap);
@@ -142,7 +139,7 @@ fn remap_seed(
     base.clone()
 }
 
-/// Rewrite `CallBlock` / `CallBlock2` / `AddEventListener` references
+/// Rewrite `CallBlock` / `CallBlock2` / `PushHandlerId` references
 /// recursively through `If` / `Loop` bodies.
 fn rewrite_ops(ops: &mut [LirOp], remap: &HashMap<BlockId, BlockId>) {
     for op in ops.iter_mut() {
@@ -152,12 +149,7 @@ fn rewrite_ops(ops: &mut [LirOp], remap: &HashMap<BlockId, BlockId>) {
                     *block = *c;
                 }
             }
-            LirOp::CallBlock2 { block, .. } => {
-                if let Some(c) = remap.get(block) {
-                    *block = *c;
-                }
-            }
-            LirOp::AddEventListener { handler, .. } => {
+            LirOp::PushHandlerId { handler } => {
                 if let Some(c) = remap.get(handler) {
                     *handler = *c;
                 }
@@ -243,52 +235,17 @@ fn hash_op<H: Hasher>(
 
     use LirOp::*;
     match op {
-        CreateElement { tag, result } => {
-            tag.0.hash(h);
-            sn.norm(*result).hash(h);
+        PushSlot { slot } => {
+            sn.norm(*slot).hash(h);
         }
-        CreateFragment { result } => sn.norm(*result).hash(h),
-        CreateText { content, result } => {
-            content.0.hash(h);
-            sn.norm(*result).hash(h);
+        PushStringPtr { string_id } | PushStringLen { string_id } => {
+            string_id.0.hash(h);
         }
-        CreateTextDynamic { expr, result } => {
-            expr.0.hash(h);
-            sn.norm(*result).hash(h);
-        }
-        CreateComment { content, result } => {
-            content.0.hash(h);
-            sn.norm(*result).hash(h);
-        }
-        AppendChild { parent, child } => {
-            sn.norm(*parent).hash(h);
-            sn.norm(*child).hash(h);
-        }
-        InsertAfter { parent, node, anchor } => {
-            sn.norm(*parent).hash(h);
-            sn.norm(*node).hash(h);
-            sn.norm(*anchor).hash(h);
-        }
-        Remove { node } => sn.norm(*node).hash(h),
-        SetTextContent { node, expr } => {
-            sn.norm(*node).hash(h);
+        PushExprAsString { expr } | PushExprAsAttrValue { expr } => {
             expr.0.hash(h);
         }
-        SetAttribute { node, name, expr } => {
-            sn.norm(*node).hash(h);
-            name.0.hash(h);
-            expr.0.hash(h);
-        }
-        AddEventListener { node, event, handler } => {
-            sn.norm(*node).hash(h);
-            event.0.hash(h);
-            // Handler is a BlockId — use candidate substitution.
+        PushHandlerId { handler } => {
             hash_block_ref(*handler, h, candidates, hash_map);
-        }
-        MountComponent { component_def, parent, children_root } => {
-            component_def.0.hash(h);
-            sn.norm(*parent).hash(h);
-            children_root.map(|s| sn.norm(s)).hash(h);
         }
         StoreHandle { slot, from } => {
             sn.norm(*slot).hash(h);
@@ -320,11 +277,17 @@ fn hash_op<H: Hasher>(
             rhs.hash(h);
             sn.norm(*result).hash(h);
         }
-        AllocSubBoundary { boundary_id, ref_slot } => {
+        AllocSubBoundary {
+            boundary_id,
+            ref_slot,
+        } => {
             boundary_id.0.hash(h);
             sn.norm(*ref_slot).hash(h);
         }
-        AllocBoundary { boundary_id, ref_slot } => {
+        AllocBoundary {
+            boundary_id,
+            ref_slot,
+        } => {
             boundary_id.0.hash(h);
             sn.norm(*ref_slot).hash(h);
         }
@@ -336,20 +299,38 @@ fn hash_op<H: Hasher>(
             expr.0.hash(h);
             sn.norm(*result).hash(h);
         }
+        EvalExprToSlots {
+            expr,
+            dest_first_slot,
+        } => {
+            expr.0.hash(h);
+            sn.norm(*dest_first_slot).hash(h);
+        }
         DropExpr { expr } => expr.0.hash(h),
-        If { cond, then_ops, else_ops, name: _ } => {
+        If {
+            cond,
+            then_ops,
+            else_ops,
+            name: _,
+        } => {
             sn.norm(*cond).hash(h);
             hash_ops(then_ops, h, sn, candidates, hash_map);
             hash_ops(else_ops, h, sn, candidates, hash_map);
         }
-        CallBlock { block, parent } => {
+        CallBlock {
+            block,
+            args,
+            result,
+        } => {
             hash_block_ref(*block, h, candidates, hash_map);
-            sn.norm(*parent).hash(h);
+            for a in args {
+                sn.norm(*a).hash(h);
+            }
+            result.map(|s| sn.norm(s)).hash(h);
         }
         Return => {}
-        SignalRead { signal, result } => {
-            signal.0.hash(h);
-            sn.norm(*result).hash(h);
+        ReturnValue { value } => {
+            sn.norm(*value).hash(h);
         }
         SignalWrite { signal, value } => {
             signal.0.hash(h);
@@ -366,15 +347,53 @@ fn hash_op<H: Hasher>(
         }
         InitSignalDefault { signal_idx } => signal_idx.hash(h),
         InitMemorySlot { slot } => sn.norm(*slot).hash(h),
-        ResourceNew { base_addr } => base_addr.hash(h),
-        Loop { break_cond, body_ops, name: _ } => {
+        RegistryLookupToSelfRef {
+            component,
+            handle,
+            result,
+        } => {
+            component.0.hash(h);
+            sn.norm(*handle).hash(h);
+            sn.norm(*result).hash(h);
+        }
+        RegistryAlloc {
+            component,
+            ref_slot,
+            idx_scratch,
+            arr_scratch,
+            result_handle,
+        } => {
+            component.0.hash(h);
+            sn.norm(*ref_slot).hash(h);
+            sn.norm(*idx_scratch).hash(h);
+            sn.norm(*arr_scratch).hash(h);
+            sn.norm(*result_handle).hash(h);
+        }
+        CallResourceNew {
+            component,
+            handle,
+            result,
+        } => {
+            component.0.hash(h);
+            sn.norm(*handle).hash(h);
+            sn.norm(*result).hash(h);
+        }
+        Loop {
+            break_cond,
+            body_ops,
+            name: _,
+        } => {
             sn.norm(*break_cond).hash(h);
             hash_ops(body_ops, h, sn, candidates, hash_map);
         }
-        CallBlock2 { block, param0, param1, result } => {
-            hash_block_ref(*block, h, candidates, hash_map);
-            sn.norm(*param0).hash(h);
-            sn.norm(*param1).hash(h);
+        CallFunction { func, args, result } => {
+            // DefId is content-addressable across blocks, so it can be
+            // hashed directly (no dedupe-candidate remap, unlike
+            // BlockId-targeted calls).
+            func.hash(h);
+            for a in args {
+                sn.norm(*a).hash(h);
+            }
             result.map(|s| sn.norm(s)).hash(h);
         }
         GeU { index, len, result } => {
@@ -387,14 +406,12 @@ fn hash_op<H: Hasher>(
             sn.norm(*b).hash(h);
             sn.norm(*result).hash(h);
         }
-        ComputeItemPtr { base, index, element_size, result } => {
-            sn.norm(*base).hash(h);
-            sn.norm(*index).hash(h);
-            element_size.hash(h);
-            sn.norm(*result).hash(h);
-        }
         IncrSlot { slot } => sn.norm(*slot).hash(h),
-        Alloc { size, align, result } => {
+        Alloc {
+            size,
+            align,
+            result,
+        } => {
             sn.norm(*size).hash(h);
             align.hash(h);
             sn.norm(*result).hash(h);
@@ -403,7 +420,11 @@ fn hash_op<H: Hasher>(
             sn.norm(*ptr).hash(h);
             sn.norm(*size).hash(h);
         }
-        MulConst { slot, constant, result } => {
+        MulConst {
+            slot,
+            constant,
+            result,
+        } => {
             sn.norm(*slot).hash(h);
             constant.hash(h);
             sn.norm(*result).hash(h);
@@ -426,7 +447,34 @@ fn hash_op<H: Hasher>(
             sn.norm(*addr).hash(h);
             sn.norm(*value).hash(h);
         }
-        StructNew { ty_idx, fields, result } => {
+        LoadI64Addr { addr, result }
+        | LoadF32Addr { addr, result }
+        | LoadF64Addr { addr, result } => {
+            sn.norm(*addr).hash(h);
+            sn.norm(*result).hash(h);
+        }
+        StoreI64Addr { addr, value }
+        | StoreF32Addr { addr, value }
+        | StoreF64Addr { addr, value }
+        | StoreI32Narrow8Addr { addr, value }
+        | StoreI32Narrow16Addr { addr, value } => {
+            sn.norm(*addr).hash(h);
+            sn.norm(*value).hash(h);
+        }
+        MemConst { addr, result } => {
+            addr.hash(h);
+            sn.norm(*result).hash(h);
+        }
+        MemConstGlobalProp { signal_def, offset, result } => {
+            signal_def.hash(h);
+            offset.hash(h);
+            sn.norm(*result).hash(h);
+        }
+        StructNew {
+            ty_idx,
+            fields,
+            result,
+        } => {
             ty_idx.hash(h);
             fields.len().hash(h);
             for f in fields {
@@ -434,52 +482,134 @@ fn hash_op<H: Hasher>(
             }
             sn.norm(*result).hash(h);
         }
-        StructGet { ty_idx, field, rec, result } => {
-            ty_idx.hash(h);
-            field.hash(h);
-            sn.norm(*rec).hash(h);
-            sn.norm(*result).hash(h);
-        }
-        StructSet { ty_idx, field, rec, value } => {
-            ty_idx.hash(h);
-            field.hash(h);
-            sn.norm(*rec).hash(h);
-            sn.norm(*value).hash(h);
-        }
-        ArrayNewDefault { ty_idx, len, result } => {
-            ty_idx.hash(h);
-            sn.norm(*len).hash(h);
-            sn.norm(*result).hash(h);
-        }
-        ArrayGet { ty_idx, arr, idx, result } => {
-            ty_idx.hash(h);
-            sn.norm(*arr).hash(h);
-            sn.norm(*idx).hash(h);
-            sn.norm(*result).hash(h);
-        }
-        ArraySet { ty_idx, arr, idx, value } => {
-            ty_idx.hash(h);
-            sn.norm(*arr).hash(h);
-            sn.norm(*idx).hash(h);
-            sn.norm(*value).hash(h);
-        }
-        ArrayCopy {
-            dst_ty_idx,
-            src_ty_idx,
-            dst,
-            dst_idx,
-            src,
-            src_idx,
-            count,
+        StructGet {
+            ty_idx,
+            field,
+            rec,
+            result,
         } => {
-            dst_ty_idx.hash(h);
-            src_ty_idx.hash(h);
-            sn.norm(*dst).hash(h);
-            sn.norm(*dst_idx).hash(h);
-            sn.norm(*src).hash(h);
-            sn.norm(*src_idx).hash(h);
-            sn.norm(*count).hash(h);
+            ty_idx.hash(h);
+            field.hash(h);
+            sn.norm(*rec).hash(h);
+            sn.norm(*result).hash(h);
         }
+        StructSet {
+            ty_idx,
+            field,
+            rec,
+            value,
+        } => {
+            ty_idx.hash(h);
+            field.hash(h);
+            sn.norm(*rec).hash(h);
+            sn.norm(*value).hash(h);
+        }
+        GlobalGet { gref, result } => {
+            gref.hash(h);
+            sn.norm(*result).hash(h);
+        }
+        GlobalSet { gref, value } => {
+            gref.hash(h);
+            sn.norm(*value).hash(h);
+        }
+        StructNewSym {
+            ty_ref,
+            fields,
+            result,
+        } => {
+            ty_ref.hash(h);
+            fields.len().hash(h);
+            for f in fields {
+                sn.norm(*f).hash(h);
+            }
+            sn.norm(*result).hash(h);
+        }
+        StructGetSym {
+            ty_ref,
+            field,
+            rec,
+            result,
+        } => {
+            ty_ref.hash(h);
+            field.hash(h);
+            sn.norm(*rec).hash(h);
+            sn.norm(*result).hash(h);
+        }
+        StructSetSym {
+            ty_ref,
+            field,
+            rec,
+            value,
+        } => {
+            ty_ref.hash(h);
+            field.hash(h);
+            sn.norm(*rec).hash(h);
+            sn.norm(*value).hash(h);
+        }
+        StructNewDefaultSym { ty_ref, result } => {
+            ty_ref.hash(h);
+            sn.norm(*result).hash(h);
+        }
+        StructSetNewDefault {
+            struct_ty,
+            field,
+            rec,
+            field_ty,
+        } => {
+            struct_ty.hash(h);
+            field.hash(h);
+            sn.norm(*rec).hash(h);
+            field_ty.hash(h);
+        }
+        ZeroI32Mem { addr } => {
+            addr.hash(h);
+        }
+        I32Const { value, result } => {
+            value.hash(h);
+            sn.norm(*result).hash(h);
+        }
+        BoundaryStructGet {
+            boundary_id,
+            field_idx,
+            rec,
+            result,
+        } => {
+            boundary_id.0.hash(h);
+            field_idx.hash(h);
+            sn.norm(*rec).hash(h);
+            sn.norm(*result).hash(h);
+        }
+        BoundaryStructSet {
+            boundary_id,
+            field_idx,
+            rec,
+            value,
+        } => {
+            boundary_id.0.hash(h);
+            field_idx.hash(h);
+            sn.norm(*rec).hash(h);
+            sn.norm(*value).hash(h);
+        }
+        BoundaryStructSetConst {
+            boundary_id,
+            field_idx,
+            rec,
+            value,
+        } => {
+            boundary_id.0.hash(h);
+            field_idx.hash(h);
+            sn.norm(*rec).hash(h);
+            value.hash(h);
+        }
+        BoundaryRefFromSelf {
+            boundary_id,
+            result,
+        } => {
+            boundary_id.0.hash(h);
+            sn.norm(*result).hash(h);
+        }
+        // Stage 5a: Array{NewDefault,Get,Set,Copy} arms removed —
+        // those op variants are deleted from the IR.
         ArrayLen { arr, result } => {
             sn.norm(*arr).hash(h);
             sn.norm(*result).hash(h);
@@ -489,35 +619,51 @@ fn hash_op<H: Hasher>(
             ty_idx.hash(h);
             sn.norm(*result).hash(h);
         }
-        ChildrenArrayNewDefault { anchor_boundary, len, result } => {
+        ChildrenArrayNewDefault {
+            anchor_boundary,
+            len,
+            result,
+        } => {
             anchor_boundary.0.hash(h);
             sn.norm(*len).hash(h);
             sn.norm(*result).hash(h);
         }
-        ChildrenArrayGet { anchor_boundary, arr, idx, result } => {
+        ChildrenArrayGet {
+            anchor_boundary,
+            arr,
+            idx,
+            result,
+        } => {
             anchor_boundary.0.hash(h);
             sn.norm(*arr).hash(h);
             sn.norm(*idx).hash(h);
             sn.norm(*result).hash(h);
         }
-        ChildrenArraySet { anchor_boundary, arr, idx, value } => {
+        ChildrenArraySet {
+            anchor_boundary,
+            arr,
+            idx,
+            value,
+        } => {
             anchor_boundary.0.hash(h);
             sn.norm(*arr).hash(h);
             sn.norm(*idx).hash(h);
             sn.norm(*value).hash(h);
         }
-        ChildrenArrayCopy { anchor_boundary, dst, dst_idx, src, src_idx, count } => {
+        ChildrenArrayCopy {
+            anchor_boundary,
+            dst,
+            dst_idx,
+            src,
+            src_idx,
+            count,
+        } => {
             anchor_boundary.0.hash(h);
             sn.norm(*dst).hash(h);
             sn.norm(*dst_idx).hash(h);
             sn.norm(*src).hash(h);
             sn.norm(*src_idx).hash(h);
             sn.norm(*count).hash(h);
-        }
-        LoadList { signal, ptr_result, len_result } => {
-            signal.0.hash(h);
-            sn.norm(*ptr_result).hash(h);
-            sn.norm(*len_result).hash(h);
         }
         SetSlot { slot, value } => {
             sn.norm(*slot).hash(h);
@@ -531,25 +677,72 @@ fn hash_op<H: Hasher>(
             sn.norm(*mem_slot).hash(h);
             sn.norm(*result).hash(h);
         }
-        EvalListExpr { expr, ptr_result, len_result } => {
-            expr.0.hash(h);
-            sn.norm(*ptr_result).hash(h);
-            sn.norm(*len_result).hash(h);
-        }
-        LoadListGc { signal, ref_result, len_result } => {
+        LoadListGc {
+            signal,
+            ref_result,
+            len_result,
+        } => {
             signal.0.hash(h);
             sn.norm(*ref_result).hash(h);
             sn.norm(*len_result).hash(h);
         }
-        EvalListExprGc { expr, ref_result, len_result } => {
+        EvalListExprGc {
+            expr,
+            ref_result,
+            len_result,
+        } => {
             expr.0.hash(h);
             sn.norm(*ref_result).hash(h);
             sn.norm(*len_result).hash(h);
         }
-        ArrayGetItem { arr, idx, list_ty, result } => {
+        ArrayGetItem {
+            arr,
+            idx,
+            list_ty,
+            result,
+        } => {
             sn.norm(*arr).hash(h);
             sn.norm(*idx).hash(h);
             list_ty.hash(h);
+            sn.norm(*result).hash(h);
+        }
+        ArrayGetItemFat {
+            arr,
+            idx,
+            list_ty,
+            ptr_result,
+            len_result,
+        } => {
+            sn.norm(*arr).hash(h);
+            sn.norm(*idx).hash(h);
+            list_ty.hash(h);
+            sn.norm(*ptr_result).hash(h);
+            sn.norm(*len_result).hash(h);
+        }
+        ArrayGetItemFatToMem {
+            arr,
+            idx,
+            list_ty,
+            buf_addr_slot,
+        } => {
+            sn.norm(*arr).hash(h);
+            sn.norm(*idx).hash(h);
+            list_ty.hash(h);
+            sn.norm(*buf_addr_slot).hash(h);
+        }
+        RefCast { from, ty_ref, result } => {
+            sn.norm(*from).hash(h);
+            ty_ref.hash(h);
+            sn.norm(*result).hash(h);
+        }
+        RefIsNull { from, result } => {
+            sn.norm(*from).hash(h);
+            sn.norm(*result).hash(h);
+        }
+        ArrayGetTyped { ty_ref, arr, idx, result } => {
+            ty_ref.hash(h);
+            sn.norm(*arr).hash(h);
+            sn.norm(*idx).hash(h);
             sn.norm(*result).hash(h);
         }
     }
@@ -589,12 +782,12 @@ impl SlotNormalizer {
     }
 
     fn norm(&mut self, slot: LirSlotId) -> u32 {
-        if let Some(v) = self.map.get(&slot.0) {
+        if let Some(v) = self.map.get(&slot.legacy_u32()) {
             return *v;
         }
         let v = self.next;
         self.next += 1;
-        self.map.insert(slot.0, v);
+        self.map.insert(slot.legacy_u32(), v);
         v
     }
 }
@@ -652,32 +845,78 @@ fn op_eq(
     use LirOp::*;
     let resolve = |b: BlockId| *remap.get(&b).unwrap_or(&b);
     match (x, y) {
-        (If { cond: c1, then_ops: t1, else_ops: e1, .. },
-         If { cond: c2, then_ops: t2, else_ops: e2, .. }) => {
+        (
+            If {
+                cond: c1,
+                then_ops: t1,
+                else_ops: e1,
+                ..
+            },
+            If {
+                cond: c2,
+                then_ops: t2,
+                else_ops: e2,
+                ..
+            },
+        ) => {
             sn_a.norm(*c1) == sn_b.norm(*c2)
                 && ops_eq(t1, t2, sn_a, sn_b, remap)
                 && ops_eq(e1, e2, sn_a, sn_b, remap)
         }
-        (Loop { break_cond: c1, body_ops: b1, .. },
-         Loop { break_cond: c2, body_ops: b2, .. }) => {
-            sn_a.norm(*c1) == sn_b.norm(*c2) && ops_eq(b1, b2, sn_a, sn_b, remap)
-        }
-        (CallBlock { block: b1, parent: p1 },
-         CallBlock { block: b2, parent: p2 }) => {
-            resolve(*b1) == resolve(*b2) && sn_a.norm(*p1) == sn_b.norm(*p2)
-        }
-        (CallBlock2 { block: b1, param0: p01, param1: p11, result: r1 },
-         CallBlock2 { block: b2, param0: p02, param1: p12, result: r2 }) => {
+        (
+            Loop {
+                break_cond: c1,
+                body_ops: b1,
+                ..
+            },
+            Loop {
+                break_cond: c2,
+                body_ops: b2,
+                ..
+            },
+        ) => sn_a.norm(*c1) == sn_b.norm(*c2) && ops_eq(b1, b2, sn_a, sn_b, remap),
+        (
+            CallBlock {
+                block: b1,
+                args: a1,
+                result: r1,
+            },
+            CallBlock {
+                block: b2,
+                args: a2,
+                result: r2,
+            },
+        ) => {
             resolve(*b1) == resolve(*b2)
-                && sn_a.norm(*p01) == sn_b.norm(*p02)
-                && sn_a.norm(*p11) == sn_b.norm(*p12)
+                && a1.len() == a2.len()
+                && a1
+                    .iter()
+                    .zip(a2)
+                    .all(|(x, y)| sn_a.norm(*x) == sn_b.norm(*y))
                 && r1.map(|s| sn_a.norm(s)) == r2.map(|s| sn_b.norm(s))
         }
-        (AddEventListener { node: n1, event: e1, handler: h1 },
-         AddEventListener { node: n2, event: e2, handler: h2 }) => {
-            sn_a.norm(*n1) == sn_b.norm(*n2)
-                && e1.0 == e2.0
-                && resolve(*h1) == resolve(*h2)
+        (
+            CallFunction {
+                func: f1,
+                args: a1,
+                result: r1,
+            },
+            CallFunction {
+                func: f2,
+                args: a2,
+                result: r2,
+            },
+        ) => {
+            f1 == f2
+                && a1.len() == a2.len()
+                && a1
+                    .iter()
+                    .zip(a2)
+                    .all(|(x, y)| sn_a.norm(*x) == sn_b.norm(*y))
+                && r1.map(|s| sn_a.norm(s)) == r2.map(|s| sn_b.norm(s))
+        }
+        (PushHandlerId { handler: h1 }, PushHandlerId { handler: h2 }) => {
+            resolve(*h1) == resolve(*h2)
         }
         // For all the other ops we already have a hash that mixes the
         // same fields. A hash match plus matching discriminant is a
@@ -696,5 +935,4 @@ fn op_eq(
     }
 }
 
-#[allow(dead_code)]
 fn _silence_unused(_: &LirBlockEffect) {}

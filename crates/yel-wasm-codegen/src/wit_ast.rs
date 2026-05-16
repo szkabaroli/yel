@@ -3,49 +3,67 @@
 //! This module builds a WIT AST using wit-parser types and then uses
 //! wit-component to embed the component-type metadata into the core module.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use wit_parser::{
-    Docs, Function, FunctionKind, Interface, Package, PackageName,
-    Resolve, Results, Stability, Type, TypeDef, TypeDefKind, TypeId,
-    TypeOwner, World, WorldId, WorldItem, WorldKey,
-};
 use semver::Version;
+use wit_parser::{
+    Case, Docs, Enum, EnumCase, Field, Function, FunctionKind, Handle, Interface, InterfaceId,
+    Package, PackageId, PackageName, Param, Record, Resolve, Result_, Stability, Tuple, Type,
+    TypeDef, TypeDefKind, TypeId, TypeOwner, Variant, World, WorldId, WorldItem, WorldKey,
+};
 
+use yel_core::DefId;
 use yel_core::context::CompilerContext;
-use yel_core::definitions::DefKind;
-use yel_core::lir::LirComponent;
+use yel_core::definitions::{DefKind, GlobalPropDirection};
+use yel_core::lir::LirResource;
 use yel_core::types::{InternedTyKind, Ty};
 
 use super::CodegenError;
 
 /// Builder for constructing WIT AST programmatically.
+/// One free-function export passed to
+/// [`WitAstBuilder::build_function_world`]. The caller (typically
+/// `wasm::functions`) flattens its [`crate::FunctionInput`] entries
+/// into this shape — keeping `WitAstBuilder` independent of the
+/// module-assembly types up the call stack.
+pub struct FreeFunctionExport<'a> {
+    /// Source-level function name; gets kebab-cased before emission.
+    pub name: &'a str,
+    /// Parameter names, in declared order. Empty entries are
+    /// replaced with `arg{i}`. Kebab-cased before emission.
+    pub param_names: &'a [&'a str],
+    /// Parameter yel-level types, parallel to `param_names`.
+    pub param_tys: &'a [Ty],
+    /// Single-value return type, if any.
+    pub result_ty: Option<Ty>,
+}
+
 pub struct WitAstBuilder<'a> {
     ctx: &'a CompilerContext,
     resolve: Resolve,
-    package_id: wit_parser::PackageId,
+    package_id: PackageId,
     /// Cached id of the shared `yel:ui@0.1.0` package. Owns both the DOM
     /// and dispatch interfaces — the language-level syscall surface every
     /// Yel module plugs into.
-    yel_ui_package_id: Option<wit_parser::PackageId>,
+    yel_ui_package_id: Option<PackageId>,
     /// Dedicated interface that owns every canonical ADT (record/enum/variant)
     /// type. Other interfaces reference those types via `use` aliases.
-    types_interface_id: Option<wit_parser::InterfaceId>,
+    types_interface_id: Option<InterfaceId>,
     /// Resource-only interfaces (one per exported component, named
     /// `{component}-resource`). Each owns just the bare `resource X;`
     /// declaration; the matching `{component}-component` interface aliases
     /// the resource in to attach methods, and callbacks/host-boundary
     /// interfaces alias the same resource to take `borrow<X>` params.
     /// Tracked so the world-builder can add them to imports.
-    resource_interface_ids: Vec<wit_parser::InterfaceId>,
+    resource_interface_ids: Vec<InterfaceId>,
     /// Map from LIR type to WIT TypeId (canonical ids, owned by
     /// `types_interface_id` for ADTs).
     type_map: HashMap<Ty, TypeId>,
     /// Map from DefId to WIT TypeId for ADT types (canonical ids).
-    adt_map: HashMap<yel_core::ids::DefId, TypeId>,
+    adt_map: HashMap<DefId, TypeId>,
     /// Cache of use-aliases: for each (importing interface, canonical type id)
     /// pair, stores the aliased TypeId owned by the importing interface.
-    alias_map: HashMap<(wit_parser::InterfaceId, TypeId), TypeId>,
+    alias_map: HashMap<(InterfaceId, TypeId), TypeId>,
 }
 
 impl<'a> WitAstBuilder<'a> {
@@ -66,7 +84,7 @@ impl<'a> WitAstBuilder<'a> {
             interfaces: Default::default(),
             worlds: Default::default(),
         });
-        
+
         Self {
             ctx,
             resolve,
@@ -83,7 +101,7 @@ impl<'a> WitAstBuilder<'a> {
     /// Create or return the shared `types` interface. Every ADT (record,
     /// enum, variant) is owned by this interface; other interfaces `use`
     /// them via aliases.
-    fn ensure_types_interface(&mut self) -> wit_parser::InterfaceId {
+    fn ensure_types_interface(&mut self) -> InterfaceId {
         if let Some(id) = self.types_interface_id {
             return id;
         }
@@ -94,6 +112,8 @@ impl<'a> WitAstBuilder<'a> {
             functions: Default::default(),
             package: Some(self.package_id),
             stability: Stability::default(),
+            span: Default::default(),
+            clone_of: None,
         });
         self.resolve.packages[self.package_id]
             .interfaces
@@ -105,11 +125,7 @@ impl<'a> WitAstBuilder<'a> {
     /// Resolve `ty` to a `Type` visible from `in_interface`. For ADT types,
     /// this emits (or reuses) a `use types.{name};` alias in `in_interface`
     /// and returns the alias's `Type::Id`.
-    fn use_type_in(
-        &mut self,
-        ty: Ty,
-        in_interface: wit_parser::InterfaceId,
-    ) -> Result<Type, CodegenError> {
+    fn use_type_in(&mut self, ty: Ty, in_interface: InterfaceId) -> Result<Type, CodegenError> {
         let resolved = self.ty_to_wit_type(ty)?;
         let type_id = match resolved {
             Type::Id(id) => id,
@@ -136,6 +152,7 @@ impl<'a> WitAstBuilder<'a> {
             owner: TypeOwner::Interface(in_interface),
             docs: Docs::default(),
             stability: Stability::default(),
+            span: Default::default(),
         });
         self.resolve.interfaces[in_interface]
             .types
@@ -150,11 +167,7 @@ impl<'a> WitAstBuilder<'a> {
     /// aliases use `TypeDefKind::Type(Type::Id(original))` and the original's
     /// owner stays where it was. The returned `TypeId` is the one callers
     /// should wrap in `Handle::Borrow(..)`.
-    fn use_resource_in(
-        &mut self,
-        resource_ty: TypeId,
-        in_interface: wit_parser::InterfaceId,
-    ) -> TypeId {
+    fn use_resource_in(&mut self, resource_ty: TypeId, in_interface: InterfaceId) -> TypeId {
         let owner = self.resolve.types[resource_ty].owner;
         match owner {
             TypeOwner::Interface(owner_iface) if owner_iface != in_interface => {}
@@ -173,6 +186,7 @@ impl<'a> WitAstBuilder<'a> {
             owner: TypeOwner::Interface(in_interface),
             docs: Docs::default(),
             stability: Stability::default(),
+            span: Default::default(),
         });
         self.resolve.interfaces[in_interface]
             .types
@@ -180,7 +194,6 @@ impl<'a> WitAstBuilder<'a> {
         self.alias_map.insert((in_interface, resource_ty), alias_id);
         alias_id
     }
-
 
     /// Build the WIT AST for a component.
     /// Build WIT for an arbitrary number of components and globals.
@@ -193,10 +206,7 @@ impl<'a> WitAstBuilder<'a> {
     /// - the world is named after the package:
     ///   `<package>-ui`  if any component is exported
     ///   `<package>-lib` otherwise (libraries, globals-only files)
-    pub fn build_wit(
-        &mut self,
-        components: &[&LirComponent],
-    ) -> Result<WorldId, CodegenError> {
+    pub fn build_wit(&mut self, components: &[&LirResource]) -> Result<WorldId, CodegenError> {
         self.build_wit_with_all(components, components)
     }
 
@@ -210,8 +220,8 @@ impl<'a> WitAstBuilder<'a> {
     /// and the core module wires those Call sites through that import.
     pub fn build_wit_with_all(
         &mut self,
-        exported: &[&LirComponent],
-        all: &[&LirComponent],
+        exported: &[&LirResource],
+        all: &[&LirResource],
     ) -> Result<WorldId, CodegenError> {
         let components = exported;
         // Register all types referenced by components + globals up front so
@@ -224,14 +234,8 @@ impl<'a> WitAstBuilder<'a> {
         // Per-component resource interfaces — one per exported component.
         // Kept per-component because each component is genuinely its own
         // resource with its own constructor/method shape.
-        let mut component_interfaces: Vec<(
-            wit_parser::InterfaceId,
-            Option<wit_parser::InterfaceId>,
-        )> = Vec::new();
-        let mut component_resources: std::collections::HashMap<
-            yel_core::ids::DefId,
-            wit_parser::TypeId,
-        > = std::collections::HashMap::new();
+        let mut component_interfaces: Vec<(InterfaceId, Option<InterfaceId>)> = Vec::new();
+        let mut component_resources: HashMap<DefId, TypeId> = HashMap::new();
         for c in components {
             let resource_name = to_kebab_case(&self.ctx.str(c.name));
             let (iface, resource_ty) = self.create_component_interface(c, &resource_name)?;
@@ -282,11 +286,10 @@ impl<'a> WitAstBuilder<'a> {
         let world_name = pkg_name;
 
         let resource_interfaces = self.resource_interface_ids.clone();
-        let per_component_callback_iface_ids: Vec<wit_parser::InterfaceId> =
-            per_component_callbacks
-                .iter()
-                .map(|&(_def_id, iface_id)| iface_id)
-                .collect();
+        let per_component_callback_iface_ids: Vec<InterfaceId> = per_component_callbacks
+            .iter()
+            .map(|&(_def_id, iface_id)| iface_id)
+            .collect();
         self.create_world(
             &world_name,
             dom_interface_id,
@@ -298,22 +301,25 @@ impl<'a> WitAstBuilder<'a> {
             &import_component_interface_ids,
         )
     }
-    
+
     /// Register all types used by the component's signals.
-    fn register_types_for_component(&mut self, component: &LirComponent) -> Result<(), CodegenError> {
+    fn register_types_for_component(
+        &mut self,
+        component: &LirResource,
+    ) -> Result<(), CodegenError> {
         for signal in &component.signals {
             self.register_type(signal.ty)?;
         }
         Ok(())
     }
-    
+
     /// Register a type in the resolve, returning its TypeId.
     fn register_type(&mut self, ty: Ty) -> Result<Option<TypeId>, CodegenError> {
         // Check if already registered
         if let Some(&type_id) = self.type_map.get(&ty) {
             return Ok(Some(type_id));
         }
-        
+
         match self.ctx.ty_kind(ty) {
             InternedTyKind::List(elem_ty) => {
                 // Register the element type first
@@ -344,18 +350,21 @@ impl<'a> WitAstBuilder<'a> {
 
                     let type_id = self.resolve.types.alloc(TypeDef {
                         name: Some(record_name.clone()),
-                        kind: TypeDefKind::Record(wit_parser::Record {
-                            fields: fields.into_iter().map(|(name, ty)| {
-                                wit_parser::Field {
+                        kind: TypeDefKind::Record(Record {
+                            fields: fields
+                                .into_iter()
+                                .map(|(name, ty)| Field {
                                     name,
                                     ty,
                                     docs: Docs::default(),
-                                }
-                            }).collect(),
+                                    span: Default::default(),
+                                })
+                                .collect(),
                         }),
                         owner: TypeOwner::Interface(types_iface),
                         docs: Docs::default(),
                         stability: Stability::default(),
+                        span: Default::default(),
                     });
                     self.resolve.interfaces[types_iface]
                         .types
@@ -372,19 +381,21 @@ impl<'a> WitAstBuilder<'a> {
                     for &case_def_id in &enum_def.cases {
                         if let DefKind::VariantCase(case) = self.ctx.defs.kind(case_def_id) {
                             let case_name = to_kebab_case(&self.ctx.str(case.name));
-                            cases.push(wit_parser::EnumCase {
+                            cases.push(EnumCase {
                                 name: case_name,
                                 docs: Docs::default(),
+                                span: Default::default(),
                             });
                         }
                     }
 
                     let type_id = self.resolve.types.alloc(TypeDef {
                         name: Some(enum_name.clone()),
-                        kind: TypeDefKind::Enum(wit_parser::Enum { cases }),
+                        kind: TypeDefKind::Enum(Enum { cases }),
                         owner: TypeOwner::Interface(types_iface),
                         docs: Docs::default(),
                         stability: Stability::default(),
+                        span: Default::default(),
                     });
                     self.resolve.interfaces[types_iface]
                         .types
@@ -407,20 +418,22 @@ impl<'a> WitAstBuilder<'a> {
                             } else {
                                 None
                             };
-                            cases.push(wit_parser::Case {
+                            cases.push(Case {
                                 name: case_name,
                                 ty: payload_ty,
                                 docs: Docs::default(),
+                                span: Default::default(),
                             });
                         }
                     }
 
                     let type_id = self.resolve.types.alloc(TypeDef {
                         name: Some(variant_name.clone()),
-                        kind: TypeDefKind::Variant(wit_parser::Variant { cases }),
+                        kind: TypeDefKind::Variant(Variant { cases }),
                         owner: TypeOwner::Interface(types_iface),
                         docs: Docs::default(),
                         stability: Stability::default(),
+                        span: Default::default(),
                     });
                     self.resolve.interfaces[types_iface]
                         .types
@@ -437,7 +450,7 @@ impl<'a> WitAstBuilder<'a> {
             _ => Ok(None), // Primitive types don't need registration
         }
     }
-    
+
     /// Convert a LIR type to a WIT type.
     /// For complex types (List, Option), this creates a TypeDef and returns Type::Id.
     fn ty_to_wit_type(&mut self, ty: Ty) -> Result<Type, CodegenError> {
@@ -469,6 +482,7 @@ impl<'a> WitAstBuilder<'a> {
                     owner: TypeOwner::None,
                     docs: Docs::default(),
                     stability: Stability::default(),
+                    span: Default::default(),
                 });
                 self.type_map.insert(ty, type_id);
                 Type::Id(type_id)
@@ -482,6 +496,7 @@ impl<'a> WitAstBuilder<'a> {
                     owner: TypeOwner::None,
                     docs: Docs::default(),
                     stability: Stability::default(),
+                    span: Default::default(),
                 });
                 self.type_map.insert(ty, type_id);
                 Type::Id(type_id)
@@ -492,10 +507,14 @@ impl<'a> WitAstBuilder<'a> {
                 // Create a TypeDef for the result
                 let type_id = self.resolve.types.alloc(TypeDef {
                     name: None,
-                    kind: TypeDefKind::Result(wit_parser::Result_ { ok: ok_type, err: err_type }),
+                    kind: TypeDefKind::Result(Result_ {
+                        ok: ok_type,
+                        err: err_type,
+                    }),
                     owner: TypeOwner::None,
                     docs: Docs::default(),
                     stability: Stability::default(),
+                    span: Default::default(),
                 });
                 self.type_map.insert(ty, type_id);
                 Type::Id(type_id)
@@ -508,10 +527,13 @@ impl<'a> WitAstBuilder<'a> {
                 // Create a TypeDef for the tuple
                 let type_id = self.resolve.types.alloc(TypeDef {
                     name: None,
-                    kind: TypeDefKind::Tuple(wit_parser::Tuple { types: element_types }),
+                    kind: TypeDefKind::Tuple(Tuple {
+                        types: element_types,
+                    }),
                     owner: TypeOwner::None,
                     docs: Docs::default(),
                     stability: Stability::default(),
+                    span: Default::default(),
                 });
                 self.type_map.insert(ty, type_id);
                 Type::Id(type_id)
@@ -526,9 +548,10 @@ impl<'a> WitAstBuilder<'a> {
                     match self.register_type(ty)? {
                         Some(type_id) => Type::Id(type_id),
                         None => {
-                            return Err(CodegenError::MissingDefinition(
-                                format!("Type not registered: {:?}", def_id)
-                            ));
+                            return Err(CodegenError::MissingDefinition(format!(
+                                "Type not registered: {:?}",
+                                def_id
+                            )));
                         }
                     }
                 }
@@ -540,16 +563,16 @@ impl<'a> WitAstBuilder<'a> {
             _ => Type::String, // Fallback
         })
     }
-    
+
     /// Create the component interface with resource. Returns the interface
     /// id plus the resource type id. The resource + methods live in this
     /// interface as usual; callbacks and other module-scoped interfaces
     /// reference it via `use {component}-component.{resource}` aliasing.
     fn create_component_interface(
         &mut self,
-        component: &LirComponent,
+        component: &LirResource,
         resource_name: &str,
-    ) -> Result<(wit_parser::InterfaceId, wit_parser::TypeId), CodegenError> {
+    ) -> Result<(InterfaceId, TypeId), CodegenError> {
         let interface_name = format!("{}-component", resource_name);
 
         // Create the resource type
@@ -559,6 +582,7 @@ impl<'a> WitAstBuilder<'a> {
             owner: TypeOwner::None,
             docs: Docs::default(),
             stability: Stability::default(),
+            span: Default::default(),
         });
 
         // Create interface
@@ -569,6 +593,8 @@ impl<'a> WitAstBuilder<'a> {
             functions: Default::default(),
             package: Some(self.package_id),
             stability: Stability::default(),
+            span: Default::default(),
+            clone_of: None,
         });
 
         self.resolve.types[resource_type_id].owner = TypeOwner::Interface(interface_id);
@@ -578,14 +604,15 @@ impl<'a> WitAstBuilder<'a> {
 
         // ADTs live in the dedicated `types` interface; this interface pulls
         // them in via `use types.{...};` on demand through `use_type_in`.
-        
+
         // Create own handle type for constructor return
         let own_type_id = self.resolve.types.alloc(TypeDef {
             name: None,
-            kind: TypeDefKind::Handle(wit_parser::Handle::Own(resource_type_id)),
+            kind: TypeDefKind::Handle(Handle::Own(resource_type_id)),
             owner: TypeOwner::Interface(interface_id),
             docs: Docs::default(),
             stability: Stability::default(),
+            span: Default::default(),
         });
 
         // Add constructor - returns own<resource>
@@ -593,9 +620,10 @@ impl<'a> WitAstBuilder<'a> {
             name: String::new(), // Empty for constructors
             kind: FunctionKind::Constructor(resource_type_id),
             params: vec![],
-            results: Results::Anon(Type::Id(own_type_id)), // Constructor returns own<resource>
+            result: Some(Type::Id(own_type_id)), // Constructor returns own<resource>
             docs: Docs::default(),
             stability: Stability::default(),
+            span: Default::default(),
         };
         self.resolve.interfaces[interface_id]
             .functions
@@ -604,10 +632,11 @@ impl<'a> WitAstBuilder<'a> {
         // Create borrow type for self parameter
         let borrow_type_id = self.resolve.types.alloc(TypeDef {
             name: None,
-            kind: TypeDefKind::Handle(wit_parser::Handle::Borrow(resource_type_id)),
+            kind: TypeDefKind::Handle(Handle::Borrow(resource_type_id)),
             owner: TypeOwner::Interface(interface_id),
             docs: Docs::default(),
             stability: Stability::default(),
+            span: Default::default(),
         });
         let self_type = Type::Id(borrow_type_id);
 
@@ -625,16 +654,25 @@ impl<'a> WitAstBuilder<'a> {
             name: mount_name.clone(),
             kind: FunctionKind::Method(resource_type_id),
             params: vec![
-                ("self".to_string(), self_type),
-                ("root".to_string(), Type::U32),
+                Param {
+                    name: "self".to_string(),
+                    ty: self_type,
+                    span: Default::default(),
+                },
+                Param {
+                    name: "root".to_string(),
+                    ty: Type::U32,
+                    span: Default::default(),
+                },
             ],
-            results: if has_children_slot {
-                Results::Anon(Type::U32)
+            result: if has_children_slot {
+                Some(Type::U32)
             } else {
-                Results::Named(vec![])
+                None
             },
             docs: Docs::default(),
             stability: Stability::default(),
+            span: Default::default(),
         };
         self.resolve.interfaces[interface_id]
             .functions
@@ -645,10 +683,15 @@ impl<'a> WitAstBuilder<'a> {
         let unmount_func = Function {
             name: unmount_name.clone(),
             kind: FunctionKind::Method(resource_type_id),
-            params: vec![("self".to_string(), self_type)],
-            results: Results::Named(vec![]),
+            params: vec![Param {
+                name: "self".to_string(),
+                ty: self_type,
+                span: Default::default(),
+            }],
+            result: None,
             docs: Docs::default(),
             stability: Stability::default(),
+            span: Default::default(),
         };
         self.resolve.interfaces[interface_id]
             .functions
@@ -673,10 +716,15 @@ impl<'a> WitAstBuilder<'a> {
             let getter_func = Function {
                 name: getter_name.clone(),
                 kind: FunctionKind::Method(resource_type_id),
-                params: vec![("self".to_string(), self_type)],
-                results: Results::Anon(wit_type),
+                params: vec![Param {
+                    name: "self".to_string(),
+                    ty: self_type,
+                    span: Default::default(),
+                }],
+                result: Some(wit_type),
                 docs: Docs::default(),
                 stability: Stability::default(),
+                span: Default::default(),
             };
             self.resolve.interfaces[interface_id]
                 .functions
@@ -688,18 +736,27 @@ impl<'a> WitAstBuilder<'a> {
                 name: setter_name.clone(),
                 kind: FunctionKind::Method(resource_type_id),
                 params: vec![
-                    ("self".to_string(), self_type),
-                    ("value".to_string(), wit_type),
+                    Param {
+                        name: "self".to_string(),
+                        ty: self_type,
+                        span: Default::default(),
+                    },
+                    Param {
+                        name: "value".to_string(),
+                        ty: wit_type,
+                        span: Default::default(),
+                    },
                 ],
-                results: Results::Named(vec![]),
+                result: None,
                 docs: Docs::default(),
                 stability: Stability::default(),
+                span: Default::default(),
             };
             self.resolve.interfaces[interface_id]
                 .functions
                 .insert(setter_name, setter_func);
         }
-        
+
         // Register interface in package
         self.resolve.packages[self.package_id]
             .interfaces
@@ -707,12 +764,12 @@ impl<'a> WitAstBuilder<'a> {
 
         Ok((interface_id, resource_type_id))
     }
-    
+
     /// Allocate (or return the cached) `yel:ui@0.1.0` package id. Both the
     /// DOM interface and the dispatch interface live here — they're the
     /// language-level syscall surface every Yel module shares, not
     /// per-module artefacts.
-    fn ensure_yel_ui_package(&mut self) -> wit_parser::PackageId {
+    fn ensure_yel_ui_package(&mut self) -> PackageId {
         if let Some(id) = self.yel_ui_package_id {
             return id;
         }
@@ -731,7 +788,7 @@ impl<'a> WitAstBuilder<'a> {
     }
 
     /// Create the DOM interface in the shared `yel:ui@0.1.0` package.
-    fn create_dom_interface(&mut self) -> Result<wit_parser::InterfaceId, CodegenError> {
+    fn create_dom_interface(&mut self) -> Result<InterfaceId, CodegenError> {
         let dom_package_id = self.ensure_yel_ui_package();
 
         let interface_id = self.resolve.interfaces.alloc(Interface {
@@ -741,32 +798,178 @@ impl<'a> WitAstBuilder<'a> {
             functions: Default::default(),
             package: Some(dom_package_id),
             stability: Stability::default(),
+            span: Default::default(),
+            clone_of: None,
         });
 
-        // Create the attribute-value variant type for set-attribute
-        // This allows the host to perform type-to-string conversion
-        let attr_value_type_id = self.resolve.types.alloc(TypeDef {
-            name: Some("attribute-value".to_string()),
-            kind: TypeDefKind::Variant(wit_parser::Variant {
+        // Create the `color` variant type — mirrors the language-level
+        // `color` builtin so the host can receive a typed color through
+        // attribute-value. The `rgba` case carries a tuple of u8 RGBA.
+        let rgba_tuple_id = self.resolve.types.alloc(TypeDef {
+            name: None,
+            kind: TypeDefKind::Tuple(Tuple {
+                types: vec![Type::U8, Type::U8, Type::U8, Type::U8],
+            }),
+            owner: TypeOwner::Interface(interface_id),
+            docs: Docs::default(),
+            stability: Stability::default(),
+            span: Default::default(),
+        });
+
+        let color_type_id = self.resolve.types.alloc(TypeDef {
+            name: Some("color".to_string()),
+            kind: TypeDefKind::Variant(Variant {
                 cases: vec![
-                    wit_parser::Case { name: "str".to_string(), ty: Some(Type::String), docs: Docs::default() },
-                    wit_parser::Case { name: "bool".to_string(), ty: Some(Type::Bool), docs: Docs::default() },
-                    wit_parser::Case { name: "s8".to_string(), ty: Some(Type::S8), docs: Docs::default() },
-                    wit_parser::Case { name: "s16".to_string(), ty: Some(Type::S16), docs: Docs::default() },
-                    wit_parser::Case { name: "s32".to_string(), ty: Some(Type::S32), docs: Docs::default() },
-                    wit_parser::Case { name: "s64".to_string(), ty: Some(Type::S64), docs: Docs::default() },
-                    wit_parser::Case { name: "u8".to_string(), ty: Some(Type::U8), docs: Docs::default() },
-                    wit_parser::Case { name: "u16".to_string(), ty: Some(Type::U16), docs: Docs::default() },
-                    wit_parser::Case { name: "u32".to_string(), ty: Some(Type::U32), docs: Docs::default() },
-                    wit_parser::Case { name: "u64".to_string(), ty: Some(Type::U64), docs: Docs::default() },
-                    wit_parser::Case { name: "f32".to_string(), ty: Some(Type::F32), docs: Docs::default() },
-                    wit_parser::Case { name: "f64".to_string(), ty: Some(Type::F64), docs: Docs::default() },
-                    wit_parser::Case { name: "char".to_string(), ty: Some(Type::Char), docs: Docs::default() },
+                    Case {
+                        name: "red".to_string(),
+                        ty: None,
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "green".to_string(),
+                        ty: None,
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "blue".to_string(),
+                        ty: None,
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "white".to_string(),
+                        ty: None,
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "black".to_string(),
+                        ty: None,
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "transparent".to_string(),
+                        ty: None,
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "rgba".to_string(),
+                        ty: Some(Type::Id(rgba_tuple_id)),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
                 ],
             }),
             owner: TypeOwner::Interface(interface_id),
             docs: Docs::default(),
             stability: Stability::default(),
+            span: Default::default(),
+        });
+        self.resolve.interfaces[interface_id]
+            .types
+            .insert("color".to_string(), color_type_id);
+        let color_type = Type::Id(color_type_id);
+
+        // Create the attribute-value variant type for set-attribute
+        // This allows the host to perform type-to-string conversion
+        let attr_value_type_id = self.resolve.types.alloc(TypeDef {
+            name: Some("attribute-value".to_string()),
+            kind: TypeDefKind::Variant(Variant {
+                cases: vec![
+                    Case {
+                        name: "str".to_string(),
+                        ty: Some(Type::String),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "bool".to_string(),
+                        ty: Some(Type::Bool),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "s8".to_string(),
+                        ty: Some(Type::S8),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "s16".to_string(),
+                        ty: Some(Type::S16),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "s32".to_string(),
+                        ty: Some(Type::S32),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "s64".to_string(),
+                        ty: Some(Type::S64),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "u8".to_string(),
+                        ty: Some(Type::U8),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "u16".to_string(),
+                        ty: Some(Type::U16),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "u32".to_string(),
+                        ty: Some(Type::U32),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "u64".to_string(),
+                        ty: Some(Type::U64),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "f32".to_string(),
+                        ty: Some(Type::F32),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "f64".to_string(),
+                        ty: Some(Type::F64),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "char".to_string(),
+                        ty: Some(Type::Char),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "color".to_string(),
+                        ty: Some(color_type),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                ],
+            }),
+            owner: TypeOwner::Interface(interface_id),
+            docs: Docs::default(),
+            stability: Stability::default(),
+            span: Default::default(),
         });
 
         // Add the variant type to the interface
@@ -782,37 +985,129 @@ impl<'a> WitAstBuilder<'a> {
         // dedicated type alias would be used in exactly one place.
         #[allow(clippy::type_complexity)]
         let dom_funcs: Vec<(&str, Vec<(&str, Type)>, Option<Type>)> = vec![
-            ("create-element", vec![("tag", Type::String)], Some(Type::U32)),
-            ("create-text", vec![("content", Type::String)], Some(Type::U32)),
-            ("create-comment", vec![("content", Type::String)], Some(Type::U32)),
+            (
+                "create-element",
+                vec![("tag", Type::String)],
+                Some(Type::U32),
+            ),
+            (
+                "create-text",
+                vec![("content", Type::String)],
+                Some(Type::U32),
+            ),
+            (
+                "create-comment",
+                vec![("content", Type::String)],
+                Some(Type::U32),
+            ),
             ("create-fragment", vec![], Some(Type::U32)),
-            ("set-attribute", vec![("node", Type::U32), ("name", Type::String), ("value", attr_value_type)], None),
-            ("remove-attribute", vec![("node", Type::U32), ("name", Type::String)], None),
-            ("set-text-content", vec![("node", Type::U32), ("content", Type::String)], None),
-            ("set-style", vec![("node", Type::U32), ("property", Type::String), ("value", Type::String)], None),
-            ("set-class", vec![("node", Type::U32), ("class-name", Type::String)], None),
-            ("append-child", vec![("parent", Type::U32), ("child", Type::U32)], None),
-            ("insert-before", vec![("parent", Type::U32), ("node", Type::U32), ("reference", Type::U32)], None),
-            ("insert-after", vec![("parent", Type::U32), ("node", Type::U32), ("anchor", Type::U32)], None),
-            ("remove-child", vec![("parent", Type::U32), ("child", Type::U32)], None),
+            (
+                "set-attribute",
+                vec![
+                    ("node", Type::U32),
+                    ("name", Type::String),
+                    ("value", attr_value_type),
+                ],
+                None,
+            ),
+            (
+                "remove-attribute",
+                vec![("node", Type::U32), ("name", Type::String)],
+                None,
+            ),
+            (
+                "set-text-content",
+                vec![("node", Type::U32), ("content", Type::String)],
+                None,
+            ),
+            (
+                "set-style",
+                vec![
+                    ("node", Type::U32),
+                    ("property", Type::String),
+                    ("value", Type::String),
+                ],
+                None,
+            ),
+            (
+                "set-class",
+                vec![("node", Type::U32), ("class-name", Type::String)],
+                None,
+            ),
+            (
+                "append-child",
+                vec![("parent", Type::U32), ("child", Type::U32)],
+                None,
+            ),
+            (
+                "insert-before",
+                vec![
+                    ("parent", Type::U32),
+                    ("node", Type::U32),
+                    ("reference", Type::U32),
+                ],
+                None,
+            ),
+            (
+                "insert-after",
+                vec![
+                    ("parent", Type::U32),
+                    ("node", Type::U32),
+                    ("anchor", Type::U32),
+                ],
+                None,
+            ),
+            (
+                "remove-child",
+                vec![("parent", Type::U32), ("child", Type::U32)],
+                None,
+            ),
             ("remove", vec![("node", Type::U32)], None),
             ("get-parent", vec![("node", Type::U32)], Some(Type::U32)),
-            ("get-next-sibling", vec![("node", Type::U32)], Some(Type::U32)),
-            ("add-event-listener", vec![("node", Type::U32), ("event", Type::String), ("handler-id", Type::U32)], None),
-            ("remove-event-listener", vec![("node", Type::U32), ("event", Type::String), ("handler-id", Type::U32)], None),
+            (
+                "get-next-sibling",
+                vec![("node", Type::U32)],
+                Some(Type::U32),
+            ),
+            (
+                "add-event-listener",
+                vec![
+                    ("node", Type::U32),
+                    ("event", Type::String),
+                    ("handler-id", Type::U32),
+                ],
+                None,
+            ),
+            (
+                "remove-event-listener",
+                vec![
+                    ("node", Type::U32),
+                    ("event", Type::String),
+                    ("handler-id", Type::U32),
+                ],
+                None,
+            ),
         ];
 
         for (name, params, result) in dom_funcs {
             let func = Function {
                 name: name.to_string(),
                 kind: FunctionKind::Freestanding,
-                params: params.into_iter().map(|(n, t)| (n.to_string(), t)).collect(),
-                results: match result {
-                    Some(ty) => Results::Anon(ty),
-                    None => Results::Named(vec![]),
+                params: params
+                    .into_iter()
+                    .map(|(n, t)| Param {
+                        name: n.to_string(),
+                        ty: t,
+                        span: Default::default(),
+                    })
+                    .collect(),
+                result: match result {
+                    Some(ty) => Some(ty),
+                    None => None,
                 },
                 docs: Docs::default(),
                 stability: Stability::default(),
+                span: Default::default(),
             };
             self.resolve.interfaces[interface_id]
                 .functions
@@ -837,16 +1132,11 @@ impl<'a> WitAstBuilder<'a> {
     /// identical semantics across every Yel module, so it lives next to
     /// `yel:ui/dom` — a language-level syscall surface, not a per-module
     /// interface.
-    fn create_module_dispatch_interface(
-        &mut self,
-    ) -> Result<wit_parser::InterfaceId, CodegenError> {
+    fn create_module_dispatch_interface(&mut self) -> Result<InterfaceId, CodegenError> {
         let yel_ui_pkg = self.ensure_yel_ui_package();
 
         // Reuse if another call already created it.
-        if let Some(&existing) = self.resolve.packages[yel_ui_pkg]
-            .interfaces
-            .get("dispatch")
-        {
+        if let Some(&existing) = self.resolve.packages[yel_ui_pkg].interfaces.get("dispatch") {
             return Ok(existing);
         }
 
@@ -857,6 +1147,8 @@ impl<'a> WitAstBuilder<'a> {
             functions: Default::default(),
             package: Some(yel_ui_pkg),
             stability: Stability::default(),
+            span: Default::default(),
+            clone_of: None,
         });
 
         // Flat single-level variant — one arm per payload shape.
@@ -870,43 +1162,50 @@ impl<'a> WitAstBuilder<'a> {
         //   <input type="checkbox"> → input-bool(bool)
         let event_value_id = self.resolve.types.alloc(TypeDef {
             name: Some("event-value".to_string()),
-            kind: TypeDefKind::Variant(wit_parser::Variant {
+            kind: TypeDefKind::Variant(Variant {
                 cases: vec![
-                    wit_parser::Case {
+                    Case {
                         name: "none".to_string(),
                         ty: None,
                         docs: Docs::default(),
+                        span: Default::default(),
                     },
-                    wit_parser::Case {
+                    Case {
                         name: "input-text".to_string(),
                         ty: Some(Type::String),
                         docs: Docs::default(),
+                        span: Default::default(),
                     },
-                    wit_parser::Case {
+                    Case {
                         name: "input-f64".to_string(),
                         ty: Some(Type::F64),
                         docs: Docs::default(),
+                        span: Default::default(),
                     },
-                    wit_parser::Case {
+                    Case {
                         name: "input-f32".to_string(),
                         ty: Some(Type::F32),
                         docs: Docs::default(),
+                        span: Default::default(),
                     },
-                    wit_parser::Case {
+                    Case {
                         name: "input-s32".to_string(),
                         ty: Some(Type::S32),
                         docs: Docs::default(),
+                        span: Default::default(),
                     },
-                    wit_parser::Case {
+                    Case {
                         name: "input-bool".to_string(),
                         ty: Some(Type::Bool),
                         docs: Docs::default(),
+                        span: Default::default(),
                     },
                 ],
             }),
             owner: TypeOwner::Interface(interface_id),
             docs: Docs::default(),
             stability: Stability::default(),
+            span: Default::default(),
         });
         self.resolve.interfaces[interface_id]
             .types
@@ -916,13 +1215,23 @@ impl<'a> WitAstBuilder<'a> {
             name: "dispatch".to_string(),
             kind: FunctionKind::Freestanding,
             params: vec![
-                ("handler-id".to_string(), Type::U32),
-                ("event".to_string(), Type::Id(event_value_id)),
+                Param {
+                    name: "handler-id".to_string(),
+                    ty: Type::U32,
+                    span: Default::default(),
+                },
+                Param {
+                    name: "event".to_string(),
+                    ty: Type::Id(event_value_id),
+                    span: Default::default(),
+                },
             ],
-            results: Results::Named(vec![]),
+            result: None,
             docs: Docs::default(),
             stability: Stability::default(),
+            span: Default::default(),
         };
+
         self.resolve.interfaces[interface_id]
             .functions
             .insert("dispatch".to_string(), dispatch_func);
@@ -950,12 +1259,9 @@ impl<'a> WitAstBuilder<'a> {
     /// components have no WIT-visible resource of their own.
     fn create_per_component_callbacks_interfaces(
         &mut self,
-        components: &[&LirComponent],
-        component_resources: &std::collections::HashMap<
-            yel_core::ids::DefId,
-            wit_parser::TypeId,
-        >,
-    ) -> Result<Vec<(yel_core::ids::DefId, wit_parser::InterfaceId)>, CodegenError> {
+        components: &[&LirResource],
+        component_resources: &HashMap<DefId, TypeId>,
+    ) -> Result<Vec<(DefId, InterfaceId)>, CodegenError> {
         let mut out = Vec::new();
         let fallback_resource_ty = component_resources.values().next().copied();
 
@@ -964,9 +1270,8 @@ impl<'a> WitAstBuilder<'a> {
                 continue;
             };
             // Collect this component's callbacks (kebab-name + def id).
-            let mut callbacks: Vec<(yel_core::ids::DefId, String)> = Vec::new();
-            let mut seen_local: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
+            let mut callbacks: Vec<(DefId, String)> = Vec::new();
+            let mut seen_local: HashSet<String> = HashSet::new();
             for &def_id in &comp_def.callbacks {
                 let cb_name_opt = if let Some(func_def) = self.ctx.defs.as_function(def_id) {
                     if func_def.is_export {
@@ -1011,6 +1316,8 @@ impl<'a> WitAstBuilder<'a> {
                 functions: Default::default(),
                 package: Some(self.package_id),
                 stability: Stability::default(),
+                span: Default::default(),
+                clone_of: None,
             });
 
             // Each callback takes the owning component's resource handle
@@ -1030,15 +1337,14 @@ impl<'a> WitAstBuilder<'a> {
                     ))
                 })?;
             let aliased_resource_ty = self.use_resource_in(resource_ty, interface_id);
-            let borrow_ty = Type::Id(
-                self.resolve.types.alloc(TypeDef {
-                    name: None,
-                    kind: TypeDefKind::Handle(wit_parser::Handle::Borrow(aliased_resource_ty)),
-                    owner: TypeOwner::Interface(interface_id),
-                    docs: Docs::default(),
-                    stability: Stability::default(),
-                }),
-            );
+            let borrow_ty = Type::Id(self.resolve.types.alloc(TypeDef {
+                name: None,
+                kind: TypeDefKind::Handle(Handle::Borrow(aliased_resource_ty)),
+                owner: TypeOwner::Interface(interface_id),
+                docs: Docs::default(),
+                stability: Stability::default(),
+                span: Default::default(),
+            }));
 
             for (cb_def_id, cb_name) in callbacks {
                 // Resolve declared params and return type from the function
@@ -1049,30 +1355,38 @@ impl<'a> WitAstBuilder<'a> {
                     None => (Vec::new(), Ty::UNIT),
                 };
 
-                let mut params: Vec<(String, Type)> =
-                    vec![("self".to_string(), borrow_ty)];
+                let mut params: Vec<Param> = vec![Param {
+                    name: "self".to_string(),
+                    ty: borrow_ty,
+                    span: Default::default(),
+                }];
                 for pid in &param_defs {
                     let pname = self.ctx.str(self.ctx.defs.name(*pid)).to_string();
                     let pty = match self.ctx.defs.type_of(*pid) {
                         Some(t) => t,
                         None => continue,
                     };
-                    params.push((to_kebab_case(&pname), self.use_type_in(pty, interface_id)?));
+                    params.push(Param {
+                        name: to_kebab_case(&pname),
+                        ty: self.use_type_in(pty, interface_id)?,
+                        span: Default::default(),
+                    });
                 }
 
-                let results = if ret_ty == Ty::UNIT {
-                    Results::Named(vec![])
+                let result = if ret_ty == Ty::UNIT {
+                    None
                 } else {
-                    Results::Anon(self.use_type_in(ret_ty, interface_id)?)
+                    Some(self.use_type_in(ret_ty, interface_id)?)
                 };
 
                 let func = Function {
                     name: cb_name.clone(),
                     kind: FunctionKind::Freestanding,
                     params,
-                    results,
+                    result,
                     docs: Docs::default(),
                     stability: Stability::default(),
+                    span: Default::default(),
                 };
                 self.resolve.interfaces[interface_id]
                     .functions
@@ -1092,39 +1406,43 @@ impl<'a> WitAstBuilder<'a> {
     /// Create callbacks interface if needed. Legacy per-component path —
     /// kept as a helper but no longer wired into `build_wit`. Module-scope
     /// callbacks merging happens in `create_module_callbacks_interface`.
-    #[allow(dead_code)]
     fn create_callbacks_interface(
         &mut self,
-        component: &LirComponent,
+        component: &LirResource,
         resource_name: &str,
-    ) -> Result<Option<wit_parser::InterfaceId>, CodegenError> {
+    ) -> Result<Option<InterfaceId>, CodegenError> {
         // Get exported callbacks from component definition (both function declarations and function-typed properties)
-        let callbacks: Vec<_> = self.ctx.defs.as_component(component.def_id)
+        let callbacks: Vec<_> = self
+            .ctx
+            .defs
+            .as_component(component.def_id)
             .map(|c| {
                 c.callbacks
                     .iter()
                     .filter_map(|&def_id| {
                         // Check if it's an explicit function declaration with is_export
                         if let Some(func_def) = self.ctx.defs.as_function(def_id)
-                            && func_def.is_export {
-                                return Some((def_id, to_kebab_case(&self.ctx.str(func_def.name))));
-                            }
+                            && func_def.is_export
+                        {
+                            return Some((def_id, to_kebab_case(&self.ctx.str(func_def.name))));
+                        }
                         // Check if it's a signal property with function type (callback property)
                         if let Some(sig_def) = self.ctx.defs.as_signal(def_id)
                             && let Some(ty) = self.ctx.defs.type_of(def_id)
-                                && matches!(self.ctx.ty_kind(ty), InternedTyKind::Func { .. }) {
-                                    return Some((def_id, to_kebab_case(&self.ctx.str(sig_def.name))));
-                                }
+                            && matches!(self.ctx.ty_kind(ty), InternedTyKind::Func { .. })
+                        {
+                            return Some((def_id, to_kebab_case(&self.ctx.str(sig_def.name))));
+                        }
                         None
                     })
                     .collect()
             })
             .unwrap_or_default();
-        
+
         if callbacks.is_empty() {
             return Ok(None);
         }
-        
+
         let interface_name = format!("{}-callbacks", resource_name);
         let interface_id = self.resolve.interfaces.alloc(Interface {
             name: Some(interface_name.clone()),
@@ -1133,29 +1451,32 @@ impl<'a> WitAstBuilder<'a> {
             functions: Default::default(),
             package: Some(self.package_id),
             stability: Stability::default(),
+            span: Default::default(),
+            clone_of: None,
         });
-        
+
         for (_, cb_name) in callbacks {
             let func = Function {
                 name: cb_name.clone(),
                 kind: FunctionKind::Freestanding,
                 params: vec![],
-                results: Results::Named(vec![]),
+                result: None,
                 docs: Docs::default(),
                 stability: Stability::default(),
+                span: Default::default(),
             };
             self.resolve.interfaces[interface_id]
                 .functions
                 .insert(cb_name, func);
         }
-        
+
         self.resolve.packages[self.package_id]
             .interfaces
             .insert(interface_name, interface_id);
-        
+
         Ok(Some(interface_id))
     }
-    
+
     /// Register types referenced by any global's properties or callback
     /// signatures. Mirrors `register_types_for_component` but walks the
     /// file-level globals instead of a single component's signals.
@@ -1199,9 +1520,7 @@ impl<'a> WitAstBuilder<'a> {
     /// declared properties (as `get-X`/`set-X` method pairs) and methods.
     /// The world imports every such interface so the host / upstream
     /// module supplies the concrete implementation.
-    fn create_import_component_interfaces(
-        &mut self,
-    ) -> Result<Vec<wit_parser::InterfaceId>, CodegenError> {
+    fn create_import_component_interfaces(&mut self) -> Result<Vec<InterfaceId>, CodegenError> {
         let mut out = Vec::new();
         let ids: Vec<_> = self.ctx.defs.import_components().collect();
         for id in ids {
@@ -1228,6 +1547,8 @@ impl<'a> WitAstBuilder<'a> {
                 functions: Default::default(),
                 package: Some(self.package_id),
                 stability: Stability::default(),
+                span: Default::default(),
+                clone_of: None,
             });
             let resource_ty = self.resolve.types.alloc(TypeDef {
                 name: Some(resource_name.clone()),
@@ -1235,40 +1556,40 @@ impl<'a> WitAstBuilder<'a> {
                 owner: TypeOwner::Interface(interface_id),
                 docs: Docs::default(),
                 stability: Stability::default(),
+                span: Default::default(),
             });
             self.resolve.interfaces[interface_id]
                 .types
                 .insert(resource_name.clone(), resource_ty);
 
-            let self_borrow = Type::Id(
-                self.resolve.types.alloc(TypeDef {
-                    name: None,
-                    kind: TypeDefKind::Handle(wit_parser::Handle::Borrow(resource_ty)),
-                    owner: TypeOwner::Interface(interface_id),
-                    docs: Docs::default(),
-                    stability: Stability::default(),
-                }),
-            );
+            let self_borrow = Type::Id(self.resolve.types.alloc(TypeDef {
+                name: None,
+                kind: TypeDefKind::Handle(Handle::Borrow(resource_ty)),
+                owner: TypeOwner::Interface(interface_id),
+                docs: Docs::default(),
+                stability: Stability::default(),
+                span: Default::default(),
+            }));
             let self_ty = self_borrow;
 
             // Constructor: `func() -> own<resource>`. The host's
             // implementation is responsible for allocating instances.
-            let own_ty = Type::Id(
-                self.resolve.types.alloc(TypeDef {
-                    name: None,
-                    kind: TypeDefKind::Handle(wit_parser::Handle::Own(resource_ty)),
-                    owner: TypeOwner::Interface(interface_id),
-                    docs: Docs::default(),
-                    stability: Stability::default(),
-                }),
-            );
+            let own_ty = Type::Id(self.resolve.types.alloc(TypeDef {
+                name: None,
+                kind: TypeDefKind::Handle(Handle::Own(resource_ty)),
+                owner: TypeOwner::Interface(interface_id),
+                docs: Docs::default(),
+                stability: Stability::default(),
+                span: Default::default(),
+            }));
             let ctor = Function {
                 name: String::new(),
                 kind: FunctionKind::Constructor(resource_ty),
                 params: vec![],
-                results: Results::Anon(own_ty),
+                result: Some(own_ty),
                 docs: Docs::default(),
                 stability: Stability::default(),
+                span: Default::default(),
             };
             self.resolve.interfaces[interface_id]
                 .functions
@@ -1289,10 +1610,15 @@ impl<'a> WitAstBuilder<'a> {
                 let getter = Function {
                     name: getter_name.clone(),
                     kind: FunctionKind::Method(resource_ty),
-                    params: vec![("self".to_string(), self_ty)],
-                    results: Results::Anon(wit_ty),
+                    params: vec![Param {
+                        name: "self".to_string(),
+                        ty: self_ty,
+                        span: Default::default(),
+                    }],
+                    result: Some(wit_ty),
                     docs: Docs::default(),
                     stability: Stability::default(),
+                    span: Default::default(),
                 };
                 self.resolve.interfaces[interface_id]
                     .functions
@@ -1303,12 +1629,21 @@ impl<'a> WitAstBuilder<'a> {
                     name: setter_name.clone(),
                     kind: FunctionKind::Method(resource_ty),
                     params: vec![
-                        ("self".to_string(), self_ty),
-                        ("value".to_string(), wit_ty),
+                        Param {
+                            name: "self".to_string(),
+                            ty: self_ty,
+                            span: Default::default(),
+                        },
+                        Param {
+                            name: "value".to_string(),
+                            ty: wit_ty,
+                            span: Default::default(),
+                        },
                     ],
-                    results: Results::Named(vec![]),
+                    result: None,
                     docs: Docs::default(),
                     stability: Stability::default(),
+                    span: Default::default(),
                 };
                 self.resolve.interfaces[interface_id]
                     .functions
@@ -1325,20 +1660,27 @@ impl<'a> WitAstBuilder<'a> {
                 let method_name = self.ctx.str(func_def.name).to_string();
                 let kebab = to_kebab_case(&method_name);
 
-                let mut params: Vec<(String, Type)> =
-                    vec![("self".to_string(), self_ty)];
+                let mut params: Vec<Param> = vec![Param {
+                    name: "self".to_string(),
+                    ty: self_ty,
+                    span: Default::default(),
+                }];
                 for pid in &func_def.params {
                     let pname = self.ctx.str(self.ctx.defs.name(*pid)).to_string();
                     let pty = match self.ctx.defs.type_of(*pid) {
                         Some(t) => t,
                         None => continue,
                     };
-                    params.push((to_kebab_case(&pname), self.use_type_in(pty, interface_id)?));
+                    params.push(Param {
+                        name: to_kebab_case(&pname),
+                        ty: self.use_type_in(pty, interface_id)?,
+                        span: Default::default(),
+                    });
                 }
-                let results = if func_def.ret_ty == Ty::UNIT {
-                    Results::Named(vec![])
+                let result = if func_def.ret_ty == Ty::UNIT {
+                    None
                 } else {
-                    Results::Anon(self.use_type_in(func_def.ret_ty, interface_id)?)
+                    Some(self.use_type_in(func_def.ret_ty, interface_id)?)
                 };
 
                 let wit_method_name = format!("[method]{}.{}", resource_name, kebab);
@@ -1346,9 +1688,10 @@ impl<'a> WitAstBuilder<'a> {
                     name: wit_method_name.clone(),
                     kind: FunctionKind::Method(resource_ty),
                     params,
-                    results,
+                    result,
                     docs: Docs::default(),
                     stability: Stability::default(),
+                    span: Default::default(),
                 };
                 self.resolve.interfaces[interface_id]
                     .functions
@@ -1367,11 +1710,7 @@ impl<'a> WitAstBuilder<'a> {
     /// Every emitted interface is imported by the world — the host implements
     /// it. Each global's `is_export` flag is a documentation hint for
     /// downstream tooling and does not change what's emitted here.
-    fn create_globals_interfaces(
-        &mut self,
-    ) -> Result<Vec<wit_parser::InterfaceId>, CodegenError> {
-        use yel_core::definitions::GlobalPropDirection;
-
+    fn create_globals_interfaces(&mut self) -> Result<Vec<InterfaceId>, CodegenError> {
         let mut out = Vec::new();
         let global_ids: Vec<_> = self.ctx.defs.globals().collect();
 
@@ -1388,15 +1727,15 @@ impl<'a> WitAstBuilder<'a> {
 
             // Quick pre-check: does this global have any host-boundary members
             // worth emitting? (Avoids allocating an empty interface.)
-            let has_host_props = prop_ids
-                .iter()
-                .enumerate()
-                .any(|(idx, _)| {
-                    !matches!(
-                        prop_dirs.get(idx).copied().unwrap_or(GlobalPropDirection::Inline),
-                        GlobalPropDirection::Inline
-                    )
-                });
+            let has_host_props = prop_ids.iter().enumerate().any(|(idx, _)| {
+                !matches!(
+                    prop_dirs
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(GlobalPropDirection::Inline),
+                    GlobalPropDirection::Inline
+                )
+            });
             let has_callbacks = !callback_ids.is_empty();
             if !has_host_props && !has_callbacks {
                 continue;
@@ -1411,12 +1750,13 @@ impl<'a> WitAstBuilder<'a> {
                 functions: Default::default(),
                 package: Some(self.package_id),
                 stability: Stability::default(),
+                span: Default::default(),
+                clone_of: None,
             });
 
             // Properties → setter + change-notifier funcs
             for (idx, prop_id) in prop_ids.iter().enumerate() {
-                let prop_name =
-                    self.ctx.str(self.ctx.defs.name(*prop_id)).to_string();
+                let prop_name = self.ctx.str(self.ctx.defs.name(*prop_id)).to_string();
                 let direction = prop_dirs
                     .get(idx)
                     .copied()
@@ -1446,10 +1786,15 @@ impl<'a> WitAstBuilder<'a> {
                     let f = Function {
                         name: name.clone(),
                         kind: FunctionKind::Freestanding,
-                        params: vec![("v".to_string(), wit_ty)],
-                        results: Results::Named(vec![]),
+                        params: vec![Param {
+                            name: "v".to_string(),
+                            ty: wit_ty,
+                            span: Default::default(),
+                        }],
+                        result: None,
                         docs: Docs::default(),
                         stability: Stability::default(),
+                        span: Default::default(),
                     };
                     self.resolve.interfaces[interface_id]
                         .functions
@@ -1460,10 +1805,15 @@ impl<'a> WitAstBuilder<'a> {
                     let f = Function {
                         name: name.clone(),
                         kind: FunctionKind::Freestanding,
-                        params: vec![("v".to_string(), wit_ty)],
-                        results: Results::Named(vec![]),
+                        params: vec![Param {
+                            name: "v".to_string(),
+                            ty: wit_ty,
+                            span: Default::default(),
+                        }],
+                        result: None,
                         docs: Docs::default(),
                         stability: Stability::default(),
+                        span: Default::default(),
                     };
                     self.resolve.interfaces[interface_id]
                         .functions
@@ -1474,29 +1824,28 @@ impl<'a> WitAstBuilder<'a> {
             // Callbacks → imported funcs with their signatures
             for cb_id in &callback_ids {
                 let (cb_name, param_defs, ret_ty) = match self.ctx.defs.as_function(*cb_id) {
-                    Some(f) => (
-                        self.ctx.str(f.name).to_string(),
-                        f.params.clone(),
-                        f.ret_ty,
-                    ),
+                    Some(f) => (self.ctx.str(f.name).to_string(), f.params.clone(), f.ret_ty),
                     None => continue,
                 };
 
-                let mut params = Vec::new();
+                let mut params: Vec<Param> = Vec::new();
                 for pid in &param_defs {
-                    let pname =
-                        self.ctx.str(self.ctx.defs.name(*pid)).to_string();
+                    let pname = self.ctx.str(self.ctx.defs.name(*pid)).to_string();
                     let pty = match self.ctx.defs.type_of(*pid) {
                         Some(t) => t,
                         None => continue,
                     };
-                    params.push((to_kebab_case(&pname), self.use_type_in(pty, interface_id)?));
+                    params.push(Param {
+                        name: to_kebab_case(&pname),
+                        ty: self.use_type_in(pty, interface_id)?,
+                        span: Default::default(),
+                    });
                 }
 
-                let results = if ret_ty == Ty::UNIT {
-                    Results::Named(vec![])
+                let result = if ret_ty == Ty::UNIT {
+                    None
                 } else {
-                    Results::Anon(self.use_type_in(ret_ty, interface_id)?)
+                    Some(self.use_type_in(ret_ty, interface_id)?)
                 };
 
                 let name = to_kebab_case(&cb_name);
@@ -1504,9 +1853,10 @@ impl<'a> WitAstBuilder<'a> {
                     name: name.clone(),
                     kind: FunctionKind::Freestanding,
                     params,
-                    results,
+                    result,
                     docs: Docs::default(),
                     stability: Stability::default(),
+                    span: Default::default(),
                 };
                 self.resolve.interfaces[interface_id]
                     .functions
@@ -1540,16 +1890,13 @@ impl<'a> WitAstBuilder<'a> {
     fn create_world(
         &mut self,
         world_name: &str,
-        dom_interface_id: Option<wit_parser::InterfaceId>,
-        dispatch_interface_id: Option<wit_parser::InterfaceId>,
-        per_component_callback_interface_ids: &[wit_parser::InterfaceId],
-        component_interfaces: &[(
-            wit_parser::InterfaceId,
-            Option<wit_parser::InterfaceId>,
-        )],
-        resource_interface_ids: &[wit_parser::InterfaceId],
-        global_interface_ids: &[wit_parser::InterfaceId],
-        import_component_interface_ids: &[wit_parser::InterfaceId],
+        dom_interface_id: Option<InterfaceId>,
+        dispatch_interface_id: Option<InterfaceId>,
+        per_component_callback_interface_ids: &[InterfaceId],
+        component_interfaces: &[(InterfaceId, Option<InterfaceId>)],
+        resource_interface_ids: &[InterfaceId],
+        global_interface_ids: &[InterfaceId],
+        import_component_interface_ids: &[InterfaceId],
     ) -> Result<WorldId, CodegenError> {
         let world_id = self.resolve.worlds.alloc(World {
             name: world_name.to_string(),
@@ -1557,9 +1904,9 @@ impl<'a> WitAstBuilder<'a> {
             imports: Default::default(),
             exports: Default::default(),
             includes: Default::default(),
-            include_names: Default::default(),
             package: Some(self.package_id),
             stability: Stability::default(),
+            span: Default::default(),
         });
 
         // Imports: shared types interface (if any ADTs were registered),
@@ -1570,6 +1917,7 @@ impl<'a> WitAstBuilder<'a> {
                 WorldItem::Interface {
                     id: types_id,
                     stability: Stability::default(),
+                    span: Default::default(),
                 },
             );
         }
@@ -1579,6 +1927,7 @@ impl<'a> WitAstBuilder<'a> {
                 WorldItem::Interface {
                     id: dom_id,
                     stability: Stability::default(),
+                    span: Default::default(),
                 },
             );
         }
@@ -1596,6 +1945,7 @@ impl<'a> WitAstBuilder<'a> {
                     WorldItem::Interface {
                         id: iface_id,
                         stability: Stability::default(),
+                        span: Default::default(),
                     },
                 );
             }
@@ -1611,6 +1961,7 @@ impl<'a> WitAstBuilder<'a> {
                 WorldItem::Interface {
                     id: cb_id,
                     stability: Stability::default(),
+                    span: Default::default(),
                 },
             );
         }
@@ -1621,6 +1972,7 @@ impl<'a> WitAstBuilder<'a> {
                     WorldItem::Interface {
                         id: cb_id,
                         stability: Stability::default(),
+                        span: Default::default(),
                     },
                 );
             }
@@ -1631,6 +1983,7 @@ impl<'a> WitAstBuilder<'a> {
                 WorldItem::Interface {
                     id: g_id,
                     stability: Stability::default(),
+                    span: Default::default(),
                 },
             );
         }
@@ -1643,6 +1996,7 @@ impl<'a> WitAstBuilder<'a> {
                 WorldItem::Interface {
                     id: ic_id,
                     stability: Stability::default(),
+                    span: Default::default(),
                 },
             );
         }
@@ -1655,6 +2009,7 @@ impl<'a> WitAstBuilder<'a> {
                 WorldItem::Interface {
                     id: r_id,
                     stability: Stability::default(),
+                    span: Default::default(),
                 },
             );
         }
@@ -1669,6 +2024,7 @@ impl<'a> WitAstBuilder<'a> {
                 WorldItem::Interface {
                     id: dispatch_id,
                     stability: Stability::default(),
+                    span: Default::default(),
                 },
             );
         }
@@ -1678,6 +2034,7 @@ impl<'a> WitAstBuilder<'a> {
                 WorldItem::Interface {
                     id: iface_id,
                     stability: Stability::default(),
+                    span: Default::default(),
                 },
             );
         }
@@ -1689,8 +2046,114 @@ impl<'a> WitAstBuilder<'a> {
 
         Ok(world_id)
     }
-    
+
     /// Get the resolve and world ID for embedding.
+    /// Build a world that exports a flat list of free functions —
+    /// the non-UI sibling of [`Self::build_wit_with_all`]. Each
+    /// `(name, params, result)` entry becomes a world-level `export
+    /// foo: func(...)`. Compound types route through `ty_to_wit_type`,
+    /// so records / variants / lists work the moment the matching
+    /// `WireTypeDecl`s are registered in `ctx.defs`.
+    ///
+    /// Used by the non-UI module-assembly path
+    /// (`wasm::functions::generate_component`) which produces a wasm
+    /// component out of a list of top-level functions.
+    pub fn build_function_world(
+        &mut self,
+        world_name: &str,
+        functions: &[FreeFunctionExport<'_>],
+    ) -> Result<WorldId, CodegenError> {
+        // Register every ADT referenced by the exports' param /
+        // return types up front so `ty_to_wit_type` produces canonical
+        // ids (and so the shared `types` interface is created on
+        // demand). The walk goes through `ty_to_wit_type` which
+        // memoises in `type_map`, so duplicates across functions are
+        // harmless.
+        for f in functions {
+            for &pty in f.param_tys {
+                self.ty_to_wit_type(pty)?;
+            }
+            if let Some(rty) = f.result_ty {
+                self.ty_to_wit_type(rty)?;
+            }
+        }
+
+        let world_id = self.resolve.worlds.alloc(World {
+            name: world_name.to_string(),
+            docs: Docs::default(),
+            imports: Default::default(),
+            exports: Default::default(),
+            includes: Default::default(),
+            package: Some(self.package_id),
+            stability: Stability::default(),
+            span: Default::default(),
+        });
+
+        // If any ADTs were registered, the world has to import the
+        // shared types interface — otherwise the use-aliases on the
+        // exports would reference an out-of-scope type.
+        if let Some(types_id) = self.types_interface_id {
+            self.resolve.worlds[world_id].imports.insert(
+                WorldKey::Interface(types_id),
+                WorldItem::Interface {
+                    id: types_id,
+                    stability: Stability::default(),
+                    span: Default::default(),
+                },
+            );
+        }
+
+        for f in functions {
+            // Param types: walk through `ty_to_wit_type` again so we
+            // hit the cached id and (for ADTs) materialise the world's
+            // own alias via `use shared-types.{name}` if needed. Free
+            // functions live directly on the world, no owning
+            // interface, so we use the canonical type id as-is.
+            let mut params: Vec<Param> = Vec::with_capacity(f.param_tys.len());
+            for (i, (name, ty)) in f.param_names.iter().zip(f.param_tys.iter()).enumerate() {
+                let wit_ty = self.ty_to_wit_type(*ty)?;
+                let param_name = if name.is_empty() {
+                    format!("arg{i}")
+                } else {
+                    to_kebab_case(name)
+                };
+                params.push(Param {
+                    name: param_name,
+                    ty: wit_ty,
+                    span: Default::default(),
+                });
+            }
+            let result = match f.result_ty {
+                Some(rty) => Some(self.ty_to_wit_type(rty)?),
+                None => None,
+            };
+
+            let func_name = to_kebab_case(f.name);
+            let func = Function {
+                name: func_name.clone(),
+                kind: FunctionKind::Freestanding,
+                params,
+                result,
+                docs: Docs::default(),
+                stability: Stability::default(),
+                span: Default::default(),
+            };
+            self.resolve.worlds[world_id]
+                .exports
+                .insert(WorldKey::Name(func_name.clone()), WorldItem::Function(func));
+        }
+
+        // Register the world in the package's worlds map. UI's
+        // `build_world_with_callbacks` does the same — it's how
+        // `into_resolve_and_world` finds the world, and how
+        // `wit_component` discovers it during component encoding.
+        self.resolve.packages[self.package_id]
+            .worlds
+            .insert(world_name.to_string(), world_id);
+
+        Ok(world_id)
+    }
+
     pub fn into_resolve_and_world(self) -> (Resolve, WorldId) {
         // Get the first world from the package
         let world_id = *self.resolve.packages[self.package_id]
@@ -1698,7 +2161,7 @@ impl<'a> WitAstBuilder<'a> {
             .values()
             .next()
             .expect("No world created");
-        
+
         (self.resolve, world_id)
     }
 }

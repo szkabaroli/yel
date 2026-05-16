@@ -25,7 +25,7 @@ pub enum ResolvedType {
     String,
     List(Box<ResolvedType>),
     Option(Box<ResolvedType>),
-    Named(std::string::String),
+    Named(String),
     Unknown,
     Length,
     PhysicalLength,
@@ -120,7 +120,6 @@ impl TypeNarrowings {
         TypeNarrowings
     }
 
-    #[allow(dead_code)]
     pub fn get(&self, _var: &str) -> Option<&ResolvedType> {
         None
     }

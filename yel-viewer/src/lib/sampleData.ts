@@ -374,7 +374,7 @@ export component Crud {
             clicked: {
                 // TODO [UNSUPPORTED]: list.append()
                 // people.append({ first: first, last: last });
-                // selected-index = people.len() - 1;
+                selected-index = people.len() - 1;
             }
         }
 

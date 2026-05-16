@@ -24,7 +24,7 @@ pub(super) mod block_fn;
 pub(super) mod build;
 pub(super) mod constants;
 pub(super) mod dispatch;
-pub(super) mod lifecycle;
+pub(super) mod function_type;
 pub(super) mod name_section;
 pub(super) mod op_emit;
 pub(super) mod record_list;
@@ -33,4 +33,4 @@ pub(super) mod signal_emit;
 
 // Re-export helpers used by sibling modules outside `codegen` (e.g.
 // `super::expr` references `mem_arg` and `slot_local`).
-pub(super) use scratch::{mem_arg, slot_local};
+pub(super) use scratch::{mem_arg, slot_local, slot_local_resource_only};

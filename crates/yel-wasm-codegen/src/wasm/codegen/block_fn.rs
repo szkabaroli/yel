@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use wasm_encoder::{Function, Instruction, ValType};
-use yel_core::lir::{LirComponent, LirSlotKind, LirSlotValType};
+use yel_core::lir::{LirResource, LirSlotKind};
 use yel_core::ids::BlockId;
 
 use super::super::CodegenError;
@@ -24,7 +24,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // matching reset in `generate_component_mount`.
         self.current_function_labels.clear();
         self.current_label_counter = 0;
-        let component: &'a LirComponent = &self.components[comp_idx];
+        let component: &'a LirResource = &self.components[comp_idx];
         let block = component.get_block(block_id);
 
         // Param count comes from `block.params` when set (for-item-mount,
@@ -41,39 +41,72 @@ impl<'a> WasmPackageBuilder<'a> {
         // signature with 1 implicit i32 param. With boundary_params
         // present, the function uses a dynamic type and the actual
         // LIR i32 param count is whatever `block.params.len()` is.
+        // Stage 5c: read length from `boundary_param_slots`. Each
+        // slot's val_ty carries the boundary id; the count matches
+        // `boundary_params` by Stage 4 invariant.
+        let boundary_param_count: u32 = block.boundary_param_slots.len() as u32;
+        // Phase 0.3o: wasm-sig shape is derived uniformly from
+        // `block.params`, `block.boundary_param_slots`, and
+        // `block.implicit_self`'s slot kind. Lifecycle blocks
+        // (ctor/mount/unmount) and user blocks share the same
+        // prologue paths — their differences (Temp self vs.
+        // WasmParam self, return slot type, legacy-i32 fallback)
+        // are all expressible through these fields.
+        //
+        //   * `self_ref_param_count` is 1 iff `implicit_self` is
+        //     `Some` and resolves to a `WasmParam`-backed slot. That
+        //     covers mount/unmount and every user block (which all
+        //     receive `(ref $Comp)` at wasm local 0). Ctor's
+        //     `implicit_self` is a `Temp` slot (allocated by the
+        //     body's `StructNewDefaultSym`), so it contributes 0.
+        //   * `lir_param_count` is exactly `block.params.len()`.
+        //     The legacy "1 implicit i32" fallback fires *only*
+        //     when neither user params nor boundary params nor a
+        //     lifecycle-shape sig apply — we identify the lifecycle
+        //     blocks via `LirResource`'s identity fields (ctor /
+        //     mount / unmount block ids), keeping the check
+        //     field-driven rather than flag-driven.
+        // Phase 0.3m: export-wrapper blocks (host-facing constructor /
+        // mount / unmount) join the lifecycle exemption: they have no
+        // implicit self ref (`implicit_self: None`) and use only their
+        // declared `params`. The legacy-i32 fallback below is a relic
+        // for update/handler blocks that pre-date `params`; the export
+        // wrappers must opt out so `lir_param_count` matches their
+        // declared signature.
+        let is_lifecycle = Some(block_id) == component.internal_constructor_block
+            || block_id == component.mount_block
+            || Some(block_id) == component.internal_unmount_block
+            || Some(block_id) == component.export_constructor_block
+            || Some(block_id) == component.export_mount_block
+            || Some(block_id) == component.export_unmount_block;
+        let self_ref_param_count: u32 = match block.implicit_self {
+            Some(slot) => match component.slots[slot.legacy_u32() as usize].kind {
+                LirSlotKind::WasmParam { .. } => 1,
+                _ => 0,
+            },
+            None => 0,
+        };
         let lir_param_count: u32 = if !block.params.is_empty() {
             block.params.len() as u32
-        } else if block.boundary_params.is_empty() {
+        } else if boundary_param_count == 0 && !is_lifecycle {
             1
         } else {
             0
         };
-        // Pre-step: blocks that opt into dynamic per-block function
-        // types declare boundary-ref params after the legacy i32 params.
-        // These count as additional WASM params (no slot copy — the
-        // ref lives directly in the WASM param local and is registered
-        // in `current_boundary_locals` for `BoundaryField` accesses).
-        let boundary_param_count: u32 = block.boundary_params.len() as u32;
-        let param_count: u32 = lir_param_count + boundary_param_count + 1;
+        let param_count: u32 = lir_param_count + boundary_param_count + self_ref_param_count;
 
-        // Gather Temp slots ordered by compacted `local_idx`. Memory slots
-        // never become WASM locals. One local is declared per Temp slot;
-        // Temp slots reserved as block params are covered here (they're
-        // allocated just like any other temp — codegen copies the WASM
-        // param into the matching slot-local below).
-        let mut temp_slots: Vec<(u32, &yel_core::lir::LirSlotInfo)> = component
+        // Count Temp slots up-front for later sizing computations
+        // (parent-retention region, mount-child scratch locals, etc.).
+        // The slot-locals themselves are declared via the shared
+        // L3-v2 Phase 2 helper — same helper the non-UI
+        // `wasm::functions::emit_function` calls, so both paths
+        // produce byte-identical slot orderings + GC val-type
+        // resolution.
+        let num_slots = component
             .slots
             .iter()
-            .filter_map(|s| {
-                if let LirSlotKind::Temp { local_idx } = s.kind {
-                    Some((local_idx, s))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        temp_slots.sort_by_key(|(idx, _)| *idx);
-        let num_slots = temp_slots.len() as u32;
+            .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
+            .count() as u32;
 
         // If this block contains InitSignal / SignalWriteExpr ops with
         // composite signal types (Option/Result/Variant-with-payload), the
@@ -82,77 +115,16 @@ impl<'a> WasmPackageBuilder<'a> {
         let (max_i32_scratch, max_i64_scratch, max_f32_scratch, max_f64_scratch) =
             block.max_flat_scratch_counts;
 
-        // Declare one local per Temp slot in compacted `local_idx` order.
-        let mut locals = Vec::new();
-        for (_, s) in &temp_slots {
-            let val_ty = match s.val_ty {
-                LirSlotValType::I32 => ValType::I32,
-                LirSlotValType::I64 => ValType::I64,
-                LirSlotValType::F32 => ValType::F32,
-                LirSlotValType::F64 => ValType::F64,
-                LirSlotValType::RefNull(ty_idx) => ValType::Ref(wasm_encoder::RefType {
-                    nullable: true,
-                    heap_type: wasm_encoder::HeapType::Concrete(ty_idx),
-                }),
-                LirSlotValType::RefNullForBoundary(boundary_id) => {
-                    let ty_idx = self.gc_layouts[comp_idx].tree_struct_type_idx[&boundary_id];
-                    ValType::Ref(wasm_encoder::RefType {
-                        nullable: true,
-                        heap_type: wasm_encoder::HeapType::Concrete(ty_idx),
-                    })
-                }
-                LirSlotValType::RefNullForChildrenArray(anchor_id) => {
-                    let ty_idx = self.gc_layouts[comp_idx].tree_for_arr_type_idx[&anchor_id];
-                    ValType::Ref(wasm_encoder::RefType {
-                        nullable: true,
-                        heap_type: wasm_encoder::HeapType::Concrete(ty_idx),
-                    })
-                }
-                LirSlotValType::RefNullForListGc(list_ty) => {
-                    let ty_idx = *self
-                        .record_gc_types
-                        .list_array_type_idx
-                        .get(&list_ty)
-                        .ok_or_else(|| {
-                            CodegenError::InternalError(format!(
-                                "block_fn local: missing list_array_type_idx for {:?}",
-                                list_ty
-                            ))
-                        })?;
-                    ValType::Ref(wasm_encoder::RefType {
-                        nullable: true,
-                        heap_type: wasm_encoder::HeapType::Concrete(ty_idx),
-                    })
-                }
-                LirSlotValType::RefNullForRecord(record_ty) => {
-                    use yel_core::types::InternedTyKind;
-                    let def_id = match self.ctx.ty_kind(record_ty) {
-                        InternedTyKind::Adt(d) => *d,
-                        _ => {
-                            return Err(CodegenError::InternalError(format!(
-                                "block_fn local: RefNullForRecord on non-Adt {:?}",
-                                record_ty
-                            )));
-                        }
-                    };
-                    let ty_idx = *self
-                        .record_gc_types
-                        .record_type_idx
-                        .get(&def_id)
-                        .ok_or_else(|| {
-                            CodegenError::InternalError(format!(
-                                "block_fn local: missing record_type_idx for {:?}",
-                                def_id
-                            ))
-                        })?;
-                    ValType::Ref(wasm_encoder::RefType {
-                        nullable: true,
-                        heap_type: wasm_encoder::HeapType::Concrete(ty_idx),
-                    })
-                }
-            };
-            locals.push((1, val_ty));
-        }
+        let comp_layout = self.gc_layouts[comp_idx].clone();
+        // `skip_params: 0` — UI's convention is that every Temp slot
+        // (including the ones that back wasm-level params) gets its
+        // own wasm local; the prologue copies wasm params into the
+        // matching slot-local. Flow uses `skip_params: param_count`
+        // because its convention is "Temp slot 0..N IS the wasm
+        // param at local 0..N".
+        let mut locals =
+            self.declare_function_locals(&component.slots, 0, &comp_layout)?;
+
         // Append per-valtype scratch locals for flat-slot signal stores.
         push_valtype_locals(
             &mut locals,
@@ -228,7 +200,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // ops that reference a param slot hit freshly-initialised
         // locals. Each param slot is allocated fresh by block_lower
         // (see `LirBlock.params`); here we copy WASM param local `i`
-        // into the slot-local at `local_offset + slot_local(component, *slot)`.
+        // into the slot-local at `slot_local(component, *slot, local_offset)`.
         // Param 0 is the implicit self ref — recorded as
         // `current_self_local` so signal struct.get/set ops inside
         // this block source `self` from it.
@@ -241,16 +213,58 @@ impl<'a> WasmPackageBuilder<'a> {
         // `AllocSubBoundary`, but those locals belong to *this*
         // function's frame, so we must not leak them across blocks.
         let prev_boundary_locals = std::mem::take(&mut self.current_boundary_locals);
-        self.current_self_local = Some(0);
-        self.current_self_comp_idx = Some(comp_idx);
-        if block.params.is_empty() {
-            if block.boundary_params.is_empty() {
+        // Phase 0.3o: `current_self_local` is `block.implicit_self`
+        // resolved through `slot_local`. `None` leaves the ambient
+        // self-local unset (host export wrappers, flow free funcs).
+        // No flag-based gating.
+        match block.implicit_self {
+            Some(slot) => {
+                self.current_self_local = Some(slot_local(component, block, slot, local_offset));
+                self.current_self_comp_idx = Some(comp_idx);
+            }
+            None => {
+                self.current_self_local = None;
+                self.current_self_comp_idx = None;
+            }
+        }
+        // Reset the parent-retention cursor for the lifecycle bodies
+        // (ctor + mount each consume retention slots from index 0).
+        // Field-driven via the component's identity fields.
+        if is_lifecycle {
+            self.parent_retention_cursor.insert(comp_idx, 0);
+        }
+        // Phase 0.3o: user params land at wasm index
+        // `self_ref_param_count + i`.
+        let user_param_base: u32 = self_ref_param_count;
+        if !is_lifecycle && block.params.is_empty() && block.implicit_self.is_some() {
+            if block.boundary_param_slots.is_empty() {
                 // Legacy default: 1 implicit i32 LIR param at WASM
                 // local 1 maps to slot 0. Preserves behaviour for
                 // update/handler/etc. blocks that use the fixed
                 // `block_1param_type_idx` signature.
-                func.instruction(&Instruction::LocalGet(1));
-                func.instruction(&Instruction::LocalSet(local_offset));
+                //
+                // F32/F64/I64 inline regression guard: this prologue
+                // assumes the slot at local_idx 0 is i32 (the legacy
+                // "parent" placeholder). The unified inline-signal
+                // helper can allocate scalar scratches at local_idx 0
+                // first; when that scratch is not i32, copying an i32
+                // wasm param into it fails wasm validation. Skip the
+                // copy in that case — the slot will be initialized by
+                // its own emit op before any read.
+                let first_temp_is_i32 = component
+                    .slots
+                    .iter()
+                    .filter_map(|s| match s.kind {
+                        LirSlotKind::Temp { local_idx } => Some((local_idx, s.val_ty)),
+                        _ => None,
+                    })
+                    .min_by_key(|(idx, _)| *idx)
+                    .map(|(_, vt)| matches!(vt, yel_core::lir::LirSlotValType::I32))
+                    .unwrap_or(true);
+                if first_temp_is_i32 {
+                    func.instruction(&Instruction::LocalGet(1));
+                    func.instruction(&Instruction::LocalSet(local_offset));
+                }
             }
             // Else: this block uses a dynamic type with no LIR i32
             // params and only boundary-ref params. WASM param 1 is
@@ -260,10 +274,10 @@ impl<'a> WasmPackageBuilder<'a> {
             // into a non-existent slot.
         } else {
             for (i, param_slot) in block.params.iter().enumerate() {
-                // WASM param i+1 (skipping self ref at 0) → slot.
-                func.instruction(&Instruction::LocalGet((i as u32) + 1));
+                // WASM param `user_param_base + i` → slot.
+                func.instruction(&Instruction::LocalGet(user_param_base + (i as u32)));
                 func.instruction(&Instruction::LocalSet(
-                    local_offset + slot_local(component, *param_slot),
+                    slot_local(component, block, *param_slot, local_offset),
                 ));
             }
         }
@@ -274,9 +288,30 @@ impl<'a> WasmPackageBuilder<'a> {
         // param. WASM params: [0]=self, [1..1+lir_param_count]=i32 args,
         // [1+lir_param_count..]=boundary refs (in `block.boundary_params`
         // order).
-        for (i, b_id) in block.boundary_params.iter().enumerate() {
-            let local = 1 + lir_param_count + (i as u32);
-            self.current_boundary_locals.insert(*b_id, local);
+        // Stage 5c: derive boundary-id list from `boundary_param_slots`
+        // (slot val_ty carries the id) instead of reading `boundary_params`.
+        let bp_ids: Vec<_> =
+            block.boundary_param_ids_from_slots(&component.slots).collect();
+        for (i, b_id) in bp_ids.iter().enumerate() {
+            // Phase 0.3n: base is `self_ref_param_count` (0 for
+            // no-self blocks, 1 for legacy self-bearing blocks).
+            let wasm_local = self_ref_param_count + lir_param_count + (i as u32);
+            self.current_boundary_locals.insert(*b_id, wasm_local);
+            // Stage 4 of lir-resource-flatten: copy each boundary
+            // param's WASM local into its parallel LIR slot
+            // (`block.boundary_param_slots[i]`). This is what makes
+            // BoundaryStructGet / Set ops emitted by the Stage 3
+            // rewriter resolve to the same boundary ref the legacy
+            // chain walk would have used. Costs one extra
+            // `local.get; local.set` per boundary param at function
+            // entry — wasm-opt's `--remove-unused-locals` /
+            // `--simplify-locals` collapses these in the
+            // `--release` pipeline.
+            if let Some(slot_id) = block.boundary_param_slots.get(i) {
+                let slot_wasm = slot_local(component, block, *slot_id, local_offset);
+                func.instruction(&Instruction::LocalGet(wasm_local));
+                func.instruction(&Instruction::LocalSet(slot_wasm));
+            }
         }
 
         // Set captured locals, local_to_slot, and local_offset for expression emission
@@ -289,7 +324,7 @@ impl<'a> WasmPackageBuilder<'a> {
             // directly instead of going through SlotId).
             let mut resolved = HashMap::with_capacity(block.captured_locals.len());
             for (local_id, slot) in &block.captured_locals {
-                resolved.insert(*local_id, slot_local(component, *slot) + local_offset);
+                resolved.insert(*local_id, slot_local(component, block, *slot, local_offset));
             }
             self.current_block_captured_locals = Some(resolved);
         }
@@ -336,7 +371,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Emit block operations
         for op in &block.ops {
-            self.emit_op(&mut func, op, comp_idx, local_offset)?;
+            self.emit_op(&mut func, op, comp_idx, block, local_offset)?;
         }
 
         // Clear captured locals, local_to_slot, and local_offset
@@ -359,7 +394,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // array for later diff / unmount.
         if let Some(slot) = block.return_slot {
             func.instruction(&Instruction::LocalGet(
-                slot_local(component, slot) + local_offset,
+                slot_local(component, block, slot, local_offset),
             ));
         }
 
@@ -367,7 +402,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // Stash collected structural-op label names under this block's
         // WASM function index for the name section to surface.
         if !self.current_function_labels.is_empty()
-            && let Some(&wasm_func_idx) = self.block_func_indices.get(&(comp_idx, block_id))
+            && let Some(&wasm_func_idx) = self.block_func_indices.get(&block_id)
         {
             let labels = std::mem::take(&mut self.current_function_labels);
             self.function_label_names.insert(wasm_func_idx, labels);

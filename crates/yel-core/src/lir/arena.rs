@@ -1,0 +1,200 @@
+//! Arena traits — abstract over *who owns* the interned LIR expression
+//! and string tables.
+//!
+//! Background. LIR was born inside the UI compiler, where every block
+//! lives inside a [`crate::lir::node::LirResource`] (one component) and
+//! every `ExprId` / `StringId` indexes into that component's tables.
+//! Code-gen reaches for `&LirResource` whenever it has to dereference an
+//! id — directly into `resource.exprs[id]` and `resource.strings[id]`.
+//!
+//! That coupling is fine for components but blocks new callers (notably
+//! the flow-graph frontend) from re-using the same body emitter when
+//! their interning lives elsewhere — e.g. per-function on a `FlowFunc`.
+//!
+//! This trait is the smallest abstraction that lets such a caller plug
+//! in: implement `expr` (and optionally `strings`) however you store
+//! them, and the same code-gen helpers can read through the trait.
+//!
+//! Two traits because not every arena owns strings — flow functions
+//! don't carry any, and forcing them to stub a panicking impl would be
+//! a silent fallback at runtime. Keeping them split makes the
+//! "this caller has no strings" case representable in the type system.
+
+use std::collections::HashMap;
+
+use crate::ids::{BlockId, DefId, LocalId};
+use crate::interner::Name;
+
+use super::block::{
+    ExprId, LirBindingMode, LirBlock, LirOp, LirSlotId, LirSlotInfo, StringId,
+};
+use super::expr::LirExpr;
+use super::function::{CallingConv, FunctionRole};
+use super::struct_types::{LirArrayTypeDecl, LirStructTypeDecl};
+
+/// Read-only access to a LIR expression table.
+///
+/// `id` is interpreted *with respect to the implementor* — two
+/// different arenas may both hand out the integer `5` and they refer
+/// to different expressions. The arena is the scope.
+pub trait LirExprArena {
+    fn expr(&self, id: ExprId) -> &LirExpr;
+}
+
+/// Read-only access to an interned-string table. Implementors are
+/// arenas that carry static-ish text (tag names, attribute keys, etc.);
+/// flow-style functions that don't need any text won't implement this.
+pub trait LirStringArena {
+    fn string(&self, id: StringId) -> &str;
+}
+
+/// Read-only access to a slot-info table. `LirSlotId`s are interpreted
+/// against the implementor — UI components own their slots on
+/// `LirResource`; flow functions own them per-`FlowFunc`. The
+/// previous code-gen path read `&LirResource` everywhere it needed
+/// a slot; routing through this trait lets non-component callers
+/// (flow) reuse the same helpers.
+pub trait LirSlotArena {
+    fn slots(&self) -> &[LirSlotInfo];
+
+    /// Convenience: look up one slot. Defaults to indexing `slots()`.
+    fn slot(&self, id: LirSlotId) -> &LirSlotInfo {
+        &self.slots()[id.legacy_u32() as usize]
+    }
+}
+
+/// Function-shaped object that the wasm body emitter can consume.
+///
+/// Two implementors today:
+/// * [`crate::lir::block::LirBlock`] — UI's "block" abstraction
+///   (carries the implicit `(ref $Comp)` self-ref by convention).
+/// * `yel_flow_core::flow_ir::FlowFunc` — a top-level flow function
+///   (no self-ref, arbitrary return type).
+///
+/// Most fields default to empty / `false` so flow's impl only has to
+/// fill in what it actually has.
+pub trait LirFunctionLike {
+    /// Slot ids holding the function's WASM-level value parameters,
+    /// in declared order. For UI blocks this excludes the implicit
+    /// self-ref param 0 (declared via `has_self_ref_param`).
+    fn params(&self) -> &[LirSlotId];
+
+    /// Slot whose value is the function's single-value return, if any.
+    fn return_slot(&self) -> Option<LirSlotId>;
+
+    /// Top-level op stream emitted into the function body.
+    fn ops(&self) -> &[LirOp];
+
+    /// Pre-validated per-valtype scratch local counts required by the
+    /// body's flat-slot signal stores. `(i32, i64, f32, f64)`. Zero
+    /// for flow functions (no signals).
+    fn max_flat_scratch_counts(&self) -> (u32, u32, u32, u32) {
+        (0, 0, 0, 0)
+    }
+
+    /// Captured-local bindings used by for-loop body blocks. Empty
+    /// outside that UI lowering.
+    fn captured_locals(&self) -> &HashMap<LocalId, LirSlotId>;
+
+    /// Locals loaded from memory at block entry. Empty outside UI.
+    fn local_to_slot(&self) -> &HashMap<LocalId, LirSlotId>;
+
+    /// Per-LocalId binding-mode override (Ptr vs Value). Empty
+    /// outside UI.
+    fn local_modes(&self) -> &HashMap<LocalId, LirBindingMode>;
+
+    /// Trailing typed boundary-ref params (UI only). Empty for flow.
+    fn boundary_param_slots(&self) -> &[LirSlotId];
+
+    /// Distinct child components reachable via `MountComponent`.
+    /// Empty for flow.
+    fn mount_component_children(&self) -> &[DefId];
+
+    /// Whether this function's calling convention prepends an
+    /// implicit `(ref null $Comp)` as wasm param 0. `true` for UI
+    /// blocks (their bodies need `local.get 0` to reach the
+    /// component instance); `false` for flow functions, which take
+    /// only their declared params.
+    ///
+    /// Kept on the trait as a fast-path so callers that *only* need
+    /// "does this prepend a self-ref?" don't have to materialise a
+    /// full `CallingConv`. Implementations should keep this
+    /// consistent with `calling_conv()`'s first implicit param.
+    fn has_self_ref_param(&self) -> bool {
+        true
+    }
+
+    /// The wasm-level invocation shape for this function. Drives
+    /// type-section emission + prologue param-copy. Defaults to a
+    /// UI-style legacy convention `(ref $Comp) -> ()` so the existing
+    /// `LirBlock` impl doesn't have to override unless it has typed
+    /// params, boundary refs, or a return.
+    ///
+    /// Concrete impls should construct this once and return a
+    /// reference; recomputing on every call is fine for now (the
+    /// struct is small) but the codegen pipeline will only call this
+    /// twice per function (type registration + prologue) so even
+    /// owned-return semantics would be acceptable.
+    fn calling_conv(&self) -> CallingConv {
+        CallingConv::default()
+    }
+
+    /// Who this function is — its identity space and contextual role.
+    /// Codegen uses this to drive index-map population (DefId-keyed
+    /// vs BlockId-keyed) and WIT export decisions. The default is
+    /// `None` so existing `LirBlock` callers (which don't yet supply
+    /// a role) keep compiling; codegen interprets `None` as "treat
+    /// like a legacy UI block, no WIT export."
+    fn role(&self) -> Option<FunctionRole> {
+        None
+    }
+}
+
+/// Module-level view of a LIR component — every neutral accessor the
+/// wasm code generator needs to consume something that *acts like* a
+/// component (multi-block, owns slots/exprs/strings/GC-type tables,
+/// has an identity + export flag).
+///
+/// `LirResource` implements this directly. The flow frontend's
+/// per-function adapter (one-block "component" packaging) also
+/// implements it. Codegen reads through the trait so the
+/// `Vec<LirResource>` shape isn't baked in.
+///
+/// UI-only metadata (signals / effects / mount block / DOM bookkeeping)
+/// is **not** part of this trait. Those fields are still read by UI
+/// codegen during the transitional phases; they disappear as
+/// THIR→LIR lowers them inline to plain LirOps. Once the UI fields
+/// are gone, this trait is the full read API and nothing reaches for
+/// concrete `LirResource` outside the lowering pass.
+pub trait LirComponentArena: LirExprArena + LirStringArena + LirSlotArena {
+    /// Stable identity of this component / function. Used by codegen
+    /// for export-name resolution and for `LirOp::CallFunction` target
+    /// lookups across the module.
+    fn def_id(&self) -> DefId;
+
+    /// Interned name (resolves to the user-facing identifier via the
+    /// compiler context's string table).
+    fn name(&self) -> Name;
+
+    /// Whether this component is part of the WIT export surface.
+    /// World-level free functions / exported UI components → `true`.
+    fn is_export(&self) -> bool;
+
+    /// Every basic block belonging to this component. `BlockId(n)`
+    /// indexes into the returned slice — codegen relies on this
+    /// ordering for `LirOp::CallBlock` resolution.
+    fn blocks(&self) -> &[LirBlock];
+
+    /// Convenience: fetch a block by id.
+    fn block(&self, id: BlockId) -> &LirBlock {
+        &self.blocks()[id.0 as usize]
+    }
+
+    /// GC struct types declared by this component (record / variant /
+    /// component-instance layouts that the wasm GC type section
+    /// emits up-front).
+    fn struct_types(&self) -> &[LirStructTypeDecl];
+
+    /// GC array types declared (typed lists, children arrays, etc.).
+    fn array_types(&self) -> &[LirArrayTypeDecl];
+}

@@ -202,7 +202,7 @@ pub enum TyKind {
     },
 
     // Custom/named types (resources, records, etc.)
-    Named(std::string::String),
+    Named(String),
 
     // Unknown type (for type inference)
     Unknown,
@@ -403,16 +403,16 @@ impl<'de> Deserialize<'de> for TyKind {
             where
                 M: MapAccess<'de>,
             {
-                let mut kind: Option<std::string::String> = None;
+                let mut kind: Option<String> = None;
                 let mut of: Option<Box<TyKind>> = None;
                 let mut ok: Option<Option<Box<TyKind>>> = None;
                 let mut err: Option<Option<Box<TyKind>>> = None;
                 let mut types: Option<Vec<TyKind>> = None;
-                let mut params: Option<Vec<(std::string::String, TyKind)>> = None;
+                let mut params: Option<Vec<(String, TyKind)>> = None;
                 let mut return_type: Option<Option<Box<TyKind>>> = None;
-                let mut name: Option<std::string::String> = None;
+                let mut name: Option<String> = None;
 
-                while let Some(key) = map.next_key::<std::string::String>()? {
+                while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "kind" => kind = Some(map.next_value()?),
                         "of" => of = Some(map.next_value()?),

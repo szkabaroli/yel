@@ -124,6 +124,12 @@ impl<'ctx> LirLayoutContext<'ctx> {
     /// per-instance byte allocation: every signal type whose internal
     /// repr is **not** a Pointer is GC-struct-resident and reserves
     /// zero bytes in linear memory.
+    /// Expose the underlying `CompilerContext` for callers that need to
+    /// inspect `InternedTyKind` alongside layout queries.
+    pub fn ctx(&self) -> &'ctx CompilerContext {
+        self.ctx
+    }
+
     pub fn is_pointer_repr(&self, ty: Ty) -> bool {
         use crate::definitions::DefKind;
         match self.ctx.ty_kind(ty) {

@@ -7,13 +7,15 @@
 //! the module-shared registry-handle types. All types live in rec
 //! groups so cyclic struct ↔ array references resolve.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use wasm_encoder::{
-    ArrayType, CompositeInnerType, CompositeType, FieldType, HeapType, RefType, StorageType,
-    StructType, SubType, TypeSection, ValType,
+    AbstractHeapType, ArrayType, CompositeInnerType, CompositeType, FieldType, HeapType, RefType,
+    StorageType, StructType, SubType, TypeSection, ValType,
 };
 use yel_core::ids::TreeBoundaryId;
-use yel_core::lir::block::{ComponentTreeShape, LirSlotValType, TreeBoundaryKind, TreeFieldDecl};
+use yel_core::lir::LirResource;
+use yel_core::lir::block::{LirSlotValType, TreeBoundaryKind, TreeFieldDecl};
+use yel_core::{CompilerContext, DefId, DefKind, InternedTyKind, Ty};
 
 /// Type-index assignments for one component's GC types.
 ///
@@ -24,7 +26,7 @@ pub struct GcTypeLayout {
     /// Type index of `$Comp_<Name>` — the struct holding this
     /// component's signals as fields. Set by `emit_component_struct_type`.
     pub component_struct_type_idx: Option<u32>,
-    /// For each signal (index matches `LirComponent.signals`), the list
+    /// For each signal (index matches `LirResource.signals`), the list
     /// of struct-field indices that hold its canonical-ABI slots.
     /// Single-slot signals get a one-element vec; multi-slot ones
     /// (string/list = (ptr, len), variant = (discr, payload…)) get one
@@ -81,8 +83,7 @@ pub struct GcTypeLayout {
 
     /// Per-tree-boundary struct type index — the GC struct emitted for
     /// each boundary in the component's `ComponentTreeShape`. Keyed by
-    /// `TreeBoundaryId`. Phase B.3: populated, not yet consumed by
-    /// emission paths.
+    /// `TreeBoundaryId`. Populated, not yet consumed by emission paths.
     pub tree_struct_type_idx: HashMap<TreeBoundaryId, u32>,
     /// Per-`ForAnchor`-boundary array type index — the GC array type
     /// `(array (mut (ref null <iter_body_struct>)))` used as the
@@ -130,6 +131,7 @@ pub fn emit_component_struct_type(
     types: &mut TypeSection,
     base_type_idx: u32,
     layout: &mut GcTypeLayout,
+    component: &LirResource,
 ) -> u32 {
     // Pre-allocate indices so the rec group's forward refs resolve.
     let comp_idx = base_type_idx;
@@ -221,9 +223,38 @@ pub fn emit_component_struct_type(
         composite_type: CompositeType {
             shared: false,
             inner: CompositeInnerType::Struct(comp_struct),
+            descriptor: None,
+            describes: None,
         },
     }];
     types.ty().rec(sub_types);
+
+    // The LIR-side `SignalLayout` must agree with the codegen-side
+    // field-paths exactly; divergence means `compute_signal_layout` and
+    // `signal_storage_valtypes` have drifted apart.
+    #[cfg(debug_assertions)]
+    for (sig_idx, path) in field_paths.iter().enumerate() {
+        let lir_path = component.signal_layout.signal_field_path(sig_idx);
+        debug_assert_eq!(
+            path, &lir_path,
+            "signal {} field-path mismatch: codegen={:?} lir={:?}",
+            sig_idx, path, lir_path
+        );
+    }
+    // LIR-side `comp_struct_layout` mirrors the field allocations
+    // above; LIR pass and codegen must agree slot-for-slot.
+    debug_assert_eq!(
+        parent_retention_field_base, component.comp_struct_layout.parent_retention_field_base,
+        "comp_struct_layout: parent_retention_field_base drift",
+    );
+    debug_assert_eq!(
+        self_handle_field_idx, component.comp_struct_layout.self_handle_field_idx,
+        "comp_struct_layout: self_handle_field_idx drift",
+    );
+    debug_assert_eq!(
+        tree_root_field_idx, component.comp_struct_layout.tree_root_field_idx,
+        "comp_struct_layout: tree_root_field_idx drift",
+    );
 
     layout.component_struct_type_idx = Some(comp_idx);
     layout.signal_field_paths = field_paths;
@@ -289,6 +320,8 @@ pub fn emit_shared_handle_types(types: &mut TypeSection, base_type_idx: u32) -> 
             composite_type: CompositeType {
                 shared: false,
                 inner: CompositeInnerType::Struct(handle_struct),
+                descriptor: None,
+                describes: None,
             },
         },
         SubType {
@@ -297,6 +330,8 @@ pub fn emit_shared_handle_types(types: &mut TypeSection, base_type_idx: u32) -> 
             composite_type: CompositeType {
                 shared: false,
                 inner: CompositeInnerType::Array(handle_array),
+                descriptor: None,
+                describes: None,
             },
         },
     ]);
@@ -331,84 +366,199 @@ pub const COMPONENT_TYPE_COUNT: u32 = 1;
 /// `tree_struct_type_idx`, `tree_for_arr_type_idx`, and
 /// `tree_root_type_idx`.
 ///
-/// **Phase B.3**: types are declared but no emission path consumes the
-/// indices yet. Mount/effect/fan-out emit migrate to typed walks in
-/// later sub-phases (B.6–B.8).
+/// Types are declared but no emission path consumes the indices yet.
 pub fn emit_component_tree_types(
-    shape: &ComponentTreeShape,
+    component: &yel_core::lir::node::LirResource,
     types: &mut TypeSection,
     base_type_idx: u32,
     layout: &mut GcTypeLayout,
     ctx: &yel_core::context::CompilerContext,
     record_gc_types: &RecordGcTypes,
 ) -> u32 {
-    if shape.boundaries.is_empty() {
+    // Stage 5d: walk the resource's struct_types / array_types
+    // registry instead of the parallel `tree_shape.boundaries`.
+    // Registry index `i` corresponds to TreeBoundaryId(i) by the
+    // synthesizer's projection invariant, so the per-boundary
+    // `tree_struct_type_idx` / `tree_for_arr_type_idx` maps still
+    // populate using TreeBoundaryId keys for compatibility with
+    // codegen sites that haven't migrated yet.
+    let struct_types = &component.struct_types;
+    let array_types = &component.array_types;
+    if struct_types.is_empty() {
         return 0;
     }
+    let n = struct_types.len() as u32;
+    let n_arrays = array_types.len() as u32;
 
-    let n = shape.boundaries.len() as u32;
-
-    // Pass 1: assign struct type indices for every boundary, and array
-    // type indices for every ForAnchor. Pre-assigning indices lets the
-    // body of pass 2 reference targets that appear later in the rec
-    // group without out-of-order resolution issues.
-    for (i, b) in shape.boundaries.iter().enumerate() {
+    // Pass 1: assign struct + array type indices.
+    for i in 0..n {
         layout
             .tree_struct_type_idx
-            .insert(b.id, base_type_idx + i as u32);
+            .insert(TreeBoundaryId(i), base_type_idx + i);
     }
-    let mut arr_count: u32 = 0;
-    for b in &shape.boundaries {
-        if matches!(b.kind, TreeBoundaryKind::ForAnchor { .. }) {
-            layout
-                .tree_for_arr_type_idx
-                .insert(b.id, base_type_idx + n + arr_count);
-            arr_count += 1;
+    // Map each ForAnchor's struct → its array's wasm type idx. The
+    // array's element points at the iter-body struct, and the
+    // ChildrenArray field on the ForAnchor carries the array index
+    // — but we walk struct_types looking for kind == ForAnchor and
+    // find the matching array by ChildrenArray field's ref_target.
+    let mut arr_assigned: u32 = 0;
+    for (i, struct_decl) in struct_types.iter().enumerate() {
+        if !matches!(struct_decl.kind, TreeBoundaryKind::ForAnchor { .. }) {
+            continue;
         }
+        // The for-anchor has a ChildrenArray field; its
+        // LirRefTarget::Array gives the registry array idx. Sanity
+        // check; otherwise fall back to sequential allocation.
+        let child_arr_field = struct_decl
+            .fields
+            .iter()
+            .find_map(|f| match f.ref_target {
+                Some(yel_core::lir::struct_types::LirRefTarget::Array(idx)) => Some(idx.0),
+                _ => None,
+            })
+            .unwrap_or(arr_assigned);
+        let _ = child_arr_field;
+        layout
+            .tree_for_arr_type_idx
+            .insert(TreeBoundaryId(i as u32), base_type_idx + n + arr_assigned);
+        arr_assigned += 1;
     }
-    layout.tree_root_type_idx = Some(base_type_idx + shape.root_idx);
+    debug_assert_eq!(
+        arr_assigned, n_arrays,
+        "registry array_types count must match ForAnchor count in struct_types"
+    );
+    // Root type idx: the unique struct with kind == Root.
+    layout.tree_root_type_idx = struct_types
+        .iter()
+        .position(|s| matches!(s.kind, TreeBoundaryKind::Root))
+        .map(|i| base_type_idx + i as u32);
 
-    // Pass 2: build the SubTypes in declaration order.
-    let mut sub_types: Vec<SubType> = Vec::with_capacity((n + arr_count) as usize);
-
-    // Boundary structs.
-    for b in &shape.boundaries {
-        let struct_ty = build_tree_boundary_struct(&b.fields, layout, ctx, record_gc_types);
+    // Pass 2: build SubTypes in declaration order from the registry.
+    let mut sub_types: Vec<SubType> = Vec::with_capacity((n + n_arrays) as usize);
+    for struct_decl in struct_types {
+        let struct_ty = build_struct_from_decls(&struct_decl.fields, layout, ctx, record_gc_types);
         sub_types.push(SubType {
             is_final: true,
             supertype_idx: None,
             composite_type: CompositeType {
                 shared: false,
                 inner: CompositeInnerType::Struct(struct_ty),
+                descriptor: None,
+                describes: None,
+            },
+        });
+    }
+    for array_decl in array_types {
+        let elem_struct_idx = match array_decl.element {
+            yel_core::lir::struct_types::LirArrayElement::StructRef(idx) => base_type_idx + idx.0,
+        };
+        let arr_ty = ArrayType(FieldType {
+            element_type: StorageType::Val(ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(elem_struct_idx),
+            })),
+            mutable: array_decl.mutable,
+        });
+        sub_types.push(SubType {
+            is_final: true,
+            supertype_idx: None,
+            composite_type: CompositeType {
+                shared: false,
+                inner: CompositeInnerType::Array(arr_ty),
+                descriptor: None,
+                describes: None,
             },
         });
     }
 
-    // Per-ForAnchor companion array types.
-    for b in &shape.boundaries {
-        if let TreeBoundaryKind::ForAnchor { iter_body_idx, .. } = b.kind {
-            let iter_body_id = TreeBoundaryId(iter_body_idx);
-            let elem_struct_idx = layout.tree_struct_type_idx[&iter_body_id];
-            let arr_ty = ArrayType(FieldType {
-                element_type: StorageType::Val(ValType::Ref(RefType {
-                    nullable: true,
-                    heap_type: HeapType::Concrete(elem_struct_idx),
-                })),
-                mutable: true,
-            });
-            sub_types.push(SubType {
-                is_final: true,
-                supertype_idx: None,
-                composite_type: CompositeType {
-                    shared: false,
-                    inner: CompositeInnerType::Array(arr_ty),
-                },
-            });
-        }
-    }
-
     types.ty().rec(sub_types);
-    n + arr_count
+    n + n_arrays
+}
+
+/// Stage 5d sibling to `build_tree_boundary_struct` — translates
+/// `LirStructFieldDecl`s from the resource registry to wasm
+/// `FieldType`s. The `ref_target` field carries cross-reference
+/// resolution info; layout's `tree_struct_type_idx` (populated in
+/// pass 1) maps `LirStructTypeIdx` → wasm struct type index.
+fn build_struct_from_decls(
+    fields: &[yel_core::lir::struct_types::LirStructFieldDecl],
+    layout: &GcTypeLayout,
+    ctx: &yel_core::context::CompilerContext,
+    record_gc_types: &RecordGcTypes,
+) -> StructType {
+    use yel_core::lir::struct_types::{LirFieldRole, LirRefTarget};
+    let wasm_fields: Vec<FieldType> = fields
+        .iter()
+        .map(|f| match (f.role, f.ref_target) {
+            (LirFieldRole::DomHandle | LirFieldRole::ActiveTag, _) => FieldType {
+                element_type: StorageType::Val(ValType::I32),
+                mutable: f.mutable,
+            },
+            (LirFieldRole::LoopVar, _) => FieldType {
+                element_type: StorageType::Val(slot_val_ty_to_val_ty(
+                    &f.val_ty,
+                    ctx,
+                    record_gc_types,
+                )),
+                mutable: f.mutable,
+            },
+            (LirFieldRole::SubBoundary, Some(LirRefTarget::Struct(target))) => {
+                let target_struct_idx = layout.tree_struct_type_idx[&TreeBoundaryId(target.0)];
+                FieldType {
+                    element_type: StorageType::Val(ValType::Ref(RefType {
+                        nullable: true,
+                        heap_type: HeapType::Concrete(target_struct_idx),
+                    })),
+                    mutable: f.mutable,
+                }
+            }
+            (LirFieldRole::ChildrenArray, Some(LirRefTarget::Array(_))) => {
+                // The ChildrenArray field points at the for-anchor's
+                // companion array. layout.tree_for_arr_type_idx is
+                // keyed by the OWNING for-anchor's TreeBoundaryId,
+                // not by array index — but the synthesizer's
+                // ordering invariant means the iter-body's struct
+                // comes right before the for-anchor, and we encoded
+                // that in the registry projection. Recover the
+                // anchor by walking layout.tree_for_arr_type_idx for
+                // the matching idx (same approach the legacy
+                // builder used).
+                //
+                // Cleaner long-term: the LirRefTarget::Array carries
+                // the idx directly; layout could store
+                // `array_ty_idx` keyed by `LirArrayTypeIdx` too.
+                // For Stage 5d we keep the existing layout shape
+                // and look up via the legacy helper.
+                let arr_idx = match f.ref_target {
+                    Some(LirRefTarget::Array(idx)) => {
+                        // The registry array idx is `idx.0`.
+                        // Compute its wasm-type-section idx as
+                        // `tree_root_or_first_struct + n + idx.0`.
+                        // We don't have base/n directly here, so
+                        // recover from the layout's first array
+                        // entry.
+                        let any_arr =
+                            *layout.tree_for_arr_type_idx.values().min().expect(
+                                "ChildrenArray field requires at least one ForAnchor array",
+                            );
+                        any_arr + idx.0
+                    }
+                    _ => unreachable!(),
+                };
+                FieldType {
+                    element_type: StorageType::Val(ValType::Ref(RefType {
+                        nullable: true,
+                        heap_type: HeapType::Concrete(arr_idx),
+                    })),
+                    mutable: f.mutable,
+                }
+            }
+            other => unreachable!("unexpected (role, ref_target) combination: {:?}", other),
+        })
+        .collect();
+    StructType {
+        fields: wasm_fields.into_boxed_slice(),
+    }
 }
 
 /// Build the struct type for one tree-boundary by translating each
@@ -521,6 +671,9 @@ fn slot_val_ty_to_val_ty(
         LirSlotValType::RefNullForBoundary(_) | LirSlotValType::RefNullForChildrenArray(_) => {
             unreachable!("tree-boundary loop-var field cannot use boundary ref types")
         }
+        LirSlotValType::RefNullForComponent(_) => {
+            unreachable!("tree-boundary loop-var field cannot hold a component instance ref")
+        }
         LirSlotValType::RefNullForListGc(_) => {
             unreachable!("GC list array ref not expected as a tree loop-var field type")
         }
@@ -538,6 +691,33 @@ fn slot_val_ty_to_val_ty(
                 nullable: true,
                 heap_type: HeapType::Concrete(type_idx),
             })
+        }
+        LirSlotValType::RefNullForTuple(_) => {
+            unreachable!("tuple ref not expected as a tree loop-var field type")
+        }
+        LirSlotValType::RefNullForFlatGc(ty) => {
+            // list<FlatGcStruct> iter-body LoopVar field stores the
+            // supertype ref directly.
+            let &super_idx = record_gc_types
+                .flat_gc_super_idx
+                .get(ty)
+                .expect("RefNullForFlatGc: missing flat_gc_super_idx");
+            ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(super_idx),
+            })
+        }
+        LirSlotValType::RefNullForSharedHandleArray => {
+            unreachable!("shared handle-array ref not expected as a tree loop-var field type")
+        }
+        LirSlotValType::RefNullForSharedHandle => {
+            unreachable!("shared handle ref not expected as a tree loop-var field type")
+        }
+        LirSlotValType::AnyRef => {
+            unreachable!("anyref not expected as a tree loop-var field type")
+        }
+        LirSlotValType::RefNullForGlobalBlock(_) => {
+            unreachable!("global-block instance ref not expected as a tree loop-var field type")
         }
     }
 }
@@ -558,15 +738,13 @@ fn slot_val_ty_to_val_ty(
 pub struct GlobalsBlockLayout {
     /// DefId of the owning `global Foo { ... }` block. Read by Step 2
     /// helpers that resolve blocks by their owning global property.
-    #[allow(dead_code)]
-    pub block_def_id: yel_core::DefId,
+    pub block_def_id: DefId,
     pub struct_type_idx: u32,
     pub self_global_idx: u32,
     /// Per-property field-index path inside the block's GC struct,
     /// indexed by property position in `GlobalDef.properties`. Empty
     /// vec marks pointer-typed properties that stay on the legacy
     /// memory path. Read by Step 2 read/write helpers.
-    #[allow(dead_code)]
     pub property_field_paths: Vec<Vec<u32>>,
 }
 
@@ -579,7 +757,7 @@ pub struct GlobalsBlockLayout {
 /// Reserves exactly **1** type index. The caller is responsible for
 /// bumping its cursor by 1 after the call.
 pub fn emit_globals_struct_type(
-    block_def_id: yel_core::DefId,
+    block_def_id: DefId,
     prop_slot_valtypes: &[Vec<ValType>],
     types: &mut TypeSection,
     base_type_idx: u32,
@@ -612,36 +790,31 @@ pub fn emit_globals_struct_type(
 }
 
 // ============================================================================
-// Phase 1 of records-to-GC migration: per-program record / tuple GC types.
+// Per-program record / tuple GC types.
 // ============================================================================
 
 /// Program-scope registry of GC struct types emitted for user-defined
-/// records and (Phase 1: simplified-naming) tuples.
-///
-/// Populated once during type-section emission by
-/// `emit_program_record_types`. Phase 1 only emits the types — no
-/// consumer reads from this map yet (signal storage, field access,
-/// constructors all stay on the legacy memory path). Phase 2+ migration
-/// reads `record_type_idx[def_id]` at every `struct.new` / `struct.get`
-/// / `struct.set` site.
+/// records and tuples. Populated once during type-section emission by
+/// `emit_program_record_types`; read at every `struct.new` /
+/// `struct.get` / `struct.set` site.
 #[derive(Debug, Default, Clone)]
 pub struct RecordGcTypes {
     /// Record `DefId` → emitted GC struct type index in the module's
     /// type section. One entry per `Definitions::records()`.
-    pub record_type_idx: std::collections::HashMap<yel_core::DefId, u32>,
+    pub record_type_idx: HashMap<DefId, u32>,
     /// Record `DefId` → list of GC struct field indices, parallel to
     /// the record's `field_offsets`. `field_gc_indices[i]` is the GC
     /// field index for the `i`-th declared field. Today field indices
     /// are simply `0..N`, but we still keep the indirection so future
     /// changes (multi-slot variant payloads, padding fields) can shift
     /// the GC index without bleeding into call sites.
-    pub field_gc_indices: std::collections::HashMap<yel_core::DefId, Vec<u32>>,
+    pub field_gc_indices: HashMap<DefId, Vec<u32>>,
     /// Debug names emitted into the WASM name section's type subsection
     /// for each record's GC struct. Populated alongside the type indices
     /// so the name-section pass can emit them without a second pass over
     /// `Definitions`.
     pub type_names: Vec<(u32, String)>,
-    /// Phase 3: shared `$fat_value` GC struct type
+    /// Shared `$fat_value` GC struct type
     /// `(struct (field $ptr (mut i32)) (field $len (mut i32)))`.
     /// Used to box string and `list<scalar>` values when they appear as
     /// fields of a single-level record (SLR) — a record whose every
@@ -651,22 +824,35 @@ pub struct RecordGcTypes {
     /// to recover the (ptr, len) fat-pointer pair on stack.
     /// `None` if no records were emitted (no rec group built).
     pub fat_value_type_idx: Option<u32>,
-    /// Phase 5a: per-list-element-type GC array type indices.
-    /// Keyed by the **list `Ty`** itself (i.e. the `Ty` whose
-    /// `InternedTyKind` is `List(elem)`), NOT by the element `Ty`.
-    /// Keying on the list `Ty` matches the call sites that have a
+    /// Per-list-element-type GC array type indices, keyed by the
+    /// **list `Ty`** (the `Ty` whose `InternedTyKind` is `List(elem)`),
+    /// NOT by the element `Ty` — matches call sites that have a
     /// `list<T>` value's `Ty` in hand at `Index` / `ListConstruct`.
-    /// Phase 5a: types are emitted but no consumer reads from this
-    /// map yet — `Index` / `ListConstruct` still go through the
-    /// inline-byte runtime helpers. Phase 5b+ flips consumers over.
     pub list_array_type_idx: std::collections::HashMap<yel_core::Ty, u32>,
-    /// Phase 5a: per-tuple-type GC struct type indices, keyed by the
-    /// tuple `Ty` (whose `InternedTyKind` is `Tuple(elements)`).
-    /// One emitted struct per **distinct** tuple type, sharing types
-    /// across components / records. Phase 5a only emits; Phase 5d
-    /// switches `TupleConstruct` / tuple-`Field` to `struct.new` /
-    /// `struct.get`.
+    /// Per-tuple-type GC struct type indices, keyed by the tuple `Ty`
+    /// (whose `InternedTyKind` is `Tuple(elements)`). One emitted
+    /// struct per **distinct** tuple type, shared across components.
     pub tuple_struct_type_idx: std::collections::HashMap<yel_core::Ty, u32>,
+    /// Per-`option<T>` / `result<T,E>` / user-`variant` parent `Ty` →
+    /// emitted **supertype** struct index (an empty `(sub (struct))`
+    /// non-final type). Storage of a migrated value is a single
+    /// `(ref null $supertype)` slot per the W3C component-model GC ABI
+    /// proposal (issue #525).
+    ///
+    /// Cycle / topo invariant: emitted in payload-dependency order —
+    /// if `option<variant<…>>` is a parent, the inner variant's
+    /// supertype must already be in this map when the outer rec group
+    /// is built. YEL has no recursive variants today; if it ever adds
+    /// them, fold the SCC into one rec group.
+    pub flat_gc_super_idx: std::collections::HashMap<yel_core::Ty, u32>,
+    /// Per-`(parent Ty, case_idx)` → emitted **case-subtype** struct
+    /// index (a `(sub final $supertype …)`).
+    /// Cases with payload have one struct field; cases without have
+    /// an empty struct.
+    pub flat_gc_case_idx: std::collections::HashMap<(yel_core::Ty, u32), u32>,
+    /// Per-parent `Ty` → number of cases. Lets consumers iterate cases
+    /// without re-querying defs / type kinds.
+    pub flat_gc_case_count: std::collections::HashMap<yel_core::Ty, u32>,
 }
 
 /// Emit, in a single program-scope rec group, one `(struct ...)` GC
@@ -675,25 +861,19 @@ pub struct RecordGcTypes {
 /// the inner record's type index via forward reference within the same
 /// rec group — wasm rec groups resolve recursive references.
 ///
-/// Phase 1 field-type rules (from the migration plan, §1):
+/// Field-type rules:
 /// - `bool` / `s8` / `s16` / `s32` / `u8` / `u16` / `u32` / `char` /
 ///   enum / `option<scalar>` / `result<scalar, scalar>` → single `i32`
-///   field (the `signal_storage_valtypes` rules collapse all of these
-///   to one i32 internally).
-/// - `s64` / `u64` → `i64`.
-/// - `f32` → `f32`, `f64` → `f64`.
-/// - `string` → `anyref` (cast to `(ref $fat_string)` at access time;
-///   open question 1 resolution).
-/// - `list<T>` → `anyref` (Phase 5 makes these concrete `(array ...)`).
+///   field.
+/// - `s64` / `u64` → `i64`. `f32` → `f32`, `f64` → `f64`.
+/// - `string` → `anyref` (cast to `(ref $fat_string)` at access time).
+/// - `list<T>` → typed `(array ...)` ref when registered, else `anyref`.
 /// - Record / tuple field → `(ref null $<inner>_record)` for nested
 ///   records (forward reference resolved by the rec group), or
-///   `anyref` for tuples (Phase 1 simplification: tuple GC types are
-///   not emitted yet — owner-context plumbing deferred to Phase 4 per
-///   the plan's allowance).
+///   `anyref` for tuples when not registered.
 /// - Variant / option-with-payload / result-with-payload of an
-///   aggregate → `anyref` (Phase 1 simplification — the canonical-ABI
-///   join shape is multi-slot which doesn't fit in one struct field;
-///   Phase 4 revisits per the plan's variant-payload open question).
+///   aggregate → `anyref` when the canonical-ABI join shape doesn't
+///   fit in one struct field.
 ///
 /// Reserves exactly `defs.records().count()` type indices when
 /// non-empty; advances the cursor by the same amount. Returns the
@@ -714,37 +894,104 @@ pub fn emit_program_record_types(
     use yel_core::definitions::DefKind;
     use yel_core::types::InternedTyKind;
 
-    let record_def_ids: Vec<yel_core::DefId> = ctx.defs.records().collect();
+    let record_def_ids: Vec<DefId> = ctx.defs.records().collect();
 
-    // Phase 5a: collect all list and tuple types referenced anywhere
-    // in the program (signal types, record-field types, transitively
-    // through nested compounds). The walk is conservative — it traverses
-    // every ADT field and every type subterm — and dedupes by `Ty` so
-    // each unique list element-type and tuple shape gets exactly one
-    // emitted GC type.
-    let (list_tys, tuple_tys) = collect_list_and_tuple_tys(ctx, extra_seed_tys);
+    // Collect all list and tuple types referenced anywhere in the
+    // program; dedupe by `Ty` so each unique element-type / tuple
+    // shape gets exactly one emitted GC type.
+    let (list_tys, tuple_tys, flat_gc_tys_unsorted) =
+        collect_list_and_tuple_tys(ctx, extra_seed_tys);
+    // Emit flat-gc parents in payload-dependency order so any nested
+    // option<variant<…>>'s inner supertype index is already registered
+    // when the outer rec group's payload-field storage is resolved.
+    let flat_gc_tys = topo_sort_flat_gc_tys(ctx, &flat_gc_tys_unsorted);
 
-    if record_def_ids.is_empty() && list_tys.is_empty() && tuple_tys.is_empty() {
+    if record_def_ids.is_empty()
+        && list_tys.is_empty()
+        && tuple_tys.is_empty()
+        && flat_gc_tys.is_empty()
+    {
         return (0, RecordGcTypes::default());
     }
 
     let mut registry = RecordGcTypes::default();
 
-    // Phase 3: emit a shared `$fat_value` struct as the FIRST type in
-    // the rec group. Records that contain string / `list<scalar>` fields
-    // store those fields as `(ref null $fat_value)`; the box carries the
-    // (ptr, len) fat-pointer pair as two i32 fields. Co-locating in the
-    // rec group lets record types forward-reference its index.
+    // Emission order — each block is its own rec group so cross-block
+    // references resolve via indices already declared:
+    //
+    //   [base+0]                           $fat_value (singleton rec group)
+    //   [base+1 .. base+1+Σ(1+cases)]      flat-gc rec groups, topo-sorted
+    //   [records_base .. tuple_end]        records / lists / tuples
+    //                                      (single rec group)
+    //
+    // Flat-gc rec groups need $fat_value's index for string / scalar-
+    // list payload fields, so $fat_value comes first. Records / lists /
+    // tuples need flat-gc supertype indices for nested option / variant
+    // fields, so they come last.
+
+    // Emit $fat_value first as its own singleton rec group.
     let fat_value_idx = base_type_idx;
     registry.fat_value_type_idx = Some(fat_value_idx);
+    {
+        // Stage 8: $fat_value's (ptr, len) are written exactly once at
+        // struct.new and never mutated — strings are immutable values.
+        // Marking the fields immutable lets the wasm-GC engine optimize
+        // loads (no aliasing concerns).
+        let fat_value_struct = StructType {
+            fields: Box::from([
+                FieldType {
+                    element_type: StorageType::Val(ValType::I32),
+                    mutable: false,
+                },
+                FieldType {
+                    element_type: StorageType::Val(ValType::I32),
+                    mutable: false,
+                },
+            ]),
+        };
+        types.ty().rec(vec![SubType {
+            is_final: true,
+            supertype_idx: None,
+            composite_type: CompositeType {
+                shared: false,
+                inner: CompositeInnerType::Struct(fat_value_struct),
+                descriptor: None,
+                describes: None,
+            },
+        }]);
+    }
+    registry
+        .type_names
+        .push((fat_value_idx, "fat_value".to_string()));
 
-    // Pre-assign type indices in a fixed order so every emission step
-    // can forward-reference any other type within the rec group:
-    //   [base+0]               fat_value
-    //   [records_base..]       record structs
-    //   [list_arrays_base..]   list element arrays
-    //   [tuple_structs_base..] tuple structs
-    let records_base = base_type_idx + 1;
+    // Merge flat-gc parents, records, list arrays, and tuple structs
+    // into ONE big rec group. Forward refs within a rec group
+    // resolve naturally — so `option<Person>`'s Some-case can reference
+    // `$person_record` as a typed `(ref null $person_record)` even
+    // though Person's struct body comes later in the rec group, and
+    // `record User { x: option<Address> }` can likewise reference its
+    // option supertype regardless of emission order. Earlier we tried
+    // separate rec groups + topo-sort; that breaks down for the
+    // bidirectional cycle (records → flat-gc → records) and forced an
+    // anyref fallback in `record_field_storage_type`. The merged group
+    // sidesteps the cycle entirely.
+    //
+    // Index layout within the merged rec group:
+    //   [cursor .. cursor + flat_gc_total)        flat-gc supertypes + cases
+    //   [records_base .. list_arrays_base)        records
+    //   [list_arrays_base .. tuple_structs_base)  list arrays
+    //   [tuple_structs_base .. tuple_end)         tuple structs
+    //
+    // ($fat_value stays as its own singleton rec group above — it's
+    //  referenced *from* the merged group but doesn't reference back,
+    //  so the boundary is acyclic.)
+    let mut cursor = fat_value_idx + 1;
+    for &parent_ty in &flat_gc_tys {
+        let consumed = assign_flat_gc_indices(ctx, parent_ty, cursor, &mut registry);
+        cursor += consumed;
+    }
+
+    let records_base = cursor;
     for (i, &def_id) in record_def_ids.iter().enumerate() {
         registry
             .record_type_idx
@@ -763,35 +1010,23 @@ pub fn emit_program_record_types(
             .insert(tuple_ty, tuple_structs_base + i as u32);
     }
 
-    // Build each record's struct type. Field types follow the rules
-    // documented above. We also accumulate `field_gc_indices` and the
-    // name-section debug entries.
-    let mut sub_types: Vec<SubType> = Vec::with_capacity(record_def_ids.len() + 1);
+    // Build the merged rec group's SubType vector. Order MUST match
+    // the index reservations above so each SubType lands at the
+    // index assigned in the registry.
+    let flat_gc_total: u32 = flat_gc_tys
+        .iter()
+        .map(|ty| 1 + flat_gc_case_count(ctx, *ty).unwrap_or(0))
+        .sum();
+    let total_subtypes = (flat_gc_total
+        + record_def_ids.len() as u32
+        + list_tys.len() as u32
+        + tuple_tys.len() as u32) as usize;
+    let mut sub_types: Vec<SubType> = Vec::with_capacity(total_subtypes);
 
-    // Phase 3: emit the shared `$fat_value` struct first.
-    let fat_value_struct = StructType {
-        fields: Box::from([
-            FieldType {
-                element_type: StorageType::Val(ValType::I32),
-                mutable: true,
-            },
-            FieldType {
-                element_type: StorageType::Val(ValType::I32),
-                mutable: true,
-            },
-        ]),
-    };
-    sub_types.push(SubType {
-        is_final: true,
-        supertype_idx: None,
-        composite_type: CompositeType {
-            shared: false,
-            inner: CompositeInnerType::Struct(fat_value_struct),
-        },
-    });
-    registry
-        .type_names
-        .push((fat_value_idx, "fat_value".to_string()));
+    for &parent_ty in &flat_gc_tys {
+        build_flat_gc_subtypes(ctx, parent_ty, &registry, &mut sub_types);
+    }
+
     for &def_id in &record_def_ids {
         let record_def = ctx
             .defs
@@ -807,9 +1042,13 @@ pub fn emit_program_record_types(
             };
             let field_idx = wasm_fields.len() as u32;
             let storage = record_field_storage_type(ctx, field_def.ty, &registry);
+            // Stage 8: record fields are immutable. YEL records are
+            // values — assigning a record-typed signal replaces the
+            // whole ref via struct.set on the *component* struct, not
+            // on the record's own fields.
             wasm_fields.push(FieldType {
                 element_type: StorageType::Val(storage),
-                mutable: true,
+                mutable: false,
             });
             gc_indices.push(field_idx);
         }
@@ -830,18 +1069,19 @@ pub fn emit_program_record_types(
                 inner: CompositeInnerType::Struct(StructType {
                     fields: wasm_fields.into_boxed_slice(),
                 }),
+                descriptor: None,
+                describes: None,
             },
         });
     }
 
-    // Phase 5a: emit one `(array (mut <elem>))` per unique list type.
-    // Element ValType chosen via `list_element_storage_type`:
+    // Emit one `(array (mut <elem>))` per unique list type. Element
+    // ValType chosen via `list_element_storage_type`:
     //   - scalars unboxed (i32 / i64 / f32 / f64)
-    //   - string / list<...> → `(ref null $fat_value)` for now (Phase
-    //     5e will switch list<list<T>> to a concrete inner array ref)
+    //   - string / list<...> → `(ref null $fat_value)`
     //   - records (DTR) → `(ref null $<record>_record)`
     //   - tuples → `(ref null $tuple_<n>)`
-    //   - option / result / variant → `anyref` (Phase 5e refines)
+    //   - option / result / variant → `anyref`
     for (idx, &list_ty) in list_tys.iter().enumerate() {
         let arr_idx = list_arrays_base + idx as u32;
         let elem_ty = match ctx.ty_kind(list_ty) {
@@ -859,6 +1099,8 @@ pub fn emit_program_record_types(
             composite_type: CompositeType {
                 shared: false,
                 inner: CompositeInnerType::Array(arr_ty),
+                descriptor: None,
+                describes: None,
             },
         });
         let elem_name = list_elem_short_name(ctx, elem_ty);
@@ -867,7 +1109,7 @@ pub fn emit_program_record_types(
             .push((arr_idx, format!("{}_list", elem_name)));
     }
 
-    // Phase 5a: emit one `(struct ...)` per unique tuple type.
+    // Emit one `(struct ...)` per unique tuple type.
     for (i, &tuple_ty) in tuple_tys.iter().enumerate() {
         let struct_idx = tuple_structs_base + i as u32;
         let elem_tys: Vec<yel_core::Ty> = match ctx.ty_kind(tuple_ty) {
@@ -882,9 +1124,13 @@ pub fn emit_program_record_types(
             // records → concrete ref, nested tuples → concrete ref via
             // `registry.tuple_struct_type_idx`.
             let storage = record_field_storage_type(ctx, *elem_ty, &registry);
+            // Stage 8: tuple fields are immutable. YEL tuples are values;
+            // rebinding a tuple-typed slot replaces the whole ref via
+            // struct.set on the *parent* struct, not on the tuple's
+            // own fields.
             wasm_fields.push(FieldType {
                 element_type: StorageType::Val(storage),
-                mutable: true,
+                mutable: false,
             });
         }
         sub_types.push(SubType {
@@ -895,6 +1141,8 @@ pub fn emit_program_record_types(
                 inner: CompositeInnerType::Struct(StructType {
                     fields: wasm_fields.into_boxed_slice(),
                 }),
+                descriptor: None,
+                describes: None,
             },
         });
         registry
@@ -903,11 +1151,21 @@ pub fn emit_program_record_types(
         let _ = DefKind::Record; // silence unused import lint
     }
 
-    types.ty().rec(sub_types);
-    let _ = HashMap::<yel_core::DefId, u32>::new(); // silence import lint when empty
-    // Total reserved indices: 1 (fat_value) + N records + L lists + T tuples.
-    let total = 1 + record_def_ids.len() + list_tys.len() + tuple_tys.len();
-    (total as u32, registry)
+    if !sub_types.is_empty() {
+        types.ty().rec(sub_types);
+    }
+    let _ = HashMap::<DefId, u32>::new(); // silence import lint when empty
+    // Total reserved indices:
+    //   1 ($fat_value)
+    //   + Σ (1 + case_count) over flat-gc parents
+    //   + N (records) + L (lists) + T (tuples).
+    // (`flat_gc_total` is computed above for the SubType capacity hint.)
+    let total = 1
+        + flat_gc_total
+        + record_def_ids.len() as u32
+        + list_tys.len() as u32
+        + tuple_tys.len() as u32;
+    (total, registry)
 }
 
 /// Walk every signal type and every record-field type, recursively
@@ -919,29 +1177,43 @@ pub fn emit_program_record_types(
 fn collect_list_and_tuple_tys(
     ctx: &yel_core::context::CompilerContext,
     extra_seed_tys: &[yel_core::Ty],
-) -> (Vec<yel_core::Ty>, Vec<yel_core::Ty>) {
+) -> (Vec<yel_core::Ty>, Vec<yel_core::Ty>, Vec<yel_core::Ty>) {
     use yel_core::definitions::DefKind;
     use yel_core::types::InternedTyKind;
 
     let mut list_seen: std::collections::HashSet<yel_core::Ty> = std::collections::HashSet::new();
     let mut tuple_seen: std::collections::HashSet<yel_core::Ty> = std::collections::HashSet::new();
+    let mut flat_gc_seen: std::collections::HashSet<yel_core::Ty> =
+        std::collections::HashSet::new();
     let mut list_order: Vec<yel_core::Ty> = Vec::new();
     let mut tuple_order: Vec<yel_core::Ty> = Vec::new();
+    let mut flat_gc_order: Vec<yel_core::Ty> = Vec::new();
 
     fn walk(
         ctx: &yel_core::context::CompilerContext,
         ty: yel_core::Ty,
         list_seen: &mut std::collections::HashSet<yel_core::Ty>,
         tuple_seen: &mut std::collections::HashSet<yel_core::Ty>,
+        flat_gc_seen: &mut std::collections::HashSet<yel_core::Ty>,
         list_order: &mut Vec<yel_core::Ty>,
         tuple_order: &mut Vec<yel_core::Ty>,
+        flat_gc_order: &mut Vec<yel_core::Ty>,
     ) {
         match ctx.ty_kind(ty) {
             InternedTyKind::List(inner) => {
                 if list_seen.insert(ty) {
                     list_order.push(ty);
                 }
-                walk(ctx, *inner, list_seen, tuple_seen, list_order, tuple_order);
+                walk(
+                    ctx,
+                    *inner,
+                    list_seen,
+                    tuple_seen,
+                    flat_gc_seen,
+                    list_order,
+                    tuple_order,
+                    flat_gc_order,
+                );
             }
             InternedTyKind::Tuple(els) => {
                 if tuple_seen.insert(ty) {
@@ -949,26 +1221,75 @@ fn collect_list_and_tuple_tys(
                 }
                 let els = els.clone();
                 for e in els {
-                    walk(ctx, e, list_seen, tuple_seen, list_order, tuple_order);
+                    walk(
+                        ctx,
+                        e,
+                        list_seen,
+                        tuple_seen,
+                        flat_gc_seen,
+                        list_order,
+                        tuple_order,
+                        flat_gc_order,
+                    );
                 }
             }
             InternedTyKind::Option(inner) => {
-                walk(ctx, *inner, list_seen, tuple_seen, list_order, tuple_order);
+                // Register the option Ty itself as a FlatGcStruct
+                // candidate, then recurse into its inner.
+                if flat_gc_seen.insert(ty) {
+                    flat_gc_order.push(ty);
+                }
+                walk(
+                    ctx,
+                    *inner,
+                    list_seen,
+                    tuple_seen,
+                    flat_gc_seen,
+                    list_order,
+                    tuple_order,
+                    flat_gc_order,
+                );
             }
             InternedTyKind::Result { ok, err } => {
+                if flat_gc_seen.insert(ty) {
+                    flat_gc_order.push(ty);
+                }
                 if let Some(t) = ok {
-                    walk(ctx, *t, list_seen, tuple_seen, list_order, tuple_order);
+                    walk(
+                        ctx,
+                        *t,
+                        list_seen,
+                        tuple_seen,
+                        flat_gc_seen,
+                        list_order,
+                        tuple_order,
+                        flat_gc_order,
+                    );
                 }
                 if let Some(t) = err {
-                    walk(ctx, *t, list_seen, tuple_seen, list_order, tuple_order);
+                    walk(
+                        ctx,
+                        *t,
+                        list_seen,
+                        tuple_seen,
+                        flat_gc_seen,
+                        list_order,
+                        tuple_order,
+                        flat_gc_order,
+                    );
                 }
             }
-            InternedTyKind::Adt(_) => {
-                // Records are walked separately below; don't recurse
-                // into their fields here to avoid revisiting the same
-                // record N times. Variants/enums carry no list/tuple
-                // payloads we need to discover (variant payloads are
-                // their own Tys handled when those Tys are referenced).
+            InternedTyKind::Adt(d) => {
+                // User variants register as FlatGcStruct parents.
+                // Records and enums do NOT — records have their own GC
+                // struct path; enums lower to plain i32.
+                if matches!(ctx.defs.kind(*d), DefKind::Variant(_)) && flat_gc_seen.insert(ty) {
+                    flat_gc_order.push(ty);
+                }
+                // Records' fields and variants' payloads are walked
+                // separately (over `defs.records()` / `defs.variants()`),
+                // so we don't recurse into them here — that would
+                // revisit each parent's inner Tys N times.
             }
             _ => {}
         }
@@ -982,8 +1303,10 @@ fn collect_list_and_tuple_tys(
                 s.ty,
                 &mut list_seen,
                 &mut tuple_seen,
+                &mut flat_gc_seen,
                 &mut list_order,
                 &mut tuple_order,
+                &mut flat_gc_order,
             );
         }
         let _ = def_id;
@@ -1002,8 +1325,10 @@ fn collect_list_and_tuple_tys(
                     f.ty,
                     &mut list_seen,
                     &mut tuple_seen,
+                    &mut flat_gc_seen,
                     &mut list_order,
                     &mut tuple_order,
+                    &mut flat_gc_order,
                 );
             }
         }
@@ -1021,8 +1346,10 @@ fn collect_list_and_tuple_tys(
                             payload_ty,
                             &mut list_seen,
                             &mut tuple_seen,
+                            &mut flat_gc_seen,
                             &mut list_order,
                             &mut tuple_order,
+                            &mut flat_gc_order,
                         );
                     }
                 }
@@ -1030,32 +1357,578 @@ fn collect_list_and_tuple_tys(
         }
     }
 
-    // Phase 5e.6: also walk caller-supplied extra seed types — used to
-    // catch list types that appear only in LIR expressions (list literals
-    // iterated by `for`, etc.) and have no Def-level reference.
+    // Also walk caller-supplied extra seed types — catches list types
+    // that appear only in LIR expressions (list literals iterated by
+    // `for`, etc.) and have no Def-level reference.
     for &ty in extra_seed_tys {
         walk(
             ctx,
             ty,
             &mut list_seen,
             &mut tuple_seen,
+            &mut flat_gc_seen,
             &mut list_order,
             &mut tuple_order,
+            &mut flat_gc_order,
         );
     }
 
-    (list_order, tuple_order)
+    (list_order, tuple_order, flat_gc_order)
+}
+
+/// Number of cases for an option/result/variant `Ty`.
+/// Returns `None` when `parent_ty` is not a flat-gc-eligible parent.
+pub(crate) fn flat_gc_case_count(
+    ctx: &yel_core::context::CompilerContext,
+    parent_ty: yel_core::Ty,
+) -> Option<u32> {
+    use yel_core::definitions::DefKind;
+    use yel_core::types::InternedTyKind;
+    match ctx.ty_kind(parent_ty) {
+        InternedTyKind::Option(_) => Some(2),
+        InternedTyKind::Result { .. } => Some(2),
+        InternedTyKind::Adt(d) => match ctx.defs.kind(*d) {
+            DefKind::Variant(v) => Some(v.cases.len() as u32),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Payload type for a given `(parent_ty, case_idx)`. Per the W3C
+/// component-model GC ABI proposal, each case becomes one
+/// final subtype struct with at most one payload field. Returns `None`
+/// when the case has no payload (e.g. `option`'s `none`, `variant`'s
+/// unit case, `result`'s unit ok/err arm).
+///
+/// **Case-index conventions** — these match YEL's THIR/LIR lowering
+/// (see `thir::typeck::build_option_*` / `build_result_*`):
+/// - `option<T>`: **0 = Some(T)**, 1 = None.
+/// - `result<T,E>`: **0 = Ok(T)**, 1 = Err(E).
+/// - User variant: matches `VariantDef::cases` declaration order.
+///
+/// Case 0 is the "default" (zero-inited) case for legacy memory
+/// init parity: `struct.new_default $<sup>_<case0>` fills payload
+/// fields with their type defaults (matching zero-byte memory).
+pub(crate) fn case_payload_ty(
+    ctx: &yel_core::context::CompilerContext,
+    parent_ty: yel_core::Ty,
+    case_idx: u32,
+) -> Option<yel_core::Ty> {
+    use yel_core::definitions::DefKind;
+    use yel_core::types::InternedTyKind;
+    match ctx.ty_kind(parent_ty) {
+        InternedTyKind::Option(inner) => {
+            if case_idx == 0 {
+                Some(*inner)
+            } else {
+                None
+            }
+        }
+        InternedTyKind::Result { ok, err } => match case_idx {
+            0 => *ok,
+            1 => *err,
+            _ => None,
+        },
+        InternedTyKind::Adt(d) => match ctx.defs.kind(*d) {
+            DefKind::Variant(v) => {
+                let case_def_id = *v.cases.get(case_idx as usize)?;
+                match ctx.defs.kind(case_def_id) {
+                    DefKind::VariantCase(c) => c.payload,
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Human-readable short name for a case, used in the name section.
+/// `option` cases are `none`/`some`; `result` cases are `ok`/`err`;
+/// user-variant cases come from `VariantCaseDef.name`.
+fn case_short_name(
+    ctx: &yel_core::context::CompilerContext,
+    parent_ty: yel_core::Ty,
+    case_idx: u32,
+) -> String {
+    use yel_core::definitions::DefKind;
+    use yel_core::types::InternedTyKind;
+    match ctx.ty_kind(parent_ty) {
+        InternedTyKind::Option(_) => {
+            if case_idx == 0 {
+                "some".to_string()
+            } else {
+                "none".to_string()
+            }
+        }
+        InternedTyKind::Result { .. } => {
+            if case_idx == 0 {
+                "ok".to_string()
+            } else {
+                "err".to_string()
+            }
+        }
+        InternedTyKind::Adt(d) => match ctx.defs.kind(*d) {
+            DefKind::Variant(v) => v
+                .cases
+                .get(case_idx as usize)
+                .and_then(|cid| match ctx.defs.kind(*cid) {
+                    DefKind::VariantCase(c) => Some(ctx.str(c.name).to_ascii_lowercase()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| format!("case_{}", case_idx)),
+            _ => format!("case_{}", case_idx),
+        },
+        _ => format!("case_{}", case_idx),
+    }
+}
+
+/// Short prefix for the parent (`opt`, `res`, or the variant name
+/// lower-cased).
+fn flat_gc_parent_short_name(
+    ctx: &yel_core::context::CompilerContext,
+    parent_ty: yel_core::Ty,
+) -> String {
+    use yel_core::definitions::DefKind;
+    use yel_core::types::InternedTyKind;
+    match ctx.ty_kind(parent_ty) {
+        InternedTyKind::Option(inner) => {
+            format!("opt_{}", list_elem_short_name(ctx, *inner))
+        }
+        InternedTyKind::Result { ok, err } => {
+            let ok_n = ok
+                .map(|t| list_elem_short_name(ctx, t))
+                .unwrap_or_else(|| "unit".to_string());
+            let err_n = err
+                .map(|t| list_elem_short_name(ctx, t))
+                .unwrap_or_else(|| "unit".to_string());
+            format!("res_{}_{}", ok_n, err_n)
+        }
+        InternedTyKind::Adt(d) => match ctx.defs.kind(*d) {
+            DefKind::Variant(v) => format!("var_{}", ctx.str(v.name).to_ascii_lowercase()),
+            _ => "flat_gc".to_string(),
+        },
+        _ => "flat_gc".to_string(),
+    }
+}
+
+/// Emit one rec group for an option/result/variant parent `Ty`:
+///   - empty supertype `(sub (struct))` (NOT final — has subtypes)
+///   - one case-subtype `(sub final $super (struct …))` per case,
+///     with at most one mutable field whose storage type is the
+///     case's payload (per W3C #525 packed-storage rules).
+///
+/// Pre-assigns indices: `super = base_idx; cases[i] = base_idx + 1 + i`.
+/// Records the per-case payload's heap-type indirection through the
+/// existing `record_field_storage_type` helper, which already routes
+/// record/list/tuple payloads to their concrete refs and falls back
+/// to `$fat_value` for strings / non-typed-array lists.
+///
+/// Side effects: pushes name-section entries for the supertype and
+/// every case subtype; populates `registry.flat_gc_super_idx`,
+/// `flat_gc_case_idx`, and `flat_gc_case_count`.
+///
+/// Returns the count of types reserved (`1 + case_count`).
+/// Reserve type-section indices for `parent_ty`'s flat-gc supertype and
+/// per-case subtypes, and emit name-section entries. Returns the number
+/// of indices consumed (1 + case_count). Does NOT build SubType bodies
+/// — that happens in `build_flat_gc_subtypes` after every record / list
+/// / tuple has its own index reserved, so case-payload field types can
+/// reference them as forward refs within the merged rec group.
+fn assign_flat_gc_indices(
+    ctx: &yel_core::context::CompilerContext,
+    parent_ty: yel_core::Ty,
+    base_idx: u32,
+    registry: &mut RecordGcTypes,
+) -> u32 {
+    let case_count = flat_gc_case_count(ctx, parent_ty)
+        .expect("assign_flat_gc_indices: parent_ty is not flat-gc-eligible");
+    let super_idx = base_idx;
+    registry.flat_gc_super_idx.insert(parent_ty, super_idx);
+    registry.flat_gc_case_count.insert(parent_ty, case_count);
+    for i in 0..case_count {
+        registry
+            .flat_gc_case_idx
+            .insert((parent_ty, i), super_idx + 1 + i);
+    }
+    let parent_short = flat_gc_parent_short_name(ctx, parent_ty);
+    registry.type_names.push((super_idx, parent_short.clone()));
+    for i in 0..case_count {
+        let case_name = case_short_name(ctx, parent_ty, i);
+        registry
+            .type_names
+            .push((super_idx + 1 + i, format!("{}_{}", parent_short, case_name)));
+    }
+    1 + case_count
+}
+
+/// Append the SubType bodies for `parent_ty`'s supertype and per-case
+/// subtypes to `out`. Indices must already be reserved via
+/// `assign_flat_gc_indices`.
+fn build_flat_gc_subtypes(
+    ctx: &yel_core::context::CompilerContext,
+    parent_ty: yel_core::Ty,
+    registry: &RecordGcTypes,
+    out: &mut Vec<SubType>,
+) {
+    let super_idx = registry.flat_gc_super_idx[&parent_ty];
+    let case_count = registry.flat_gc_case_count[&parent_ty];
+
+    // Supertype: `(sub (struct))` — non-final, no parent.
+    out.push(SubType {
+        is_final: false,
+        supertype_idx: None,
+        composite_type: CompositeType {
+            shared: false,
+            inner: CompositeInnerType::Struct(StructType {
+                fields: Box::from([]),
+            }),
+            descriptor: None,
+            describes: None,
+        },
+    });
+
+    for i in 0..case_count {
+        let payload_ty = case_payload_ty(ctx, parent_ty, i);
+        let fields: Box<[FieldType]> = match payload_ty {
+            Some(p_ty) => Box::from([field_storage_for_case_payload(ctx, p_ty, registry)]),
+            None => Box::from([]),
+        };
+        out.push(SubType {
+            is_final: true,
+            supertype_idx: Some(super_idx),
+            composite_type: CompositeType {
+                shared: false,
+                inner: CompositeInnerType::Struct(StructType { fields }),
+                descriptor: None,
+                describes: None,
+            },
+        });
+    }
+}
+
+/// Structural mirror of
+/// `WasmPackageBuilder::flat_gc_migrated` (in `wasm/repr.rs`) and
+/// `yel_core::lir::block_lower::is_flat_gc_migrated_ty`. ALL THREE
+/// must agree per `Ty` — they decide whether option/result/variant
+/// uses the W3C subtype-hierarchy GC repr (1 nullable supertype ref
+/// slot) or the canonical-flat repr (multi-slot).
+///
+/// The free function form lives here because `gc_types` is the type-
+/// emission module, called *before* `WasmPackageBuilder` exists. Both
+/// `record_field_storage_type` and `list_element_storage_type`
+/// consult this gate when deciding whether to emit a typed supertype
+/// ref or fall back to anyref / canonical-flat shape.
+pub(crate) fn is_flat_gc_migrated(
+    ctx: &yel_core::context::CompilerContext,
+    ty: yel_core::Ty,
+    registry: &RecordGcTypes,
+) -> bool {
+    let mut visiting = HashSet::new();
+    is_flat_gc_migrated_recursive(ctx, ty, registry, &mut visiting)
+}
+
+fn is_flat_gc_migrated_recursive(
+    ctx: &CompilerContext,
+    ty: Ty,
+    registry: &RecordGcTypes,
+    visiting: &mut HashSet<DefId>,
+) -> bool {
+    let admitted = match ctx.ty_kind(ty) {
+        InternedTyKind::Option(inner) => {
+            let inner = *inner;
+            if is_gc_eligible_list_ty(ctx, inner) {
+                return false;
+            }
+            if let InternedTyKind::Adt(d) = ctx.ty_kind(inner) {
+                if matches!(ctx.defs.kind(*d), DefKind::Record(_))
+                    && is_dtr_record_for_collapse(ctx, *d)
+                {
+                    return false;
+                }
+            }
+            is_flat_gc_payload_admissible(ctx, inner, registry, visiting)
+        }
+        InternedTyKind::Result { ok, err } => {
+            let ok_ok = match ok {
+                Some(t) => is_flat_gc_payload_admissible(ctx, *t, registry, visiting),
+                None => true,
+            };
+            let err_ok = match err {
+                Some(t) => is_flat_gc_payload_admissible(ctx, *t, registry, visiting),
+                None => true,
+            };
+            ok_ok && err_ok
+        }
+        InternedTyKind::Adt(def_id) => {
+            let def_id = *def_id;
+            let cases = match ctx.defs.as_variant(def_id) {
+                Some(v) => v.cases.clone(),
+                None => return false,
+            };
+            if !visiting.insert(def_id) {
+                return true;
+            }
+            let result = cases.iter().all(|&c| {
+                if let DefKind::VariantCase(case) = ctx.defs.kind(c) {
+                    match case.payload {
+                        None => true,
+                        Some(p) => is_flat_gc_payload_admissible(ctx, p, registry, visiting),
+                    }
+                } else {
+                    false
+                }
+            });
+            visiting.remove(&def_id);
+            result
+        }
+        _ => false,
+    };
+    admitted && registry.flat_gc_super_idx.contains_key(&ty)
+}
+
+fn is_flat_gc_payload_admissible(
+    ctx: &yel_core::context::CompilerContext,
+    ty: yel_core::Ty,
+    registry: &RecordGcTypes,
+    visiting: &mut std::collections::HashSet<DefId>,
+) -> bool {
+    use yel_core::definitions::DefKind;
+    use yel_core::types::InternedTyKind;
+    match ctx.ty_kind(ty) {
+        InternedTyKind::Bool
+        | InternedTyKind::S8
+        | InternedTyKind::S16
+        | InternedTyKind::S32
+        | InternedTyKind::S64
+        | InternedTyKind::U8
+        | InternedTyKind::U16
+        | InternedTyKind::U32
+        | InternedTyKind::U64
+        | InternedTyKind::F32
+        | InternedTyKind::F64
+        | InternedTyKind::Char
+        | InternedTyKind::String => true,
+        InternedTyKind::List(_) => is_gc_eligible_list_ty(ctx, ty),
+        InternedTyKind::Adt(d) => match ctx.defs.kind(*d) {
+            DefKind::Enum(_) => true,
+            DefKind::Record(_) => is_dtr_record_for_collapse(ctx, *d),
+            DefKind::Variant(_) => is_flat_gc_migrated_recursive(ctx, ty, registry, visiting),
+            _ => false,
+        },
+        InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
+            is_flat_gc_migrated_recursive(ctx, ty, registry, visiting)
+        }
+        _ => false,
+    }
+}
+
+/// Phase 5e.5: minimal DTR-record check — used by the free
+/// `is_flat_gc_migrated` to mirror the option-of-DTR-record collapse
+/// gate. Tracks visited def ids to handle recursive records (none
+/// today, but cheap defensiveness).
+fn is_dtr_record_for_collapse(ctx: &CompilerContext, def_id: DefId) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    is_dtr_record_for_collapse_inner(ctx, def_id, &mut seen)
+}
+
+fn is_dtr_record_for_collapse_inner(
+    ctx: &CompilerContext,
+    def_id: DefId,
+    seen: &mut std::collections::HashSet<DefId>,
+) -> bool {
+    let record = match ctx.defs.kind(def_id) {
+        DefKind::Record(r) => r.clone(),
+        _ => return false,
+    };
+    if !seen.insert(def_id) {
+        return true;
+    }
+    let result = (|| {
+        for &field_def_id in &record.fields {
+            let field_ty = match ctx.defs.kind(field_def_id) {
+                DefKind::Field(f) => f.ty,
+                _ => return false,
+            };
+            // Allowed field shapes for DTR (mirrors yel-core's
+            // `is_dtr_field_ty`): primitives, string, scalar-list,
+            // nested DTR record. Conservative on edge cases.
+            let ok = matches!(
+                ctx.ty_kind(field_ty),
+                InternedTyKind::Bool
+                    | InternedTyKind::S8
+                    | InternedTyKind::S16
+                    | InternedTyKind::S32
+                    | InternedTyKind::S64
+                    | InternedTyKind::U8
+                    | InternedTyKind::U16
+                    | InternedTyKind::U32
+                    | InternedTyKind::U64
+                    | InternedTyKind::F32
+                    | InternedTyKind::F64
+                    | InternedTyKind::Char
+                    | InternedTyKind::String
+            ) || matches!(
+                ctx.ty_kind(field_ty),
+                InternedTyKind::Adt(d) if matches!(ctx.defs.kind(*d), DefKind::Enum(_))
+            ) || is_gc_eligible_list_ty(ctx, field_ty)
+                || (matches!(ctx.ty_kind(field_ty), InternedTyKind::Adt(_))
+                    && match ctx.ty_kind(field_ty) {
+                        InternedTyKind::Adt(d) => {
+                            matches!(ctx.defs.kind(*d), DefKind::Record(_))
+                                && is_dtr_record_for_collapse_inner(ctx, *d, seen)
+                        }
+                        _ => false,
+                    });
+            if !ok {
+                return false;
+            }
+        }
+        true
+    })();
+    seen.remove(&def_id);
+    result
+}
+
+/// Phase 5e.5 (Stage 2): per-W3C component-model GC ABI proposal,
+/// `bool` / `{s,u}8` / `{s,u}16` payload fields use the packed
+/// storage types `i8` / `i16`. Other payload types use the same
+/// rules as record fields (`record_field_storage_type` — primitive
+/// scalars unboxed, strings/non-typed-array lists boxed in
+/// `$fat_value`, records/tuples/typed lists as concrete refs,
+/// nested option/result/variant as `(ref null $<sup>)`).
+///
+/// Readers must use `StructGetS` for signed packed types and
+/// `StructGetU` for unsigned/bool/char to recover the full-width
+/// value (cf. `struct_get_op_for_payload`).
+fn field_storage_for_case_payload(
+    ctx: &CompilerContext,
+    payload_ty: Ty,
+    registry: &RecordGcTypes,
+) -> FieldType {
+    let storage = match ctx.ty_kind(payload_ty) {
+        InternedTyKind::Bool | InternedTyKind::S8 | InternedTyKind::U8 => StorageType::I8,
+        InternedTyKind::S16 | InternedTyKind::U16 => StorageType::I16,
+        _ => StorageType::Val(record_field_storage_type(ctx, payload_ty, registry)),
+    };
+    // Stage 8: variant case payloads are immutable. Variants are sum-
+    // type values; the payload is set once at struct.new and never
+    // mutated.
+    FieldType {
+        element_type: storage,
+        mutable: false,
+    }
+}
+
+/// Phase 5e.5 (Stage 2): how a reader must dispatch when reading a
+/// case payload field — sign-extending, zero-extending, or plain.
+/// Centralised here so codegen sites that emit `struct.get` /
+/// `StructGetS` / `StructGetU` make consistent choices for the same
+/// payload type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StructGetVariant {
+    /// `struct.get` — non-packed fields.
+    Plain,
+    /// `struct.get_s` — signed packed (`s8`, `s16`).
+    Signed,
+    /// `struct.get_u` — unsigned/bool/char packed (`bool`, `u8`,
+    /// `u16` — `char` is value-type i32 so still Plain).
+    Unsigned,
+}
+
+pub(crate) fn struct_get_op_for_payload(ctx: &CompilerContext, payload_ty: Ty) -> StructGetVariant {
+    match ctx.ty_kind(payload_ty) {
+        InternedTyKind::Bool | InternedTyKind::U8 | InternedTyKind::U16 => {
+            StructGetVariant::Unsigned
+        }
+        InternedTyKind::S8 | InternedTyKind::S16 => StructGetVariant::Signed,
+        _ => StructGetVariant::Plain,
+    }
+}
+
+/// Phase 5e.5: topologically sort flat-gc parent Tys so that every
+/// parent is emitted *after* every flat-gc parent it transitively
+/// references through case payloads. Records/tuples/lists referenced
+/// by payloads do NOT introduce edges here — they emit later in their
+/// own rec group (which can forward-reference any flat-gc supertype
+/// already emitted).
+///
+/// Algorithm: Kahn's. YEL has no recursive variants today, so the
+/// graph is a DAG. If a cycle is ever introduced, we panic with a
+/// descriptive message — supporting recursive variants requires
+/// folding the SCC into one rec group (future work).
+fn topo_sort_flat_gc_tys(ctx: &CompilerContext, tys: &[Ty]) -> Vec<Ty> {
+    let ty_set: HashSet<Ty> = tys.iter().copied().collect();
+    // Edges: `parent → payload_parent` when payload_parent is also a
+    // flat-gc Ty. We emit `payload_parent` first, so it's a "deps"
+    // edge; in-degree of a node = # of flat-gc parents whose payload
+    // references it.
+    let mut deps: HashMap<Ty, Vec<Ty>> = HashMap::new();
+    let mut in_degree: HashMap<Ty, usize> = tys.iter().map(|&t| (t, 0)).collect();
+    for &parent in tys {
+        let case_count = match flat_gc_case_count(ctx, parent) {
+            Some(n) => n,
+            None => continue,
+        };
+        for i in 0..case_count {
+            if let Some(p_ty) = case_payload_ty(ctx, parent, i) {
+                if ty_set.contains(&p_ty) && p_ty != parent {
+                    deps.entry(p_ty).or_default().push(parent);
+                    *in_degree.entry(parent).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    // Start with all zero-in-degree nodes, in original insertion order.
+    let mut queue: VecDeque<Ty> = tys
+        .iter()
+        .copied()
+        .filter(|t| in_degree.get(t).copied() == Some(0))
+        .collect();
+    let mut out: Vec<Ty> = Vec::with_capacity(tys.len());
+    while let Some(n) = queue.pop_front() {
+        out.push(n);
+        if let Some(succs) = deps.get(&n) {
+            for &m in succs {
+                let entry = in_degree.get_mut(&m).expect("topo: missing in-degree");
+                *entry -= 1;
+                if *entry == 0 {
+                    queue.push_back(m);
+                }
+            }
+        }
+    }
+    if out.len() != tys.len() {
+        panic!(
+            "topo_sort_flat_gc_tys: cycle detected in flat-gc Ty graph \
+             (recursive variants are not yet supported — sorted {} of {} tys)",
+            out.len(),
+            tys.len()
+        );
+    }
+    out
+}
+
+/// Stage 6 typed-GC migration re-export — the typed filter helper
+/// declares its `item` local with the same shape the array stores per
+/// element. Public surface for `record_list.rs::generate_filter_function`.
+pub(crate) fn list_element_storage_type_pub(
+    ctx: &CompilerContext,
+    elem_ty: Ty,
+    registry: &RecordGcTypes,
+) -> ValType {
+    list_element_storage_type(ctx, elem_ty, registry)
 }
 
 /// Map a list element type to its Phase 5a GC array element ValType.
 /// Mirrors `record_field_storage_type` but for the *element* slot of
 /// `(array (mut <elem>))`.
 fn list_element_storage_type(
-    ctx: &yel_core::context::CompilerContext,
-    elem_ty: yel_core::Ty,
+    ctx: &CompilerContext,
+    elem_ty: Ty,
     registry: &RecordGcTypes,
 ) -> ValType {
-    use yel_core::types::InternedTyKind;
     // Phase 5e.2: nested lists — when the element is itself a typed
     // GC array (list<scalar>, list<DTR-record>, list<list<...>>),
     // store a concrete `(ref null $<inner_arr>)` so callers can
@@ -1079,33 +1952,15 @@ fn list_element_storage_type(
             });
         }
     }
-    // Phase 5e.5: option<scalar-i32-fits> — reuse $fat_value as the
-    // 2-i32 box (disc + payload). Only applies when the option's
-    // canonical-ABI is exactly 2 i32 slots.
-    if let InternedTyKind::Option(inner) = ctx.ty_kind(elem_ty) {
-        let inner_fits = matches!(
-            ctx.ty_kind(*inner),
-            InternedTyKind::Bool
-                | InternedTyKind::S8
-                | InternedTyKind::S16
-                | InternedTyKind::S32
-                | InternedTyKind::U8
-                | InternedTyKind::U16
-                | InternedTyKind::U32
-                | InternedTyKind::F32
-                | InternedTyKind::Char
-        ) || matches!(
-            ctx.ty_kind(*inner),
-            InternedTyKind::Adt(d) if matches!(ctx.defs.kind(*d), yel_core::definitions::DefKind::Enum(_))
-        );
-        if inner_fits {
-            if let Some(fv) = registry.fat_value_type_idx {
-                return ValType::Ref(RefType {
-                    nullable: true,
-                    heap_type: HeapType::Concrete(fv),
-                });
-            }
-        }
+    // Phase 5e.5 Stage 8a: FlatGcStruct elements (option/result/user
+    // variant) — store the concrete supertype ref so consumers can
+    // `array.get` directly to a typed ref and ref.test / ref.cast
+    // without going through $fat_value.
+    if let Some(&super_idx) = registry.flat_gc_super_idx.get(&elem_ty) {
+        return ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(super_idx),
+        });
     }
     // Otherwise reuse record-field rules: scalars unboxed, strings as
     // $fat_value, records as concrete refs, tuples as concrete refs,
@@ -1115,9 +1970,7 @@ fn list_element_storage_type(
 
 /// Short, lowercased name fragment used in the emitted `<elem>_list`
 /// debug name for a list array type.
-fn list_elem_short_name(ctx: &yel_core::context::CompilerContext, elem_ty: yel_core::Ty) -> String {
-    use yel_core::definitions::DefKind;
-    use yel_core::types::InternedTyKind;
+fn list_elem_short_name(ctx: &CompilerContext, elem_ty: Ty) -> String {
     match ctx.ty_kind(elem_ty) {
         InternedTyKind::S8 => "s8".into(),
         InternedTyKind::S16 => "s16".into(),
@@ -1157,12 +2010,7 @@ fn list_elem_short_name(ctx: &yel_core::context::CompilerContext, elem_ty: yel_c
 /// `(ref null $<elem>_list)` GC array on a record/tuple field. Mirrors
 /// `repr.rs::is_scalar_list_ty` — kept here to avoid the cyclic
 /// dependency between `gc_types` and `WasmPackageBuilder` methods.
-fn is_gc_eligible_list_ty(
-    ctx: &yel_core::context::CompilerContext,
-    ty: yel_core::Ty,
-) -> bool {
-    use yel_core::definitions::DefKind;
-    use yel_core::types::InternedTyKind;
+fn is_gc_eligible_list_ty(ctx: &CompilerContext, ty: Ty) -> bool {
     let elem = match ctx.ty_kind(ty) {
         InternedTyKind::List(e) => *e,
         _ => return false,
@@ -1187,9 +2035,7 @@ fn is_gc_eligible_list_ty(
     ) {
         return true;
     }
-    if matches!(ctx.ty_kind(elem), InternedTyKind::List(_))
-        && is_gc_eligible_list_ty(ctx, elem)
-    {
+    if matches!(ctx.ty_kind(elem), InternedTyKind::List(_)) && is_gc_eligible_list_ty(ctx, elem) {
         return true;
     }
     if matches!(ctx.ty_kind(elem), InternedTyKind::String) {
@@ -1228,13 +2074,7 @@ fn is_gc_eligible_list_ty(
     false
 }
 
-fn record_field_storage_type(
-    ctx: &yel_core::context::CompilerContext,
-    ty: yel_core::Ty,
-    registry: &RecordGcTypes,
-) -> ValType {
-    use yel_core::definitions::DefKind;
-    use yel_core::types::InternedTyKind;
+fn record_field_storage_type(ctx: &CompilerContext, ty: Ty, registry: &RecordGcTypes) -> ValType {
     match ctx.ty_kind(ty) {
         InternedTyKind::S64 | InternedTyKind::U64 => ValType::I64,
         InternedTyKind::F32 => ValType::F32,
@@ -1296,23 +2136,61 @@ fn record_field_storage_type(
                 heap_type: HeapType::Concrete(fat_value_idx),
             })
         }
-        // Options/results, variants, tuples → anyref.
-        // Phase 4+ revisits these (variant payloads and nested tuples).
-        InternedTyKind::Option(_)
-        | InternedTyKind::Result { .. }
-        | InternedTyKind::Tuple(_) => ValType::Ref(RefType {
-            nullable: true,
-            heap_type: HeapType::Abstract {
-                shared: false,
-                ty: wasm_encoder::AbstractHeapType::Any,
-            },
-        }),
+        // Phase 5e.5 (Stage 6+): option / result that are migrated
+        // to the W3C subtype-hierarchy GC repr store as a concrete
+        // `(ref null $<parent>_super)` instead of anyref. Both gates
+        // (`is_flat_gc_migrated` here AND `internal_repr ==
+        // FlatGcStruct`) MUST agree, otherwise a record's field type
+        // is a typed ref but `RecordConstruct` pushes flat-canonical
+        // slots (or vice versa).
+        InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
+            if is_flat_gc_migrated(ctx, ty, registry) {
+                if let Some(&super_idx) = registry.flat_gc_super_idx.get(&ty) {
+                    return ValType::Ref(RefType {
+                        nullable: true,
+                        heap_type: HeapType::Concrete(super_idx),
+                    });
+                }
+            }
+            ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Abstract {
+                    shared: false,
+                    ty: AbstractHeapType::Any,
+                },
+            })
+        }
+        InternedTyKind::Tuple(_) => {
+            if let Some(&tup_idx) = registry.tuple_struct_type_idx.get(&ty) {
+                ValType::Ref(RefType {
+                    nullable: true,
+                    heap_type: HeapType::Concrete(tup_idx),
+                })
+            } else {
+                ValType::Ref(RefType {
+                    nullable: true,
+                    heap_type: HeapType::Abstract {
+                        shared: false,
+                        ty: AbstractHeapType::Any,
+                    },
+                })
+            }
+        }
         InternedTyKind::Adt(def_id) => match ctx.defs.kind(*def_id) {
             DefKind::Record(_) => {
                 // Nested record: reference the sibling record's type
-                // via the registry's pre-assigned index (forward refs
-                // within a rec group resolve naturally).
-                let inner_idx = registry.record_type_idx[def_id];
+                // via the registry's pre-assigned index. Phase 7
+                // merged flat-gc and records into one rec group so
+                // forward refs resolve naturally; the index must be
+                // present.
+                let inner_idx = *registry.record_type_idx.get(def_id).unwrap_or_else(|| {
+                    panic!(
+                        "record_field_storage_type: record def_id={:?} missing from registry — \
+                         the merged flat-gc/records rec group should have pre-assigned every \
+                         record_type_idx before this lookup",
+                        def_id
+                    )
+                });
                 ValType::Ref(RefType {
                     nullable: true,
                     heap_type: HeapType::Concrete(inner_idx),
@@ -1321,14 +2199,29 @@ fn record_field_storage_type(
             // Enums collapse to a single i32 discriminant, like the
             // `signal_storage_valtypes` flat path.
             DefKind::Enum(_) => ValType::I32,
-            // Variants with payload have a multi-slot canonical-ABI
-            // shape that doesn't fit in one struct field — store them
-            // as anyref for Phase 1 (Phase 4 revisits).
+            // User variants: typed supertype ref when migrated.
+            DefKind::Variant(_) => {
+                if is_flat_gc_migrated(ctx, ty, registry) {
+                    if let Some(&super_idx) = registry.flat_gc_super_idx.get(&ty) {
+                        return ValType::Ref(RefType {
+                            nullable: true,
+                            heap_type: HeapType::Concrete(super_idx),
+                        });
+                    }
+                }
+                ValType::Ref(RefType {
+                    nullable: true,
+                    heap_type: HeapType::Abstract {
+                        shared: false,
+                        ty: AbstractHeapType::Any,
+                    },
+                })
+            }
             _ => ValType::Ref(RefType {
                 nullable: true,
                 heap_type: HeapType::Abstract {
                     shared: false,
-                    ty: wasm_encoder::AbstractHeapType::Any,
+                    ty: AbstractHeapType::Any,
                 },
             }),
         },

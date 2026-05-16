@@ -15,7 +15,7 @@ use crate::definitions::DefKind;
 use crate::hir::expr::HirLiteral;
 use crate::ids::{DefId, LocalId, NodeId};
 use crate::interner::Name;
-use crate::lir::block_lower::BlockLowering;
+use super::blocks::BlockLowering;
 use crate::source::Span;
 use crate::thir::{
     ThirBinding, ThirComponent, ThirExpr, ThirExprKind, ThirHandler, ThirInterpolationPart,
@@ -23,8 +23,8 @@ use crate::thir::{
 };
 use crate::types::{InternedTyKind, Ty};
 
-use super::expr::{LirExpr, LirExprKind, LirLiteral, LirStatement};
-use super::layout::LirLayoutContext;
+use crate::lir::expr::{LirExpr, LirExprKind, LirLiteral, LirStatement};
+use crate::lir::layout::LirLayoutContext;
 
 /// Convert a primitive HirLiteral to LirLiteral.
 /// Panics for compound types (List, Tuple, Record) which should be handled as separate constructs.
@@ -75,12 +75,12 @@ fn lower_primitive_literal(lit: &HirLiteral, ty: Ty, ctx: &CompilerContext) -> L
         }
     }
 }
-use super::node::{LirBinding, LirComponent, LirHandler, LirNode, LirNodeKind};
-use super::signal::{LirEffect, LirSignal, UpdateKind};
+use crate::lir::node::{LirBinding, LirResource, LirHandler, LirNode, LirNodeKind};
+use crate::lir::signal::{LirEffect, LirSignal, UpdateKind};
 
 /// Internal tree-based representation used during lowering.
-/// This is converted to block-based `LirComponent` at the end.
-pub(crate) struct TreeLirComponent {
+/// This is converted to block-based `LirResource` at the end.
+pub(crate) struct TreeLirResource {
     pub def_id: DefId,
     pub name: Name,
     pub span: Span,
@@ -91,7 +91,7 @@ pub(crate) struct TreeLirComponent {
 }
 
 /// Lower a THIR component to block-based LIR (ready for codegen).
-pub fn lower_component(component: &ThirComponent, ctx: &CompilerContext) -> LirComponent {
+pub fn lower_component(component: &ThirComponent, ctx: &CompilerContext) -> LirResource {
     let mut lowering = LirLowering::for_component(ctx, component.def_id, &component.locals);
     // First create tree-based representation
     let tree = lowering.lower_component_to_tree(component);
@@ -224,7 +224,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
         id
     }
 
-    fn lower_component_to_tree(&mut self, component: &ThirComponent) -> TreeLirComponent {
+    fn lower_component_to_tree(&mut self, component: &ThirComponent) -> TreeLirResource {
         // Extract signals from component properties, using type-checked defaults
         let signals = self.lower_signals(&component.signal_defaults);
 
@@ -235,7 +235,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
             .map(|node| self.lower_node(node))
             .collect();
 
-        TreeLirComponent {
+        TreeLirResource {
             def_id: component.def_id,
             name: component.name,
             span: component.span,
@@ -250,7 +250,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
     /// Uses type-checked defaults from ThirComponent.signal_defaults.
     fn lower_signals(
         &mut self,
-        signal_defaults: &std::collections::HashMap<DefId, ThirExpr>,
+        signal_defaults: &HashMap<DefId, ThirExpr>,
     ) -> Vec<LirSignal> {
         // Only meaningful in component scope — module-scope lowering has no
         // owning component to extract signals from.
@@ -1039,6 +1039,11 @@ mod tests {
 
     fn create_test_ctx_with_component(name: &str) -> (CompilerContext, DefId) {
         let mut ctx = CompilerContext::new();
+        // Phase 2.2: lowering reads `ctx.dom_imports()` to construct
+        // `LirOp::CallFunction` for DOM ops. Register them on the test
+        // ctx so the helper produces a ctx ready for the lowering pass.
+        let dom = crate::dom_imports::register_dom_imports(&mut ctx);
+        ctx.set_dom_imports(dom);
         let comp_name = ctx.intern(name);
         // Pre-allocate a DefId for the component
         let def_id = DefId::new(ctx.defs.len() as u32);
@@ -1068,18 +1073,23 @@ mod tests {
             is_export: true,
             body: vec![],
             locals: LocalScope::new(),
-            signal_defaults: std::collections::HashMap::new(),
+            signal_defaults: HashMap::new(),
+            signal_deps: crate::thir::signalck::SignalDependencies::default(),
         };
 
         let lir = lower_component(&component, &ctx);
         assert!(lir.is_export);
-        // Block-based: check that mount block has no CreateElement/CreateText ops
+        // Phase 2.3: DOM ops are now CallFunction against dom_imports
+        // DefIds. An empty component should not emit any
+        // create_element / create_text dispatch calls.
         let mount_block = &lir.blocks[lir.mount_block.0 as usize];
-        // An empty component should have minimal ops (just return or nothing)
-        assert!(mount_block
-            .ops
-            .iter()
-            .all(|op| !matches!(op, LirOp::CreateElement { .. } | LirOp::CreateText { .. })));
+        let create_element_def = ctx.dom_imports().create_element;
+        let create_text_def = ctx.dom_imports().create_text;
+        assert!(mount_block.ops.iter().all(|op| !matches!(
+            op,
+            LirOp::CallFunction { func, .. }
+                if *func == create_element_def || *func == create_text_def
+        )));
         assert!(lir.effects.is_empty());
     }
 
@@ -1092,7 +1102,8 @@ mod tests {
             name: Name(0),
             span: dummy_span(),
             is_export: true,
-            signal_defaults: std::collections::HashMap::new(),
+            signal_defaults: HashMap::new(),
+            signal_deps: crate::thir::signalck::SignalDependencies::default(),
             body: vec![ThirNode::new(
                 NodeId::new(0),
                 ThirNodeKind::Text(ThirExpr::new(
@@ -1114,12 +1125,22 @@ mod tests {
             "String 'Hello' should be interned"
         );
 
-        // Check that mount block contains a CreateText op
+        // Check that mount block contains a CreateText-equivalent
+        // call. Phase 2.2b switched static-text lowering to
+        // `LirOp::CallFunction { func: dom_imports.create_text, … }`
+        // prefixed by `PushStringPtr` / `PushStringLen`; the legacy
+        // `LirOp::CreateText` variant is no longer emitted.
         let mount_block = &lir.blocks[lir.mount_block.0 as usize];
-        let has_create_text = mount_block
-            .ops
-            .iter()
-            .any(|op| matches!(op, LirOp::CreateText { .. }));
-        assert!(has_create_text, "Mount block should contain CreateText op");
+        let create_text_def = ctx.dom_imports().create_text;
+        let has_create_text = mount_block.ops.iter().any(|op| {
+            matches!(
+                op,
+                LirOp::CallFunction { func, .. } if *func == create_text_def
+            )
+        });
+        assert!(
+            has_create_text,
+            "Mount block should contain a CallFunction to dom_imports.create_text"
+        );
     }
 }

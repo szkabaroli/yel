@@ -13,6 +13,9 @@ pub mod wit_ast;
 
 // pub use lir_rust::generate_rust;
 pub use dot::{generate_dot, DotOptions};
+pub use wasm::functions::{
+    generate_component, generate_function_module, ComponentPackage, FunctionInput,
+};
 pub use wasm::{generate_wasm, generate_wasm_module, generate_wasm_with_wit, WasmWithWitOptions};
 pub use wit::{generate_wit, WitOptions};
 

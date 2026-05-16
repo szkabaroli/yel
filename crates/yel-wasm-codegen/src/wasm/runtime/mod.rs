@@ -4,16 +4,12 @@
 //! - Memory allocation (alloc, free, cabi_realloc with inline memory.copy)
 //! - String concatenation (concat2, concat3, ...) - uses bulk memory.copy internally
 //! - Type-to-string conversions (s32_to_string, bool_to_string, ...)
-//! - List operations (list_get, list_get_opt)
 
-pub mod list;
 pub mod memory;
 pub mod strings;
 
 use std::collections::HashMap;
-
-pub use list::{emit_list_get, emit_list_get_fat, emit_list_get_opt};
-pub use memory::{emit_alloc, emit_allocator_globals, emit_cabi_realloc, emit_free, emit_store_fat_ptr, emit_load_fat_ptr, emit_pack_fat_ptr_to_i64, emit_store_option, emit_store_result, AllocatorGlobals};
+pub use memory::{emit_alloc, emit_allocator_globals, emit_cabi_realloc, emit_free, emit_store_fat_ptr, emit_load_fat_ptr, emit_pack_fat_ptr_to_i64, AllocatorGlobals};
 pub use strings::{
     emit_bool_to_string, emit_concat_n, emit_f32_to_string, emit_s32_to_string,
     emit_s64_to_string, emit_starts_with, StringData,
@@ -25,49 +21,53 @@ use yel_core::{DefId, Ty};
 /// These are LOCAL functions generated in the main module.
 /// Memory management functions (memcpy, alloc, free, cabi_realloc) are now
 /// imported from the allocator module - see ImportLayout for their indices.
+/// Demand-driven flags. Set by a pre-emit scan of the LIR; passed to
+/// [`RuntimeFunctions::new`] so unreferenced helpers neither claim a
+/// function index nor get emitted into the code section.
+///
+/// All flags default to false. The scan that populates them MUST mirror
+/// the actual emit-side trigger conditions exactly — every `Call(idx)`
+/// the codegen issues to a runtime helper must correspond to a `true`
+/// here, otherwise `RuntimeFunctions::new` returns `None` for the index
+/// and `.unwrap()` at the call site will panic.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RuntimeNeeds {
+    pub s32_to_string: bool,
+    pub s64_to_string: bool,
+    pub bool_to_string: bool,
+    pub f32_to_string: bool,
+    pub starts_with: bool,
+    pub store_fat_ptr: bool,
+    pub load_fat_ptr: bool,
+    pub pack_fat_ptr_to_i64: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeFunctions {
-    // String operations (locally generated)
+    // String operations (locally generated). `None` means the pre-emit
+    // scan determined no callsite uses this helper, so it's neither
+    // assigned an index nor written into the code section.
     /// s32_to_string function index
-    pub s32_to_string: u32,
+    pub s32_to_string: Option<u32>,
     /// s64_to_string function index
     /// Also used for u64 interpolation (matches s32_to_string/u32 policy).
-    pub s64_to_string: u32,
+    pub s64_to_string: Option<u32>,
     /// bool_to_string function index
-    pub bool_to_string: u32,
+    pub bool_to_string: Option<u32>,
     /// f32_to_string function index
-    pub f32_to_string: u32,
+    pub f32_to_string: Option<u32>,
     /// Map of concat arity -> function index (concat2, concat3, etc.)
     pub concat_indices: std::collections::HashMap<usize, u32>,
 
     // Fat pointer operations
     /// store_fat_ptr function index: (addr, ptr, len) -> ()
-    pub store_fat_ptr: u32,
+    pub store_fat_ptr: Option<u32>,
     /// load_fat_ptr function index: (addr) -> (ptr, len)
-    pub load_fat_ptr: u32,
-
-    // Option/Result storage helpers
-    /// store_option function index: (addr, discriminant, value) -> ()
-    pub store_option: u32,
-    /// store_result function index: (addr, discriminant, payload1, payload2) -> ()
-    pub store_result: u32,
-
-    // List operations
-    /// list_get function index: (ptr, len, idx, elem_size) -> elem_ptr
-    /// Traps on out-of-bounds access.
-    pub list_get: u32,
-    /// list_get_opt function index: (ptr, len, idx, elem_size) -> (is_some, elem_ptr)
-    /// Returns (0, 0) on out-of-bounds, (1, elem_ptr) on success.
-    pub list_get_opt: u32,
-    /// list_get_fat function index: (ptr, len, idx, elem_size) -> (slot0, slot1)
-    /// Traps on out-of-bounds; loads the two i32 words at offsets 0 and 4 of the
-    /// element pointer. Used for list elements that are 2-slot composites
-    /// (e.g. `list<string>`, `list<list<T>>`).
-    pub list_get_fat: u32,
+    pub load_fat_ptr: Option<u32>,
 
     // String operations
     /// starts_with function index: (str_ptr, str_len, prefix_ptr, prefix_len) -> bool
-    pub starts_with: u32,
+    pub starts_with: Option<u32>,
 
     // Record constructor helpers
     /// Map of record DefId -> function index for $ctor_X (allocates and returns ptr)
@@ -80,9 +80,16 @@ pub struct RuntimeFunctions {
     /// Each list constructor takes element values as params and returns (ptr, len)
     pub list_ctors: HashMap<(Ty, usize), u32>,
 
+    /// Map of list type -> function index for the per-list-Ty
+    /// `list_append` helper. Signature:
+    /// `(src: ref null $list_arr, elem: <storage-ty>) -> (ref null $list_arr)`.
+    /// One function per unique `list<T>` referenced by an
+    /// `append` call site.
+    pub list_appends: HashMap<Ty, u32>,
+
     /// pack_fat_ptr_to_i64 function index: (ptr, len) -> i64
     /// Packs fat pointer (ptr, len) into canonical ABI i64 format: (ptr << 32) | len
-    pub pack_fat_ptr_to_i64: u32,
+    pub pack_fat_ptr_to_i64: Option<u32>,
 
     // Filter operations
     /// Map of filter_call_id -> function index for $filter_0, $filter_1, etc.
@@ -103,25 +110,29 @@ impl RuntimeFunctions {
     /// Note: allocator functions are imported, not generated here.
     pub fn new(
         base: u32,
+        needs: RuntimeNeeds,
         concat_arities: &[usize],
         record_types: &[DefId],
         list_constructs: &[(Ty, usize)],
+        list_appends: &[Ty],
         filter_count: usize,
     ) -> Self {
         let mut idx = base;
+        let alloc_if = |idx: &mut u32, cond: bool| -> Option<u32> {
+            if cond {
+                let v = *idx;
+                *idx += 1;
+                Some(v)
+            } else {
+                None
+            }
+        };
 
-        // String operations (these are locally generated)
-        let s32_to_string = idx;
-        idx += 1;
-
-        let s64_to_string = idx;
-        idx += 1;
-
-        let bool_to_string = idx;
-        idx += 1;
-
-        let f32_to_string = idx;
-        idx += 1;
+        // String operations (locally generated when referenced).
+        let s32_to_string = alloc_if(&mut idx, needs.s32_to_string);
+        let s64_to_string = alloc_if(&mut idx, needs.s64_to_string);
+        let bool_to_string = alloc_if(&mut idx, needs.bool_to_string);
+        let f32_to_string = alloc_if(&mut idx, needs.f32_to_string);
 
         let mut concat_indices = std::collections::HashMap::new();
         for &arity in concat_arities {
@@ -129,33 +140,12 @@ impl RuntimeFunctions {
             idx += 1;
         }
 
-        // Fat pointer helpers
-        let store_fat_ptr = idx;
-        idx += 1;
+        // Fat pointer helpers.
+        let store_fat_ptr = alloc_if(&mut idx, needs.store_fat_ptr);
+        let load_fat_ptr = alloc_if(&mut idx, needs.load_fat_ptr);
 
-        let load_fat_ptr = idx;
-        idx += 1;
-
-        // Option/Result storage helpers
-        let store_option = idx;
-        idx += 1;
-
-        let store_result = idx;
-        idx += 1;
-
-        // List operations
-        let list_get = idx;
-        idx += 1;
-
-        let list_get_opt = idx;
-        idx += 1;
-
-        let list_get_fat = idx;
-        idx += 1;
-
-        // String comparison
-        let starts_with = idx;
-        idx += 1;
+        // String comparison.
+        let starts_with = alloc_if(&mut idx, needs.starts_with);
 
         // Record constructor helpers
         // For each record type, we generate two functions:
@@ -179,9 +169,15 @@ impl RuntimeFunctions {
             idx += 1;
         }
 
-        // Fat pointer packing helper
-        let pack_fat_ptr_to_i64 = idx;
-        idx += 1;
+        // List append helpers (one per unique list type).
+        let mut list_appends_map = std::collections::HashMap::new();
+        for &list_ty in list_appends {
+            list_appends_map.insert(list_ty, idx);
+            idx += 1;
+        }
+
+        // Fat pointer packing helper.
+        let pack_fat_ptr_to_i64 = alloc_if(&mut idx, needs.pack_fat_ptr_to_i64);
 
         // Filter functions
         // For each filter call site, generate a specialized filter function:
@@ -200,15 +196,11 @@ impl RuntimeFunctions {
             concat_indices,
             store_fat_ptr,
             load_fat_ptr,
-            store_option,
-            store_result,
-            list_get,
-            list_get_opt,
-            list_get_fat,
             starts_with,
             record_ctors,
             record_ctors_at,
             list_ctors,
+            list_appends: list_appends_map,
             pack_fat_ptr_to_i64,
             filter_indices,
             count: idx - base,
@@ -233,6 +225,11 @@ impl RuntimeFunctions {
     /// Get the function index for list constructor.
     pub fn list_ctor(&self, elem_ty: Ty, count: usize) -> Option<u32> {
         self.list_ctors.get(&(elem_ty, count)).copied()
+    }
+
+    /// Get the function index for the per-list-Ty append helper.
+    pub fn list_append(&self, list_ty: Ty) -> Option<u32> {
+        self.list_appends.get(&list_ty).copied()
     }
 
     /// Get the function index for filter with the given call ID.
@@ -288,16 +285,9 @@ pub mod types {
     /// (i32, i32, i32, i32) -> i32 - cabi_realloc(old_ptr, old_size, align, new_size) -> ptr
     pub const CABI_REALLOC: u32 = I32X4_I32;
 
-    // List operation types
-    /// (i32, i32, i32, i32) -> i32 - list_get(ptr, len, idx, elem_size) -> elem_ptr
-    pub const LIST_GET: u32 = I32X4_I32;
-    /// (i32, i32, i32, i32) -> (i32, i32) - list_get_opt function signature
-    /// Same signature as CONCAT2, so reuse that type index
-    pub const LIST_GET_OPT: u32 = CONCAT2;
-    /// (i32, i32, i32, i32) -> (i32, i32) - list_get_fat function signature
-    /// Same signature as LIST_GET_OPT / CONCAT2.
-    pub const LIST_GET_FAT: u32 = CONCAT2;
-    /// () -> (i32, i32) - for if block results in list_get_opt
+    /// () -> (i32, i32) — pre-interned for legacy multi-value if-block
+    /// results. Reachable for any `block_ty_for` lookup against a 2-i32
+    /// shape.
     pub const VOID_I32_I32: u32 = 26;
     /// (i32, i32) -> (i32, i32) - for list_ctor with 2 params
     pub const I32_I32_TO_I32_I32: u32 = 27;

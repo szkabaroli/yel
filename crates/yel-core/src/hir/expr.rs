@@ -3,7 +3,7 @@
 use crate::ids::{DefId, LocalId};
 use crate::source::Span;
 use crate::types::Ty;
-use serde::{Serialize, Deserialize};
+use serde::Serialize;
 
 /// A HIR expression.
 #[derive(Debug, Clone, Serialize)]
@@ -111,71 +111,11 @@ pub enum HirLiteral {
     Record { fields: Vec<(String, HirExpr)> },
 }
 
-/// Binary operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BinOp {
-    // Arithmetic
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-    // Comparison
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    // Logical
-    And,
-    Or,
-    // Bitwise
-    BitAnd,
-    BitOr,
-    BitXor,
-}
-
-impl BinOp {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "+" => Some(BinOp::Add),
-            "-" => Some(BinOp::Sub),
-            "*" => Some(BinOp::Mul),
-            "/" => Some(BinOp::Div),
-            "%" => Some(BinOp::Mod),
-            "==" => Some(BinOp::Eq),
-            "!=" => Some(BinOp::Ne),
-            "<" => Some(BinOp::Lt),
-            "<=" => Some(BinOp::Le),
-            ">" => Some(BinOp::Gt),
-            ">=" => Some(BinOp::Ge),
-            "&&" => Some(BinOp::And),
-            "||" => Some(BinOp::Or),
-            "&" => Some(BinOp::BitAnd),
-            "|" => Some(BinOp::BitOr),
-            "^" => Some(BinOp::BitXor),
-            _ => None,
-        }
-    }
-}
-
-/// Unary operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum UnaryOp {
-    Neg,
-    Not,
-}
-
-impl UnaryOp {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "-" => Some(UnaryOp::Neg),
-            "!" => Some(UnaryOp::Not),
-            _ => None,
-        }
-    }
-}
+// Operator types live in `crate::ops` — they're not HIR-specific.
+// Re-exported here so existing call sites (`crate::hir::expr::BinOp`)
+// keep compiling, while LIR / flow-core / future frontends read
+// `crate::ops::{BinOp, UnaryOp}` directly without depending on HIR.
+pub use crate::ops::{BinOp, UnaryOp};
 
 /// HIR statement (in closures/handlers).
 #[derive(Debug, Clone, Serialize)]

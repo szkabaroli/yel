@@ -11,14 +11,14 @@
 use wasm_encoder::{Instruction, ValType};
 
 use super::super::CodegenError;
-use yel_core::lir::{LirComponent, LirSlotId, LirSlotKind};
+use yel_core::lir::{LirBlock, LirResource, LirSlotId, LirSlotInfo, LirSlotKind};
 
 /// Compute the total `MountComponent` retention count for a component.
 /// Every mount site (regardless of whether it lives inside a for-body)
 /// gets one `(mut (ref null any))` field appended to `$Comp_<comp_idx>`,
 /// so the parent instance keeps every mounted child alive through GC
 /// tracing.
-pub(super) fn compute_mount_retention_counts(component: &LirComponent) -> u32 {
+pub(super) fn compute_mount_retention_counts(component: &LirResource) -> u32 {
     component
         .blocks
         .iter()
@@ -26,20 +26,90 @@ pub(super) fn compute_mount_retention_counts(component: &LirComponent) -> u32 {
         .sum()
 }
 
-/// Look up a Temp slot's compacted WASM-local index. Panics on a
-/// Memory slot — memory slots must never reach a `LocalGet`/`LocalSet`
-/// emission path; they're only addressable via `StoreHandle`/`LoadHandle`
-/// and friends. Hitting the panic indicates a lowering bug.
+/// Resolve a slot to its absolute WASM-local index.
+///
+/// - `Temp { local_idx }` → `local_idx + local_offset` (the standard
+///   case: a slot's compacted index is shifted past the function's
+///   param locals).
+/// - `WasmParam { idx }` → `idx` (the slot *is* a wasm param; the
+///   enclosing function's `local_offset` is ignored).
+///
+/// Panics on Memory / BoundaryField — those must never reach a
+/// `LocalGet` / `LocalSet` emission path (they're only addressable via
+/// `StoreHandle` / `LoadHandle` or struct-get/set against a tree
+/// boundary ref). Hitting the panic indicates a lowering bug.
+///
+/// Phase 0.3i: callers pass `local_offset` here instead of adding it
+/// at the call site, so the `WasmParam` variant can bypass the offset.
 #[inline]
-pub(crate) fn slot_local(component: &LirComponent, slot: LirSlotId) -> u32 {
-    match component.slots[slot.0 as usize].kind {
-        LirSlotKind::Temp { local_idx } => local_idx,
+pub(crate) fn slot_local(
+    component: &LirResource,
+    block: &LirBlock,
+    slot: LirSlotId,
+    local_offset: u32,
+) -> u32 {
+    match slot_info(slot, block, component).kind {
+        LirSlotKind::Temp { local_idx } => local_idx + local_offset,
+        LirSlotKind::WasmParam { idx } => idx,
         LirSlotKind::Memory { .. } => panic!(
             "slot {:?} is a Memory slot but was used as a WASM local (LocalGet/LocalSet)",
             slot
         ),
         LirSlotKind::BoundaryField { .. } => panic!(
             "slot {:?} is a BoundaryField slot but was used as a WASM local (LocalGet/LocalSet)",
+            slot
+        ),
+    }
+}
+
+/// Task #105 (2): unified slot-info lookup. Routes `LirSlotId::Block`
+/// to `block.slots` and `LirSlotId::Resource` to `component.slots`.
+/// Today `block.slots` is empty (the `Block` variant is never
+/// constructed — the allocator still flat-indexes everything into
+/// `component.slots`), so the Resource arm is the only one that fires.
+/// Safe no-op widening that gives later migration stages a single
+/// chokepoint to flip.
+#[inline]
+pub(crate) fn slot_info<'a>(
+    slot: LirSlotId,
+    block: &'a LirBlock,
+    component: &'a LirResource,
+) -> &'a LirSlotInfo {
+    match slot {
+        LirSlotId::Block { block: bid, idx } => {
+            debug_assert_eq!(bid, block.id, "slot ref to different block");
+            &block.slots[idx as usize]
+        }
+        LirSlotId::Resource { idx } => &component.slots[idx as usize],
+    }
+}
+
+/// Task #105 (2): variant of `slot_local` for the (rare) call sites
+/// that emit outside a block context — e.g. signal-emit helpers
+/// invoked from setup code where no `LirBlock` is in scope. Asserts
+/// the slot must be `Resource`-variant (the only kind reachable from
+/// non-block contexts today) and panics on `Block`.
+#[inline]
+pub(crate) fn slot_local_resource_only(
+    component: &LirResource,
+    slot: LirSlotId,
+    local_offset: u32,
+) -> u32 {
+    match slot {
+        LirSlotId::Resource { idx } => match component.slots[idx as usize].kind {
+            LirSlotKind::Temp { local_idx } => local_idx + local_offset,
+            LirSlotKind::WasmParam { idx } => idx,
+            LirSlotKind::Memory { .. } => panic!(
+                "slot {:?} is a Memory slot but was used as a WASM local (LocalGet/LocalSet)",
+                slot
+            ),
+            LirSlotKind::BoundaryField { .. } => panic!(
+                "slot {:?} is a BoundaryField slot but was used as a WASM local (LocalGet/LocalSet)",
+                slot
+            ),
+        },
+        LirSlotId::Block { .. } => panic!(
+            "slot_local_resource_only called with Block-variant slot {:?} (no LirBlock context available)",
             slot
         ),
     }

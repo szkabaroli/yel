@@ -114,7 +114,6 @@ impl Document {
     }
 
     /// Convert a character offset to an LSP position.
-    #[allow(dead_code)]
     pub fn offset_to_position(&self, offset: usize) -> Position {
         let offset = offset.min(self.rope.len_chars());
         let line = self.rope.char_to_line(offset);

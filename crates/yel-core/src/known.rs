@@ -280,6 +280,10 @@ pub struct KnownFunctions {
     /// Filter list by predicate: func(list<T>, func(T) -> bool) -> list<T>
     pub filter: Option<DefId>,
 
+    /// Append element to list (immutable, returns new list):
+    /// `func(list<T>, T) -> list<T>`.
+    pub append: Option<DefId>,
+
     // String methods
     /// Check if string starts with prefix: func(string, string) -> bool
     pub starts_with: Option<DefId>,
@@ -346,6 +350,10 @@ impl KnownFunctions {
         self.filter.expect("filter not initialized")
     }
 
+    pub fn append(&self) -> DefId {
+        self.append.expect("append not initialized")
+    }
+
     pub fn starts_with(&self) -> DefId {
         self.starts_with.expect("starts_with not initialized")
     }
@@ -367,6 +375,7 @@ impl KnownFunctions {
             || self.min == Some(def_id)
             || self.max == Some(def_id)
             || self.filter == Some(def_id)
+            || self.append == Some(def_id)
             || self.starts_with == Some(def_id)
     }
 }

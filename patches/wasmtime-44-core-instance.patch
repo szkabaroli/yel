@@ -1,0 +1,68 @@
+From: yel
+Subject: [PATCH] expose `wasmtime::component::Instance::core_instance`
+
+Adds a public accessor that returns the underlying core wasm
+`crate::Instance` for a given runtime-instance index of a component.
+Required for runtime GC dumping of typed Wasm-GC structs/arrays
+held inside the component (the component model otherwise hides core
+instances completely).
+
+The implementation reuses the existing `pub(crate) fn from_wasmtime`
+constructor on `Instance` and the `pub fn instance(idx)` accessor on
+`ComponentInstance` (already exposed via `data.component()`).
+
+Apply with:
+    patches/apply.sh
+
+To verify after applying:
+    cargo run -p yel-host -- gc-dump <component.wasm>
+
+--- a/src/runtime/component/instance.rs
++++ b/src/runtime/component/instance.rs
+@@ -236,6 +236,46 @@ impl Instance {
+         }
+     }
+
++    /// Returns the underlying core wasm [`crate::Instance`] for the
++    /// `runtime_idx`th core instance instantiated as part of this
++    /// component. Index 0 is the first core module the component
++    /// instantiated, which for typical Yel components is the main
++    /// `module $core` containing all GC types and globals.
++    ///
++    /// Returns `None` if `runtime_idx` is out of range or the
++    /// component has not yet finished instantiation.
++    ///
++    /// # Yel-host patch
++    ///
++    /// Maintained out-of-tree at `patches/wasmtime-44-core-instance.patch`.
++    /// Used to walk component-internal Wasm-GC objects (`$Comp_<name>`,
++    /// boundary structs, typed lists) from the host for debugging.
++    /// `wasmtime::component::Instance` does not expose this in upstream
++    /// 44.x; everything else needed is already public.
++    ///
++    /// # Panics
++    ///
++    /// Panics if `store` does not own this instance.
++    pub fn core_instance(
++        &self,
++        mut store: impl AsContextMut,
++        runtime_idx: u32,
++    ) -> Option<crate::Instance> {
++        use wasmtime_environ::component::RuntimeInstanceIndex;
++        let store = store.as_context_mut().0;
++        let data = self.id().get(store);
++        let env = data.component().env_component();
++        if runtime_idx >= env.num_runtime_instances {
++            return None;
++        }
++        let runtime_index = RuntimeInstanceIndex::from_u32(runtime_idx);
++        let instance_id = data.instance(runtime_index);
++        // SAFETY: from_wasmtime requires a `&mut StoreOpaque`. We're
++        // already holding one via as_context_mut().
++        let store_mut: &mut StoreOpaque = store;
++        Some(crate::Instance::from_wasmtime(instance_id, store_mut))
++    }
++
+     /// Looks up an exported resource type by name within this [`Instance`].
+     ///
+     /// The `store` argument provided must be the store that this instance

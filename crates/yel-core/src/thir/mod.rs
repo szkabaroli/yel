@@ -5,10 +5,12 @@
 
 pub mod expr;
 pub mod node;
+pub mod signalck;
 pub mod typeck;
 
 pub use expr::{ThirExpr, ThirExprKind, ThirInterpolationPart, ThirPattern, ThirStatement};
-pub use node::{ThirBinding, ThirComponent, ThirHandler, ThirNode, ThirNodeKind};
+pub use node::{ThirBinding, ThirComponent, ThirGlobal, ThirHandler, ThirNode, ThirNodeKind};
 pub use typeck::{
-    type_check, type_check_globals, type_check_with_map, Mode, TypeCheckResult, TypeMap,
+    type_check, type_check_globals, type_check_globals_structured, type_check_with_map, Mode,
+    TypeCheckResult, TypeMap,
 };

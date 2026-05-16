@@ -28,10 +28,12 @@ pub mod compiler;
 pub mod context;
 pub mod definitions;
 pub mod diagnostic;
+pub mod dom_imports;
 pub mod ids;
 pub mod index_vec;
 pub mod interner;
 pub mod known;
+pub mod ops;
 pub mod source;
 pub mod stdlib_lookup;
 pub mod syntax;
@@ -41,6 +43,10 @@ pub mod types;
 pub mod hir;
 pub mod lir;
 pub mod thir;
+
+/// THIR → LIR lowering. Frontend-bridge code, kept outside
+/// `crate::lir` so `lir/` stays free of HIR/THIR dependencies.
+pub mod lower_to_lir;
 
 // Re-exports
 pub use compiler::{CompileError, CompileResult, Compiler};

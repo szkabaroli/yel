@@ -26,7 +26,7 @@
 //! ```
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Configuration for the generator.
 #[derive(Debug, Clone)]
@@ -127,7 +127,10 @@ impl YelModule {
 
         // Package declaration
         if let Some(pkg) = &self.package {
-            out.push_str(&format!("package {}:{}@{};\n\n", pkg.namespace, pkg.name, pkg.version));
+            out.push_str(&format!(
+                "package {}:{}@{};\n\n",
+                pkg.namespace, pkg.name, pkg.version
+            ));
         }
 
         // Records
@@ -293,8 +296,14 @@ impl TypeRef {
             TypeRef::List(inner) => format!("list<{}>", inner.to_source()),
             TypeRef::Option(inner) => format!("option<{}>", inner.to_source()),
             TypeRef::Result { ok, err } => {
-                let ok_str = ok.as_ref().map(|t| t.to_source()).unwrap_or_else(|| "_".into());
-                let err_str = err.as_ref().map(|t| t.to_source()).unwrap_or_else(|| "_".into());
+                let ok_str = ok
+                    .as_ref()
+                    .map(|t| t.to_source())
+                    .unwrap_or_else(|| "_".into());
+                let err_str = err
+                    .as_ref()
+                    .map(|t| t.to_source())
+                    .unwrap_or_else(|| "_".into());
                 format!("result<{}, {}>", ok_str, err_str)
             }
             TypeRef::Tuple(types) => {
@@ -486,7 +495,9 @@ impl Node {
                         for part in parts {
                             match part {
                                 InterpolationPart::Literal(lit) => s.push_str(lit),
-                                InterpolationPart::Expr(e) => s.push_str(&format!("{{{}}}", e.to_source())),
+                                InterpolationPart::Expr(e) => {
+                                    s.push_str(&format!("{{{}}}", e.to_source()))
+                                }
                             }
                         }
                         format!("{}\"{}\"\n", pad, s)
@@ -746,7 +757,11 @@ impl Expr {
             Expr::Index { base, index } => {
                 format!("{}[{}]", base.to_source(), index.to_source())
             }
-            Expr::Range { start, end, inclusive } => {
+            Expr::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 if *inclusive {
                     format!("{}..={}", start.to_source(), end.to_source())
                 } else {
@@ -805,8 +820,15 @@ impl Expr {
 #[derive(Debug, Clone)]
 pub enum Statement {
     Expr(Expr),
-    Assign { target: Expr, value: Expr },
-    CompoundAssign { target: Expr, op: CompoundOp, value: Expr },
+    Assign {
+        target: Expr,
+        value: Expr,
+    },
+    CompoundAssign {
+        target: Expr,
+        op: CompoundOp,
+        value: Expr,
+    },
     If {
         condition: Expr,
         then_body: Vec<Statement>,
@@ -841,11 +863,24 @@ impl Statement {
                 format!("{} = {};", target.to_source(), value.to_source())
             }
             Statement::CompoundAssign { target, op, value } => {
-                format!("{} {} {};", target.to_source(), op.to_str(), value.to_source())
+                format!(
+                    "{} {} {};",
+                    target.to_source(),
+                    op.to_str(),
+                    value.to_source()
+                )
             }
-            Statement::If { condition, then_body, else_body } => {
+            Statement::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
                 let then_stmts: Vec<_> = then_body.iter().map(|s| s.to_source()).collect();
-                let mut out = format!("if {} {{ {} }}", condition.to_source(), then_stmts.join(" "));
+                let mut out = format!(
+                    "if {} {{ {} }}",
+                    condition.to_source(),
+                    then_stmts.join(" ")
+                );
                 if let Some(else_stmts) = else_body {
                     let else_src: Vec<_> = else_stmts.iter().map(|s| s.to_source()).collect();
                     out.push_str(&format!(" else {{ {} }}", else_src.join(" ")));
@@ -876,7 +911,9 @@ fn get_element_schema(element: &str) -> Option<ElementSchema> {
 
     match element {
         "VStack" | "HStack" | "ZStack" | "Box" | "Text" | "Button" | "List" => {
-            Some(ElementSchema { attributes: EMPTY_ATTRS })
+            Some(ElementSchema {
+                attributes: EMPTY_ATTRS,
+            })
         }
         _ => None,
     }
@@ -1101,8 +1138,12 @@ impl GenerationContext {
         let is_export: bool = u.arbitrary()?;
 
         // Generate properties (use valid kebab-case names)
-        let prop_names = ["count", "value", "label", "enabled", "visible", "selected", "items", "data", "name", "title"];
-        let num_props: usize = u.int_in_range(0..=prop_names.len().min(self.config.max_properties))?;
+        let prop_names = [
+            "count", "value", "label", "enabled", "visible", "selected", "items", "data", "name",
+            "title",
+        ];
+        let num_props: usize =
+            u.int_in_range(0..=prop_names.len().min(self.config.max_properties))?;
         let properties: Vec<_> = (0..num_props)
             .map(|i| {
                 let prop_name = prop_names[i].to_string();
@@ -1125,7 +1166,8 @@ impl GenerationContext {
         // Generate callbacks (use valid kebab-case names)
         // Only export callbacks if the component itself is exported
         let cb_names = ["on-click", "on-change", "on-submit", "on-select", "on-load"];
-        let num_callbacks: usize = u.int_in_range(0..=cb_names.len().min(self.config.max_callbacks))?;
+        let num_callbacks: usize =
+            u.int_in_range(0..=cb_names.len().min(self.config.max_callbacks))?;
         let callbacks: Vec<_> = (0..num_callbacks)
             .map(|i| {
                 let cb_name = cb_names[i].to_string();
@@ -1165,13 +1207,21 @@ impl GenerationContext {
     fn arbitrary_node(&mut self, u: &mut Unstructured, depth: usize) -> Result<Node> {
         if depth >= self.config.max_node_depth {
             // At max depth, only generate text nodes
-            return Ok(Node::Text(self.arbitrary_expr_of_type(u, &TypeRef::String, 0)?));
+            return Ok(Node::Text(self.arbitrary_expr_of_type(
+                u,
+                &TypeRef::String,
+                0,
+            )?));
         }
 
         let choice: u8 = u.int_in_range(0..=3)?;
         match choice {
             0 => self.arbitrary_element(u, depth),
-            1 => Ok(Node::Text(self.arbitrary_expr_of_type(u, &TypeRef::String, 0)?)),
+            1 => Ok(Node::Text(self.arbitrary_expr_of_type(
+                u,
+                &TypeRef::String,
+                0,
+            )?)),
             2 => self.arbitrary_if_node(u, depth),
             3 => self.arbitrary_for_node(u, depth),
             _ => Ok(Node::Text(Expr::String("text".into()))),
@@ -1179,13 +1229,15 @@ impl GenerationContext {
     }
 
     fn arbitrary_element(&mut self, u: &mut Unstructured, depth: usize) -> Result<Node> {
-        let elements = ["VStack", "HStack", "ZStack", "Box", "Text", "Button", "List"];
+        let elements = [
+            "VStack", "HStack", "ZStack", "Box", "Text", "Button", "List",
+        ];
         let name = elements[u.int_in_range(0..=elements.len() - 1)?].to_string();
 
         // Generate schema-aware bindings
         let bindings = if let Some(schema) = get_element_schema(&name) {
             let num_bindings: usize = u.int_in_range(0..=2.min(schema.attributes.len()))?;
-            let mut used_attrs = std::collections::BTreeSet::new();
+            let mut used_attrs = BTreeSet::new();
             let mut result = Vec::new();
 
             for _ in 0..num_bindings {
@@ -1212,7 +1264,7 @@ impl GenerationContext {
         // Generate handlers (unique names, at least one statement each)
         let handler_names = ["clicked", "pressed", "hovered", "changed"];
         let num_handlers: usize = u.int_in_range(0..=1)?; // Limit to avoid duplicates
-        let mut used_handlers = std::collections::BTreeSet::new();
+        let mut used_handlers = BTreeSet::new();
         let handlers: Vec<_> = (0..num_handlers)
             .filter_map(|_| {
                 // Pick an unused handler name
@@ -1313,7 +1365,11 @@ impl GenerationContext {
         let iterable = match iterable_choice {
             0 => {
                 // Try to find a list property
-                if let Some((name, _)) = self.properties.iter().find(|(_, ty)| matches!(ty, TypeRef::List(_))) {
+                if let Some((name, _)) = self
+                    .properties
+                    .iter()
+                    .find(|(_, ty)| matches!(ty, TypeRef::List(_)))
+                {
                     Expr::Var(name.clone())
                 } else {
                     Expr::List(vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)])
@@ -1347,8 +1403,7 @@ impl GenerationContext {
                     .filter(|(_, ty)| matches!(ty, TypeRef::S32 | TypeRef::String))
                     .collect();
                 // Group by type so the literal is homogeneous.
-                let mut by_type: std::collections::BTreeMap<String, Vec<String>> =
-                    std::collections::BTreeMap::new();
+                let mut by_type: BTreeMap<String, Vec<String>> = BTreeMap::new();
                 for (name, ty) in compatible {
                     by_type
                         .entry(ty.to_source())
@@ -1356,8 +1411,7 @@ impl GenerationContext {
                         .push(name.clone());
                 }
                 if let Some((_, names)) = by_type.iter().find(|(_, ns)| ns.len() >= 2) {
-                    let elements: Vec<Expr> =
-                        names.iter().map(|n| Expr::Var(n.clone())).collect();
+                    let elements: Vec<Expr> = names.iter().map(|n| Expr::Var(n.clone())).collect();
                     Expr::List(elements)
                 } else {
                     Expr::List(vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)])
@@ -1367,8 +1421,10 @@ impl GenerationContext {
                 // Signal-bounded range: find an s32 signal and use it as
                 // the range's end. Start stays constant for simplicity.
                 // Fall back to a constant range when no s32 signal exists.
-                if let Some((name, _)) =
-                    self.properties.iter().find(|(_, ty)| matches!(ty, TypeRef::S32))
+                if let Some((name, _)) = self
+                    .properties
+                    .iter()
+                    .find(|(_, ty)| matches!(ty, TypeRef::S32))
                 {
                     let inclusive: bool = u.arbitrary()?;
                     Expr::Range {
@@ -1407,7 +1463,15 @@ impl GenerationContext {
     }
 
     fn arbitrary_binding_name(&self, u: &mut Unstructured) -> Result<String> {
-        let names = ["padding", "gap", "width", "height", "color", "background", "enabled"];
+        let names = [
+            "padding",
+            "gap",
+            "width",
+            "height",
+            "color",
+            "background",
+            "enabled",
+        ];
         Ok(names[u.int_in_range(0..=names.len() - 1)?].to_string())
     }
 
@@ -1420,7 +1484,11 @@ impl GenerationContext {
         self.arbitrary_statement_with_depth(u, 0)
     }
 
-    fn arbitrary_statement_with_depth(&mut self, u: &mut Unstructured, depth: usize) -> Result<Statement> {
+    fn arbitrary_statement_with_depth(
+        &mut self,
+        u: &mut Unstructured,
+        depth: usize,
+    ) -> Result<Statement> {
         // Generate callback calls, property assignments (regular or compound) and if statements
 
         // 15% chance to generate callback call if we have callbacks
@@ -1447,9 +1515,11 @@ impl GenerationContext {
             let has_else: bool = u.arbitrary()?;
             let else_body = if has_else {
                 let num_else: usize = u.int_in_range(1..=2)?;
-                Some((0..num_else)
-                    .filter_map(|_| self.arbitrary_statement_with_depth(u, depth + 1).ok())
-                    .collect())
+                Some(
+                    (0..num_else)
+                        .filter_map(|_| self.arbitrary_statement_with_depth(u, depth + 1).ok())
+                        .collect(),
+                )
             } else {
                 None
             };
@@ -1461,13 +1531,24 @@ impl GenerationContext {
         }
 
         // Try to find a numeric property for compound assignment (30% chance)
-        let numeric_prop = self.properties.iter()
-            .find(|(_, ty)| matches!(
-                ty,
-                TypeRef::S8 | TypeRef::S16 | TypeRef::S32 | TypeRef::S64 |
-                TypeRef::U8 | TypeRef::U16 | TypeRef::U32 | TypeRef::U64 |
-                TypeRef::F32 | TypeRef::F64
-            ))
+        let numeric_prop = self
+            .properties
+            .iter()
+            .find(|(_, ty)| {
+                matches!(
+                    ty,
+                    TypeRef::S8
+                        | TypeRef::S16
+                        | TypeRef::S32
+                        | TypeRef::S64
+                        | TypeRef::U8
+                        | TypeRef::U16
+                        | TypeRef::U32
+                        | TypeRef::U64
+                        | TypeRef::F32
+                        | TypeRef::F64
+                )
+            })
             .map(|(n, t)| (n.clone(), t.clone()));
 
         // 30% chance to use compound assignment if we have a numeric property
@@ -1489,7 +1570,11 @@ impl GenerationContext {
         }
 
         // Regular assignment to any property
-        let prop = self.properties.iter().next().map(|(n, t)| (n.clone(), t.clone()));
+        let prop = self
+            .properties
+            .iter()
+            .next()
+            .map(|(n, t)| (n.clone(), t.clone()));
         if let Some((name, ty)) = prop {
             let value = self.arbitrary_expr_of_type(u, &ty, 0)?;
             Ok(Statement::Assign {
@@ -1545,9 +1630,9 @@ impl GenerationContext {
         // 10% chance to generate index expression
         if u.int_in_range(0..=9)? == 0 {
             // First try: use a list property if available
-            if let Some((list_name, _)) = self.properties.iter().find(|(_, prop_ty)| {
-                matches!(prop_ty, TypeRef::List(inner) if inner.as_ref() == ty)
-            }) {
+            if let Some((list_name, _)) = self.properties.iter().find(
+                |(_, prop_ty)| matches!(prop_ty, TypeRef::List(inner) if inner.as_ref() == ty),
+            ) {
                 let list_name = list_name.clone();
                 return Ok(Expr::Index {
                     base: Box::new(Expr::Var(list_name)),
@@ -1622,7 +1707,14 @@ impl GenerationContext {
                         // Comparison
                         let lhs = self.arbitrary_expr_of_type(u, &TypeRef::S32, depth + 1)?;
                         let rhs = self.arbitrary_expr_of_type(u, &TypeRef::S32, depth + 1)?;
-                        let ops = [BinaryOp::Eq, BinaryOp::Ne, BinaryOp::Lt, BinaryOp::Le, BinaryOp::Gt, BinaryOp::Ge];
+                        let ops = [
+                            BinaryOp::Eq,
+                            BinaryOp::Ne,
+                            BinaryOp::Lt,
+                            BinaryOp::Le,
+                            BinaryOp::Gt,
+                            BinaryOp::Ge,
+                        ];
                         let op = ops[u.int_in_range(0..=ops.len() - 1)?];
                         Ok(Expr::Binary {
                             op,
@@ -1670,7 +1762,9 @@ impl GenerationContext {
                     0 => Ok(Expr::String(self.arbitrary_string(u)?)),
                     _ => {
                         // Use variable interpolation if we have string properties
-                        let string_prop = self.properties.iter()
+                        let string_prop = self
+                            .properties
+                            .iter()
                             .find(|(_, t)| matches!(t, TypeRef::String))
                             .map(|(n, _)| n.clone());
                         if let Some(prop_name) = string_prop {
@@ -1729,7 +1823,9 @@ impl GenerationContext {
             }
             TypeRef::Color | TypeRef::Brush => {
                 let colors = ["#ffffff", "#000000", "#ff0000", "#00ff00", "#0000ff"];
-                Ok(Expr::Color(colors[u.int_in_range(0..=colors.len() - 1)?].into()))
+                Ok(Expr::Color(
+                    colors[u.int_in_range(0..=colors.len() - 1)?].into(),
+                ))
             }
             TypeRef::List(inner) => {
                 let num_elements: usize = u.int_in_range(0..=5)?;
@@ -1751,9 +1847,13 @@ impl GenerationContext {
                     0 => {
                         // Try to use optional member access if we have option<record> property
                         // where the record has a field matching inner type
-                        if let Some((prop_name, record_name)) = self.find_option_record_prop_with_field(inner) {
+                        if let Some((prop_name, record_name)) =
+                            self.find_option_record_prop_with_field(inner)
+                        {
                             // Generate prop?.field
-                            if let Some(field_name) = self.find_record_field_of_type(&record_name, inner) {
+                            if let Some(field_name) =
+                                self.find_record_field_of_type(&record_name, inner)
+                            {
                                 return Ok(Expr::OptionalField {
                                     base: Box::new(Expr::Var(prop_name)),
                                     field: field_name,
@@ -1764,23 +1864,27 @@ impl GenerationContext {
                         Ok(Expr::VariantCtor {
                             variant: "option".into(),
                             case: "some".into(),
-                            payload: Some(Box::new(self.arbitrary_expr_of_type(u, inner, depth + 1)?)),
+                            payload: Some(Box::new(self.arbitrary_expr_of_type(
+                                u,
+                                inner,
+                                depth + 1,
+                            )?)),
                         })
                     }
-                    1 => {
-                        Ok(Expr::VariantCtor {
-                            variant: "option".into(),
-                            case: "some".into(),
-                            payload: Some(Box::new(self.arbitrary_expr_of_type(u, inner, depth + 1)?)),
-                        })
-                    }
-                    _ => {
-                        Ok(Expr::VariantCtor {
-                            variant: "option".into(),
-                            case: "none".into(),
-                            payload: None,
-                        })
-                    }
+                    1 => Ok(Expr::VariantCtor {
+                        variant: "option".into(),
+                        case: "some".into(),
+                        payload: Some(Box::new(self.arbitrary_expr_of_type(
+                            u,
+                            inner,
+                            depth + 1,
+                        )?)),
+                    }),
+                    _ => Ok(Expr::VariantCtor {
+                        variant: "option".into(),
+                        case: "none".into(),
+                        payload: None,
+                    }),
                 }
             }
             TypeRef::Result { ok, err } => {
@@ -1788,7 +1892,11 @@ impl GenerationContext {
                 let use_ok: bool = u.arbitrary()?;
                 if use_ok {
                     let payload = if let Some(ok_ty) = ok {
-                        Some(Box::new(self.arbitrary_expr_of_type(u, ok_ty, depth + 1)?))
+                        Some(Box::new(self.arbitrary_expr_of_type(
+                            u,
+                            ok_ty,
+                            depth + 1,
+                        )?))
                     } else {
                         None
                     };
@@ -1799,7 +1907,11 @@ impl GenerationContext {
                     })
                 } else {
                     let payload = if let Some(err_ty) = err {
-                        Some(Box::new(self.arbitrary_expr_of_type(u, err_ty, depth + 1)?))
+                        Some(Box::new(self.arbitrary_expr_of_type(
+                            u,
+                            err_ty,
+                            depth + 1,
+                        )?))
                     } else {
                         None
                     };
@@ -1837,7 +1949,11 @@ impl GenerationContext {
                 if let Some(cases) = self.variants.get(name).cloned() {
                     let case = &cases[u.int_in_range(0..=cases.len() - 1)?];
                     let payload = if let Some(ref payload_ty) = case.payload {
-                        Some(Box::new(self.arbitrary_expr_of_type(u, payload_ty, depth + 1)?))
+                        Some(Box::new(self.arbitrary_expr_of_type(
+                            u,
+                            payload_ty,
+                            depth + 1,
+                        )?))
                     } else {
                         None
                     };
@@ -1883,7 +1999,10 @@ impl GenerationContext {
                 // Generate simple literals for each tuple element
                 let elements: Vec<_> = types
                     .iter()
-                    .map(|ty| self.arbitrary_literal_of_type(u, ty).unwrap_or(Expr::Int(0)))
+                    .map(|ty| {
+                        self.arbitrary_literal_of_type(u, ty)
+                            .unwrap_or(Expr::Int(0))
+                    })
                     .collect();
                 Expr::Tuple(elements)
             }
@@ -1895,7 +2014,10 @@ impl GenerationContext {
             TypeRef::Result { ok, err: _ } => {
                 // Default to ok with literal payload
                 let payload = ok.as_ref().map(|ty| {
-                    Box::new(self.arbitrary_literal_of_type(u, ty).unwrap_or(Expr::Int(0)))
+                    Box::new(
+                        self.arbitrary_literal_of_type(u, ty)
+                            .unwrap_or(Expr::Int(0)),
+                    )
                 });
                 Expr::VariantCtor {
                     variant: "result".into(),
@@ -1974,8 +2096,13 @@ impl GenerationContext {
                     for (field_name, field_ty) in &fields {
                         // Check if field_ty is a record with a subfield of target type
                         if let TypeRef::Named(nested_record_name) = field_ty {
-                            if let Some(subfield_name) = self.find_record_field_of_type(nested_record_name, target_ty) {
-                                return Some((prop_name.clone(), vec![field_name.clone(), subfield_name]));
+                            if let Some(subfield_name) =
+                                self.find_record_field_of_type(nested_record_name, target_ty)
+                            {
+                                return Some((
+                                    prop_name.clone(),
+                                    vec![field_name.clone(), subfield_name],
+                                ));
                             }
                         }
                     }
@@ -2010,7 +2137,12 @@ mod tests {
 
         // Try to parse with yel-core
         let result = yel_core::parse(&source);
-        assert!(result.is_ok(), "Generated code failed to parse: {:?}\nSource:\n{}", result.err(), source);
+        assert!(
+            result.is_ok(),
+            "Generated code failed to parse: {:?}\nSource:\n{}",
+            result.err(),
+            source
+        );
     }
 
     #[test]
@@ -2026,18 +2158,33 @@ mod tests {
         let parsed = compiler.parse(&source).expect("Failed to parse");
         let hir_components = compiler.lower_to_hir(&parsed);
 
-        assert!(!compiler.has_errors(), "HIR errors: {}\nSource:\n{}", compiler.render_diagnostics(), source);
+        assert!(
+            !compiler.has_errors(),
+            "HIR errors: {}\nSource:\n{}",
+            compiler.render_diagnostics(),
+            source
+        );
 
         for hir in &hir_components {
             let thir = compiler.type_check(hir);
-            assert!(!compiler.has_errors(), "Type errors: {}\nSource:\n{}", compiler.render_diagnostics(), source);
+            assert!(
+                !compiler.has_errors(),
+                "Type errors: {}\nSource:\n{}",
+                compiler.render_diagnostics(),
+                source
+            );
 
             let lir = compiler.lower_to_lir(&thir);
             let ctx = compiler.context();
 
             // Generate WASM
             let wasm_result = yel_wasm_codegen::generate_wasm(&[lir], ctx);
-            assert!(wasm_result.is_ok(), "WASM generation failed: {:?}\nSource:\n{}", wasm_result.err(), source);
+            assert!(
+                wasm_result.is_ok(),
+                "WASM generation failed: {:?}\nSource:\n{}",
+                wasm_result.err(),
+                source
+            );
         }
     }
 
@@ -2053,7 +2200,13 @@ mod tests {
 
                 // At minimum, it should parse
                 let result = yel_core::parse(&source);
-                assert!(result.is_ok(), "Seed {} failed to parse: {:?}\nSource:\n{}", seed, result.err(), source);
+                assert!(
+                    result.is_ok(),
+                    "Seed {} failed to parse: {:?}\nSource:\n{}",
+                    seed,
+                    result.err(),
+                    source
+                );
             }
         }
     }

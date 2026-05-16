@@ -281,6 +281,7 @@ mod wasi_impl {
                     name: wit_options.name.clone(),
                     version: wit_options.version.clone(),
                     global_defaults: lir_globals.clone(),
+                    wasm_opt_args: None,
                 };
                 let wasm_bytes = if !lir_components.is_empty() {
                     match codegen::generate_wasm_module(&module, ctx, &wasm_options) {
@@ -318,6 +319,7 @@ mod wasi_impl {
                     name: wit_options.name.clone(),
                     version: wit_options.version.clone(),
                     global_defaults: lir_globals.clone(),
+                    wasm_opt_args: None,
                 };
                 let wast_code = if !lir_components.is_empty() {
                     match codegen::generate_wasm_module(&module, ctx, &wasm_options) {
@@ -608,6 +610,7 @@ pub mod native {
                     name: wit_options.name.clone(),
                     version: wit_options.version.clone(),
                     global_defaults: lir_globals.clone(),
+                    wasm_opt_args: None,
                 };
                 let wasm_bytes = if !lir_components.is_empty() {
                     // Pass the assembled module to codegen with package options

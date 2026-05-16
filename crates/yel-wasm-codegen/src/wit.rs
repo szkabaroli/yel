@@ -9,7 +9,7 @@
 use super::CodegenError;
 use crate::wit_ast::WitAstBuilder;
 use yel_core::context::CompilerContext;
-use yel_core::lir::LirComponent;
+use yel_core::lir::LirResource;
 
 use wit_encoder::packages_from_parsed;
 
@@ -33,12 +33,12 @@ pub struct WitOptions {
 /// no exported component still produce a well-formed package with a library
 /// world — no special casing at the call site.
 pub fn generate_wit(
-    components: &[LirComponent],
+    components: &[LirResource],
     ctx: &CompilerContext,
     options: &WitOptions,
 ) -> Result<String, CodegenError> {
-    let exported: Vec<&LirComponent> = components.iter().filter(|c| c.is_export).collect();
-    let all: Vec<&LirComponent> = components.iter().collect();
+    let exported: Vec<&LirResource> = components.iter().filter(|c| c.is_export).collect();
+    let all: Vec<&LirResource> = components.iter().collect();
 
     let mut builder = WitAstBuilder::new(ctx, &options.namespace, &options.name, &options.version);
     builder.build_wit_with_all(&exported, &all)?;
