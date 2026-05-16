@@ -2032,17 +2032,11 @@ impl<'a> BlockLowering<'a> {
         // `local_idx` get decremented by one so the post-promotion
         // local space stays packed (lifecycle.rs declares one wasm
         // local per Temp slot in compacted `local_idx` order).
-        let promoted_local_idx = {
-            let info = &self.slots[parent_slot.legacy_u32() as usize];
-            match info.kind {
-                LirSlotKind::Temp { local_idx } => local_idx,
-                _ => panic!(
-                    "Phase 0.3i: parent_slot expected Temp kind, got {:?}",
-                    info.kind
-                ),
-            }
+        let promoted_local_idx = match &self.slot_info(parent_slot).kind {
+            LirSlotKind::Temp { local_idx } => *local_idx,
+            other => panic!("Phase 0.3i: parent_slot expected Temp kind, got {:?}", other),
         };
-        self.slots[parent_slot.legacy_u32() as usize].kind = LirSlotKind::WasmParam { idx: 1 };
+        self.slot_info_mut(parent_slot).kind = LirSlotKind::WasmParam { idx: 1 };
         for s in self.slots.iter_mut() {
             if let LirSlotKind::Temp { local_idx } = &mut s.kind {
                 if *local_idx > promoted_local_idx {
@@ -5893,6 +5887,49 @@ impl<'a> BlockLowering<'a> {
         self.alloc_temp_slot_typed(LirSlotValType::I32)
     }
 
+    /// Task #105 B2: dispatch a `LirSlotId` to its backing
+    /// `LirSlotInfo`. Resource-variant ids index into the component-wide
+    /// `self.slots` vec; Block-variant ids index into either
+    /// `current_block_slots` (when `slot.block` matches the in-progress
+    /// block) or a finished block's `.slots` in `self.blocks`.
+    fn slot_info(&self, slot: LirSlotId) -> &LirSlotInfo {
+        match slot {
+            LirSlotId::Resource { idx } => &self.slots[idx as usize],
+            LirSlotId::Block { block: bid, idx } => {
+                if self.pending_block_ids.last().copied() == Some(bid) {
+                    &self.current_block_slots[idx as usize]
+                } else if let Some(b) = self.blocks.iter().find(|b| b.id == bid) {
+                    &b.slots[idx as usize]
+                } else {
+                    panic!(
+                        "slot_info: Block-variant slot references unknown block {:?}",
+                        bid
+                    );
+                }
+            }
+        }
+    }
+
+    /// Mutable counterpart to `slot_info`. Used by helpers that retag
+    /// slot kind / name after creation.
+    fn slot_info_mut(&mut self, slot: LirSlotId) -> &mut LirSlotInfo {
+        match slot {
+            LirSlotId::Resource { idx } => &mut self.slots[idx as usize],
+            LirSlotId::Block { block: bid, idx } => {
+                if self.pending_block_ids.last().copied() == Some(bid) {
+                    &mut self.current_block_slots[idx as usize]
+                } else if let Some(b) = self.blocks.iter_mut().find(|b| b.id == bid) {
+                    &mut b.slots[idx as usize]
+                } else {
+                    panic!(
+                        "slot_info_mut: Block-variant slot references unknown block {:?}",
+                        bid
+                    );
+                }
+            }
+        }
+    }
+
     /// Alloc a temp slot tagged with a debug name. The name flows
     /// into the WASM name section as `$<name>` so WAT output reads
     /// `local.get $iter_record_ptr` instead of `local.get 97`. Prefer
@@ -5900,13 +5937,7 @@ impl<'a> BlockLowering<'a> {
     pub(crate) fn alloc_temp_slot_named(&mut self, name: impl Into<String>) -> LirSlotId {
         let id = self.alloc_temp_slot_typed(LirSlotValType::I32);
         let name_str = format!("{}_{}", name.into(), id.legacy_u32());
-        // Task #105 B2: slot may have landed in either current_block_slots
-        // or self.slots depending on whether we were inside a block.
-        if let Some(info) = self.current_block_slots.iter_mut().find(|s| s.id == id) {
-            info.name = Some(name_str);
-        } else if let Some(info) = self.slots.iter_mut().find(|s| s.id == id) {
-            info.name = Some(name_str);
-        }
+        self.slot_info_mut(id).name = Some(name_str);
         id
     }
 
@@ -5920,12 +5951,7 @@ impl<'a> BlockLowering<'a> {
     ) -> LirSlotId {
         let id = self.alloc_temp_slot_typed(val_ty);
         let name_str = format!("{}_{}", name.into(), id.legacy_u32());
-        // Task #105 B2: search both stores.
-        if let Some(info) = self.current_block_slots.iter_mut().find(|s| s.id == id) {
-            info.name = Some(name_str);
-        } else if let Some(info) = self.slots.iter_mut().find(|s| s.id == id) {
-            info.name = Some(name_str);
-        }
+        self.slot_info_mut(id).name = Some(name_str);
         id
     }
 
