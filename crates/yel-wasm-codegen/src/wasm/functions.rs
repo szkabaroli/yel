@@ -157,6 +157,7 @@ pub fn generate_function_module_with_names(
             &input.lir_fn.conv,
             &block.params,
             &input.resource.slots,
+            Some(&block.slots),
             layout,
         )?;
         funcs.function(i as u32);

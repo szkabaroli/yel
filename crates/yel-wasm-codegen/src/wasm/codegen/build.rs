@@ -805,6 +805,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     &conv,
                     &block.params,
                     &component.slots,
+                    Some(&block.slots),
                     &layout,
                 )?;
                 layout.block_dynamic_type_idx.insert(block.id, type_idx);

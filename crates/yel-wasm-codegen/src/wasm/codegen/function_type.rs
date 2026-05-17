@@ -239,6 +239,7 @@ impl<'a> WasmPackageBuilder<'a> {
         conv: &CallingConv,
         user_param_slots: &[LirSlotId],
         slots: &[LirSlotInfo],
+        block_slots: Option<&[LirSlotInfo]>,
         layout: &GcTypeLayout,
     ) -> Result<(Vec<ValType>, Vec<ValType>), CodegenError> {
         // Parameter order: [implicit_pre...] [user params...]
@@ -251,10 +252,23 @@ impl<'a> WasmPackageBuilder<'a> {
             params.push(self.implicit_param_wasm_valtype(p, layout)?);
         }
         for ps in user_param_slots {
-            let val_ty = slots
-                .get(ps.legacy_u32() as usize)
-                .map(|s| s.val_ty)
-                .unwrap_or(LirSlotValType::I32);
+            // Task #105 B2: Block-variant slot ids index into
+            // block.slots; Resource-variant index into component.slots.
+            let val_ty = match ps {
+                LirSlotId::Block { idx, .. } => block_slots
+                    .and_then(|bs| bs.get(*idx as usize))
+                    .map(|s| s.val_ty)
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR(format!(
+                            "wasm_function_type_for_conv: Block-variant slot {:?} but no block.slots provided or idx out of range",
+                            ps
+                        ))
+                    })?,
+                LirSlotId::Resource { idx } => slots
+                    .get(*idx as usize)
+                    .map(|s| s.val_ty)
+                    .unwrap_or(LirSlotValType::I32),
+            };
             params.push(self.slot_wasm_valtype(val_ty, layout)?);
         }
         for p in &conv.implicit_post {
@@ -277,10 +291,11 @@ impl<'a> WasmPackageBuilder<'a> {
         conv: &CallingConv,
         user_param_slots: &[LirSlotId],
         slots: &[LirSlotInfo],
+        block_slots: Option<&[LirSlotInfo]>,
         layout: &GcTypeLayout,
     ) -> Result<u32, CodegenError> {
         let (params, returns) =
-            self.wasm_function_type_for_conv(conv, user_param_slots, slots, layout)?;
+            self.wasm_function_type_for_conv(conv, user_param_slots, slots, block_slots, layout)?;
         types.ty().function(params, returns);
         let idx = *cursor;
         *cursor += 1;

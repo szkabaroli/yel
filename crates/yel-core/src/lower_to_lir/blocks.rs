@@ -7067,24 +7067,25 @@ pub(crate) fn synth_internal_unmount_block(ctx: &CompilerContext, component: &mu
     let remove_fn = ctx.dom_imports().remove;
     let mut ops: Vec<LirOp> = Vec::new();
 
-    // Helper: allocate a fresh Temp slot of `val_ty`, assigning
-    // local_idx past the current max. Mirrors `synth_internal_constructor_block`.
-    fn alloc_slot(component: &mut LirResource, val_ty: LirSlotValType) -> LirSlotId {
-        let next_local_idx: u32 = component
+    // Task #105 B2: per-block slot ladder. Pre-allocate the new block
+    // and push slots into its own `slots` vec (Block-variant ids,
+    // per-block contiguous local_idx).
+    let new_block_id = ctx.alloc_block_id();
+    let mut new_block = LirBlock::new(new_block_id);
+    fn alloc_block_slot(
+        block: &mut LirBlock,
+        val_ty: LirSlotValType,
+    ) -> LirSlotId {
+        let local_idx = block
             .slots
             .iter()
-            .filter_map(|s| match s.kind {
-                LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0);
-        let id = LirSlotId::resource(component.slots.len() as u32);
-        component.slots.push(LirSlotInfo {
+            .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
+            .count() as u32;
+        let idx = block.slots.len() as u16;
+        let id = LirSlotId::Block { block: block.id, idx };
+        block.slots.push(LirSlotInfo {
             id,
-            kind: LirSlotKind::Temp {
-                local_idx: next_local_idx,
-            },
+            kind: LirSlotKind::Temp { local_idx },
             val_ty,
             name: None,
         });
@@ -7101,8 +7102,8 @@ pub(crate) fn synth_internal_unmount_block(ctx: &CompilerContext, component: &mu
         })
         .collect();
     for offset in mem_slots {
-        let addr_slot = alloc_slot(component, LirSlotValType::I32);
-        let handle_slot = alloc_slot(component, LirSlotValType::I32);
+        let addr_slot = alloc_block_slot(&mut new_block, LirSlotValType::I32);
+        let handle_slot = alloc_block_slot(&mut new_block, LirSlotValType::I32);
         ops.push(LirOp::I32Const {
             value: offset as i32,
             result: addr_slot,
@@ -7164,8 +7165,8 @@ pub(crate) fn synth_internal_unmount_block(ctx: &CompilerContext, component: &mu
         })
         .collect();
     for (boundary_id, field_idx) in boundary_detaches {
-        let ref_slot = alloc_slot(component, LirSlotValType::RefNullForBoundary(boundary_id));
-        let handle_slot = alloc_slot(component, LirSlotValType::I32);
+        let ref_slot = alloc_block_slot(&mut new_block, LirSlotValType::RefNullForBoundary(boundary_id));
+        let handle_slot = alloc_block_slot(&mut new_block, LirSlotValType::I32);
         ops.push(LirOp::BoundaryRefFromSelf {
             boundary_id,
             result: ref_slot,
@@ -7186,16 +7187,17 @@ pub(crate) fn synth_internal_unmount_block(ctx: &CompilerContext, component: &mu
 
     // Phase 0.3j: allocate a WasmParam{idx:0} slot holding the typed
     // self ref. `slot_local` resolves it to wasm local 0 directly.
-    let self_ref_slot = LirSlotId::resource(component.slots.len() as u32);
-    component.slots.push(LirSlotInfo {
+    let self_ref_slot = LirSlotId::Block {
+        block: new_block_id,
+        idx: new_block.slots.len() as u16,
+    };
+    new_block.slots.push(LirSlotInfo {
         id: self_ref_slot,
         kind: LirSlotKind::WasmParam { idx: 0 },
         val_ty: LirSlotValType::RefNullForComponent(component.def_id),
         name: None,
     });
 
-    let new_block_id = ctx.alloc_block_id();
-    let mut new_block = LirBlock::new(new_block_id);
     new_block.ops = ops;
     new_block.implicit_self = Some(self_ref_slot);
     // unmount has no scratch + no return value.
@@ -7257,7 +7259,6 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
     let children_root = component.children_root_slot;
 
     // === 1. Export constructor block ===
-    // Signature: () -> i32 (host handle).
     {
         let self_ref = alloc_temp(
             component,
@@ -7272,33 +7273,18 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
             "export_ctor_arr_scratch",
         );
         let host_handle = alloc_temp(component, LirSlotValType::I32, "export_ctor_host_handle");
-
         let ops = vec![
-            LirOp::CallBlock {
-                block: internal_ctor,
-                args: Vec::new(),
-                result: Some(self_ref),
-            },
+            LirOp::CallBlock { block: internal_ctor, args: Vec::new(), result: Some(self_ref) },
             LirOp::RegistryAlloc {
-                component: def_id,
-                ref_slot: self_ref,
-                idx_scratch,
-                arr_scratch,
-                result_handle: handle,
+                component: def_id, ref_slot: self_ref,
+                idx_scratch, arr_scratch, result_handle: handle,
             },
-            LirOp::CallResourceNew {
-                component: def_id,
-                handle,
-                result: host_handle,
-            },
+            LirOp::CallResourceNew { component: def_id, handle, result: host_handle },
             LirOp::StructSetSym {
                 ty_ref: LirTypeRef::ComponentStruct,
-                field: self_handle_field,
-                rec: self_ref,
-                value: host_handle,
+                field: self_handle_field, rec: self_ref, value: host_handle,
             },
         ];
-
         let block_id = next_block_id(component);
         let mut block = LirBlock::new(block_id);
         block.ops = ops;
@@ -7310,7 +7296,6 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
     }
 
     // === 2. Export mount block ===
-    // Signature: (handle: i32, root: i32) -> i32|().
     {
         let handle_param_idx = LirSlotId::resource(component.slots.len() as u32);
         component.slots.push(LirSlotInfo {
@@ -7327,42 +7312,24 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
             name: Some("export_mount_root".to_string()),
         });
         let self_ref = alloc_temp(
-            component,
-            LirSlotValType::RefNullForComponent(def_id),
-            "export_mount_self_ref",
+            component, LirSlotValType::RefNullForComponent(def_id), "export_mount_self_ref",
         );
-        // Container components: allocate a Temp i32 slot to receive
-        // the children-root id from the internal mount call.
         let result_slot = if children_root.is_some() {
-            Some(alloc_temp(
-                component,
-                LirSlotValType::I32,
-                "export_mount_result",
-            ))
+            Some(alloc_temp(component, LirSlotValType::I32, "export_mount_result"))
         } else {
             None
         };
-
-        let mut ops = vec![
+        let ops = vec![
             LirOp::RegistryLookupToSelfRef {
-                component: def_id,
-                handle: handle_param_idx,
-                result: self_ref,
+                component: def_id, handle: handle_param_idx, result: self_ref,
             },
             LirOp::GlobalSet {
-                gref: LirGlobalRef::CurrentHandle(def_id),
-                value: handle_param_idx,
+                gref: LirGlobalRef::CurrentHandle(def_id), value: handle_param_idx,
             },
             LirOp::CallBlock {
-                block: mount_block,
-                args: vec![self_ref, root_param_idx],
-                result: result_slot,
+                block: mount_block, args: vec![self_ref, root_param_idx], result: result_slot,
             },
         ];
-        // Phase 0.3o: avoid an unused-variable warning when there's no
-        // result slot but we still want the explicit form.
-        let _ = &mut ops;
-
         let block_id = next_block_id(component);
         let mut block = LirBlock::new(block_id);
         block.ops = ops;
@@ -7374,7 +7341,6 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
     }
 
     // === 3. Export unmount block ===
-    // Signature: (handle: i32) -> ().
     {
         let handle_param_idx = LirSlotId::resource(component.slots.len() as u32);
         component.slots.push(LirSlotInfo {
@@ -7384,24 +7350,16 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
             name: Some("export_unmount_handle".to_string()),
         });
         let self_ref = alloc_temp(
-            component,
-            LirSlotValType::RefNullForComponent(def_id),
-            "export_unmount_self_ref",
+            component, LirSlotValType::RefNullForComponent(def_id), "export_unmount_self_ref",
         );
-
         let ops = vec![
             LirOp::RegistryLookupToSelfRef {
-                component: def_id,
-                handle: handle_param_idx,
-                result: self_ref,
+                component: def_id, handle: handle_param_idx, result: self_ref,
             },
             LirOp::CallBlock {
-                block: internal_unmount,
-                args: vec![self_ref],
-                result: None,
+                block: internal_unmount, args: vec![self_ref], result: None,
             },
         ];
-
         let block_id = next_block_id(component);
         let mut block = LirBlock::new(block_id);
         block.ops = ops;
