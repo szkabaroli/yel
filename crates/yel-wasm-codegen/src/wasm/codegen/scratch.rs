@@ -49,7 +49,24 @@ pub(crate) fn slot_local(
     local_offset: u32,
 ) -> u32 {
     match slot_info(slot, block, component).kind {
-        LirSlotKind::Temp { local_idx } => local_idx + local_offset,
+        LirSlotKind::Temp { local_idx } => match slot {
+            // Resource Temps are declared first in the function's local
+            // section (after the wasm params), so their local index is
+            // `local_offset + local_idx`.
+            LirSlotId::Resource { .. } => local_idx + local_offset,
+            // Task #105 B2: Block Temps are declared AFTER the
+            // component-wide Resource Temps. Their local_idx is
+            // per-block (starts at 0), so offset by the count of
+            // Resource Temp slots in the component.
+            LirSlotId::Block { .. } => {
+                let n_resource_temp = component
+                    .slots
+                    .iter()
+                    .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
+                    .count() as u32;
+                local_offset + n_resource_temp + local_idx
+            }
+        },
         LirSlotKind::WasmParam { idx } => idx,
         LirSlotKind::Memory { .. } => panic!(
             "slot {:?} is a Memory slot but was used as a WASM local (LocalGet/LocalSet)",

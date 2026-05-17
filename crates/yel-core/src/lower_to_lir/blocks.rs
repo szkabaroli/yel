@@ -2037,14 +2037,33 @@ impl<'a> BlockLowering<'a> {
             other => panic!("Phase 0.3i: parent_slot expected Temp kind, got {:?}", other),
         };
         self.slot_info_mut(parent_slot).kind = LirSlotKind::WasmParam { idx: 1 };
-        for s in self.slots.iter_mut() {
-            if let LirSlotKind::Temp { local_idx } = &mut s.kind {
-                if *local_idx > promoted_local_idx {
-                    *local_idx -= 1;
+        // Task #105 B2: parent_slot lives in either the component slots
+        // (Resource variant, pre-B2 fallback) or the mount block's
+        // slots (Block variant, post-B2). Walk both: decrement local_idx
+        // of every Temp slot with a higher local_idx than the promoted
+        // one so the post-promotion local space stays packed.
+        let pack_temp_locals = |slots: &mut Vec<LirSlotInfo>, promoted: u32| {
+            for s in slots.iter_mut() {
+                if let LirSlotKind::Temp { local_idx } = &mut s.kind {
+                    if *local_idx > promoted {
+                        *local_idx -= 1;
+                    }
                 }
             }
+        };
+        pack_temp_locals(&mut self.slots, promoted_local_idx);
+        if let LirSlotId::Block { block: bid, .. } = parent_slot {
+            if let Some(b) = self.blocks.iter_mut().find(|b| b.id == bid) {
+                pack_temp_locals(&mut b.slots, promoted_local_idx);
+            }
         }
-        self.next_local_idx -= 1;
+        // Only decrement next_local_idx when parent_slot was the
+        // component-Temp (Resource) case; per-block local space is
+        // self-contained via current_block_local_idx (already reset on
+        // finish_block).
+        if matches!(parent_slot, LirSlotId::Resource { .. }) {
+            self.next_local_idx -= 1;
+        }
         // Register the param slot as the first wasm-level param of the
         // mount block (after the implicit `self` ref at wasm local 0).
         if let Some(block) = self.blocks.iter_mut().find(|b| b.id == mount_block) {
@@ -6570,11 +6589,15 @@ impl<'a> BlockLowering<'a> {
     }
 
     fn alloc_temp_slot_typed(&mut self, val_ty: LirSlotValType) -> LirSlotId {
-        // Task #105 B2: per-block storage migration deferred — too many
-        // lowering-side sites still do `self.slots[slot.legacy_u32()]`
-        // direct lookups (e.g. blocks.rs:2036 parent_slot promotion).
-        // Until those are threaded through a slot_info dispatch helper,
-        // keep allocations on the component vec.
+        // Task #105 B2: per-block migration reverted again — landing
+        // alloc-side without ALSO migrating the synth-pass slot
+        // allocators (synth_internal_constructor_block,
+        // synth_one_global_fanout_block, etc., which push directly to
+        // component.slots) creates val-ty resolution failures during
+        // function-type registration (block.params slot val_tys not
+        // visible in component.slots when wasm types are built).
+        // Full migration requires updating synth passes as part of the
+        // same step.
         let id = LirSlotId::resource(self.next_slot);
         self.next_slot += 1;
         let local_idx = self.next_local_idx;

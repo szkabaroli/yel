@@ -102,11 +102,21 @@ impl<'a> WasmPackageBuilder<'a> {
         // `wasm::functions::emit_function` calls, so both paths
         // produce byte-identical slot orderings + GC val-type
         // resolution.
-        let num_slots = component
+        // Task #105 B2: Temp slots may live on the component (Resource
+        // variant, allocated outside block context) OR on the block
+        // itself (Block variant, allocated inside this block). Both
+        // need wasm locals declared.
+        let num_resource_slots = component
             .slots
             .iter()
             .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
             .count() as u32;
+        let num_block_slots = block
+            .slots
+            .iter()
+            .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
+            .count() as u32;
+        let num_slots = num_resource_slots + num_block_slots;
 
         // If this block contains InitSignal / SignalWriteExpr ops with
         // composite signal types (Option/Result/Variant-with-payload), the
@@ -122,8 +132,16 @@ impl<'a> WasmPackageBuilder<'a> {
         // matching slot-local. Flow uses `skip_params: param_count`
         // because its convention is "Temp slot 0..N IS the wasm
         // param at local 0..N".
+        // Task #105 B2: declare Resource-Temp locals first (sorted by
+        // their component-wide local_idx), then Block-Temp locals
+        // (sorted by per-block local_idx). slot_local's offset math
+        // mirrors this order: Block Temps add `num_resource_slots` to
+        // their local_idx.
         let mut locals =
             self.declare_function_locals(&component.slots, 0, &comp_layout)?;
+        let block_locals =
+            self.declare_function_locals(&block.slots, 0, &comp_layout)?;
+        locals.extend(block_locals);
 
         // Append per-valtype scratch locals for flat-slot signal stores.
         push_valtype_locals(
