@@ -12,7 +12,7 @@ use yel_core::ids::BlockId;
 
 use super::super::CodegenError;
 use super::super::WasmPackageBuilder;
-use super::scratch::{push_valtype_locals, slot_local};
+use super::scratch::{push_valtype_locals, slot_info, slot_local};
 
 impl<'a> WasmPackageBuilder<'a> {
     pub(super) fn generate_block_function(
@@ -80,7 +80,7 @@ impl<'a> WasmPackageBuilder<'a> {
             || Some(block_id) == component.export_mount_block
             || Some(block_id) == component.export_unmount_block;
         let self_ref_param_count: u32 = match block.implicit_self {
-            Some(slot) => match component.slots[slot.legacy_u32() as usize].kind {
+            Some(slot) => match slot_info(slot, block, component).kind {
                 LirSlotKind::WasmParam { .. } => 1,
                 _ => 0,
             },

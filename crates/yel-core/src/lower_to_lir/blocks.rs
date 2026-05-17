@@ -6958,24 +6958,19 @@ pub(crate) fn synth_internal_constructor_block(ctx: &CompilerContext, component:
         return;
     }
 
-    // 1. Allocate the self_ref Temp slot. `declare_function_locals`
-    //    declares locals in local_idx-sorted order; assign the next
-    //    free local_idx so the order stays contiguous.
-    let next_local_idx: u32 = component
-        .slots
-        .iter()
-        .filter_map(|s| match s.kind {
-            LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
-    let self_ref_slot = LirSlotId::resource(component.slots.len() as u32);
-    component.slots.push(LirSlotInfo {
+    // Task #105 B2: synth-pass slot allocations land on the new block's
+    // `slots` vec (Block variant ids, per-block local_idx from 0).
+    let new_block_id = ctx.alloc_block_id();
+    let mut new_block = LirBlock::new(new_block_id);
+
+    // 1. self_ref Temp slot (per-block local_idx 0).
+    let self_ref_slot = LirSlotId::Block {
+        block: new_block_id,
+        idx: new_block.slots.len() as u16,
+    };
+    new_block.slots.push(LirSlotInfo {
         id: self_ref_slot,
-        kind: LirSlotKind::Temp {
-            local_idx: next_local_idx,
-        },
+        kind: LirSlotKind::Temp { local_idx: 0 },
         val_ty: LirSlotValType::RefNullForComponent(component.def_id),
         name: None,
     });
@@ -7001,31 +6996,14 @@ pub(crate) fn synth_internal_constructor_block(ctx: &CompilerContext, component:
         }
     }
 
-    // 4. Phase 1.1c-g: call into the user constructor_block as a
-    //    real wasm function, forwarding the freshly-allocated
-    //    self_ref. The user ctor's wasm sig is
-    //    `[SelfRef, LegacyI32] -> ()` (per `ui_block_calling_conv`'s
-    //    fallback for blocks with no `params` / `boundary_params`);
-    //    we therefore push self_ref + a dummy parent i32 as args.
-    //    No clone — the user ctor body runs against its own wasm
-    //    locals, so any future inline of `InitSignal` →
-    //    `StructSetSym{rec: WasmParam{idx:0}}` resolves to the same
-    //    self-ref the caller passed.
-    let dummy_parent_local_idx: u32 = component
-        .slots
-        .iter()
-        .filter_map(|s| match s.kind {
-            LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
-    let dummy_parent_slot = LirSlotId::resource(component.slots.len() as u32);
-    component.slots.push(LirSlotInfo {
+    // 4. Phase 1.1c-g: call into the user constructor_block.
+    let dummy_parent_slot = LirSlotId::Block {
+        block: new_block_id,
+        idx: new_block.slots.len() as u16,
+    };
+    new_block.slots.push(LirSlotInfo {
         id: dummy_parent_slot,
-        kind: LirSlotKind::Temp {
-            local_idx: dummy_parent_local_idx,
-        },
+        kind: LirSlotKind::Temp { local_idx: 1 },
         val_ty: LirSlotValType::I32,
         name: Some("internal_ctor_dummy_parent".to_string()),
     });
@@ -7042,9 +7020,6 @@ pub(crate) fn synth_internal_constructor_block(ctx: &CompilerContext, component:
         }
     }
 
-    // Allocate a module-wide unique BlockId.
-    let new_block_id = ctx.alloc_block_id();
-    let mut new_block = LirBlock::new(new_block_id);
     new_block.ops = ops;
     // Phase 0.3j: self-ref slot is the just-allocated Temp slot that the
     // first `StructNewDefaultSym` op writes into; return_slot makes the
