@@ -45,7 +45,7 @@ wit-component = "0.225"
 wasm-metadata = "0.225"
 wit-encoder = { version = "0.225", features = ["from-parser"] }
 wit-bindgen = "0.51"
-wasmtime = { version = "40", features = ["component-model"] }
+wasmtime = { version = "41", features = ["component-model"] }
 wasmtime-wasi = "40"
 
 # Utilities
