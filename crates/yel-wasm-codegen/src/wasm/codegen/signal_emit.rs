@@ -204,51 +204,6 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(out)
     }
 
-    /// Resolve the destination for one `MountComponent` retention
-    /// store. Returns `Some((target_struct_type_idx, target_struct_local,
-    /// field_idx))` describing where to `struct.set` the fresh child
-    /// ref so the GC keeps it alive. Returns `None` only when the
-    /// caller is outside any retention scope (e.g. globals init) — in
-    /// practice every `MountComponent` site is inside a body that has
-    /// a retention target, but we tolerate `None` rather than panicing
-    /// to make incremental migration safe.
-    ///
-    /// Retention always lives on the surrounding component's
-    /// `$Comp_<comp_idx>`, with `current_self_local` pointing at the
-    /// parent ref.
-    pub(super) fn next_mount_retention_target(
-        &mut self,
-        comp_idx: usize,
-    ) -> Result<Option<(u32, u32, u32)>, CodegenError> {
-        // Parent-component retention.
-        let gc = &self.gc_layouts[comp_idx];
-        let cap = gc.parent_retention_count;
-        let base = match gc.parent_retention_field_base {
-            Some(b) => b,
-            None => return Ok(None),
-        };
-        let struct_ty = gc.component_struct_type_idx.ok_or_else(|| {
-            CodegenError::InvalidIR(
-                "next_mount_retention_target: component has no struct type".into(),
-            )
-        })?;
-        let parent_local = match (self.current_self_local, self.current_self_comp_idx) {
-            (Some(l), Some(ci)) if ci == comp_idx => l,
-            _ => return Ok(None),
-        };
-        let cursor = self.parent_retention_cursor.entry(comp_idx).or_insert(0);
-        if *cursor >= cap {
-            return Err(CodegenError::InvalidIR(format!(
-                "next_mount_retention_target: ran out of parent-retention \
-                 fields on $Comp_<{}> (cap={}, used={})",
-                comp_idx, cap, *cursor
-            )));
-        }
-        let field_idx = base + *cursor;
-        *cursor += 1;
-        Ok(Some((struct_ty, parent_local, field_idx)))
-    }
-
     /// Push the current function's `(ref $Comp_<i>)` self ref onto
     /// the WASM stack. Sources from `current_self_local` — the
     /// per-instance, ref-typed entry-point convention.
@@ -852,35 +807,39 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(())
     }
 
-    /// Resolve a migrated global property to `(struct_type_idx,
-    /// self_global_idx, field_path)` — the inputs every per-block
-    /// emit helper needs. Returns `Err` if the property is not a
-    /// migrated global-block property (caller should fall back to the
-    /// legacy linear-memory path or surface an error).
-    fn resolve_global_struct_target(
+
+    /// Push every ABI slot of a migrated global property onto the
+    /// WASM stack via `global.get $globals_<block>_self; struct.get
+    /// $globals_<block> $field` per slot. Pushes one stack value per
+    /// slot in canonical order (slot 0 first, last on top).
+    /// Resolve a migrated global property to the core wasm global index
+    /// backing each of its storage slots, in canonical (slot 0 first)
+    /// order. The live replacement for `resolve_global_struct_target`'s
+    /// `(struct_ty, self_global, field_path)`.
+    pub(crate) fn resolve_global_core_globals(
         &self,
         prop_def_id: DefId,
-    ) -> Result<(u32, u32, Vec<u32>), CodegenError> {
+    ) -> Result<Vec<u32>, CodegenError> {
         let block_id = self
             .ctx
             .defs
             .owning_global_block(prop_def_id)
             .ok_or_else(|| {
                 CodegenError::InvalidIR(format!(
-                    "global struct emit: DefId {:?} is not a global-block property",
+                    "global core-global resolve: DefId {:?} is not a global-block property",
                     prop_def_id
                 ))
             })?;
         let &layout_idx = self.global_block_def_to_idx.get(&block_id).ok_or_else(|| {
             CodegenError::InvalidIR(format!(
-                "global struct emit: no globals layout for block {:?}",
+                "global core-global resolve: no globals layout for block {:?}",
                 block_id
             ))
         })?;
         let layout = &self.globals_layouts[layout_idx];
         let block = self.ctx.defs.as_global(block_id).ok_or_else(|| {
             CodegenError::InvalidIR(format!(
-                "global struct emit: block {:?} is not a GlobalDef",
+                "global core-global resolve: block {:?} is not a GlobalDef",
                 block_id
             ))
         })?;
@@ -890,48 +849,36 @@ impl<'a> WasmPackageBuilder<'a> {
             .position(|&p| p == prop_def_id)
             .ok_or_else(|| {
                 CodegenError::InvalidIR(format!(
-                    "global struct emit: property {:?} not found in block {:?}",
+                    "global core-global resolve: property {:?} not in block {:?}",
                     prop_def_id, block_id
                 ))
             })?;
-        let field_path = layout
-            .property_field_paths
-            .get(prop_pos)
-            .cloned()
-            .ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "global struct emit: no field path for property {:?} (pos {})",
-                    prop_def_id, prop_pos
-                ))
-            })?;
+        let field_path = layout.property_field_paths.get(prop_pos).ok_or_else(|| {
+            CodegenError::InvalidIR(format!(
+                "global core-global resolve: no field path for property {:?} (pos {})",
+                prop_def_id, prop_pos
+            ))
+        })?;
         if field_path.is_empty() {
             return Err(CodegenError::InvalidIR(format!(
-                "global struct emit: property {:?} is pointer-typed (legacy memory path); \
-                 callers must dispatch on global_in_struct before invoking struct helpers",
+                "global core-global resolve: property {:?} is pointer-typed (legacy memory path)",
                 prop_def_id
             )));
         }
-        Ok((layout.struct_type_idx, layout.self_global_idx, field_path))
+        Ok(field_path
+            .iter()
+            .map(|&f| layout.field_core_globals[f as usize])
+            .collect())
     }
 
-    /// Push every ABI slot of a migrated global property onto the
-    /// WASM stack via `global.get $globals_<block>_self; struct.get
-    /// $globals_<block> $field` per slot. Pushes one stack value per
-    /// slot in canonical order (slot 0 first, last on top).
     pub(crate) fn emit_global_struct_read(
         &self,
         func: &mut Function,
         prop_def_id: DefId,
     ) -> Result<(), CodegenError> {
-        let (struct_ty, self_global, field_path) =
-            self.resolve_global_struct_target(prop_def_id)?;
-        for &field_idx in &field_path {
-            func.instruction(&Instruction::GlobalGet(self_global));
-            func.instruction(&Instruction::RefAsNonNull);
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: struct_ty,
-                field_index: field_idx,
-            });
+        let core_globals = self.resolve_global_core_globals(prop_def_id)?;
+        for &g in &core_globals {
+            func.instruction(&Instruction::GlobalGet(g));
         }
         Ok(())
     }
@@ -950,14 +897,14 @@ impl<'a> WasmPackageBuilder<'a> {
         layout: &MemoryLayout,
         scratch: crate::wasm::FlatScratchBases,
     ) -> Result<(), CodegenError> {
-        let (struct_ty, self_global, field_path) =
-            self.resolve_global_struct_target(prop_def_id)?;
+        let _ = scratch;
+        let core_globals = self.resolve_global_core_globals(prop_def_id)?;
         let slot_valtypes = self.signal_storage_valtypes(expr.ty);
-        if slot_valtypes.len() != field_path.len() {
+        if slot_valtypes.len() != core_globals.len() {
             return Err(CodegenError::InvalidIR(format!(
-                "emit_global_struct_store_from_expr: storage valtypes ({}) disagree with field path ({}) for property {:?}",
+                "emit_global_struct_store_from_expr: storage valtypes ({}) disagree with core globals ({}) for property {:?}",
                 slot_valtypes.len(),
-                field_path.len(),
+                core_globals.len(),
                 prop_def_id,
             )));
         }
@@ -966,31 +913,12 @@ impl<'a> WasmPackageBuilder<'a> {
             self.emit_expr(func, expr, component, layout)?;
             return Ok(());
         }
-        if slot_valtypes.len() == 1 {
-            func.instruction(&Instruction::GlobalGet(self_global));
-            func.instruction(&Instruction::RefAsNonNull);
-            self.emit_expr(func, expr, component, layout)?;
-            func.instruction(&Instruction::StructSet {
-                struct_type_index: struct_ty,
-                field_index: field_path[0],
-            });
-            return Ok(());
-        }
-        // Multi-slot: emit pushes N values; spill to typed scratch
-        // locals; replay one struct.set per slot in ascending order.
+        // Emit the value expr (pushes N slots, slot 0 deepest / slot N-1
+        // on top), then `global.set` each slot in reverse so the top of
+        // stack lands in the last field — no scratch spill needed.
         self.emit_expr(func, expr, component, layout)?;
-        let locals = Self::signal_struct_slot_locals(&slot_valtypes, &scratch)?;
-        for i in (0..slot_valtypes.len()).rev() {
-            func.instruction(&Instruction::LocalSet(locals[i]));
-        }
-        for i in 0..slot_valtypes.len() {
-            func.instruction(&Instruction::GlobalGet(self_global));
-            func.instruction(&Instruction::RefAsNonNull);
-            func.instruction(&Instruction::LocalGet(locals[i]));
-            func.instruction(&Instruction::StructSet {
-                struct_type_index: struct_ty,
-                field_index: field_path[i],
-            });
+        for i in (0..core_globals.len()).rev() {
+            func.instruction(&Instruction::GlobalSet(core_globals[i]));
         }
         Ok(())
     }
@@ -1007,17 +935,11 @@ impl<'a> WasmPackageBuilder<'a> {
         value_slot: yel_core::lir::block::LirSlotId,
         local_offset: u32,
     ) -> Result<(), CodegenError> {
-        let (struct_ty, self_global, field_path) =
-            self.resolve_global_struct_target(prop_def_id)?;
+        let core_globals = self.resolve_global_core_globals(prop_def_id)?;
         let base_local = slot_local(component, block, value_slot, local_offset);
-        for (i, &field_idx) in field_path.iter().enumerate() {
-            func.instruction(&Instruction::GlobalGet(self_global));
-            func.instruction(&Instruction::RefAsNonNull);
+        for (i, &g) in core_globals.iter().enumerate() {
             func.instruction(&Instruction::LocalGet(base_local + i as u32));
-            func.instruction(&Instruction::StructSet {
-                struct_type_index: struct_ty,
-                field_index: field_idx,
-            });
+            func.instruction(&Instruction::GlobalSet(g));
         }
         Ok(())
     }

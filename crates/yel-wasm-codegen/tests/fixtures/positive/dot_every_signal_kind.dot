@@ -3,29 +3,29 @@ digraph yel_signal_graph {
   compound=true;
   node [fontname="Helvetica", fontsize=10];
   edge [fontname="Helvetica", fontsize=9];
-  subgraph cluster_global_409 {
+  subgraph cluster_global_459 {
     label="global Store";
     style="rounded,dashed";
     color="#b56576";
-    "global_sig_410" [shape=ellipse, style="filled,dashed", fillcolor="#fce4ec", label="counter\n: s32", class="yel-signal-global"];
+    "global_sig_460" [shape=ellipse, style="filled,dashed", fillcolor="#fce4ec", label="counter\n: s32", class="yel-signal-global"];
   }
-  subgraph cluster_global_412 {
+  subgraph cluster_global_462 {
     label="global Prefs";
     style="rounded,dashed";
     color="#b56576";
-    "global_sig_413" [shape=ellipse, style="filled,dashed", fillcolor="#fce4ec", label="theme\n: string", class="yel-signal-global"];
+    "global_sig_463" [shape=ellipse, style="filled,dashed", fillcolor="#fce4ec", label="theme\n: string", class="yel-signal-global"];
   }
   subgraph cluster_c0 {
     label="component Counter";
     style=rounded;
     color="#888";
-    "c0_sig_415" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="label\n: string", class="yel-signal"];
-    "c0_eff_0" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 0\nupdate-b0-s410 #3", class="yel-effect"];
-    "global_sig_410" -> "c0_eff_0" [label="reads", color="#3366cc", class="yel-reads"];
+    "c0_sig_465" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="label\n: string", class="yel-signal"];
+    "c0_eff_0" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 0\nupdate-b0-s460 #3", class="yel-effect"];
+    "global_sig_460" -> "c0_eff_0" [label="reads", color="#3366cc", class="yel-reads"];
     "c0_blk3_dom0" [shape=oval, style=filled, fillcolor="#e8f5e9", label="set text", class="yel-domsink"];
     "c0_eff_0" -> "c0_blk3_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
-    "c0_eff_1" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 1\nupdate-b0-s410 #3", class="yel-effect"];
-    "c0_sig_415" -> "c0_eff_1" [label="reads", color="#3366cc", class="yel-reads"];
+    "c0_eff_1" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 1\nupdate-b0-s460 #3", class="yel-effect"];
+    "c0_sig_465" -> "c0_eff_1" [label="reads", color="#3366cc", class="yel-reads"];
     "c0_blk3_dom0" [shape=oval, style=filled, fillcolor="#e8f5e9", label="set text", class="yel-domsink"];
     "c0_eff_1" -> "c0_blk3_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
     "c0_elem_3" [shape=box, style="filled", fillcolor="#e0f7fa", label="Button #3", class="yel-element"];
@@ -36,17 +36,17 @@ digraph yel_signal_graph {
     label="component App (export)";
     style=rounded;
     color="#888";
-    "c1_sig_417" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="count\n: s32", class="yel-signal"];
-    "c1_sig_418" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="ratio\n: f32", class="yel-signal"];
-    "c1_sig_419" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="flag\n: bool", class="yel-signal"];
-    "c1_sig_420" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="name\n: string", class="yel-signal"];
-    "c1_sig_421" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="maybe\n: option<s32>", class="yel-signal"];
-    "c1_sig_422" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="status\n: Status", class="yel-signal"];
-    "c1_sig_423" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="point\n: Point", class="yel-signal"];
-    "c1_sig_424" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="tags\n: list<string>", class="yel-signal"];
-    "c1_sig_425" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="outcome\n: result<s32, string>", class="yel-signal"];
-    "c1_eff_0" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 0\nupdate-b0-s419 #25", class="yel-effect"];
-    "c1_sig_419" -> "c1_eff_0" [label="reads", color="#3366cc", class="yel-reads"];
+    "c1_sig_467" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="count\n: s32", class="yel-signal"];
+    "c1_sig_468" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="ratio\n: f32", class="yel-signal"];
+    "c1_sig_469" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="flag\n: bool", class="yel-signal"];
+    "c1_sig_470" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="name\n: string", class="yel-signal"];
+    "c1_sig_471" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="maybe\n: option<s32>", class="yel-signal"];
+    "c1_sig_472" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="status\n: Status", class="yel-signal"];
+    "c1_sig_473" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="point\n: Point", class="yel-signal"];
+    "c1_sig_474" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="tags\n: list<string>", class="yel-signal"];
+    "c1_sig_475" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="outcome\n: result<s32, string>", class="yel-signal"];
+    "c1_eff_0" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 0\nupdate-b0-s469 #25", class="yel-effect"];
+    "c1_sig_469" -> "c1_eff_0" [label="reads", color="#3366cc", class="yel-reads"];
     "c1_blk25_dom0" [shape=oval, style=filled, fillcolor="#e8f5e9", label="attr", class="yel-domsink"];
     "c1_eff_0" -> "c1_blk25_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
     "c1_fn_14" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="if-update-b0 #14\nb0:root", class="yel-fn"];
@@ -71,8 +71,8 @@ digraph yel_signal_graph {
     "c1_fn_12" -> "c1_blk12_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
     "c1_blk12_dom1" [shape=oval, style=filled, fillcolor="#e8f5e9", label="create text", class="yel-domsink"];
     "c1_fn_12" -> "c1_blk12_dom1" [label="updates", color="#2e7d32", class="yel-updates"];
-    "c1_eff_1" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 1\nupdate-b0-s424 #27", class="yel-effect"];
-    "c1_sig_424" -> "c1_eff_1" [label="reads", color="#3366cc", class="yel-reads"];
+    "c1_eff_1" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 1\nupdate-b0-s474 #27", class="yel-effect"];
+    "c1_sig_474" -> "c1_eff_1" [label="reads", color="#3366cc", class="yel-reads"];
     "c1_fn_17" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="for-update #17", class="yel-fn"];
     "c1_eff_1" -> "c1_fn_17" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c1_fn_16" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="for-item-unmount #16\nremove dom", class="yel-fn"];
@@ -85,16 +85,16 @@ digraph yel_signal_graph {
     "c1_fn_15" -> "c1_blk15_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
     "c1_blk15_dom1" [shape=oval, style=filled, fillcolor="#e8f5e9", label="create text", class="yel-domsink"];
     "c1_fn_15" -> "c1_blk15_dom1" [label="updates", color="#2e7d32", class="yel-updates"];
-    "c1_eff_2" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 2\nupdate-b0-s413 #23", class="yel-effect"];
-    "global_sig_413" -> "c1_eff_2" [label="reads", color="#3366cc", class="yel-reads"];
+    "c1_eff_2" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 2\nupdate-b0-s463 #23", class="yel-effect"];
+    "global_sig_463" -> "c1_eff_2" [label="reads", color="#3366cc", class="yel-reads"];
     "c1_blk23_dom0" [shape=oval, style=filled, fillcolor="#e8f5e9", label="set text", class="yel-domsink"];
     "c1_eff_2" -> "c1_blk23_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
-    "c1_eff_3" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 3\nupdate-b0-s413 #23", class="yel-effect"];
-    "c1_sig_417" -> "c1_eff_3" [label="reads", color="#3366cc", class="yel-reads"];
+    "c1_eff_3" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 3\nupdate-b0-s463 #23", class="yel-effect"];
+    "c1_sig_467" -> "c1_eff_3" [label="reads", color="#3366cc", class="yel-reads"];
     "c1_blk23_dom0" [shape=oval, style=filled, fillcolor="#e8f5e9", label="set text", class="yel-domsink"];
     "c1_eff_3" -> "c1_blk23_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
-    "c1_eff_4" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 4\nupdate-b0-s413 #23", class="yel-effect"];
-    "c1_sig_420" -> "c1_eff_4" [label="reads", color="#3366cc", class="yel-reads"];
+    "c1_eff_4" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 4\nupdate-b0-s463 #23", class="yel-effect"];
+    "c1_sig_470" -> "c1_eff_4" [label="reads", color="#3366cc", class="yel-reads"];
     "c1_blk23_dom0" [shape=oval, style=filled, fillcolor="#e8f5e9", label="set text", class="yel-domsink"];
     "c1_eff_4" -> "c1_blk23_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
     "c1_elem_3" [shape=box, style="filled", fillcolor="#e0f7fa", label="Text #3", class="yel-element"];
@@ -103,7 +103,7 @@ digraph yel_signal_graph {
     "c1_elem_15" [shape=box, style="filled", fillcolor="#e0f7fa", label="Button #15", class="yel-element"];
     "c1_handler_0" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on clicked", class="yel-handler"];
     "c1_elem_13" -> "c1_handler_0" [label="fires", color="#7e57c2", class="yel-fires"];
-    "c1_fn_23" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="update-b0-s413 #23\nb0:root, set text", class="yel-fn"];
+    "c1_fn_23" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="update-b0-s463 #23\nb0:root, set text", class="yel-fn"];
     "c1_handler_0" -> "c1_fn_23" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c1_blk23_dom0" [shape=oval, style=filled, fillcolor="#e8f5e9", label="set text", class="yel-domsink"];
     "c1_fn_23" -> "c1_blk23_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
@@ -112,7 +112,7 @@ digraph yel_signal_graph {
     "c1_handler_1" -> "c1_fn_23" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c1_handler_2" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on pressed", class="yel-handler"];
     "c1_elem_13" -> "c1_handler_2" [label="fires", color="#7e57c2", class="yel-fires"];
-    "c1_handler_2" -> "c1_sig_422" [label="writes", color="#cc3333", class="yel-writes"];
+    "c1_handler_2" -> "c1_sig_472" [label="writes", color="#cc3333", class="yel-writes"];
     "c1_handler_3" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on hovered", class="yel-handler"];
     "c1_elem_13" -> "c1_handler_3" [label="fires", color="#7e57c2", class="yel-fires"];
     "c1_handler_4" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on clicked", class="yel-handler"];

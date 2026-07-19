@@ -12,7 +12,7 @@ use crate::source::Span;
 use crate::types::Ty;
 
 use super::arena::{LirComponentArena, LirExprArena, LirSlotArena, LirStringArena};
-use super::block::{LirBlock, LirBlockEffect, LirSlotId, LirSlotInfo, StringId, ExprId};
+use super::block::{LirBlock, LirBlockEffect, LirSlotId, LirSlotInfo, StringId, LirExprId};
 use super::expr::{LirExpr, LirStatement};
 use super::signal::LirSignal;
 use super::signal_layout::SignalLayout;
@@ -47,7 +47,7 @@ pub struct InternalLifecycleScratch {
 }
 
 impl LirExprArena for LirResource {
-    fn expr(&self, id: ExprId) -> &LirExpr {
+    fn expr(&self, id: LirExprId) -> &LirExpr {
         &self.exprs[id.0 as usize]
     }
 }
@@ -91,7 +91,7 @@ impl LirComponentArena for LirResource {
 /// - UI operations are explicit instructions (LirOp in blocks)
 /// - Branches become separate blocks with mount/unmount operations
 /// - Storage is pre-allocated (SlotId for temps and memory)
-/// - Strings and expressions are interned (StringId, ExprId)
+/// - Strings and expressions are interned (StringId, LirExprId)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LirResource {
     /// DefId of this component.
@@ -269,7 +269,7 @@ impl LirResource {
     }
 
     /// Get an expression by its ID.
-    pub fn get_expr(&self, id: ExprId) -> &LirExpr {
+    pub fn get_expr(&self, id: LirExprId) -> &LirExpr {
         &self.exprs[id.0 as usize]
     }
 
@@ -282,11 +282,10 @@ impl LirResource {
     /// scan when the fast-path index doesn't match.
     pub fn get_block(&self, id: BlockId) -> &LirBlock {
         let idx = id.0 as usize;
-        if let Some(b) = self.blocks.get(idx) {
-            if b.id == id {
+        if let Some(b) = self.blocks.get(idx)
+            && b.id == id {
                 return b;
             }
-        }
         self.blocks
             .iter()
             .find(|b| b.id == id)

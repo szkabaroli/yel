@@ -674,7 +674,7 @@ pub enum BinaryOp {
 }
 
 impl BinaryOp {
-    fn to_str(&self) -> &'static str {
+    fn to_str(self) -> &'static str {
         match self {
             BinaryOp::Add => "+",
             BinaryOp::Sub => "-",
@@ -700,7 +700,7 @@ pub enum UnaryOp {
 }
 
 impl UnaryOp {
-    fn to_str(&self) -> &'static str {
+    fn to_str(self) -> &'static str {
         match self {
             UnaryOp::Neg => "-",
             UnaryOp::Not => "!",
@@ -845,7 +845,7 @@ pub enum CompoundOp {
 }
 
 impl CompoundOp {
-    fn to_str(&self) -> &'static str {
+    fn to_str(self) -> &'static str {
         match self {
             CompoundOp::AddAssign => "+=",
             CompoundOp::SubAssign => "-=",
@@ -1462,24 +1462,6 @@ impl GenerationContext {
         })
     }
 
-    fn arbitrary_binding_name(&self, u: &mut Unstructured) -> Result<String> {
-        let names = [
-            "padding",
-            "gap",
-            "width",
-            "height",
-            "color",
-            "background",
-            "enabled",
-        ];
-        Ok(names[u.int_in_range(0..=names.len() - 1)?].to_string())
-    }
-
-    fn arbitrary_handler_name(&self, u: &mut Unstructured) -> Result<String> {
-        let names = ["clicked", "pressed", "hovered", "changed"];
-        Ok(names[u.int_in_range(0..=names.len() - 1)?].to_string())
-    }
-
     fn arbitrary_statement(&mut self, u: &mut Unstructured) -> Result<Statement> {
         self.arbitrary_statement_with_depth(u, 0)
     }
@@ -1552,8 +1534,8 @@ impl GenerationContext {
             .map(|(n, t)| (n.clone(), t.clone()));
 
         // 30% chance to use compound assignment if we have a numeric property
-        if let Some((name, ty)) = numeric_prop {
-            if u.int_in_range(0..=9)? < 3 {
+        if let Some((name, ty)) = numeric_prop
+            && u.int_in_range(0..=9)? < 3 {
                 let op = match u.int_in_range(0..=3)? {
                     0 => CompoundOp::AddAssign,
                     1 => CompoundOp::SubAssign,
@@ -1567,7 +1549,6 @@ impl GenerationContext {
                     value,
                 });
             }
-        }
 
         // Regular assignment to any property
         let prop = self
@@ -1587,10 +1568,6 @@ impl GenerationContext {
         }
     }
 
-    fn arbitrary_expr(&mut self, u: &mut Unstructured, depth: usize) -> Result<Expr> {
-        self.arbitrary_expr_of_type(u, &TypeRef::S32, depth)
-    }
-
     /// Generate an expression of a specific type (key for semantic validity).
     fn arbitrary_expr_of_type(
         &mut self,
@@ -1603,11 +1580,10 @@ impl GenerationContext {
         }
 
         // Prefer variables of matching type
-        if let Some((name, _)) = self.properties.iter().find(|(_, t)| *t == ty) {
-            if u.arbitrary::<bool>()? {
+        if let Some((name, _)) = self.properties.iter().find(|(_, t)| *t == ty)
+            && u.arbitrary::<bool>()? {
                 return Ok(Expr::Var(name.clone()));
             }
-        }
 
         // 10% chance to generate ternary expression for simple non-string types
         // (String ternaries cause quote conflicts in interpolation contexts)
@@ -1657,8 +1633,8 @@ impl GenerationContext {
         }
 
         // 10% chance to generate field access (record.field or record.field.subfield)
-        if u.int_in_range(0..=9)? == 0 {
-            if let Some((prop_name, fields)) = self.find_chained_field_access(ty) {
+        if u.int_in_range(0..=9)? == 0
+            && let Some((prop_name, fields)) = self.find_chained_field_access(ty) {
                 // Build the chained field access expression
                 let mut expr = Expr::Var(prop_name);
                 for field in fields {
@@ -1669,7 +1645,6 @@ impl GenerationContext {
                 }
                 return Ok(expr);
             }
-        }
 
         // NOTE: Removed closure generation here - closures should only be used
         // in specific contexts like filter/map predicates, not as standalone expressions
@@ -1966,7 +1941,6 @@ impl GenerationContext {
                 // Fallback
                 Ok(Expr::Int(0))
             }
-            _ => self.arbitrary_literal_of_type(u, ty),
         }
     }
 
@@ -2041,16 +2015,14 @@ impl GenerationContext {
     /// Find a property of type option<RecordName> where the record has a field of the given type.
     fn find_option_record_prop_with_field(&self, inner_ty: &TypeRef) -> Option<(String, String)> {
         for (prop_name, prop_ty) in &self.properties {
-            if let TypeRef::Option(inner) = prop_ty {
-                if let TypeRef::Named(record_name) = inner.as_ref() {
+            if let TypeRef::Option(inner) = prop_ty
+                && let TypeRef::Named(record_name) = inner.as_ref() {
                     // Check if this record has a field of the target type
-                    if let Some(fields) = self.records.get(record_name) {
-                        if fields.iter().any(|(_, fty)| fty == inner_ty) {
+                    if let Some(fields) = self.records.get(record_name)
+                        && fields.iter().any(|(_, fty)| fty == inner_ty) {
                             return Some((prop_name.clone(), record_name.clone()));
                         }
-                    }
                 }
-            }
         }
         None
     }
@@ -2071,11 +2043,10 @@ impl GenerationContext {
     /// Returns (property_name, field_name) if found.
     fn find_record_prop_with_field(&self, target_ty: &TypeRef) -> Option<(String, String)> {
         for (prop_name, prop_ty) in &self.properties {
-            if let TypeRef::Named(record_name) = prop_ty {
-                if let Some(field_name) = self.find_record_field_of_type(record_name, target_ty) {
+            if let TypeRef::Named(record_name) = prop_ty
+                && let Some(field_name) = self.find_record_field_of_type(record_name, target_ty) {
                     return Some((prop_name.clone(), field_name));
                 }
-            }
         }
         None
     }
@@ -2091,12 +2062,12 @@ impl GenerationContext {
 
         // Try depth 2: property -> field (record) -> subfield
         for (prop_name, prop_ty) in &self.properties {
-            if let TypeRef::Named(record_name) = prop_ty {
-                if let Some(fields) = self.records.get(record_name).cloned() {
+            if let TypeRef::Named(record_name) = prop_ty
+                && let Some(fields) = self.records.get(record_name).cloned() {
                     for (field_name, field_ty) in &fields {
                         // Check if field_ty is a record with a subfield of target type
-                        if let TypeRef::Named(nested_record_name) = field_ty {
-                            if let Some(subfield_name) =
+                        if let TypeRef::Named(nested_record_name) = field_ty
+                            && let Some(subfield_name) =
                                 self.find_record_field_of_type(nested_record_name, target_ty)
                             {
                                 return Some((
@@ -2104,10 +2075,8 @@ impl GenerationContext {
                                     vec![field_name.clone(), subfield_name],
                                 ));
                             }
-                        }
                     }
                 }
-            }
         }
         None
     }
@@ -2165,14 +2134,19 @@ mod tests {
             source
         );
 
-        for hir in &hir_components {
-            let thir = compiler.type_check(hir);
+        for item in &hir_components {
+            let thir_item = compiler.type_check(item);
             assert!(
                 !compiler.has_errors(),
                 "Type errors: {}\nSource:\n{}",
                 compiler.render_diagnostics(),
                 source
             );
+            // The fuzzer exercises component codegen; globals carry no
+            // body to lower on this per-item path.
+            let yel_core::thir::ThirItem::Component(thir) = thir_item else {
+                continue;
+            };
 
             let lir = compiler.lower_to_lir(&thir);
             let ctx = compiler.context();

@@ -8,7 +8,6 @@ use crate::source::Span;
 use crate::types::Ty;
 
 use super::expr::{ThirExpr, ThirStatement};
-use super::signalck::SignalDependencies;
 
 /// A THIR component definition.
 #[derive(Debug, Clone)]
@@ -28,11 +27,6 @@ pub struct ThirComponent {
     pub signal_defaults: HashMap<DefId, ThirExpr>,
     /// UI tree body.
     pub body: Vec<ThirNode>,
-    /// Phase 1.1c-b: per-component signal dependency analysis,
-    /// produced by `thir::signalck::check_component` after typeck.
-    /// Defaulted to empty if signalck hasn't been run yet — LIR
-    /// lowering may rely on it being populated.
-    pub signal_deps: SignalDependencies,
 }
 
 /// A THIR global-singleton definition.
@@ -40,10 +34,11 @@ pub struct ThirComponent {
 /// Phase 1.1c-k: globals are modelled as "singleton ThirComponents" so the
 /// same type-checked + signalck'd contract that drives component lowering
 /// also drives global lowering. Globals carry only the subset that applies:
-/// signals (properties) and their type-checked default expressions, plus
-/// the [`SignalDependencies`] produced by [`super::signalck`]. They have no
-/// UI body, no handlers, no mount/effects on DOM — derived-signal fanout
-/// is the only effect surface, and lives inside `signal_deps`.
+/// signals (properties) and their type-checked default expressions. The
+/// signal-dependency analysis produced by [`super::signalck`] lives in the
+/// `CompilerContext` side table (keyed by this global's `DefId`), not on this
+/// node. Globals have no UI body, no handlers, no mount/effects on DOM —
+/// derived-signal fanout is the only effect surface.
 #[derive(Debug, Clone)]
 pub struct ThirGlobal {
     /// DefId of this global.
@@ -62,11 +57,34 @@ pub struct ThirGlobal {
     /// Type-checked default expressions per signal. Same shape as
     /// `ThirComponent::signal_defaults`.
     pub signal_defaults: HashMap<DefId, ThirExpr>,
-    /// Per-derived-signal dependency analysis produced by
-    /// [`super::signalck::check_global`]. `binding_reads` and
-    /// `handler_writes` stay empty for globals — only
-    /// `derived_signal_reads` and `effects_by_signal` are populated.
-    pub signal_deps: SignalDependencies,
+}
+
+/// A type-checked top-level compilation unit — the THIR counterpart of
+/// [`crate::hir::HirItem`]. One `type_check` entry produces these, so the
+/// driver iterates a single item list instead of running components and
+/// globals through separate phases.
+#[derive(Debug, Clone)]
+pub enum ThirItem {
+    Component(ThirComponent),
+    Global(ThirGlobal),
+}
+
+impl ThirItem {
+    /// The component, if this item is one.
+    pub fn as_component(&self) -> Option<&ThirComponent> {
+        match self {
+            ThirItem::Component(c) => Some(c),
+            ThirItem::Global(_) => None,
+        }
+    }
+
+    /// Consume the item, yielding the component if it is one.
+    pub fn into_component(self) -> Option<ThirComponent> {
+        match self {
+            ThirItem::Component(c) => Some(c),
+            ThirItem::Global(_) => None,
+        }
+    }
 }
 
 /// A THIR UI node.

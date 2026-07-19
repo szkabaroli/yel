@@ -30,8 +30,8 @@ pub fn lookup_known_definitions(ctx: &mut CompilerContext) {
     // Pre-allocate DefIds for the `meshx-ui/dom` WIT imports. Phase 2.2
     // will lower UI-specific LirOps to `LirOp::CallFunction` against
     // these DefIds; codegen maps them back to wasm import indices.
-    let dom_imports = register_dom_imports(ctx);
-    ctx.set_dom_imports(dom_imports);
+    let dom_global = register_dom_imports(ctx);
+    ctx.set_dom_global(dom_global);
 }
 
 fn register_builtin_types(ctx: &mut CompilerContext) {
@@ -194,6 +194,48 @@ fn register_builtin_variants(ctx: &mut CompilerContext) {
             ("image", None),
         ],
     ));
+
+    // AttributeValue: the `set-attribute` value type from `yel:ui/dom`.
+    // 14 cases in WIT order; the `color` case reuses the builtin `Color`
+    // variant. Its canonical-ABI flattening
+    // (`[i32 discrim, i64, i32, i32, i32, i32]`) is exactly what the DOM
+    // `set-attribute` import signature requires.
+    let s8 = ctx.types.intern(InternedTyKind::S8);
+    let s16 = ctx.types.intern(InternedTyKind::S16);
+    let s32 = ctx.types.intern(InternedTyKind::S32);
+    let s64 = ctx.types.intern(InternedTyKind::S64);
+    let u8t = ctx.types.intern(InternedTyKind::U8);
+    let u16 = ctx.types.intern(InternedTyKind::U16);
+    let u32t = ctx.types.intern(InternedTyKind::U32);
+    let u64 = ctx.types.intern(InternedTyKind::U64);
+    let f32 = ctx.types.intern(InternedTyKind::F32);
+    let f64 = ctx.types.intern(InternedTyKind::F64);
+    let bool_t = ctx.types.intern(InternedTyKind::Bool);
+    let char_t = ctx.types.intern(InternedTyKind::Char);
+    let string_t = ctx.types.intern(InternedTyKind::String);
+    let attribute_value_def = register_variant(
+        ctx,
+        "AttributeValue",
+        &[
+            ("str", Some(string_t)),
+            ("bool", Some(bool_t)),
+            ("s8", Some(s8)),
+            ("s16", Some(s16)),
+            ("s32", Some(s32)),
+            ("s64", Some(s64)),
+            ("u8", Some(u8t)),
+            ("u16", Some(u16)),
+            ("u32", Some(u32t)),
+            ("u64", Some(u64)),
+            ("f32", Some(f32)),
+            ("f64", Some(f64)),
+            ("char", Some(char_t)),
+            ("color", Some(color_ty)),
+        ],
+    );
+    let attribute_value_ty = ctx.types.intern_adt(attribute_value_def);
+    ctx.known.variants.attribute_value = Some(attribute_value_def);
+    ctx.known.variants.attribute_value_ty = Some(attribute_value_ty);
 }
 
 fn register_builtin_functions(ctx: &mut CompilerContext) {

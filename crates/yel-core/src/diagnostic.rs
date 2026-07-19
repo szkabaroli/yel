@@ -11,13 +11,117 @@ pub enum Severity {
     Note,
 }
 
+/// Stable diagnostic codes.
+///
+/// The `E####` / `W####` string returned by [`ErrorCode::code`] is the *stable
+/// identity* of a diagnostic: users can search it, docs can cross-reference it,
+/// and tests can assert on it — all while the human-readable message wording
+/// stays free to change. Codes are grouped into bands of ten by category so a
+/// category can grow without renumbering. `W`-prefixed codes are warnings.
+///
+/// When adding a diagnostic, add (or reuse) a variant here rather than emitting
+/// an un-coded error — see the `diag-error-codes` rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCode {
+    // — Type checking —
+    /// Expected one type, found another.
+    TypeMismatch,
+    /// A type could not be inferred and no annotation was given.
+    CannotInferType,
+    /// An integer literal does not fit its declared/expected type.
+    IntLiteralOutOfRange,
+    /// An unknown unit suffix on a literal (e.g. `10xyz`).
+    UnknownUnitSuffix,
+
+    // — Name resolution —
+    /// A name is defined more than once in the same scope.
+    DuplicateDefinition,
+    /// A referenced name/type/function does not resolve to any definition.
+    UnresolvedName,
+    /// No such case in an enum/variant.
+    NoSuchCase,
+    /// No such function/property/method on a value (e.g. a global).
+    NoSuchMember,
+
+    // — Records & fields —
+    /// A required record field is missing from a literal.
+    MissingField,
+    /// A record literal was written where a record type was not expected.
+    NotARecord,
+    /// Field access against a type that has no such field.
+    NoSuchField,
+
+    // — Calls & arity —
+    /// A call/constructor got the wrong number of arguments.
+    WrongArgCount,
+    /// The callee of a call is not a callable form.
+    InvalidCallBase,
+
+    // — Components & structural —
+    /// More than one `@children` slot declared on a component.
+    DuplicateChildrenSlot,
+    /// Child nodes passed to a component that declares no `@children` slot.
+    MissingChildrenSlot,
+    /// A required element/declaration is missing.
+    MissingElement,
+    /// A component instantiates itself.
+    RecursiveInstantiation,
+    /// A malformed two-way `set value:` binding.
+    InvalidValueBinding,
+
+    // — Syntax & driver —
+    /// A parse-level syntax error surfaced from the front-end.
+    SyntaxError,
+    /// A package identifier is not a valid WIT kebab-case name.
+    InvalidPackageName,
+
+    // — Warnings —
+    /// A setter writes a signal that its companion getter also reads.
+    SetterOverwritesGetter,
+}
+
+impl ErrorCode {
+    /// The stable `E####` / `W####` string for this code.
+    pub fn code(self) -> &'static str {
+        match self {
+            ErrorCode::TypeMismatch => "E0001",
+            ErrorCode::CannotInferType => "E0002",
+            ErrorCode::IntLiteralOutOfRange => "E0003",
+            ErrorCode::UnknownUnitSuffix => "E0004",
+            ErrorCode::DuplicateDefinition => "E0010",
+            ErrorCode::UnresolvedName => "E0011",
+            ErrorCode::NoSuchCase => "E0012",
+            ErrorCode::NoSuchMember => "E0013",
+            ErrorCode::MissingField => "E0020",
+            ErrorCode::NotARecord => "E0021",
+            ErrorCode::NoSuchField => "E0022",
+            ErrorCode::WrongArgCount => "E0030",
+            ErrorCode::InvalidCallBase => "E0031",
+            ErrorCode::DuplicateChildrenSlot => "E0040",
+            ErrorCode::MissingChildrenSlot => "E0041",
+            ErrorCode::MissingElement => "E0042",
+            ErrorCode::RecursiveInstantiation => "E0043",
+            ErrorCode::InvalidValueBinding => "E0050",
+            ErrorCode::SyntaxError => "E0060",
+            ErrorCode::InvalidPackageName => "E0070",
+            ErrorCode::SetterOverwritesGetter => "W0001",
+        }
+    }
+}
+
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
 /// A single diagnostic message.
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub severity: Severity,
     pub message: String,
     pub span: Option<Span>,
-    pub code: Option<String>,
+    pub code: Option<ErrorCode>,
     pub notes: Vec<String>,
 }
 
@@ -47,8 +151,8 @@ impl Diagnostic {
         self
     }
 
-    pub fn with_code(mut self, code: impl Into<String>) -> Self {
-        self.code = Some(code.into());
+    pub fn with_code(mut self, code: ErrorCode) -> Self {
+        self.code = Some(code);
         self
     }
 
@@ -75,14 +179,13 @@ impl Diagnostic {
         }
 
         // Source location
-        if let Some(span) = self.span {
-            if let Some(source) = source_map.get(span.source) {
+        if let Some(span) = self.span
+            && let Some(source) = source_map.get(span.source) {
                 let (line, col) = source.line_col(span.start);
                 output.push_str(&format!("  --> {}:{}:{}\n", source.name(), line, col));
                 output.push_str(&source.snippet(line, 1));
                 output.push('\n');
             }
-        }
 
         // Notes
         for note in &self.notes {
@@ -108,12 +211,12 @@ impl Diagnostics {
         self.diagnostics.push(diag);
     }
 
-    pub fn error(&mut self, span: Span, message: impl Into<String>) {
-        self.push(Diagnostic::error(message).with_span(span));
+    pub fn error(&mut self, span: Span, code: ErrorCode, message: impl Into<String>) {
+        self.push(Diagnostic::error(message).with_span(span).with_code(code));
     }
 
-    pub fn warning(&mut self, span: Span, message: impl Into<String>) {
-        self.push(Diagnostic::warning(message).with_span(span));
+    pub fn warning(&mut self, span: Span, code: ErrorCode, message: impl Into<String>) {
+        self.push(Diagnostic::warning(message).with_span(span).with_code(code));
     }
 
     pub fn has_errors(&self) -> bool {

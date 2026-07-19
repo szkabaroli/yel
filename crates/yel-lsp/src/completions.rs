@@ -248,7 +248,7 @@ fn get_contextual_completions(doc: &Document, position: Position) -> Option<Vec<
         }
 
         // User-defined enums
-        if let Some(ref file) = parsed {
+        if let Some(file) = parsed {
             for enum_def in &file.enums {
                 for case in &enum_def.node.cases {
                     if case.node.starts_with(current_word) {
@@ -383,8 +383,8 @@ fn get_property_type(
     // Check user-defined components
     if let Some(file) = parsed {
         for comp in &file.components {
-            if comp.node.name == element {
-                if let Some(prop) = comp
+            if comp.node.name == element
+                && let Some(prop) = comp
                     .node
                     .properties
                     .iter()
@@ -392,7 +392,6 @@ fn get_property_type(
                 {
                     return Some(prop.node.ty.kind.clone());
                 }
-            }
         }
     }
 

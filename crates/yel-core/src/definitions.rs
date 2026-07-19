@@ -1,11 +1,11 @@
 //! Central storage for all definitions in the program.
 
-use crate::ids::{DefId, FieldIdx, VariantIdx};
+use crate::ids::{DefId, FieldIdx, ParamIdx, VariantIdx};
 use crate::index_vec::IndexVec;
 use crate::interner::Name;
 use crate::source::Span;
 use crate::types::Ty;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// All definitions in the compilation unit.
 pub struct Definitions {
@@ -183,7 +183,7 @@ pub struct ParameterDef {
     /// Parameter type.
     pub ty: Ty,
     /// Index within function parameters.
-    pub idx: u32,
+    pub idx: ParamIdx,
 }
 
 /// Intrinsic element type definition.
@@ -257,6 +257,11 @@ pub struct GlobalDef {
     pub property_defaults: Vec<Option<crate::hir::HirExpr>>,
     /// Callback DefIds (imported from host).
     pub callbacks: Vec<DefId>,
+    /// Owning package for this global's interface. `None` = the module's
+    /// own package (the common case for user `global`s). `Some` = a
+    /// foreign package, e.g. the built-in `Dom` global lives in
+    /// `yel:ui` so its imports declare against `yel:ui/dom@…`.
+    pub package: Option<crate::syntax::ast::PackageId>,
 }
 
 impl Default for Definitions {
@@ -269,8 +274,8 @@ impl Definitions {
     pub fn new() -> Self {
         Self {
             items: IndexVec::new(),
-            types: HashMap::new(),
-            names: HashMap::new(),
+            types: HashMap::default(),
+            names: HashMap::default(),
         }
     }
 
@@ -656,11 +661,10 @@ impl Definitions {
     /// against the small set of global blocks; not cached.
     pub fn owning_global_block(&self, prop_def_id: DefId) -> Option<DefId> {
         for block_id in self.globals() {
-            if let Some(g) = self.as_global(block_id) {
-                if g.properties.contains(&prop_def_id) {
+            if let Some(g) = self.as_global(block_id)
+                && g.properties.contains(&prop_def_id) {
                     return Some(block_id);
                 }
-            }
         }
         None
     }
@@ -695,16 +699,26 @@ impl Definitions {
             .copied()
             .find(|&fn_id| self.items[fn_id].name == fn_name)
     }
+
+    /// True if `fn_id` is a callback of some `global` (a freestanding
+    /// host import), as opposed to a component callback (a resource
+    /// method). Codegen uses this to decide whether a `Call` pushes a
+    /// receiver handle: component callbacks do, global callbacks do not.
+    pub fn is_global_callback(&self, fn_id: DefId) -> bool {
+        self.globals().any(|g_id| {
+            self.as_global(g_id)
+                .is_some_and(|g| g.callbacks.contains(&fn_id))
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::interner::Interner;
-    use crate::source::SourceId;
 
     fn dummy_span() -> Span {
-        Span::new(SourceId(0), 0, 0)
+        Span::default()
     }
 
     #[test]

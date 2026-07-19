@@ -31,14 +31,14 @@ fn build_block_func_name(
         s.push_str(&format!("-b{}", bp.0));
     }
     if let Some(sig) = name.signal {
-        s.push_str(&format!("-s{}", sig));
+        s.push_str(&format!("-s{}", sig.index()));
     }
     s.push_str(&format!("#{}", block_id_raw));
     s
 }
 
 use super::super::{
-    ImportLayout, MemoryLayout, NUM_DOM_IMPORTS, WasmPackageBuilder, to_kebab_case, to_wit_name,
+    ImportLayout, MemoryLayout, WasmPackageBuilder, to_kebab_case, to_wit_name,
 };
 
 impl<'a> WasmPackageBuilder<'a> {
@@ -69,44 +69,8 @@ impl<'a> WasmPackageBuilder<'a> {
         // Type names - describe each function type signature
         // =================================================================
         let mut type_names = NameMap::new();
-        type_names.append(0, "type_void_void"); // () -> ()
-        type_names.append(1, "type_i32_void"); // (i32) -> ()
-        type_names.append(2, "type_void_i32"); // () -> i32
-        type_names.append(3, "type_i32_i32_void"); // (i32, i32) -> ()
-        type_names.append(4, "type_i32_i32"); // (i32) -> i32
-        type_names.append(5, "type_i32_i32_i32"); // (i32, i32) -> i32
-        type_names.append(6, "type_i32_i32_i32_void"); // (i32, i32, i32) -> ()
-        type_names.append(7, "type_i32x5_void"); // (i32, i32, i32, i32, i32) -> ()
-        type_names.append(8, "type_i32x4_void"); // (i32, i32, i32, i32) -> ()
-        type_names.append(9, "type_i32x4_i32"); // (i32, i32, i32, i32) -> i32 (realloc)
-        type_names.append(10, "type_i32_f32"); // (i32) -> f32 (getter f32)
-        type_names.append(11, "type_i32_f32_void"); // (i32, f32) -> () (setter f32)
-        type_names.append(12, "type_i32_f64"); // (i32) -> f64 (getter f64)
-        type_names.append(13, "type_i32_f64_void"); // (i32, f64) -> () (setter f64)
-        type_names.append(14, "type_i32_i64"); // (i32) -> i64 (getter i64)
-        type_names.append(15, "type_i32_i64_void"); // (i32, i64) -> ()
-        // Runtime / ad-hoc types declared at module construction time
-        // (build.rs:90-180). Each is the function type of exactly one
-        // runtime fn — naming them here means WAT shows the role at a
-        // glance instead of `(type 17)`.
-        type_names.append(16, "type-i32-to-ptr-len"); // s32_to_string, bool_to_string, load_fat_ptr
-        type_names.append(17, "type-runtime-concat2");
-        type_names.append(18, "type-runtime-concat3");
-        type_names.append(19, "type-runtime-concat4");
-        type_names.append(20, "type-runtime-concat5");
-        type_names.append(21, "type-runtime-concat6");
-        type_names.append(22, "type-runtime-concat7");
-        type_names.append(23, "type-runtime-concat8");
-        type_names.append(24, "type-record-ctor-3"); // 3-field record ctor
-        type_names.append(25, "type-record-ctor-5"); // 5-field record ctor
-        type_names.append(26, "type-runtime-void-i32-i32"); // multi-value if-block result shape
-        type_names.append(27, "type-f32-to-ptr-len"); // f32_to_string
-        type_names.append(28, "type-list-ctor-3");
-        type_names.append(29, "type-list-ctor-2");
-        type_names.append(30, "type-list-ctor-5");
-        type_names.append(31, "type-set-attribute-variant"); // DOM set-attribute import
-        type_names.append(32, "type-promote-ptr-for-variant");
-        type_names.append(33, "type-i64-to-ptr-len"); // s64_to_string (setter i64)
+        // Function-type names come from `intern_type` (applied via
+        // `self.function_type_names` below) — no fixed-index block.
 
         // Module-shared registry-handle types (one pair per module
         // instead of per-component pre-unification).
@@ -213,14 +177,9 @@ impl<'a> WasmPackageBuilder<'a> {
             type_names.append(*idx, name);
         }
 
-        // Per-named-`global`-block GC struct types. Indices come after
-        // every per-component type so monotonic ascending order is
-        // preserved by walking `globals_layouts` in declaration order.
-        for layout in self.globals_layouts.iter() {
-            let block_name = to_kebab_case(&self.ctx.str(self.ctx.defs.name(layout.block_def_id)))
-                .replace('-', "_");
-            type_names.append(layout.struct_type_idx, &format!("{}-global", block_name));
-        }
+        // (Global singletons have no GC struct type — their state lives
+        // in core wasm globals, named in the global-name subsection.)
+
         // Subsection write deferred to end of fn — must be emitted in
         // ascending subsection-id order (1=function, 2=local, 3=label,
         // 4=type, 6=memory, 7=global, 9=data, 10=field). wasm-opt
@@ -252,16 +211,13 @@ impl<'a> WasmPackageBuilder<'a> {
                 global_names.append(g, &format!("{}-current-handle", comp_name));
             }
         }
-        // Per-named-`global`-block self-globals. Indices come after
-        // the per-component handle-registry quadruple, in
-        // `globals_layouts` order — monotonic ascending preserved.
+        // Per-field core wasm globals backing each global block's state.
         for layout in self.globals_layouts.iter() {
             let block_name = to_kebab_case(&self.ctx.str(self.ctx.defs.name(layout.block_def_id)))
                 .replace('-', "_");
-            global_names.append(
-                layout.self_global_idx,
-                &format!("{}-global-self", block_name),
-            );
+            for (field, &g) in layout.field_core_globals.iter().enumerate() {
+                global_names.append(g, &format!("{}-global-{}", block_name, field));
+            }
         }
         // Globals subsection: deferred to end-of-fn ordered emission.
 
@@ -337,40 +293,8 @@ impl<'a> WasmPackageBuilder<'a> {
                 field_names.append(ty_idx, &bnd_fields);
             }
         }
-        // Per-named-`global`-block struct field names. One field name
-        // per migrated property's ABI slot; multi-slot properties get
-        // `<prop>_slot_0`, `<prop>_slot_1` suffixes (mirroring component
-        // signal field naming). Pointer-typed properties have empty
-        // field paths and contribute nothing.
-        for layout in self.globals_layouts.iter() {
-            let block = match self.ctx.defs.as_global(layout.block_def_id) {
-                Some(b) => b,
-                None => continue,
-            };
-            let mut block_fields = NameMap::new();
-            let mut any = false;
-            for (prop_pos, &prop_def_id) in block.properties.iter().enumerate() {
-                let Some(field_path) = layout.property_field_paths.get(prop_pos) else {
-                    continue;
-                };
-                if field_path.is_empty() {
-                    continue;
-                }
-                let prop_name =
-                    to_kebab_case(&self.ctx.str(self.ctx.defs.name(prop_def_id))).replace('-', "_");
-                if field_path.len() == 1 {
-                    block_fields.append(field_path[0], &prop_name);
-                } else {
-                    for (slot_i, &f) in field_path.iter().enumerate() {
-                        block_fields.append(f, &format!("{}_slot_{}", prop_name, slot_i));
-                    }
-                }
-                any = true;
-            }
-            if any {
-                field_names.append(layout.struct_type_idx, &block_fields);
-            }
-        }
+        // (Global singletons have no GC struct, so no struct field names
+        // — their state is core wasm globals, named above.)
         // Fields subsection: deferred to end-of-fn ordered emission.
 
         // =================================================================
@@ -384,41 +308,28 @@ impl<'a> WasmPackageBuilder<'a> {
         // Function names
         // =================================================================
         let mut func_names = NameMap::new();
-        let dom_func_names = [
-            "create-element",
-            "create-text",
-            "create-comment",
-            "set-attribute",
-            "remove-attribute",
-            "set-text-content",
-            "set-style",
-            "set-class",
-            "append-child",
-            "insert-before",
-            "remove-child",
-            "remove",
-            "get-parent",
-            "get-next-sibling",
-            "add-event-listener",
-            "remove-event-listener",
-            "insert-after",
-            "create-fragment",
-        ];
-        for (i, name) in dom_func_names.iter().enumerate() {
-            func_names.append(i as u32, name);
-        }
 
         // Name-section labels must follow the *actual* import emission
-        // order: first every component's callbacks (one per component, in
-        // component order), then one `[resource-new]` per exported
-        // component.
-        let mut import_idx = NUM_DOM_IMPORTS;
+        // order: every component's callbacks (one per component, in
+        // component order), then every global's callbacks (the built-in
+        // `Dom` global's callbacks are named here too, as
+        // `[global-callback]dom.*`), then one `[resource-new]` per
+        // exported component.
+        let mut import_idx = 0u32;
         for &(comp_idx, cb_def_id) in &import_layout.unique_callbacks {
             if let Some(func_def) = self.ctx.defs.as_function(cb_def_id) {
                 let name = to_kebab_case(&self.ctx.str(func_def.name));
                 let owner_comp = &self.components[comp_idx];
                 let comp_kebab = to_kebab_case(&self.ctx.str(owner_comp.name));
                 func_names.append(import_idx, &format!("[callback]{}.{}", comp_kebab, name));
+                import_idx += 1;
+            }
+        }
+        for &(global_id, cb_def_id) in &import_layout.global_callbacks {
+            if let Some(func_def) = self.ctx.defs.as_function(cb_def_id) {
+                let name = to_kebab_case(&self.ctx.str(func_def.name));
+                let global_kebab = to_kebab_case(&self.ctx.str(self.ctx.defs.name(global_id)));
+                func_names.append(import_idx, &format!("[global-callback]{}.{}", global_kebab, name));
                 import_idx += 1;
             }
         }

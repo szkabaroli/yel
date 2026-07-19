@@ -3,7 +3,7 @@
 //!
 //! Background. LIR was born inside the UI compiler, where every block
 //! lives inside a [`crate::lir::node::LirResource`] (one component) and
-//! every `ExprId` / `StringId` indexes into that component's tables.
+//! every `LirExprId` / `StringId` indexes into that component's tables.
 //! Code-gen reaches for `&LirResource` whenever it has to dereference an
 //! id — directly into `resource.exprs[id]` and `resource.strings[id]`.
 //!
@@ -26,7 +26,7 @@ use crate::ids::{BlockId, DefId, LocalId};
 use crate::interner::Name;
 
 use super::block::{
-    ExprId, LirBindingMode, LirBlock, LirOp, LirSlotId, LirSlotInfo, StringId,
+    LirExprId, LirBindingMode, LirBlock, LirOp, LirSlotId, LirSlotInfo, StringId,
 };
 use super::expr::LirExpr;
 use super::function::{CallingConv, FunctionRole};
@@ -38,7 +38,7 @@ use super::struct_types::{LirArrayTypeDecl, LirStructTypeDecl};
 /// different arenas may both hand out the integer `5` and they refer
 /// to different expressions. The arena is the scope.
 pub trait LirExprArena {
-    fn expr(&self, id: ExprId) -> &LirExpr;
+    fn expr(&self, id: LirExprId) -> &LirExpr;
 }
 
 /// Read-only access to an interned-string table. Implementors are

@@ -33,4 +33,4 @@ pub(super) mod signal_emit;
 
 // Re-export helpers used by sibling modules outside `codegen` (e.g.
 // `super::expr` references `mem_arg` and `slot_local`).
-pub(super) use scratch::{mem_arg, slot_local, slot_local_resource_only};
+pub(super) use scratch::{mem_arg, slot_local_resource_only};

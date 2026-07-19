@@ -39,7 +39,9 @@ impl<I: Idx, T> IndexVec<I, T> {
 
     /// Push a value and return its index.
     pub fn push(&mut self, value: T) -> I {
-        let idx = I::new(self.raw.len() as u32);
+        let idx = I::new(
+            u32::try_from(self.raw.len()).expect("IndexVec exceeded u32::MAX entries"),
+        );
         self.raw.push(value);
         idx
     }
@@ -64,6 +66,10 @@ impl<I: Idx, T> IndexVec<I, T> {
         self.raw.iter()
     }
 
+    pub fn as_slice(&self) -> &[T] {
+        &self.raw
+    }
+
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
         self.raw.iter_mut()
     }
@@ -76,7 +82,7 @@ impl<I: Idx, T> IndexVec<I, T> {
     }
 
     pub fn next_idx(&self) -> I {
-        I::new(self.raw.len() as u32)
+        I::new(u32::try_from(self.raw.len()).expect("IndexVec exceeded u32::MAX entries"))
     }
 }
 
@@ -114,6 +120,7 @@ impl_idx!(crate::ids::VariantIdx);
 impl_idx!(crate::ids::LocalId);
 impl_idx!(crate::ids::ExprId);
 impl_idx!(crate::ids::NodeId);
+impl_idx!(crate::ids::InterfaceId);
 
 #[cfg(test)]
 mod tests {

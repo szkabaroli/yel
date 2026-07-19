@@ -37,22 +37,32 @@ fn compile_to_component(source: &str) -> Vec<u8> {
         compiler.render_diagnostics()
     );
     let mut lir_components = Vec::new();
-    for h in &hir {
-        let thir = compiler.type_check(h);
-        assert!(
-            !compiler.has_errors(),
-            "typeck errors:\n{}",
-            compiler.render_diagnostics()
-        );
-        lir_components.push(compiler.lower_to_lir(&thir));
+    let mut global_thir_defaults: std::collections::HashMap<
+        yel_core::DefId,
+        yel_core::thir::ThirExpr,
+    > = std::collections::HashMap::new();
+    for item in &hir {
+        match compiler.type_check(item) {
+            yel_core::thir::ThirItem::Component(thir) => {
+                assert!(
+                    !compiler.has_errors(),
+                    "typeck errors:\n{}",
+                    compiler.render_diagnostics()
+                );
+                lir_components.push(compiler.lower_to_lir(&thir));
+            }
+            yel_core::thir::ThirItem::Global(global) => {
+                assert!(
+                    !compiler.has_errors(),
+                    "global typeck errors:\n{}",
+                    compiler.render_diagnostics()
+                );
+                global_thir_defaults.extend(global.signal_defaults);
+            }
+        }
     }
-    let thir_globals = compiler.type_check_globals();
-    assert!(
-        !compiler.has_errors(),
-        "global typeck errors:\n{}",
-        compiler.render_diagnostics()
-    );
-    let lir_globals = compiler.lower_globals_to_lir(&thir_globals);
+    let (lir_globals, lir_global_default_exprs) =
+        compiler.lower_globals_to_lir(&global_thir_defaults);
 
     let (namespace, name, version) = match file.package {
         Some(ref pkg) => (
@@ -63,9 +73,12 @@ fn compile_to_component(source: &str) -> Vec<u8> {
         None => ("yel".into(), "app".into(), "0.1.0".into()),
     };
 
+    let interfaces = compiler.build_import_interfaces();
     let module = yel_core::lir::LirModule {
-        components: lir_components,
+        resources: lir_components,
         global_defaults: lir_globals.clone(),
+        global_default_exprs: lir_global_default_exprs.clone(),
+        interfaces,
         package: file.package.clone(),
     };
     let opts = codegen::WasmWithWitOptions {
@@ -73,6 +86,7 @@ fn compile_to_component(source: &str) -> Vec<u8> {
         name,
         version,
         global_defaults: lir_globals,
+        global_default_exprs: lir_global_default_exprs,
         wasm_opt_args: None,
     };
     codegen::generate_wasm_module(&module, compiler.context(), &opts).expect("wasm codegen")
@@ -528,11 +542,11 @@ fn module_start_function_seeds_global_defaults() {
          defaults get seeded at instantiation time"
     );
 
-    // Walk the start function's body — after the per-block GC migration,
-    // globals are seeded via `struct.set` into the per-block GC struct
-    // (not via `i32.store` to linear memory). Either op qualifies as
-    // proof that init actually runs. (Previously it was an empty stub
-    // produced by `dummy_module`.)
+    // Walk the start function's body — global singleton state lives in
+    // per-field core wasm globals, so defaults are seeded via
+    // `global.set` (pointer-typed properties that stay in linear memory
+    // seed via `i32.store`). Either op proves init actually runs.
+    // (Previously it was an empty stub produced by `dummy_module`.)
     let start_idx = Parser::new(0)
         .parse_all(&core.bytes)
         .find_map(|p| match p.expect("parse") {
@@ -543,9 +557,9 @@ fn module_start_function_seeds_global_defaults() {
     let ops = core.function_body(start_idx);
     assert!(
         ops.iter()
-            .any(|op| matches!(op, Operator::I32Store { .. } | Operator::StructSet { .. })),
+            .any(|op| matches!(op, Operator::GlobalSet { .. } | Operator::I32Store { .. })),
         "start function body must write at least one default-seed value \
-         (struct.set into a per-block globals GC struct or i32.store into \
+         (global.set into a per-field core wasm global, or i32.store into \
          linear memory for pointer-typed globals). ops: {:?}",
         ops
     );

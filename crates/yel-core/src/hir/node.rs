@@ -23,6 +23,46 @@ pub struct HirComponent {
     pub body: Vec<HirNode>,
 }
 
+/// A HIR global-singleton definition.
+///
+/// A global is a host-boundary singleton: it has no UI body, so unlike
+/// [`HirComponent`] it carries no node tree. Its property defaults and
+/// callback signatures live in the `GlobalDef` registered during HIR
+/// lowering (`register_global`); this handle is what lets a global flow
+/// through the same `lower_to_hir → type_check → lower` spine as a
+/// component instead of being pulled from a side table.
+#[derive(Debug, Clone, Serialize)]
+pub struct HirGlobal {
+    /// DefId of this global.
+    pub def_id: DefId,
+    /// Global name.
+    pub name: Name,
+    /// Source span.
+    pub span: Span,
+    /// Whether exported across packages.
+    pub is_export: bool,
+}
+
+/// A top-level compilation unit in HIR. Both variants are reactive units
+/// the back-end lowers to a GC struct + init; a component additionally
+/// has a UI body and a host-driven lifecycle, a global is a host-boundary
+/// surface. They share one pipeline from here on.
+#[derive(Debug, Clone, Serialize)]
+pub enum HirItem {
+    Component(HirComponent),
+    Global(HirGlobal),
+}
+
+impl HirItem {
+    /// The component, if this item is one.
+    pub fn as_component(&self) -> Option<&HirComponent> {
+        match self {
+            HirItem::Component(c) => Some(c),
+            HirItem::Global(_) => None,
+        }
+    }
+}
+
 /// A HIR UI node.
 #[derive(Debug, Clone, Serialize)]
 pub struct HirNode {

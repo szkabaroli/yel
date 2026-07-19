@@ -66,11 +66,12 @@ impl Document {
                 tracing::debug!("Parse successful, {} components", file.components.len());
 
                 // Lower to HIR and type check
-                let hir_components = compiler.lower_to_hir(&file);
-                for hir in &hir_components {
-                    let _thir = compiler.type_check(hir);
+                let items = compiler.lower_to_hir(&file);
+                for item in &items {
+                    // Type-checks components and globals alike; we only
+                    // need the accumulated diagnostics here.
+                    let _ = compiler.type_check(item);
                 }
-                compiler.type_check_globals();
 
                 // Collect diagnostics from the compiler context
                 let mut diagnostics = Vec::new();
@@ -138,11 +139,10 @@ impl Document {
         }
 
         // Check if we're on a color literal (#rrggbb)
-        if bytes[offset] == b'#' || (offset > 0 && self.find_color_start(offset, bytes).is_some()) {
-            if let Some(color) = self.get_color_at_offset(offset, &content, bytes) {
+        if (bytes[offset] == b'#' || (offset > 0 && self.find_color_start(offset, bytes).is_some()))
+            && let Some(color) = self.get_color_at_offset(offset, &content, bytes) {
                 return Some(color);
             }
-        }
 
         // Find word boundaries (including digits for unit literals like 10px)
         let mut start = offset;

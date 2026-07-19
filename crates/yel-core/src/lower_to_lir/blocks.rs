@@ -15,8 +15,8 @@ use super::component::TreeLirResource;
 use crate::context::CompilerContext;
 use crate::definitions::DefKind;
 use crate::lir::block::{
-    BoundaryDepIndex, ExprId, LirBlock, LirBlockEffect, LirOp, LirSlotId, LirSlotInfo, LirSlotKind,
-    LirSlotValType, PendingBinding, PendingBindingKind, StringId,
+    ArithOp, ArrayItemRepr, BinOperand, BoundaryDepIndex, CompareOp, LirExprId, LirBlock, LirBlockEffect, LirIf, LirOp, LirSlotId,
+    LirSlotInfo, LirSlotKind, LirSlotValType, PendingBinding, PendingBindingKind, StringId,
 };
 use crate::lir::expr::{LirExpr, LirExprKind, LirStatement};
 use crate::lir::node::{LirHandler, LirNode, LirNodeKind, LirResource};
@@ -77,11 +77,10 @@ pub fn ty_to_slot_val_type(
         }
     }
     // Phase 5e.1: DTR records have a single GC ref internal repr.
-    if let InternedTyKind::Adt(d) = ctx.ty_kind(ty) {
-        if matches!(ctx.defs.kind(*d), DefKind::Record(_)) && is_dtr_record_struct(ctx, *d) {
+    if let InternedTyKind::Adt(d) = ctx.ty_kind(ty)
+        && matches!(ctx.defs.kind(*d), DefKind::Record(_)) && is_dtr_record_struct(ctx, *d) {
             return LirSlotValType::RefNullForRecord(ty);
         }
-    }
     // Phase 5e.5: option / result / variant migrated to W3C
     // subtype-hierarchy GC repr — single nullable supertype ref.
     if is_flat_gc_migrated_ty_struct(ctx, ty) {
@@ -203,12 +202,11 @@ fn is_flat_gc_migrated_ty_struct_inner(
             if is_scalar_list_ty_struct(ctx, inner, &mut seen) {
                 return false;
             }
-            if let InternedTyKind::Adt(d) = ctx.ty_kind(inner) {
-                if matches!(ctx.defs.kind(*d), DefKind::Record(_)) && is_dtr_record_struct(ctx, *d)
+            if let InternedTyKind::Adt(d) = ctx.ty_kind(inner)
+                && matches!(ctx.defs.kind(*d), DefKind::Record(_)) && is_dtr_record_struct(ctx, *d)
                 {
                     return false;
                 }
-            }
             is_flat_gc_payload_ty_struct(ctx, inner, visiting)
         }
         InternedTyKind::Result { ok, err } => {
@@ -326,11 +324,10 @@ pub(crate) fn is_scalar_list_ty_struct(
     if is_flat_gc_migrated_ty_struct(ctx, elem) {
         return true;
     }
-    if let InternedTyKind::Adt(d) = ctx.ty_kind(elem) {
-        if matches!(ctx.defs.kind(*d), DefKind::Record(_)) {
+    if let InternedTyKind::Adt(d) = ctx.ty_kind(elem)
+        && matches!(ctx.defs.kind(*d), DefKind::Record(_)) {
             return is_dtr_record_struct_inner(ctx, *d, seen);
         }
-    }
     // Phase 5e.7: list<tuple<…>> — element is a typed `(ref null
     // $tuple_<n>)`.
     if matches!(ctx.ty_kind(elem), InternedTyKind::Tuple(_)) {
@@ -346,12 +343,12 @@ enum IterableKind {
     /// Iterable is an expression that evaluates to a list.
     /// Includes literals like `[0, 1]` and field accesses like `item.children`.
     /// Evaluated at mount time, produces (ptr, len).
-    Expr { expr_id: ExprId },
+    Expr { expr_id: LirExprId },
     /// Iterable is a range expression (start..end or start..=end).
     /// Generates integers from start to end (exclusive or inclusive).
     Range {
-        start: ExprId,
-        end: ExprId,
+        start: LirExprId,
+        end: LirExprId,
         inclusive: bool,
     },
     /// Unsupported iterable expression.
@@ -404,7 +401,7 @@ pub(crate) struct BlockLowering<'a> {
     // Active outer item field slots for nested blocks.
     // Maps LocalId -> (Type, BoundaryField SlotId, BindingMode).
     // BindingMode::Ptr for memory/range items; Value for GC-list items.
-    outer_item_field_slots: HashMap<LocalId, (Ty, LirSlotId, LirBindingMode)>,
+    outer_item_field_slots: HashMap<LocalId, (Ty, TreeBoundaryId, LirBindingMode)>,
 
     // Locals defined in the current block being built.
     // Used to populate block's local_to_slot when finishing.
@@ -616,7 +613,7 @@ struct DeferredHandlerBody {
     /// loop-vars resolve identically.
     local_bindings: HashMap<LocalId, (LirSlotId, Ty, LirBindingMode)>,
     /// Env snapshot: `outer_item_field_slots` at capture time.
-    outer_item_field_slots: HashMap<LocalId, (Ty, LirSlotId, LirBindingMode)>,
+    outer_item_field_slots: HashMap<LocalId, (Ty, TreeBoundaryId, LirBindingMode)>,
     /// Env snapshot: enclosing for stack (innermost last).
     for_stack: Vec<ForId>,
     /// Env snapshot: enclosing iter-body refs (parallel to `for_stack`).
@@ -637,31 +634,29 @@ struct DeferredDerivedBody {
     /// downstream effects must fire after the write.
     target: DefId,
     /// Recompute expression. Interned at deferral time, but the
-    /// `ExprId` lives in `self.exprs` so it stays valid through the
+    /// `LirExprId` lives in `self.exprs` so it stays valid through the
     /// later emission.
-    expr_id: ExprId,
+    expr_id: LirExprId,
 }
 
 #[derive(Debug, Clone)]
 struct AttrBindingInfo {
-    /// Owning boundary recorded at emission time. Currently unused at
-    /// the consumer (the emitter recovers the boundary by re-reading
-    /// the slot's `BoundaryField` kind), but kept for symmetry with
-    /// the corresponding `PendingBinding` and to enable cross-checking
-    /// in future phases.
-    owning_boundary: TreeBoundaryId,
     dependencies: Vec<DefId>,
-    elem_mem_slot: LirSlotId,
+    /// The DomHandle field this binding reads/writes, as a symbolic
+    /// `(struct, field)` pair — resolved to a concrete ref by
+    /// `boundary_rewrite`. Replaces the old `elem_mem_slot: BoundaryField`.
+    struct_ty: TreeBoundaryId,
+    field_idx: u32,
     name_id: StringId,
-    expr_id: ExprId,
+    expr_id: LirExprId,
 }
 
 #[derive(Debug, Clone)]
 struct DynTextBindingInfo {
-    owning_boundary: TreeBoundaryId,
     dependencies: Vec<DefId>,
-    text_mem_slot: LirSlotId,
-    expr_id: ExprId,
+    struct_ty: TreeBoundaryId,
+    field_idx: u32,
+    expr_id: LirExprId,
 }
 
 /// Shared envelope for structural bindings (if-cond reroute, for-list
@@ -673,7 +668,6 @@ struct DynTextBindingInfo {
 /// `BindBoundaryLocal` before issuing `CallBlock`.
 #[derive(Debug, Clone)]
 struct StructuralBindingInfo {
-    owning_boundary: TreeBoundaryId,
     dependencies: Vec<DefId>,
     /// The update_block that contains the structural mutation logic
     /// (if-cond reroute, for-list diff, or derived-signal recompute).
@@ -693,7 +687,10 @@ impl<'a> BlockLowering<'a> {
             slots: Vec::new(),
             strings: Vec::new(),
             string_map: HashMap::new(),
-            exprs: Vec::new(),
+            // Continue the arena the tree stage started: `LirExprId`s already
+            // baked into tree nodes index into these leading entries, and the
+            // block stage appends further exprs via `intern_expr`.
+            exprs: tree.exprs.clone(),
             next_slot: 0,
             next_local_idx: 0,
             next_block: 0,
@@ -1081,9 +1078,7 @@ impl<'a> BlockLowering<'a> {
                 let mut d = 0u32;
                 augmented_path.insert(cur);
                 loop {
-                    if !depth.contains_key(&cur) {
-                        depth.insert(cur, d);
-                    }
+                    depth.entry(cur).or_insert(d);
                     let pl = self.tree_shape.boundaries[cur.index()].parent_link;
                     let next = match pl {
                         Some((p, _)) => Some(p),
@@ -1206,13 +1201,11 @@ impl<'a> BlockLowering<'a> {
         let mut spliced: Vec<LirBlockEffect> = Vec::with_capacity(old_effects.len());
         for e in old_effects {
             if migrated_binding_ids.contains(&e.id) {
-                if let Some(sig) = binding_to_signal.get(&e.id) {
-                    if signals_used.insert(*sig) {
-                        if let Some(new_e) = new_by_signal.get(sig).cloned() {
+                if let Some(sig) = binding_to_signal.get(&e.id)
+                    && signals_used.insert(*sig)
+                        && let Some(new_e) = new_by_signal.get(sig).cloned() {
                             spliced.push(new_e);
                         }
-                    }
-                }
                 continue;
             }
             spliced.push(e);
@@ -1307,30 +1300,20 @@ impl<'a> BlockLowering<'a> {
                             Some(info) => info.clone(),
                             None => continue,
                         };
-                        // Find this binding's slot's field index.
-                        let binding_field_idx = match self
-                            .slots
-                            .iter()
-                            .find(|s| s.id == info.elem_mem_slot)
-                            .map(|s| &s.kind)
-                        {
-                            Some(LirSlotKind::BoundaryField {
-                                boundary_id: bb,
-                                field_idx,
-                            }) if *bb == boundary_id => *field_idx,
-                            _ => continue,
-                        };
-                        if binding_field_idx != field_idx {
+                        // Inline only if this binding owns the DomHandle at
+                        // the current (boundary, field).
+                        if info.struct_ty != boundary_id || info.field_idx != field_idx {
                             continue;
                         }
                         if !info.dependencies.contains(&sig) {
                             continue;
                         }
-                        // Inline LoadHandle + SetAttribute.
+                        // Inline StructFieldGet + SetAttribute.
                         let target = self.alloc_temp_slot_named("attr_target");
-                        self.emit(LirOp::LoadHandle {
-                            slot: info.elem_mem_slot,
-                            to: target,
+                        self.emit(LirOp::StructFieldGet {
+                            struct_ty: info.struct_ty,
+                            field_idx: info.field_idx,
+                            result: target,
                         });
                         // Phase 2.2b: lower SetAttribute to a stack-push
                         // sequence + CallFunction against
@@ -1346,7 +1329,8 @@ impl<'a> BlockLowering<'a> {
                         self.emit(LirOp::PushStringLen {
                             string_id: info.name_id,
                         });
-                        self.emit(LirOp::PushExprAsAttrValue { expr: info.expr_id });
+                        let av = self.wrap_as_attr_value(info.expr_id);
+                        self.emit(LirOp::PushExpr { expr: av });
                         self.emit(LirOp::CallFunction {
                             func: self.ctx.dom_imports().set_attribute,
                             args: vec![],
@@ -1361,33 +1345,23 @@ impl<'a> BlockLowering<'a> {
                             Some(info) => info.clone(),
                             None => continue,
                         };
-                        let binding_field_idx = match self
-                            .slots
-                            .iter()
-                            .find(|s| s.id == info.text_mem_slot)
-                            .map(|s| &s.kind)
-                        {
-                            Some(LirSlotKind::BoundaryField {
-                                boundary_id: bb,
-                                field_idx,
-                            }) if *bb == boundary_id => *field_idx,
-                            _ => continue,
-                        };
-                        if binding_field_idx != field_idx {
+                        if info.struct_ty != boundary_id || info.field_idx != field_idx {
                             continue;
                         }
                         if !info.dependencies.contains(&sig) {
                             continue;
                         }
                         let target = self.alloc_temp_slot_named("text_target");
-                        self.emit(LirOp::LoadHandle {
-                            slot: info.text_mem_slot,
-                            to: target,
+                        self.emit(LirOp::StructFieldGet {
+                            struct_ty: info.struct_ty,
+                            field_idx: info.field_idx,
+                            result: target,
                         });
                         // Phase 2.2b: stack-push (node, expr-as-string)
                         // then call dom_imports.set_text_content.
                         self.emit(LirOp::PushSlot { slot: target });
-                        self.emit(LirOp::PushExprAsString { expr: info.expr_id });
+                        let s = self.wrap_as_string(info.expr_id);
+                        self.emit(LirOp::PushExpr { expr: s });
                         self.emit(LirOp::CallFunction {
                             func: self.ctx.dom_imports().set_text_content,
                             args: vec![],
@@ -1412,15 +1386,11 @@ impl<'a> BlockLowering<'a> {
                             // We need the IfAnchor's ActiveTag field — fixed at
                             // index 2 per the synthesizer (parent=0, anchor=1,
                             // active=2, then branch SubBoundary refs).
-                            let if_anchor_active_slot = self.alloc_boundary_field_slot_named(
-                                target_b,
-                                2,
-                                "walker_ifanchor_active",
-                            );
                             let active_tag = self.alloc_temp_slot_named("walker_active_tag");
-                            self.emit(LirOp::LoadI32 {
-                                slot: if_anchor_active_slot,
-                                to: active_tag,
+                            self.emit(LirOp::StructFieldGet {
+                                struct_ty: target_b,
+                                field_idx: 2,
+                                result: active_tag,
                             });
                             // For each branch boundary, if it's on the
                             // path AND active tag matches, call its
@@ -1443,11 +1413,6 @@ impl<'a> BlockLowering<'a> {
                                 .parent_link
                                 .map(|(_, f)| f)
                                 .unwrap_or(0);
-                                let branch_ref_slot = self.alloc_boundary_field_slot_named(
-                                    target_b,
-                                    branch_field_idx,
-                                    "walker_branch_ref_field",
-                                );
                                 let branch_ref_temp = self.alloc_temp_slot_typed_named(
                                     LirSlotValType::RefNullForBoundary(branch_id),
                                     "walker_branch_ref",
@@ -1472,9 +1437,10 @@ impl<'a> BlockLowering<'a> {
                                     // typed local and BindBoundaryLocal
                                     // it so CallBlock's emit_boundary_ref
                                     // resolves via current_boundary_locals.
-                                    LirOp::LoadHandle {
-                                        slot: branch_ref_slot,
-                                        to: branch_ref_temp,
+                                    LirOp::StructFieldGet {
+                                        struct_ty: target_b,
+                                        field_idx: branch_field_idx,
+                                        result: branch_ref_temp,
                                     },
                                     LirOp::BindBoundaryLocal {
                                         boundary_id: branch_id,
@@ -1490,12 +1456,12 @@ impl<'a> BlockLowering<'a> {
                                     },
                                 ];
                                 let label = self.next_if_label();
-                                self.emit(LirOp::If {
+                                self.emit(LirOp::If(Box::new(LirIf {
                                     cond: cmp,
                                     then_ops,
                                     else_ops: vec![],
                                     name: Some(format!("walker_if{}_branch{}", label, b_idx)),
-                                });
+                                })));
                             }
                             let _ = child_block; // anchor's own block unused — branches are leaves
                         }
@@ -1511,11 +1477,6 @@ impl<'a> BlockLowering<'a> {
                             };
                             // Load children-array (field 2 on ForAnchor),
                             // loop, dispatch each iter-body.
-                            let children_field_slot = self.alloc_boundary_field_slot_named(
-                                target_b,
-                                2,
-                                "walker_for_children",
-                            );
                             let arr_slot = self.alloc_temp_slot_typed_named(
                                 LirSlotValType::RefNullForChildrenArray(target_b),
                                 "walker_for_arr",
@@ -1523,9 +1484,10 @@ impl<'a> BlockLowering<'a> {
                             let len_slot = self.alloc_temp_slot_named("walker_for_len");
                             let idx_slot = self.alloc_temp_slot_named("walker_for_idx");
                             let break_cond = self.alloc_temp_slot_named("walker_for_break");
-                            self.emit(LirOp::LoadHandle {
-                                slot: children_field_slot,
-                                to: arr_slot,
+                            self.emit(LirOp::StructFieldGet {
+                                struct_ty: target_b,
+                                field_idx: 2,
+                                result: arr_slot,
                             });
                             self.emit(LirOp::ArrayLen {
                                 arr: arr_slot,
@@ -1535,11 +1497,7 @@ impl<'a> BlockLowering<'a> {
                                 slot: idx_slot,
                                 value: 0,
                             });
-                            self.emit(LirOp::GeU {
-                                index: idx_slot,
-                                len: len_slot,
-                                result: break_cond,
-                            });
+                            self.emit(LirOp::Compare { op: CompareOp::GeU, lhs: idx_slot, rhs: len_slot, result: break_cond });
 
                             let iter_ref_slot = self.alloc_temp_slot_typed_named(
                                 LirSlotValType::RefNullForBoundary(iter_body_id),
@@ -1548,8 +1506,8 @@ impl<'a> BlockLowering<'a> {
                             let dummy_parent =
                                 self.alloc_temp_slot_named("walker_for_dummy_parent");
                             let body_ops = vec![
-                                LirOp::ChildrenArrayGet {
-                                    anchor_boundary: target_b,
+                                LirOp::ArrayGet {
+                                    array_type: self.for_anchor_array_idx(target_b),
                                     arr: arr_slot,
                                     idx: idx_slot,
                                     result: iter_ref_slot,
@@ -1566,12 +1524,8 @@ impl<'a> BlockLowering<'a> {
                                     ],
                                     result: None,
                                 },
-                                LirOp::IncrSlot { slot: idx_slot },
-                                LirOp::GeU {
-                                    index: idx_slot,
-                                    len: len_slot,
-                                    result: break_cond,
-                                },
+                                LirOp::BinaryOp { op: ArithOp::Add, lhs: idx_slot, rhs: BinOperand::Const(1), result: idx_slot },
+                                LirOp::Compare { op: CompareOp::GeU, lhs: idx_slot, rhs: len_slot, result: break_cond },
                             ];
                             self.emit(LirOp::Loop {
                                 break_cond,
@@ -1639,7 +1593,7 @@ impl<'a> BlockLowering<'a> {
             }
         }
 
-        let block_id = self.finish_block_with_name(BlockDebugName::update(sig.0));
+        let block_id = self.finish_block_with_name(BlockDebugName::update(sig));
         if let Some(b) = self.blocks.iter_mut().find(|b| b.id == block_id) {
             b.params = vec![dummy_param];
             let mut bp = vec![boundary_id];
@@ -1749,7 +1703,6 @@ impl<'a> BlockLowering<'a> {
             self.derivedsig_binding_data.insert(
                 binding_id,
                 StructuralBindingInfo {
-                    owning_boundary,
                     dependencies,
                     update_block,
                 },
@@ -1800,6 +1753,7 @@ impl<'a> BlockLowering<'a> {
     ///   - `lower_init_signal_default_to_memory` actually expands the
     ///     type (today: i32-zero path; F32/F64/I64 zero-init paths bail
     ///     because no const-materialize LirOp exists yet — Phase 1.1c).
+    ///
     /// `None` means the caller keeps emitting `LirOp::InitSignalDefault`.
     fn try_lower_init_signal_default_inline(
         &mut self,
@@ -2044,19 +1998,17 @@ impl<'a> BlockLowering<'a> {
         // one so the post-promotion local space stays packed.
         let pack_temp_locals = |slots: &mut Vec<LirSlotInfo>, promoted: u32| {
             for s in slots.iter_mut() {
-                if let LirSlotKind::Temp { local_idx } = &mut s.kind {
-                    if *local_idx > promoted {
+                if let LirSlotKind::Temp { local_idx } = &mut s.kind
+                    && *local_idx > promoted {
                         *local_idx -= 1;
                     }
-                }
             }
         };
         pack_temp_locals(&mut self.slots, promoted_local_idx);
-        if let LirSlotId::Block { block: bid, .. } = parent_slot {
-            if let Some(b) = self.blocks.iter_mut().find(|b| b.id == bid) {
+        if let LirSlotId::Block { block: bid, .. } = parent_slot
+            && let Some(b) = self.blocks.iter_mut().find(|b| b.id == bid) {
                 pack_temp_locals(&mut b.slots, promoted_local_idx);
             }
-        }
         // Only decrement next_local_idx when parent_slot was the
         // component-Temp (Resource) case; per-block local space is
         // self-contained via current_block_local_idx (already reset on
@@ -2195,28 +2147,36 @@ impl<'a> BlockLowering<'a> {
         // slot at the function prologue.
         allocate_boundary_param_slots(&mut component);
 
-        // Stage 3 of lir-resource-flatten: rewrite LoadHandle /
-        // StoreHandle on BoundaryField slots into explicit
-        // BoundaryStructGet / BoundaryStructSet ops with the
-        // boundary-ref slot resolved at lowering time. Codegen for
-        // the new ops avoids the chain walk entirely; sites we
-        // can't statically resolve (boundary_params, before Stage 4)
-        // continue through the legacy LoadHandle/StoreHandle
-        // codegen path.
+        // lir-resource-flatten Stage 5e-4: resolve every symbolic
+        // `StructField{Get,Set,SetConst}` op (emitted by the lowerer with a
+        // `struct_ty` + `field_idx`) into a concrete `StructGet`/`StructSet`
+        // against an in-scope boundary-ref slot, synthesizing
+        // `BoundaryRefFromSelf` / ancestor-chain prologues as needed. The old
+        // `BoundaryField` slot kind is gone; these ops carry the data directly.
         let _rewrites =
-            crate::lir::boundary_rewrite::rewrite_boundary_field_loadstore(&mut component);
-        // Stage 5b verification: opt-in count of BoundaryField
-        // LoadHandle/StoreHandle still in the IR. Set
-        // `YEL_DEBUG_BOUNDARY_FIELD=1` to print per-resource counts;
-        // any nonzero figure means the chain walk is still active.
+            crate::lir::boundary_rewrite::rewrite_struct_field_ops(&mut component);
+        // Invariant — ENFORCED: the rewriter resolves *every* symbolic
+        // struct-field op, so zero may survive. Codegen has no fallback — a
+        // surviving `StructField*` op `unreachable!`s. Assert it here so a
+        // future lowering change that reintroduces an unresolvable use fails at
+        // the LIR layer with a clear message, not as an opaque codegen panic.
+        // The whole lowering test suite runs in debug, so this is the
+        // regression guard. `YEL_DEBUG_BOUNDARY_FIELD=1` prints per-resource
+        // counts.
+        let remaining =
+            crate::lir::boundary_rewrite::count_remaining_struct_field_ops(&component);
         if std::env::var_os("YEL_DEBUG_BOUNDARY_FIELD").is_some() {
-            let remaining =
-                crate::lir::boundary_rewrite::count_remaining_boundary_field_loadstore(&component);
             eprintln!(
-                "[lir] resource {:?}: rewrote {} BoundaryField loads/stores, {} remain",
+                "[lir] resource {:?}: rewrote {} struct-field ops, {} remain",
                 component.def_id, _rewrites, remaining
             );
         }
+        debug_assert_eq!(
+            remaining, 0,
+            "boundary_rewrite left {remaining} unresolved StructField op(s) in \
+             resource {:?}; codegen has no fallback for these (see lir/boundary_rewrite.rs)",
+            component.def_id
+        );
 
         // Populate per-block structural metadata that codegen would
         // otherwise recompute by re-walking the op tree on every emit.
@@ -2480,7 +2440,8 @@ impl<'a> BlockLowering<'a> {
                     self.emit(LirOp::PushSlot { slot: elem_slot });
                     self.emit(LirOp::PushStringPtr { string_id: name_id });
                     self.emit(LirOp::PushStringLen { string_id: name_id });
-                    self.emit(LirOp::PushExprAsAttrValue { expr: expr_id });
+                    let av = self.wrap_as_attr_value(expr_id);
+                    self.emit(LirOp::PushExpr { expr: av });
                     self.emit(LirOp::CallFunction {
                         func: self.ctx.dom_imports().set_attribute,
                         args: vec![],
@@ -2499,25 +2460,19 @@ impl<'a> BlockLowering<'a> {
                     // `boundary_params`), so `BoundaryField` reads /
                     // writes resolve via `local.get` or a single
                     // `struct.get` walk.
-                    let elem_mem_slot = match self
-                        .tree_shape
-                        .node_field
-                        .get(&node.id)
-                        .copied()
-                    {
-                        Some(nfr) => self.alloc_boundary_field_slot_named(
-                            nfr.owning_boundary,
-                            nfr.field_idx,
-                            "elem_handle",
-                        ),
-                        None => unreachable!(
-                            "Element node {:?} missing tree_shape.node_field entry; synthesizer must allocate a BoundaryField for every Element",
-                            node.id
-                        ),
-                    };
-                    self.emit(LirOp::StoreHandle {
-                        slot: elem_mem_slot,
-                        from: elem_slot,
+                    let (elem_struct_ty, elem_field_idx) =
+                        match self.tree_shape.node_field.get(&node.id).copied() {
+                            Some(nfr) => (nfr.owning_boundary, nfr.field_idx),
+                            None => unreachable!(
+                                "Element node {:?} missing tree_shape.node_field entry; synthesizer must allocate a struct field for every Element",
+                                node.id
+                            ),
+                        };
+                    // Persist the DOM handle into the element's struct field.
+                    self.emit(LirOp::StructFieldSet {
+                        struct_ty: elem_struct_ty,
+                        field_idx: elem_field_idx,
+                        value: elem_slot,
                     });
 
                     // Create effects for each dynamic binding
@@ -2537,7 +2492,8 @@ impl<'a> BlockLowering<'a> {
                                 self.emit(LirOp::PushSlot { slot: elem_slot });
                                 self.emit(LirOp::PushStringPtr { string_id: name_id });
                                 self.emit(LirOp::PushStringLen { string_id: name_id });
-                                self.emit(LirOp::PushExprAsAttrValue { expr: expr_id });
+                                let av = self.wrap_as_attr_value(expr_id);
+                                self.emit(LirOp::PushExpr { expr: av });
                                 self.emit(LirOp::CallFunction {
                                     func: self.ctx.dom_imports().set_attribute,
                                     args: vec![],
@@ -2579,9 +2535,9 @@ impl<'a> BlockLowering<'a> {
                                     self.attr_binding_data.insert(
                                         pb_id,
                                         AttrBindingInfo {
-                                            owning_boundary,
                                             dependencies: deps,
-                                            elem_mem_slot,
+                                            struct_ty: elem_struct_ty,
+                                            field_idx: elem_field_idx,
                                             name_id,
                                             expr_id,
                                         },
@@ -2669,22 +2625,14 @@ impl<'a> BlockLowering<'a> {
                 // `boundary_params` plumbing, so reads/writes resolve
                 // via `local.get` (in-scope) or a single `struct.get`
                 // walk via `parent_link`.
-                let text_mem_slot = match self
-                    .tree_shape
-                    .node_field
-                    .get(&node.id)
-                    .copied()
-                {
-                    Some(nfr) => self.alloc_boundary_field_slot_named(
-                        nfr.owning_boundary,
-                        nfr.field_idx,
-                        "text_handle",
-                    ),
-                    None => unreachable!(
-                        "DynamicText node {:?} missing tree_shape.node_field entry; synthesizer must allocate a BoundaryField for every DynamicText",
-                        node.id
-                    ),
-                };
+                let (text_struct_ty, text_field_idx) =
+                    match self.tree_shape.node_field.get(&node.id).copied() {
+                        Some(nfr) => (nfr.owning_boundary, nfr.field_idx),
+                        None => unreachable!(
+                            "DynamicText node {:?} missing tree_shape.node_field entry; synthesizer must allocate a struct field for every DynamicText",
+                            node.id
+                        ),
+                    };
                 let expr_id = self.intern_expr(&expr);
 
                 // Create text node with initial dynamic content.
@@ -2693,26 +2641,24 @@ impl<'a> BlockLowering<'a> {
                 // CreateTextDynamic arm targets IMPORT_CREATE_TEXT —
                 // the stringified payload feeds the same import as the
                 // static-text variant).
-                self.emit(LirOp::PushExprAsString { expr: expr_id });
+                let s = self.wrap_as_string(expr_id);
+                self.emit(LirOp::PushExpr { expr: s });
                 self.emit(LirOp::CallFunction {
                     func: self.ctx.dom_imports().create_text,
                     args: vec![],
                     result: Some(text_slot),
                 });
 
-                // Store handle in memory for effect updates
-                self.emit(LirOp::StoreHandle {
-                    slot: text_mem_slot,
-                    from: text_slot,
+                // Persist the text node's handle into its struct field
+                // for effect updates. Resolved to a concrete `struct.set`
+                // by `boundary_rewrite`; fan-out text-update walks fetch
+                // the target via a `StructFieldGet` after binding the
+                // iter-body in scope.
+                self.emit(LirOp::StructFieldSet {
+                    struct_ty: text_struct_ty,
+                    field_idx: text_field_idx,
+                    value: text_slot,
                 });
-
-                // The text node's handle is already persisted by the
-                // `StoreHandle text_mem_slot, from text_slot` above:
-                // `text_mem_slot` is now a `BoundaryField` slot pinned
-                // to this node's `(owning_boundary, field_idx)` from
-                // `tree_shape.node_field`. Fan-out text-update walks
-                // bind the iter-body in scope and fetch the target via
-                // a `BoundaryField` `LoadHandle` — no iter-rec stash.
 
                 // Append to parent
                 self.emit(LirOp::CallFunction {
@@ -2726,8 +2672,8 @@ impl<'a> BlockLowering<'a> {
                 // the walker emits LoadHandle + SetTextContent
                 // directly into the right boundary's update fn,
                 // looked up via `dyntext_binding_data`.
-                if let Some(deps) = dependencies {
-                    if !deps.is_empty() {
+                if let Some(deps) = dependencies
+                    && !deps.is_empty() {
                         let pb_id = self.next_binding_id;
                         self.next_binding_id += 1;
                         let owning_boundary = self
@@ -2745,14 +2691,13 @@ impl<'a> BlockLowering<'a> {
                         self.dyntext_binding_data.insert(
                             pb_id,
                             DynTextBindingInfo {
-                                owning_boundary,
                                 dependencies: deps,
-                                text_mem_slot,
+                                struct_ty: text_struct_ty,
+                                field_idx: text_field_idx,
                                 expr_id,
                             },
                         );
                     }
-                }
             }
 
             LirNodeKind::If {
@@ -2859,15 +2804,12 @@ impl<'a> BlockLowering<'a> {
             expected_branches
         );
 
-        // BoundaryField slots — synthesizer's IfAnchor layout:
+        // IfAnchor struct-field layout (synthesizer-fixed):
         //   field 0 = parent (DomHandle)
         //   field 1 = anchor (DomHandle)
         //   field 2 = active (ActiveTag)
-        let parent_field_slot =
-            self.alloc_boundary_field_slot_named(if_anchor_id, 0, "if_parent_handle");
-        let anchor_field_slot =
-            self.alloc_boundary_field_slot_named(if_anchor_id, 1, "if_anchor_handle");
-        let active_flag = self.alloc_boundary_field_slot_named(if_anchor_id, 2, "if_active_tag");
+        // Accessed via symbolic StructField ops keyed by `if_anchor_id`
+        // (struct_ty) + the fixed field index above.
 
         // Allocate the IfAnchor sub-boundary BEFORE any field writes.
         // The op stores the ref on the parent's SubBoundary field and
@@ -2903,15 +2845,17 @@ impl<'a> BlockLowering<'a> {
             args: vec![parent_slot, anchor_slot],
             result: None,
         });
-        self.emit(LirOp::StoreHandle {
-            slot: anchor_field_slot,
-            from: anchor_slot,
+        self.emit(LirOp::StructFieldSet {
+            struct_ty: if_anchor_id,
+            field_idx: 1,
+            value: anchor_slot,
         });
         // Persist the if's DOM parent into the IfAnchor so update /
         // unmount can re-fetch it without a memory slot.
-        self.emit(LirOp::StoreHandle {
-            slot: parent_field_slot,
-            from: parent_slot,
+        self.emit(LirOp::StructFieldSet {
+            struct_ty: if_anchor_id,
+            field_idx: 0,
+            value: parent_slot,
         });
 
         // Build the flat list of (cond_opt, body, branch_id) tuples.
@@ -2943,13 +2887,11 @@ impl<'a> BlockLowering<'a> {
         let mut branch_mount_unmount: Vec<(BlockId, BlockId)> =
             Vec::with_capacity(expected_branches);
         for (_, body, branch_id) in &flat_branches {
-            let content_slot =
-                self.alloc_boundary_field_slot_named(*branch_id, 0, "if_branch_content");
             let (mount, unmount) = self.create_branch_with_tracking(
                 body,
                 parent_slot,
-                anchor_field_slot,
-                content_slot,
+                if_anchor_id,
+                *branch_id,
             );
             // Mount block: needs IfAnchor + IfBranch in scope. When
             // nested under a for, append the iter-body ref so loop-
@@ -3010,8 +2952,7 @@ impl<'a> BlockLowering<'a> {
             let update_block = self.create_if_update_block_flat(
                 &flat_branches,
                 &branch_mount_unmount,
-                parent_field_slot,
-                active_flag,
+                if_anchor_id,
                 owning_boundary,
                 &iter_body_stack_snapshot,
             );
@@ -3035,7 +2976,6 @@ impl<'a> BlockLowering<'a> {
             self.ifcond_binding_data.insert(
                 binding_id,
                 StructuralBindingInfo {
-                    owning_boundary,
                     dependencies: deps,
                     update_block,
                 },
@@ -3051,7 +2991,6 @@ impl<'a> BlockLowering<'a> {
             &branch_mount_unmount,
             if_anchor_id,
             parent_slot,
-            active_flag,
         );
     }
 
@@ -3065,7 +3004,6 @@ impl<'a> BlockLowering<'a> {
         branch_mount_unmount: &[(BlockId, BlockId)],
         if_anchor_id: TreeBoundaryId,
         parent_slot: LirSlotId,
-        active_flag: LirSlotId,
     ) {
         // Build an `If`-tree from the bottom up so the deepest else
         // arm is the trailing branch (or a no-op if no `else`). For
@@ -3099,19 +3037,20 @@ impl<'a> BlockLowering<'a> {
                 ],
                 result: None,
             });
-            tail_ops.push(LirOp::StoreI32 {
-                slot: active_flag,
+            tail_ops.push(LirOp::StructFieldSetConst {
+                struct_ty: if_anchor_id,
+                field_idx: 2,
                 value: n as i32,
             });
         } else {
             // No else: when no condition matches, active stays 0
             // (= "nothing mounted").
-            tail_ops.push(LirOp::StoreI32 {
-                slot: active_flag,
+            tail_ops.push(LirOp::StructFieldSetConst {
+                struct_ty: if_anchor_id,
+                field_idx: 2,
                 value: 0,
             });
         }
-        let _ = if_anchor_id;
 
         // Now wrap, from the LAST conditional branch up to the FIRST
         // (then), an If chain.
@@ -3143,19 +3082,20 @@ impl<'a> BlockLowering<'a> {
                     ],
                     result: None,
                 },
-                LirOp::StoreI32 {
-                    slot: active_flag,
+                LirOp::StructFieldSetConst {
+                    struct_ty: if_anchor_id,
+                    field_idx: 2,
                     value: (ci as i32) + 1,
                 },
             ];
             let label = self.next_if_label();
             let prev_tail = std::mem::take(&mut tail_ops);
-            tail_ops = vec![LirOp::If {
+            tail_ops = vec![LirOp::If(Box::new(LirIf {
                 cond: cond_slot,
                 then_ops,
                 else_ops: prev_tail,
                 name: Some(format!("if{}_init_b{}", label, ci)),
-            }];
+            }))];
         }
         for op in tail_ops {
             self.emit(op);
@@ -3174,18 +3114,18 @@ impl<'a> BlockLowering<'a> {
         &mut self,
         flat_branches: &[(Option<&LirExpr>, &[LirNode], TreeBoundaryId)],
         branch_mount_unmount: &[(BlockId, BlockId)],
-        parent_field_slot: LirSlotId,
-        active_flag: LirSlotId,
+        if_anchor_id: TreeBoundaryId,
         owning_boundary: TreeBoundaryId,
         outer_iter_bodies: &[TreeBoundaryId],
     ) -> BlockId {
         self.start_block();
 
-        // Load parent from the IfAnchor's `parent` field.
+        // Load parent from the IfAnchor's `parent` field (index 0).
         let parent_slot = self.alloc_temp_slot_named("upd_parent");
-        self.emit(LirOp::LoadHandle {
-            slot: parent_field_slot,
-            to: parent_slot,
+        self.emit(LirOp::StructFieldGet {
+            struct_ty: if_anchor_id,
+            field_idx: 0,
+            result: parent_slot,
         });
 
         // Compute target_idx = 1 + first matching branch index, or
@@ -3218,34 +3158,31 @@ impl<'a> BlockLowering<'a> {
             }];
             let label = self.next_if_label();
             let prev_tail = std::mem::take(&mut tail_ops);
-            tail_ops = vec![LirOp::If {
+            tail_ops = vec![LirOp::If(Box::new(LirIf {
                 cond: cond_slot,
                 then_ops,
                 else_ops: prev_tail,
                 name: Some(format!("if{}_upd_pickb{}", label, ci)),
-            }];
+            }))];
         }
 
         for op in tail_ops {
             self.emit(op);
         }
 
-        // Load old active.
+        // Load old active (IfAnchor field 2).
         let old_active = self.alloc_temp_slot_named("upd_old_active");
-        self.emit(LirOp::LoadI32 {
-            slot: active_flag,
-            to: old_active,
+        self.emit(LirOp::StructFieldGet {
+            struct_ty: if_anchor_id,
+            field_idx: 2,
+            result: old_active,
         });
 
         // If old_active != target_idx: unmount the branch indexed by
         // (old_active - 1) if old_active > 0, then mount target_idx
         // branch (allocating fresh IfBranch first) if target_idx > 0.
         let neq_slot = self.alloc_temp_slot_named("upd_neq");
-        self.emit(LirOp::I32Ne {
-            lhs: old_active,
-            rhs: target_slot,
-            result: neq_slot,
-        });
+        self.emit(LirOp::Compare { op: CompareOp::Ne, lhs: old_active, rhs: target_slot, result: neq_slot });
 
         // Build switch ops: for each possible (old_active value) we
         // emit `if old_active == k: unmount branch k-1`. Same for
@@ -3265,7 +3202,7 @@ impl<'a> BlockLowering<'a> {
             // Emit: if old_active == k: CallBlock unmount_block_{k-1}
             let (_, unmount_block) = branch_mount_unmount[k - 1];
             let label = self.next_if_label();
-            ops_when_changed.push(LirOp::If {
+            ops_when_changed.push(LirOp::If(Box::new(LirIf {
                 cond: cmp,
                 then_ops: vec![LirOp::CallBlock {
                     block: unmount_block,
@@ -3277,7 +3214,7 @@ impl<'a> BlockLowering<'a> {
                 }],
                 else_ops: vec![],
                 name: Some(format!("if{}_upd_unmb{}", label, k - 1)),
-            });
+            })));
         }
 
         // Mount the new target branch (if target > 0).
@@ -3295,7 +3232,7 @@ impl<'a> BlockLowering<'a> {
                 "if_branch_upd_ref",
             );
             let label = self.next_if_label();
-            ops_when_changed.push(LirOp::If {
+            ops_when_changed.push(LirOp::If(Box::new(LirIf {
                 cond: cmp,
                 then_ops: vec![
                     LirOp::AllocSubBoundary {
@@ -3313,22 +3250,23 @@ impl<'a> BlockLowering<'a> {
                 ],
                 else_ops: vec![],
                 name: Some(format!("if{}_upd_mntb{}", label, k - 1)),
-            });
+            })));
         }
 
-        // Persist new active.
-        ops_when_changed.push(LirOp::StoreI32Slot {
-            slot: active_flag,
-            from: target_slot,
+        // Persist new active (IfAnchor field 2).
+        ops_when_changed.push(LirOp::StructFieldSet {
+            struct_ty: if_anchor_id,
+            field_idx: 2,
+            value: target_slot,
         });
 
         let upd_label = self.next_if_label();
-        self.emit(LirOp::If {
+        self.emit(LirOp::If(Box::new(LirIf {
             cond: neq_slot,
             then_ops: ops_when_changed,
             else_ops: vec![],
             name: Some(format!("if{}_upd_diff", upd_label)),
-        });
+        })));
 
         // The per-(boundary, signal) walker dispatches this block via
         // `LirOp::CallBlock` which always pushes one i32 parent
@@ -3389,20 +3327,11 @@ impl<'a> BlockLowering<'a> {
                     for_anchor_id, other
                 ),
             };
-        // BoundaryField slots — synthesizer's ForAnchor layout:
+        // ForAnchor struct-field layout (synthesizer-fixed):
         //   field 0 = parent (DomHandle)
         //   field 1 = anchor (DomHandle)
         //   field 2 = children (ChildrenArray)
-        let parent_field_slot = self.alloc_boundary_field_slot_named(
-            for_anchor_id,
-            0,
-            format!("for{}_parent_field", for_id.0),
-        );
-        let anchor_field_slot = self.alloc_boundary_field_slot_named(
-            for_anchor_id,
-            1,
-            format!("for{}_anchor_field", for_id.0),
-        );
+        // Accessed via symbolic StructField ops keyed by `for_anchor_id`.
 
         // Allocate the ForAnchor sub-boundary BEFORE any field writes.
         // The op stores the ref on the parent's SubBoundary field and
@@ -3438,14 +3367,16 @@ impl<'a> BlockLowering<'a> {
             result: None,
         });
 
-        // Store parent and anchor for effects/updates
-        self.emit(LirOp::StoreHandle {
-            slot: parent_field_slot,
-            from: parent_slot,
+        // Store parent and anchor for effects/updates (ForAnchor fields 0/1).
+        self.emit(LirOp::StructFieldSet {
+            struct_ty: for_anchor_id,
+            field_idx: 0,
+            value: parent_slot,
         });
-        self.emit(LirOp::StoreHandle {
-            slot: anchor_field_slot,
-            from: anchor_slot,
+        self.emit(LirOp::StructFieldSet {
+            struct_ty: for_anchor_id,
+            field_idx: 1,
+            value: anchor_slot,
         });
 
         // Calculate element size based on item type
@@ -3528,16 +3459,14 @@ impl<'a> BlockLowering<'a> {
         // (e.g. handler-bound locals) have no iter-body to reference —
         // they're skipped here. Body code reading them resolves via
         // the per-block `local_to_slot` mechanism, unchanged.
-        let mut outer_item_field_slots: HashMap<LocalId, (Ty, LirSlotId, LirBindingMode)> =
+        let mut outer_item_field_slots: HashMap<LocalId, (Ty, TreeBoundaryId, LirBindingMode)> =
             HashMap::new();
         for (outer_id, _outer_slot, outer_ty, outer_mode) in &outer_items {
             if let Some(&outer_iter_body_id) = self.for_item_iter_body.get(outer_id) {
-                let field_slot = self.alloc_boundary_field_slot_named(
-                    outer_iter_body_id,
-                    0,
-                    "for_outer_item_field",
-                );
-                outer_item_field_slots.insert(*outer_id, (*outer_ty, field_slot, *outer_mode));
+                // The outer item lives in field 0 of its iter-body struct;
+                // record the struct_ty so reads lower to StructFieldGet.
+                outer_item_field_slots
+                    .insert(*outer_id, (*outer_ty, outer_iter_body_id, *outer_mode));
             }
         }
 
@@ -3606,11 +3535,11 @@ impl<'a> BlockLowering<'a> {
         let iterable_deps = self.collect_dependencies(iterable);
         if !iterable_deps.is_empty() {
             // Re-classify the iterable for the update block so it gets a
-            // FRESH set of ExprIds (separate from the ones initial-mount
+            // FRESH set of LirExprIds (separate from the ones initial-mount
             // emitted). This matters for stdlib calls like `list.filter`
             // whose codegen assigns a monotonic call-site index per
-            // encountered ExprId in component.exprs — sharing a single
-            // ExprId between init and update would mint two filter calls
+            // encountered LirExprId in component.exprs — sharing a single
+            // LirExprId between init and update would mint two filter calls
             // but register only one entry in `filter_calls`, tripping
             // `Filter N not found in filter_calls` at codegen time.
             let update_iterable_kind = self.classify_iterable(iterable);
@@ -3622,7 +3551,6 @@ impl<'a> BlockLowering<'a> {
                 list_ty,
                 mount_block,
                 unmount_block,
-                parent_field_slot,
                 &for_ctx_snapshot,
                 iter_body_id,
             );
@@ -3650,7 +3578,6 @@ impl<'a> BlockLowering<'a> {
             self.forlist_binding_data.insert(
                 binding_id,
                 StructuralBindingInfo {
-                    owning_boundary,
                     dependencies: iterable_deps,
                     update_block,
                 },
@@ -3744,14 +3671,10 @@ impl<'a> BlockLowering<'a> {
                     result: end_slot,
                 });
                 // Compute len = end - start
-                self.emit(LirOp::SubSlots {
-                    a: end_slot,
-                    b: list_ptr,
-                    result: list_len,
-                });
+                self.emit(LirOp::BinaryOp { op: ArithOp::Sub, lhs: end_slot, rhs: BinOperand::Slot(list_ptr), result: list_len });
                 // For inclusive range, add 1 to len (start..=end has end-start+1 elements)
                 if *inclusive {
-                    self.emit(LirOp::IncrSlot { slot: list_len });
+                    self.emit(LirOp::BinaryOp { op: ArithOp::Add, lhs: list_len, rhs: BinOperand::Const(1), result: list_len });
                 }
             }
             IterableKind::Unsupported => {
@@ -3771,19 +3694,15 @@ impl<'a> BlockLowering<'a> {
             LirSlotValType::RefNullForChildrenArray(for_anchor_id),
             format!("for{}_children_arr", for_id.0),
         );
-        self.emit(LirOp::ChildrenArrayNewDefault {
-            anchor_boundary: for_anchor_id,
+        self.emit(LirOp::ArrayNewDefault {
+            array_type: self.for_anchor_array_idx(for_anchor_id),
             len: list_len,
             result: gc_arr_slot,
         });
-        let children_field_slot = self.alloc_boundary_field_slot_named(
-            for_anchor_id,
-            2,
-            format!("for{}_children_field", for_id.0),
-        );
-        self.emit(LirOp::StoreHandle {
-            slot: children_field_slot,
-            from: gc_arr_slot,
+        self.emit(LirOp::StructFieldSet {
+            struct_ty: for_anchor_id,
+            field_idx: 2,
+            value: gc_arr_slot,
         });
 
         // Init index to 0 and compute initial break_cond (exit immediately if list is empty)
@@ -3791,11 +3710,7 @@ impl<'a> BlockLowering<'a> {
             slot: index,
             value: 0,
         });
-        self.emit(LirOp::GeU {
-            index,
-            len: list_len,
-            result: break_cond,
-        });
+        self.emit(LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: list_len, result: break_cond });
 
         // Initial-mount insertion anchor — starts at the for's
         // `<#comment>` anchor node so iter[0] inserts immediately
@@ -3823,11 +3738,7 @@ impl<'a> BlockLowering<'a> {
         let mut have_item_value = false;
         match (&iterable_kind, range_item_buf) {
             (IterableKind::Range { .. }, Some(item_buf)) => {
-                loop_body.push(LirOp::AddSlots {
-                    a: list_ptr,
-                    b: index,
-                    result: item_value_for_record,
-                });
+                loop_body.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: list_ptr, rhs: BinOperand::Slot(index), result: item_value_for_record });
                 have_item_value = true;
                 // Store item_value to the shared memory buffer; item_ptr
                 // is its address. Kept during cutover so in-body reads
@@ -3855,21 +3766,11 @@ impl<'a> BlockLowering<'a> {
                     mem_slot: string_item_buf.unwrap(),
                     result: item_ptr,
                 });
-                loop_body.push(LirOp::ArrayGetItemFatToMem {
-                    arr: list_ref_slot.unwrap(),
-                    idx: index,
-                    list_ty,
-                    buf_addr_slot: item_ptr,
-                });
+                loop_body.push(LirOp::ArrayGetItem { arr: list_ref_slot.unwrap(), idx: index, list_ty: list_ty, repr: ArrayItemRepr::FatToMem { buf_addr: item_ptr } });
             }
             _ if is_gc_list => {
                 // Phase 5b-v.3: GC-list item — read element directly.
-                loop_body.push(LirOp::ArrayGetItem {
-                    arr: list_ref_slot.unwrap(),
-                    idx: index,
-                    list_ty,
-                    result: item_ptr,
-                });
+                loop_body.push(LirOp::ArrayGetItem { arr: list_ref_slot.unwrap(), idx: index, list_ty: list_ty, repr: ArrayItemRepr::Scalar { result: item_ptr } });
             }
             _ => {
                 // Stage 7: post Stage 6 the only iterables that aren't
@@ -3917,11 +3818,10 @@ impl<'a> BlockLowering<'a> {
         // unchanged. For ranges the per-iter VALUE additionally
         // lands in field 2 (`loop_var_value`) below, which the
         // fan-out wrap reads to re-seed the shared scratch buffer.
-        let init_loop_var_slot =
-            self.alloc_boundary_field_slot_named(iter_body_id, 0, "for_init_loop_var");
-        loop_body.push(LirOp::StoreHandle {
-            slot: init_loop_var_slot,
-            from: item_ptr,
+        loop_body.push(LirOp::StructFieldSet {
+            struct_ty: iter_body_id,
+            field_idx: 0,
+            value: item_ptr,
         });
         if have_item_value {
             // Stash the per-iter range VALUE into iter-body field 2
@@ -3929,11 +3829,10 @@ impl<'a> BlockLowering<'a> {
             // after `range_item_buf` has been overwritten by later
             // iterations. iter-body field 1 is `root_handle`,
             // populated inside the mount block.
-            let init_loop_var_value_slot =
-                self.alloc_boundary_field_slot_named(iter_body_id, 2, "for_init_loop_var_value");
-            loop_body.push(LirOp::StoreHandle {
-                slot: init_loop_var_value_slot,
-                from: item_value_for_record,
+            loop_body.push(LirOp::StructFieldSet {
+                struct_ty: iter_body_id,
+                field_idx: 2,
+                value: item_value_for_record,
             });
         }
         loop_body.push(LirOp::CallBlock {
@@ -3953,22 +3852,18 @@ impl<'a> BlockLowering<'a> {
         // Publish the per-iteration iter-body ref into the for-anchor's
         // typed children-array. Fan-out walks read iter-body refs out
         // of this array directly (no iter-rec indirection).
-        loop_body.push(LirOp::ChildrenArraySet {
-            anchor_boundary: for_anchor_id,
+        loop_body.push(LirOp::ArraySet {
+            array_type: self.for_anchor_array_idx(for_anchor_id),
             arr: gc_arr_slot,
             idx: index,
             value: iter_body_slot,
         });
 
         // Increment index
-        loop_body.push(LirOp::IncrSlot { slot: index });
+        loop_body.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: index, rhs: BinOperand::Const(1), result: index });
 
         // Check break condition for NEXT iteration: index >= list_len
-        loop_body.push(LirOp::GeU {
-            index,
-            len: list_len,
-            result: break_cond,
-        });
+        loop_body.push(LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: list_len, result: break_cond });
 
         // Emit the loop
         self.emit(LirOp::Loop {
@@ -3988,8 +3883,7 @@ impl<'a> BlockLowering<'a> {
             LirExprKind::ListConstruct { .. }
             | LirExprKind::ListStatic { .. }
             | LirExprKind::Field { .. }
-            | LirExprKind::Call { .. }
-            | LirExprKind::GlobalCall { .. } => {
+            | LirExprKind::Call { .. } => {
                 let expr_id = self.intern_expr(expr);
                 IterableKind::Expr { expr_id }
             }
@@ -3999,11 +3893,10 @@ impl<'a> BlockLowering<'a> {
                 end,
                 inclusive,
             } => {
-                let start_id = self.intern_expr(start);
-                let end_id = self.intern_expr(end);
+                // `start`/`end` are already arena handles — use them directly.
                 IterableKind::Range {
-                    start: start_id,
-                    end: end_id,
+                    start: *start,
+                    end: *end,
                     inclusive: *inclusive,
                 }
             }
@@ -4296,7 +4189,7 @@ impl<'a> BlockLowering<'a> {
         item: LocalId,
         item_ty: Ty,
         body: &[LirNode],
-        outer_item_field_slots: &HashMap<LocalId, (Ty, LirSlotId, LirBindingMode)>,
+        outer_item_field_slots: &HashMap<LocalId, (Ty, TreeBoundaryId, LirBindingMode)>,
         item_binding_mode: LirBindingMode,
         _for_ctx: &ForContext,
         iter_body_id: TreeBoundaryId,
@@ -4348,11 +4241,10 @@ impl<'a> BlockLowering<'a> {
         // Stash the wrapper into iter-body field 1 (the `wrapper`
         // DomHandle). The for-item-unmount block reads this field
         // and calls host `remove` on it.
-        let wrapper_field_slot =
-            self.alloc_boundary_field_slot_named(iter_body_id, 1, "for_iter_wrapper");
-        self.emit(LirOp::StoreHandle {
-            slot: wrapper_field_slot,
-            from: wrapper_slot,
+        self.emit(LirOp::StructFieldSet {
+            struct_ty: iter_body_id,
+            field_idx: 1,
+            value: wrapper_slot,
         });
 
         // The iter-body's loop-variable field 0 is populated by the
@@ -4366,7 +4258,7 @@ impl<'a> BlockLowering<'a> {
         // Phase 5b-v.3: propagate BindingMode from the outer map so GC-list
         // items use Value (direct slot) and memory/range items use Ptr (deref).
         let mut outer_loaded_slots: HashMap<LocalId, LirSlotId> = HashMap::new();
-        for (outer_id, (outer_ty, mem_slot, outer_mode)) in outer_item_field_slots {
+        for (outer_id, (outer_ty, item_struct_ty, outer_mode)) in outer_item_field_slots {
             // Phase 5e.6: type the temp slot based on the outer item's
             // type. For typed records / GC arrays the boundary field
             // stores a typed ref, so the loaded local must match.
@@ -4375,9 +4267,10 @@ impl<'a> BlockLowering<'a> {
             } else {
                 self.alloc_temp_slot_named("temp_slot")
             };
-            self.emit(LirOp::LoadHandle {
-                slot: *mem_slot,
-                to: temp_slot,
+            self.emit(LirOp::StructFieldGet {
+                struct_ty: *item_struct_ty,
+                field_idx: 0,
+                result: temp_slot,
             });
             self.local_bindings
                 .insert(*outer_id, (temp_slot, *outer_ty, *outer_mode));
@@ -4399,19 +4292,16 @@ impl<'a> BlockLowering<'a> {
         let old_outer_item_field_slots = std::mem::take(&mut self.outer_item_field_slots);
 
         // Copy inherited outer items (they're already stored to memory)
-        for (outer_id, (outer_ty, mem_slot, outer_mode)) in outer_item_field_slots {
+        for (outer_id, (outer_ty, item_struct_ty, outer_mode)) in outer_item_field_slots {
             self.outer_item_field_slots
-                .insert(*outer_id, (*outer_ty, *mem_slot, *outer_mode));
+                .insert(*outer_id, (*outer_ty, *item_struct_ty, *outer_mode));
         }
 
-        // The iter-body boundary's field 0 is the loop variable.
-        // Allocate a BoundaryField slot pointing at it so nested
-        // if-branches and fors inside the body resolve outer-item
-        // reads via `LoadHandle` on this slot.
-        let item_field_slot =
-            self.alloc_boundary_field_slot_named(iter_body_id, 0, "for_item_field");
+        // The iter-body boundary's field 0 is the loop variable. Record
+        // its struct_ty so nested if-branches and fors inside the body
+        // resolve outer-item reads via `StructFieldGet` on field 0.
         self.outer_item_field_slots
-            .insert(item, (item_ty, item_field_slot, item_binding_mode));
+            .insert(item, (item_ty, iter_body_id, item_binding_mode));
 
         // Lower each body node into the wrapper so all DOM the iter
         // creates becomes a child of the wrapper.
@@ -4530,13 +4420,12 @@ impl<'a> BlockLowering<'a> {
     fn create_for_update_block_reactive(
         &mut self,
         iterable: &IterableKind,
-        element_size: u32,
+        _element_size: u32,
         is_gc_list: bool,
         is_string_elem_gc: bool,
         list_ty: Ty,
         mount_block: BlockId,
         unmount_block: BlockId,
-        parent_field_slot: LirSlotId,
         for_ctx: &ForContext,
         iter_body_id: TreeBoundaryId,
     ) -> BlockId {
@@ -4608,9 +4497,10 @@ impl<'a> BlockLowering<'a> {
             // by the wrap loop's `BindBoundaryLocal`, so it must be
             // emitted INSIDE the diff body (wrapped by ancestor walks),
             // not at the top of the function.
-            ops.push(LirOp::LoadHandle {
-                slot: parent_field_slot,
-                to: parent_slot,
+            ops.push(LirOp::StructFieldGet {
+                struct_ty: for_anchor_id,
+                field_idx: 0,
+                result: parent_slot,
             });
             // old_len = array.len old_arr
             ops.push(LirOp::ArrayLen {
@@ -4652,13 +4542,9 @@ impl<'a> BlockLowering<'a> {
                         expr: *end,
                         result: end_slot,
                     });
-                    ops.push(LirOp::SubSlots {
-                        a: end_slot,
-                        b: new_list_ptr,
-                        result: new_len,
-                    });
+                    ops.push(LirOp::BinaryOp { op: ArithOp::Sub, lhs: end_slot, rhs: BinOperand::Slot(new_list_ptr), result: new_len });
                     if *inclusive {
-                        ops.push(LirOp::IncrSlot { slot: new_len });
+                        ops.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: new_len, rhs: BinOperand::Const(1), result: new_len });
                     }
                 }
                 IterableKind::Unsupported => {
@@ -4672,12 +4558,8 @@ impl<'a> BlockLowering<'a> {
 
             let min_len = self.alloc_temp_slot_named("min_len");
             let old_lt_new = self.alloc_temp_slot_named("old_lt_new");
-            ops.push(LirOp::LtU {
-                a: old_len,
-                b: new_len,
-                result: old_lt_new,
-            });
-            ops.push(LirOp::If {
+            ops.push(LirOp::Compare { op: CompareOp::LtU, lhs: old_len, rhs: new_len, result: old_lt_new });
+            ops.push(LirOp::If(Box::new(LirIf {
                 cond: old_lt_new,
                 then_ops: vec![LirOp::CopySlot {
                     from: old_len,
@@ -4688,11 +4570,11 @@ impl<'a> BlockLowering<'a> {
                     to: min_len,
                 }],
                 name: Some(format!("for{}_diff_min_len", for_ctx.id.0)),
-            });
+            })));
 
             // Allocate fresh typed children-array sized for new_len.
-            ops.push(LirOp::ChildrenArrayNewDefault {
-                anchor_boundary: for_anchor_id,
+            ops.push(LirOp::ArrayNewDefault {
+                array_type: self.for_anchor_array_idx(for_anchor_id),
                 len: new_len,
                 result: new_arr_slot,
             });
@@ -4702,8 +4584,8 @@ impl<'a> BlockLowering<'a> {
                 slot: index,
                 value: 0,
             });
-            ops.push(LirOp::ChildrenArrayCopy {
-                anchor_boundary: for_anchor_id,
+            ops.push(LirOp::ArrayCopy {
+                array_type: self.for_anchor_array_idx(for_anchor_id),
                 dst: new_arr_slot,
                 dst_idx: index,
                 src: old_arr_slot,
@@ -4718,21 +4600,15 @@ impl<'a> BlockLowering<'a> {
                 from: min_len,
                 to: index,
             });
-            ops.push(LirOp::GeU {
-                index,
-                len: old_len,
-                result: break_cond,
-            });
+            ops.push(LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: old_len, result: break_cond });
             let unmount_root = self.alloc_temp_slot_named("unmount_root");
             let unmount_iter_body = self.alloc_temp_slot_typed_named(
                 LirSlotValType::RefNullForBoundary(iter_body_id),
                 format!("upd_unmount_for{}_iter_body", for_ctx.id.0),
             );
-            let unmount_root_handle_slot =
-                self.alloc_boundary_field_slot_named(iter_body_id, 1, "for_unmount_root_handle");
             let unmount_body = vec![
-                LirOp::ChildrenArrayGet {
-                    anchor_boundary: for_anchor_id,
+                LirOp::ArrayGet {
+                    array_type: self.for_anchor_array_idx(for_anchor_id),
                     arr: old_arr_slot,
                     idx: index,
                     result: unmount_iter_body,
@@ -4741,9 +4617,10 @@ impl<'a> BlockLowering<'a> {
                     boundary_id: iter_body_id,
                     slot: unmount_iter_body,
                 },
-                LirOp::LoadHandle {
-                    slot: unmount_root_handle_slot,
-                    to: unmount_root,
+                LirOp::StructFieldGet {
+                    struct_ty: iter_body_id,
+                    field_idx: 1,
+                    result: unmount_root,
                 },
                 LirOp::CallBlock {
                     block: unmount_block,
@@ -4753,12 +4630,8 @@ impl<'a> BlockLowering<'a> {
                     ],
                     result: None,
                 },
-                LirOp::IncrSlot { slot: index },
-                LirOp::GeU {
-                    index,
-                    len: old_len,
-                    result: break_cond,
-                },
+                LirOp::BinaryOp { op: ArithOp::Add, lhs: index, rhs: BinOperand::Const(1), result: index },
+                LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: old_len, result: break_cond },
             ];
             ops.push(LirOp::Loop {
                 break_cond,
@@ -4772,14 +4645,10 @@ impl<'a> BlockLowering<'a> {
             // for's anchor; for nested fors it resolves through the
             // outer iter-body bound by the wrap loop. For top-level
             // fors it resolves through `$self.tree`.
-            let publish_children_slot = self.alloc_boundary_field_slot_named(
-                for_anchor_id,
-                2,
-                format!("for{}_publish_children", for_ctx.id.0),
-            );
-            ops.push(LirOp::StoreHandle {
-                slot: publish_children_slot,
-                from: new_arr_slot,
+            ops.push(LirOp::StructFieldSet {
+                struct_ty: for_anchor_id,
+                field_idx: 2,
+                value: new_arr_slot,
             });
 
             // Compute the mount-tail's insertion anchor — the DOM
@@ -4789,21 +4658,17 @@ impl<'a> BlockLowering<'a> {
             //     for's `<#comment>` node (ForAnchor field 1).
             //   - min_len > 0: anchor is the wrapper of the LAST
             //     surviving iter (the `index = min_len - 1` slot of
-            //     `new_arr`, which `ChildrenArrayCopy` just populated
+            //     `new_arr`, which `ArrayCopy` just populated
             //     with survivors).
             // Implemented as: seed from comment, then walk
             // `new_arr[0..min_len)` advancing through each survivor's
             // wrapper. Adds one bounded loop pre-mount but keeps the
             // mount-tail ops linear and avoids a per-iter conditional.
-            let for_anchor_node_field = self.alloc_boundary_field_slot_named(
-                for_anchor_id,
-                1,
-                format!("for{}_anchor_dom_handle", for_ctx.id.0),
-            );
             let upd_insert_anchor = self.alloc_temp_slot_named("upd_insert_anchor");
-            ops.push(LirOp::LoadHandle {
-                slot: for_anchor_node_field,
-                to: upd_insert_anchor,
+            ops.push(LirOp::StructFieldGet {
+                struct_ty: for_anchor_id,
+                field_idx: 1,
+                result: upd_insert_anchor,
             });
             // Walk survivors [0..min_len) — each iteration overwrites
             // upd_insert_anchor with the current iter-body's wrapper
@@ -4814,23 +4679,14 @@ impl<'a> BlockLowering<'a> {
                 LirSlotValType::RefNullForBoundary(iter_body_id),
                 format!("for{}_anchor_walk_iter_body", for_ctx.id.0),
             );
-            let walk_wrapper_field = self.alloc_boundary_field_slot_named(
-                iter_body_id,
-                1,
-                format!("for{}_anchor_walk_wrapper", for_ctx.id.0),
-            );
             ops.push(LirOp::SetSlot {
                 slot: index,
                 value: 0,
             });
-            ops.push(LirOp::GeU {
-                index,
-                len: min_len,
-                result: break_cond,
-            });
+            ops.push(LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: min_len, result: break_cond });
             let walk_body = vec![
-                LirOp::ChildrenArrayGet {
-                    anchor_boundary: for_anchor_id,
+                LirOp::ArrayGet {
+                    array_type: self.for_anchor_array_idx(for_anchor_id),
                     arr: new_arr_slot,
                     idx: index,
                     result: walk_iter_body,
@@ -4839,16 +4695,13 @@ impl<'a> BlockLowering<'a> {
                     boundary_id: iter_body_id,
                     slot: walk_iter_body,
                 },
-                LirOp::LoadHandle {
-                    slot: walk_wrapper_field,
-                    to: upd_insert_anchor,
+                LirOp::StructFieldGet {
+                    struct_ty: iter_body_id,
+                    field_idx: 1,
+                    result: upd_insert_anchor,
                 },
-                LirOp::IncrSlot { slot: index },
-                LirOp::GeU {
-                    index,
-                    len: min_len,
-                    result: break_cond,
-                },
+                LirOp::BinaryOp { op: ArithOp::Add, lhs: index, rhs: BinOperand::Const(1), result: index },
+                LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: min_len, result: break_cond },
             ];
             ops.push(LirOp::Loop {
                 break_cond,
@@ -4862,21 +4715,13 @@ impl<'a> BlockLowering<'a> {
                 from: min_len,
                 to: index,
             });
-            ops.push(LirOp::GeU {
-                index,
-                len: new_len,
-                result: break_cond,
-            });
+            ops.push(LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: new_len, result: break_cond });
             let update_item_value = self.alloc_temp_slot_named("update_item_value");
             let mut update_have_item_value = false;
             let mut mount_body = Vec::new();
             match (iterable, range_item_buf) {
                 (IterableKind::Range { .. }, Some(item_buf)) => {
-                    mount_body.push(LirOp::AddSlots {
-                        a: new_list_ptr,
-                        b: index,
-                        result: update_item_value,
-                    });
+                    mount_body.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: new_list_ptr, rhs: BinOperand::Slot(index), result: update_item_value });
                     update_have_item_value = true;
                     mount_body.push(LirOp::StoreHandle {
                         slot: item_buf,
@@ -4896,20 +4741,10 @@ impl<'a> BlockLowering<'a> {
                         mem_slot: upd_string_buf,
                         result: item_ptr,
                     });
-                    mount_body.push(LirOp::ArrayGetItemFatToMem {
-                        arr: new_list_ref_slot.unwrap(),
-                        idx: index,
-                        list_ty,
-                        buf_addr_slot: item_ptr,
-                    });
+                    mount_body.push(LirOp::ArrayGetItem { arr: new_list_ref_slot.unwrap(), idx: index, list_ty: list_ty, repr: ArrayItemRepr::FatToMem { buf_addr: item_ptr } });
                 }
                 _ if is_gc_list => {
-                    mount_body.push(LirOp::ArrayGetItem {
-                        arr: new_list_ref_slot.unwrap(),
-                        idx: index,
-                        list_ty,
-                        result: item_ptr,
-                    });
+                    mount_body.push(LirOp::ArrayGetItem { arr: new_list_ref_slot.unwrap(), idx: index, list_ty: list_ty, repr: ArrayItemRepr::Scalar { result: item_ptr } });
                 }
                 _ => {
                     unreachable!(
@@ -4940,22 +4775,20 @@ impl<'a> BlockLowering<'a> {
             // pointer-into-list for lists. Mirrors the initial-mount
             // path so nested fors and outer-item access pattern stay
             // identical across init and diff-driven mounts.
-            let upd_loop_var_slot =
-                self.alloc_boundary_field_slot_named(iter_body_id, 0, "for_upd_loop_var");
-            mount_body.push(LirOp::StoreHandle {
-                slot: upd_loop_var_slot,
-                from: item_ptr,
+            mount_body.push(LirOp::StructFieldSet {
+                struct_ty: iter_body_id,
+                field_idx: 0,
+                value: item_ptr,
             });
             if update_have_item_value {
                 // For ranges, also stash the per-iter VALUE into
                 // field 2 (`loop_var_value`) so cols-grow-style
                 // fan-out re-seeding survives `range_item_buf`
                 // overwrites by later iterations.
-                let upd_loop_var_value_slot =
-                    self.alloc_boundary_field_slot_named(iter_body_id, 2, "for_upd_loop_var_value");
-                mount_body.push(LirOp::StoreHandle {
-                    slot: upd_loop_var_value_slot,
-                    from: update_item_value,
+                mount_body.push(LirOp::StructFieldSet {
+                    struct_ty: iter_body_id,
+                    field_idx: 2,
+                    value: update_item_value,
                 });
             }
             mount_body.push(LirOp::CallBlock {
@@ -4971,18 +4804,14 @@ impl<'a> BlockLowering<'a> {
                 // inserts after this iter's wrapper.
                 result: Some(upd_insert_anchor),
             });
-            mount_body.push(LirOp::ChildrenArraySet {
-                anchor_boundary: for_anchor_id,
+            mount_body.push(LirOp::ArraySet {
+                array_type: self.for_anchor_array_idx(for_anchor_id),
                 arr: new_arr_slot,
                 idx: index,
                 value: upd_iter_body,
             });
-            mount_body.push(LirOp::IncrSlot { slot: index });
-            mount_body.push(LirOp::GeU {
-                index,
-                len: new_len,
-                result: break_cond,
-            });
+            mount_body.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: index, rhs: BinOperand::Const(1), result: index });
+            mount_body.push(LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: new_len, result: break_cond });
             ops.push(LirOp::Loop {
                 break_cond,
                 body_ops: mount_body,
@@ -4995,14 +4824,10 @@ impl<'a> BlockLowering<'a> {
         if nested_parent.is_none() {
             // Top-level for: load old_arr from the for-anchor's
             // children-field (resolves through `$self.tree`).
-            let load_children_slot = self.alloc_boundary_field_slot_named(
-                for_anchor_id,
-                2,
-                format!("for{}_load_children", for_ctx.id.0),
-            );
-            self.emit(LirOp::LoadHandle {
-                slot: load_children_slot,
-                to: old_arr_slot,
+            self.emit(LirOp::StructFieldGet {
+                struct_ty: for_anchor_id,
+                field_idx: 2,
+                result: old_arr_slot,
             });
             for op in diff_ops {
                 self.emit(op);
@@ -5041,14 +4866,10 @@ impl<'a> BlockLowering<'a> {
             // iter-body), then splice.
             let mut body: Vec<LirOp> = {
                 let mut inner: Vec<LirOp> = Vec::new();
-                let load_old_children_slot = self.alloc_boundary_field_slot_named(
-                    for_anchor_id,
-                    2,
-                    format!("for{}_load_old_children", for_ctx.id.0),
-                );
-                inner.push(LirOp::LoadHandle {
-                    slot: load_old_children_slot,
-                    to: old_arr_slot,
+                inner.push(LirOp::StructFieldGet {
+                    struct_ty: for_anchor_id,
+                    field_idx: 2,
+                    result: old_arr_slot,
                 });
                 inner.extend(diff_ops);
                 inner
@@ -5075,14 +4896,10 @@ impl<'a> BlockLowering<'a> {
                 // ancestor this resolves via `$self.tree`; for inner
                 // ancestors it resolves through the next-outer
                 // already-bound iter-body.
-                let anc_children_slot = self.alloc_boundary_field_slot_named(
-                    anc_anchor_id,
-                    2,
-                    format!("upd_anc{}_load_children", level.ancestor_id.0),
-                );
-                wrap.push(LirOp::LoadHandle {
-                    slot: anc_children_slot,
-                    to: anc_arr_slot,
+                wrap.push(LirOp::StructFieldGet {
+                    struct_ty: anc_anchor_id,
+                    field_idx: 2,
+                    result: anc_arr_slot,
                 });
                 let _ = i;
 
@@ -5091,11 +4908,7 @@ impl<'a> BlockLowering<'a> {
                     result: outer_len,
                 });
                 wrap.push(LirOp::SetSlot { slot: j, value: 0 });
-                wrap.push(LirOp::GeU {
-                    index: j,
-                    len: outer_len,
-                    result: outer_break,
-                });
+                wrap.push(LirOp::Compare { op: CompareOp::GeU, lhs: j, rhs: outer_len, result: outer_break });
 
                 let mut loop_body = Vec::new();
                 let anc_iter_body_id = self.iter_body_id_for(level.ancestor_id);
@@ -5103,8 +4916,8 @@ impl<'a> BlockLowering<'a> {
                     LirSlotValType::RefNullForBoundary(anc_iter_body_id),
                     format!("upd_anc{}_iter_body", level.ancestor_id.0),
                 );
-                loop_body.push(LirOp::ChildrenArrayGet {
-                    anchor_boundary: anc_anchor_id,
+                loop_body.push(LirOp::ArrayGet {
+                    array_type: self.for_anchor_array_idx(anc_anchor_id),
                     arr: anc_arr_slot,
                     idx: j,
                     result: anc_iter_body_slot,
@@ -5122,14 +4935,10 @@ impl<'a> BlockLowering<'a> {
                     // iteration left in the shared buf, not this
                     // iteration's value.
                     let scratch = self.alloc_temp_slot_named("scratch");
-                    let anc_loop_var_value_slot = self.alloc_boundary_field_slot_named(
-                        anc_iter_body_id,
-                        2,
-                        "for_wrap_anc_loop_var_value",
-                    );
-                    loop_body.push(LirOp::LoadHandle {
-                        slot: anc_loop_var_value_slot,
-                        to: scratch,
+                    loop_body.push(LirOp::StructFieldGet {
+                        struct_ty: anc_iter_body_id,
+                        field_idx: 2,
+                        result: scratch,
                     });
                     loop_body.push(LirOp::StoreHandle {
                         slot: buf,
@@ -5137,12 +4946,8 @@ impl<'a> BlockLowering<'a> {
                     });
                 }
                 loop_body.extend(body);
-                loop_body.push(LirOp::IncrSlot { slot: j });
-                loop_body.push(LirOp::GeU {
-                    index: j,
-                    len: outer_len,
-                    result: outer_break,
-                });
+                loop_body.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: j, rhs: BinOperand::Const(1), result: j });
+                loop_body.push(LirOp::Compare { op: CompareOp::GeU, lhs: j, rhs: outer_len, result: outer_break });
                 wrap.push(LirOp::Loop {
                     break_cond: outer_break,
                     body_ops: loop_body,
@@ -5174,12 +4979,12 @@ impl<'a> BlockLowering<'a> {
         &mut self,
         nodes: &[LirNode],
         _parent_slot: LirSlotId, // Outer parent - not used in block functions
-        anchor_mem: LirSlotId,
-        content_mem: LirSlotId,
+        if_anchor_id: TreeBoundaryId,
+        branch_id: TreeBoundaryId,
     ) -> (BlockId, BlockId) {
         // Capture outer_item_field_slots before starting the block
         // (These are for-loop items that need to be accessible in this block)
-        let outer_items_snapshot: Vec<(LocalId, Ty, LirSlotId, LirBindingMode)> = self
+        let outer_items_snapshot: Vec<(LocalId, Ty, TreeBoundaryId, LirBindingMode)> = self
             .outer_item_field_slots
             .iter()
             .map(|(id, (ty, slot, mode))| (*id, *ty, *slot, *mode))
@@ -5195,15 +5000,16 @@ impl<'a> BlockLowering<'a> {
         // (when bound by Value) so list<FlatGcStruct> elements arrive
         // as the typed supertype ref.
         let mut loaded_items: HashMap<LocalId, LirSlotId> = HashMap::new();
-        for (local_id, outer_ty, mem_slot, mode) in &outer_items_snapshot {
+        for (local_id, outer_ty, item_struct_ty, mode) in &outer_items_snapshot {
             let temp_slot = if matches!(*mode, LirBindingMode::Value) {
                 self.alloc_temp_slot_typed_named(self.ty_to_slot_val_type(*outer_ty), "temp_slot")
             } else {
                 self.alloc_temp_slot_named("temp_slot")
             };
-            self.emit(LirOp::LoadHandle {
-                slot: *mem_slot,
-                to: temp_slot,
+            self.emit(LirOp::StructFieldGet {
+                struct_ty: *item_struct_ty,
+                field_idx: 0,
+                result: temp_slot,
             });
             loaded_items.insert(*local_id, temp_slot);
         }
@@ -5212,9 +5018,10 @@ impl<'a> BlockLowering<'a> {
             // Load anchor for InsertAfter — used once to position the
             // branch's wrapper element as the if-anchor's sibling.
             let anchor_temp = self.alloc_temp_slot_named("anchor_temp");
-            self.emit(LirOp::LoadHandle {
-                slot: anchor_mem,
-                to: anchor_temp,
+            self.emit(LirOp::StructFieldGet {
+                struct_ty: if_anchor_id,
+                field_idx: 1,
+                result: anchor_temp,
             });
 
             // Allocate the branch's host-fragment wrapper element
@@ -5236,11 +5043,12 @@ impl<'a> BlockLowering<'a> {
                 result: None,
             });
             // Stash the wrapper into the IfBranch boundary's `wrapper`
-            // field (BoundaryField slot, passed as `content_mem`).
-            // The branch-unmount block reads this and calls Remove.
-            self.emit(LirOp::StoreHandle {
-                slot: content_mem,
-                from: wrapper_slot,
+            // field (IfBranch field 0). The branch-unmount block reads
+            // this and calls Remove.
+            self.emit(LirOp::StructFieldSet {
+                struct_ty: branch_id,
+                field_idx: 0,
+                value: wrapper_slot,
             });
 
             // Lower body content with the wrapper as parent — every
@@ -5269,25 +5077,27 @@ impl<'a> BlockLowering<'a> {
 
         // Load for-loop items from memory (unmount might need them for cleanup)
         let mut unmount_loaded_items: HashMap<LocalId, LirSlotId> = HashMap::new();
-        for (local_id, outer_ty, mem_slot, mode) in &outer_items_snapshot {
+        for (local_id, outer_ty, item_struct_ty, mode) in &outer_items_snapshot {
             let temp_slot = if matches!(*mode, LirBindingMode::Value) {
                 self.alloc_temp_slot_typed_named(self.ty_to_slot_val_type(*outer_ty), "temp_slot")
             } else {
                 self.alloc_temp_slot_named("temp_slot")
             };
-            self.emit(LirOp::LoadHandle {
-                slot: *mem_slot,
-                to: temp_slot,
+            self.emit(LirOp::StructFieldGet {
+                struct_ty: *item_struct_ty,
+                field_idx: 0,
+                result: temp_slot,
             });
             unmount_loaded_items.insert(*local_id, temp_slot);
         }
 
         if !nodes.is_empty() {
-            // Load the stored node handle
+            // Load the stored node handle (IfBranch field 0)
             let node_temp = self.alloc_temp_slot_named("node_temp");
-            self.emit(LirOp::LoadHandle {
-                slot: content_mem,
-                to: node_temp,
+            self.emit(LirOp::StructFieldGet {
+                struct_ty: branch_id,
+                field_idx: 0,
+                result: node_temp,
             });
 
             // Remove it from DOM
@@ -5323,6 +5133,7 @@ impl<'a> BlockLowering<'a> {
     /// - If cond true && old_state == 0: unmount else (if exists), mount then
     /// - If cond false && old_state == 0: do nothing (already else)
     /// - If cond false && old_state == 1: unmount then, mount else
+    ///
     // Args are mixed (cond expr, anchor/state slots, then/else block-id pairs)
     // and don't naturally cluster; a wrapper struct would just shadow each
     // parameter under a longer name.
@@ -5446,12 +5257,12 @@ impl<'a> BlockLowering<'a> {
                 }
 
                 let stmt_if_id = self.next_if_label();
-                self.emit(LirOp::If {
+                self.emit(LirOp::If(Box::new(LirIf {
                     cond: cond_slot,
                     then_ops,
                     else_ops,
                     name: Some(format!("if{}_stmt", stmt_if_id)),
-                });
+                })));
             }
             LirStatement::Let { local_id, value } => {
                 // Check if value type is a fat pointer (list or string) - needs two slots
@@ -5498,70 +5309,65 @@ impl<'a> BlockLowering<'a> {
                 }
             }
             LirExprKind::Binary { lhs, rhs, .. } => {
-                self.collect_deps_recursive(lhs, deps);
-                self.collect_deps_recursive(rhs, deps);
+                self.collect_deps_recursive(self.get_expr(*lhs), deps);
+                self.collect_deps_recursive(self.get_expr(*rhs), deps);
             }
             LirExprKind::Unary { operand, .. } => {
-                self.collect_deps_recursive(operand, deps);
+                self.collect_deps_recursive(self.get_expr(*operand), deps);
             }
             LirExprKind::Call { args, .. } => {
                 for arg in args {
-                    self.collect_deps_recursive(arg, deps);
+                    self.collect_deps_recursive(self.get_expr(*arg), deps);
                 }
             }
             LirExprKind::Field { base, .. } => {
-                self.collect_deps_recursive(base, deps);
+                self.collect_deps_recursive(self.get_expr(*base), deps);
             }
             LirExprKind::Index { base, index } => {
-                self.collect_deps_recursive(base, deps);
-                self.collect_deps_recursive(index, deps);
+                self.collect_deps_recursive(self.get_expr(*base), deps);
+                self.collect_deps_recursive(self.get_expr(*index), deps);
             }
             LirExprKind::Ternary {
                 condition,
                 then_expr,
                 else_expr,
             } => {
-                self.collect_deps_recursive(condition, deps);
-                self.collect_deps_recursive(then_expr, deps);
-                self.collect_deps_recursive(else_expr, deps);
+                self.collect_deps_recursive(self.get_expr(*condition), deps);
+                self.collect_deps_recursive(self.get_expr(*then_expr), deps);
+                self.collect_deps_recursive(self.get_expr(*else_expr), deps);
             }
             LirExprKind::VariantCtor { payload, .. } => {
                 if let Some(p) = payload {
-                    self.collect_deps_recursive(p, deps);
+                    self.collect_deps_recursive(self.get_expr(*p), deps);
                 }
             }
             // Phase 5e.5: discriminant test / payload extraction —
             // both are pure reads of the base expression's deps.
             LirExprKind::IsCase { base, .. } => {
-                self.collect_deps_recursive(base, deps);
+                self.collect_deps_recursive(self.get_expr(*base), deps);
             }
             LirExprKind::VariantField { base, .. } => {
-                self.collect_deps_recursive(base, deps);
+                self.collect_deps_recursive(self.get_expr(*base), deps);
             }
             // List/Record constructs - collect deps from elements/fields
             LirExprKind::ListConstruct { elements, .. } => {
                 for elem in elements {
-                    self.collect_deps_recursive(elem, deps);
+                    self.collect_deps_recursive(self.get_expr(*elem), deps);
                 }
             }
             LirExprKind::RecordConstruct { fields, .. } => {
                 for field in fields {
-                    self.collect_deps_recursive(field, deps);
+                    self.collect_deps_recursive(self.get_expr(*field), deps);
                 }
             }
             LirExprKind::TupleConstruct { elements, .. } => {
                 for elem in elements {
-                    self.collect_deps_recursive(elem, deps);
+                    self.collect_deps_recursive(self.get_expr(*elem), deps);
                 }
             }
             LirExprKind::Range { start, end, .. } => {
-                self.collect_deps_recursive(start, deps);
-                self.collect_deps_recursive(end, deps);
-            }
-            LirExprKind::GlobalCall { args, .. } => {
-                for arg in args {
-                    self.collect_deps_recursive(arg, deps);
-                }
+                self.collect_deps_recursive(self.get_expr(*start), deps);
+                self.collect_deps_recursive(self.get_expr(*end), deps);
             }
             // Closures capture state from the enclosing component — walk
             // their body statements so filter/map predicates contribute
@@ -5902,10 +5708,6 @@ impl<'a> BlockLowering<'a> {
         id
     }
 
-    fn alloc_temp_slot(&mut self) -> LirSlotId {
-        self.alloc_temp_slot_typed(LirSlotValType::I32)
-    }
-
     /// Task #105 B2: dispatch a `LirSlotId` to its backing
     /// `LirSlotInfo`. Resource-variant ids index into the component-wide
     /// `self.slots` vec; Block-variant ids index into either
@@ -6009,7 +5811,7 @@ impl<'a> BlockLowering<'a> {
         &mut self,
         signal_def: DefId,
         signal_ty: Ty,
-        value: Option<ExprId>,
+        value: Option<LirExprId>,
     ) -> InlineResult {
         // Phase 1.1c-i recovery: helper temporarily disabled — defer to
         // legacy LirOp::SignalWriteExpr / InitSignal paths whose codegen
@@ -6019,14 +5821,14 @@ impl<'a> BlockLowering<'a> {
         // are now inlined here. All other shapes still bail to caller.
         {
             // Skip tuples (typed-ref shape today's helper can't express).
-            if !matches!(self.ctx.ty_kind(signal_ty), InternedTyKind::Tuple(_)) {
-                if let Some(expr_id) = value {
+            if !matches!(self.ctx.ty_kind(signal_ty), InternedTyKind::Tuple(_))
+                && let Some(expr_id) = value {
                     let local_idx_opt =
                         self.tree_signals.iter().position(|s| s.def_id == signal_def);
                     let is_global =
                         self.ctx.defs.owning_global_block(signal_def).is_some();
-                    if let (Some(sig_idx), false) = (local_idx_opt, is_global) {
-                        if let Some(storage) =
+                    if let (Some(sig_idx), false) = (local_idx_opt, is_global)
+                        && let Some(storage) =
                             self.signal_layout_early.signals.get(sig_idx).copied()
                         {
                             // Strict scalar-i32 predicate: only accept
@@ -6059,8 +5861,9 @@ impl<'a> BlockLowering<'a> {
                                 .gc
                                 .map(|gc| gc.field_count == 1)
                                 .unwrap_or(false);
+                            // `single_slot_gc` already implies `gc.is_some()`, so the
+                            // `unwrap()` below is correlated through it (not flagged).
                             if (is_scalar_i32 || is_scalar_f64 || is_scalar_f32 || is_scalar_i64)
-                                && storage.gc.is_some()
                                 && single_slot_gc
                                 && storage.mem.is_none()
                             {
@@ -6106,7 +5909,6 @@ impl<'a> BlockLowering<'a> {
                                 .map(|gc| gc.field_count == 2)
                                 .unwrap_or(false);
                             if (is_string || is_list)
-                                && storage.gc.is_some()
                                 && multi_slot_gc
                                 && storage.mem.is_none()
                             {
@@ -6145,9 +5947,7 @@ impl<'a> BlockLowering<'a> {
                                 return InlineResult::Handled;
                             }
                         }
-                    }
                 }
-            }
         }
         // Part 1: forcing-function panic was attempted here to surface
         // every unhandled shape. After enabling inline emission for
@@ -6516,16 +6316,6 @@ impl<'a> BlockLowering<'a> {
                 None => return InlineResult::NotHandled,
             };
 
-            // Load the globals-struct ref into a typed scratch slot.
-            let rec_slot = self.alloc_temp_slot_typed_named(
-                LirSlotValType::RefNullForGlobalBlock(block_def),
-                "globals_block_self",
-            );
-            self.emit(LirOp::GlobalGet {
-                gref: crate::lir::block::LirGlobalRef::GlobalBlockSelf(block_def),
-                result: rec_slot,
-            });
-
             // Per-field scratch slots. Task #103: the first slot must
             // use the *natural* slot val_ty (handles ref types for
             // GcRef / GcArrayRef / FlatGcStruct / FatPointer-first) so
@@ -6550,10 +6340,9 @@ impl<'a> BlockLowering<'a> {
             });
             for i in 0..count {
                 let val = LirSlotId::resource(dest_first.legacy_u32() + i);
-                self.emit(LirOp::StructSetSym {
-                    ty_ref: crate::lir::block::LirTypeRef::GlobalsStruct(block_def),
+                self.emit(LirOp::GlobalFieldSet {
+                    block: block_def,
                     field: field_start + i,
-                    rec: rec_slot,
                     value: val,
                 });
             }
@@ -6649,11 +6438,10 @@ impl<'a> BlockLowering<'a> {
     /// synthesizer always emits one per for-loop).
     fn iter_body_id_for(&self, target: ForId) -> TreeBoundaryId {
         for b in &self.tree_shape.boundaries {
-            if let TreeBoundaryKind::ForIterBody { for_id } = b.kind {
-                if for_id == target {
+            if let TreeBoundaryKind::ForIterBody { for_id } = b.kind
+                && for_id == target {
                     return b.id;
                 }
-            }
         }
         panic!(
             "iter_body_id_for: no ForIterBody boundary in tree_shape for for_id {:?}",
@@ -6666,11 +6454,10 @@ impl<'a> BlockLowering<'a> {
     /// boundary pair.
     fn for_anchor_id_for(&self, target: ForId) -> TreeBoundaryId {
         for b in &self.tree_shape.boundaries {
-            if let TreeBoundaryKind::ForAnchor { for_id, .. } = b.kind {
-                if for_id == target {
+            if let TreeBoundaryKind::ForAnchor { for_id, .. } = b.kind
+                && for_id == target {
                     return b.id;
                 }
-            }
         }
         panic!(
             "for_anchor_id_for: no ForAnchor boundary in tree_shape for for_id {:?}",
@@ -6700,41 +6487,6 @@ impl<'a> BlockLowering<'a> {
         }
     }
 
-    fn alloc_boundary_field_slot_named(
-        &mut self,
-        boundary_id: TreeBoundaryId,
-        field_idx: u32,
-        name: impl Into<String>,
-    ) -> LirSlotId {
-        // Phase 5e.5 Stage 7e: when the TreeFieldDecl carries a non-I32
-        // val_ty (e.g., `LoopVar { val_ty: RefNullForFlatGc(_) }` for
-        // list<FlatGcStruct> iteration), propagate it to the slot so
-        // local-type emission and SignalRead paths see the correct
-        // ref shape. Other field kinds keep the default I32.
-        let val_ty = self
-            .tree_shape
-            .boundaries
-            .get(boundary_id.0 as usize)
-            .and_then(|b| b.fields.get(field_idx as usize))
-            .and_then(|f| match f {
-                crate::lir::block::TreeFieldDecl::LoopVar { val_ty, .. } => Some(*val_ty),
-                _ => None,
-            })
-            .unwrap_or(LirSlotValType::I32);
-        let id = LirSlotId::resource(self.next_slot);
-        self.next_slot += 1;
-        self.slots.push(LirSlotInfo {
-            id,
-            kind: LirSlotKind::BoundaryField {
-                boundary_id,
-                field_idx,
-            },
-            val_ty,
-            name: Some(name.into()),
-        });
-        id
-    }
-
     fn intern_string(&mut self, s: &str) -> StringId {
         if let Some(&id) = self.string_map.get(s) {
             return id;
@@ -6745,11 +6497,99 @@ impl<'a> BlockLowering<'a> {
         id
     }
 
-    fn intern_expr(&mut self, expr: &LirExpr) -> ExprId {
+    fn intern_expr(&mut self, expr: &LirExpr) -> LirExprId {
         // For now, always add - could deduplicate later
-        let id = ExprId(self.exprs.len() as u32);
+        let id = LirExprId(self.exprs.len() as u32);
         self.exprs.push(expr.clone());
         id
+    }
+
+    /// The children-array registry index for a `ForAnchor` boundary: its
+    /// ordinal among `ForAnchor` boundaries in `tree_shape.boundaries`
+    /// order. `project_tree_shape` allocates one array per ForAnchor in
+    /// exactly that order, and codegen assigns wasm type indices the same
+    /// way — so this is the registry index the generic `Array*` ops carry.
+    fn for_anchor_array_idx(
+        &self,
+        anchor: TreeBoundaryId,
+    ) -> crate::lir::struct_types::LirArrayTypeIdx {
+        let n = self.tree_shape.boundaries[..anchor.index()]
+            .iter()
+            .filter(|b| matches!(b.kind, crate::lir::block::TreeBoundaryKind::ForAnchor { .. }))
+            .count();
+        crate::lir::struct_types::LirArrayTypeIdx(n as u32)
+    }
+
+    /// Wrap an already-lowered value in a `to_string` `Call` so it can be
+    /// pushed as a string argument (`set-text-content`, dynamic text). If
+    /// the value is already a `string`, it's returned unwrapped. Codegen's
+    /// generic `Call` path dispatches the `to_string` helper — no bespoke
+    /// per-type stringify op.
+    fn wrap_as_string(&mut self, value_expr: LirExprId) -> LirExprId {
+        let value_ty = self.get_expr(value_expr).ty;
+        if matches!(self.ctx.ty_kind(value_ty), crate::types::InternedTyKind::String) {
+            return value_expr;
+        }
+        let to_string = self.ctx.to_string_func_for(value_ty);
+        self.intern_expr(&LirExpr {
+            kind: LirExprKind::Call {
+                func: to_string,
+                args: vec![value_expr],
+            },
+            ty: Ty::STRING,
+            span: None,
+        })
+    }
+
+    /// Wrap an already-lowered value expression in an `attribute-value`
+    /// `VariantCtor`, choosing the case whose payload type matches the
+    /// value's type (`str`/`s32`/`color`/…). This is where the DOM
+    /// knowledge lives — the frontend constructs a real variant value, so
+    /// codegen flattens it through the generic `emit_variant_ctor_flat`
+    /// path with no `set-attribute`-specific op.
+    fn wrap_as_attr_value(&mut self, value_expr: LirExprId) -> LirExprId {
+        use crate::definitions::DefKind;
+        let value_ty = self.get_expr(value_expr).ty;
+        let av_def = self.ctx.known.variants.attribute_value();
+        let av_ty = self.ctx.known.variants.attribute_value_ty();
+        let case_idx = {
+            let variant = self
+                .ctx
+                .defs
+                .as_variant(av_def)
+                .expect("AttributeValue is a registered variant");
+            variant
+                .cases
+                .iter()
+                .position(|&c| {
+                    matches!(
+                        self.ctx.defs.kind(c),
+                        DefKind::VariantCase(vc) if vc.payload == Some(value_ty)
+                    )
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "attribute value of type {:?} matches no AttributeValue case",
+                        self.ctx.ty_kind(value_ty)
+                    )
+                }) as u32
+        };
+        self.intern_expr(&LirExpr {
+            kind: LirExprKind::VariantCtor {
+                ty_def: av_def,
+                case_idx,
+                payload: Some(value_expr),
+            },
+            ty: av_ty,
+            span: None,
+        })
+    }
+
+    /// Resolve an expression handle against the block-stage arena. Children of
+    /// a `LirExpr` are `LirExprId`s into `self.exprs` (continued from the tree
+    /// stage), so walkers resolve them through here.
+    fn get_expr(&self, id: LirExprId) -> &LirExpr {
+        &self.exprs[id.0 as usize]
     }
 }
 
@@ -6839,25 +6679,23 @@ pub(crate) fn populate_block_structural_metadata(
     component: &mut LirResource,
 ) {
     let mut layout_ctx = LirLayoutContext::new(ctx);
-    // Snapshot what we need to read from the component while iterating
-    // mutably over its blocks. Cloning here is cheap relative to the
-    // alternative of cloning the whole component.
+    // Project the signal types up front (a small owned Vec). The read-only
+    // first loop borrows `component.blocks` and `component.exprs` disjointly,
+    // and the mutable second loop doesn't touch `exprs`, so no arena clone is
+    // needed — collect per-block metadata first to avoid the borrow conflict.
     let signals: Vec<(Ty,)> = component.signals.iter().map(|s| (s.ty,)).collect();
-    let exprs = component.exprs.clone();
 
-    // Collect per-block metadata first to avoid borrow conflicts on
-    // `component.blocks`.
     let mut metas: Vec<(FlatValTypeCounts, u32, Vec<DefId>)> =
         Vec::with_capacity(component.blocks.len());
     for block in &component.blocks {
         let scratch =
-            compute_flat_scratch_counts(&block.ops, &signals, &exprs, ctx, &mut layout_ctx);
+            compute_flat_scratch_counts(&block.ops, &signals, &component.exprs, ctx, &mut layout_ctx);
         let count = count_mount_sites(&block.ops);
         let mut children = Vec::new();
         collect_mount_children(&block.ops, &mut children);
         metas.push((scratch, count, children));
     }
-    for (block, (scratch, count, children)) in component.blocks.iter_mut().zip(metas.into_iter()) {
+    for (block, (scratch, count, children)) in component.blocks.iter_mut().zip(metas) {
         block.max_flat_scratch_counts = scratch;
         block.mount_component_count = count;
         block.mount_component_children = children;
@@ -7108,9 +6946,10 @@ pub(crate) fn synth_internal_unmount_block(ctx: &CompilerContext, component: &mu
             value: offset as i32,
             result: addr_slot,
         });
-        ops.push(LirOp::LoadI32Addr {
+        ops.push(LirOp::LoadAddr {
             addr: addr_slot,
             result: handle_slot,
+            ty: crate::lir::block::MemoryValueType::I32,
         });
         ops.push(LirOp::PushSlot { slot: handle_slot });
         ops.push(LirOp::CallFunction {
@@ -7120,50 +6959,39 @@ pub(crate) fn synth_internal_unmount_block(ctx: &CompilerContext, component: &mu
         });
     }
 
-    // BoundaryField slots: detachable iff role == DomHandle AND
-    // reachable from tree root (skip ForIterBody fields and orphans).
-    let boundary_detaches: Vec<(crate::ids::TreeBoundaryId, u32)> = component
-        .slots
-        .iter()
-        .filter_map(|s| match s.kind {
-            LirSlotKind::BoundaryField {
-                boundary_id,
-                field_idx,
-            } => Some((boundary_id, field_idx)),
-            _ => None,
-        })
-        .filter(|(boundary_id, field_idx)| {
-            // Role == DomHandle?
-            let is_dom_handle = component
-                .struct_types
-                .get(boundary_id.index())
-                .and_then(|s| s.fields.get(*field_idx as usize))
-                .map(|f| matches!(f.role, crate::lir::struct_types::LirFieldRole::DomHandle))
-                .unwrap_or(false);
-            if !is_dom_handle {
+    // DomHandle fields reachable from the tree root are detached at
+    // unmount. Derived from the struct-type registry — `role == DomHandle`
+    // and the boundary's parent chain reaches `Root` — rather than by
+    // scanning `BoundaryField` slots (which are being removed). Walk
+    // boundaries in id order and fields in declaration order so the emitted
+    // detach sequence is deterministic.
+    let boundary_reaches_root = |start: crate::ids::TreeBoundaryId| -> bool {
+        let mut cur = start;
+        loop {
+            let Some(s) = component.struct_types.get(cur.index()) else {
                 return false;
+            };
+            if matches!(s.kind, TreeBoundaryKind::Root) {
+                return true;
             }
-            // Reachable from tree root (walk parent chain until Root).
-            let mut cur = *boundary_id;
-            loop {
-                let kind = component
-                    .struct_types
-                    .get(cur.index())
-                    .map(|s| s.kind.clone());
-                if matches!(kind, Some(TreeBoundaryKind::Root)) {
-                    return true;
-                }
-                let parent = component
-                    .struct_types
-                    .get(cur.index())
-                    .and_then(|s| s.parent);
-                match parent {
-                    Some(p) => cur = crate::ids::TreeBoundaryId(p.parent.0),
-                    None => return false,
-                }
+            match s.parent {
+                Some(p) => cur = crate::ids::TreeBoundaryId(p.parent.0),
+                None => return false,
             }
-        })
-        .collect();
+        }
+    };
+    let mut boundary_detaches: Vec<(crate::ids::TreeBoundaryId, u32)> = Vec::new();
+    for (b_idx, decl) in component.struct_types.iter().enumerate() {
+        let boundary_id = crate::ids::TreeBoundaryId(b_idx as u32);
+        if !boundary_reaches_root(boundary_id) {
+            continue;
+        }
+        for (field_idx, field) in decl.fields.iter().enumerate() {
+            if matches!(field.role, crate::lir::struct_types::LirFieldRole::DomHandle) {
+                boundary_detaches.push((boundary_id, field_idx as u32));
+            }
+        }
+    }
     for (boundary_id, field_idx) in boundary_detaches {
         let ref_slot = alloc_block_slot(&mut new_block, LirSlotValType::RefNullForBoundary(boundary_id));
         let handle_slot = alloc_block_slot(&mut new_block, LirSlotValType::I32);
@@ -7171,10 +6999,9 @@ pub(crate) fn synth_internal_unmount_block(ctx: &CompilerContext, component: &mu
             boundary_id,
             result: ref_slot,
         });
-        ops.push(LirOp::BoundaryStructGet {
-            boundary_id,
-            field_idx,
+        ops.push(LirOp::StructGet {
             rec: ref_slot,
+            field_idx,
             result: handle_slot,
         });
         ops.push(LirOp::PushSlot { slot: handle_slot });
@@ -7261,16 +7088,12 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
     // === 1. Export constructor block ===
     {
         let self_ref = alloc_temp(
-            component,
-            LirSlotValType::RefNullForComponent(def_id),
-            "export_ctor_self_ref",
+            component, LirSlotValType::RefNullForComponent(def_id), "export_ctor_self_ref",
         );
         let handle = alloc_temp(component, LirSlotValType::I32, "export_ctor_handle");
         let idx_scratch = alloc_temp(component, LirSlotValType::I32, "export_ctor_idx_scratch");
         let arr_scratch = alloc_temp(
-            component,
-            LirSlotValType::RefNullForSharedHandleArray,
-            "export_ctor_arr_scratch",
+            component, LirSlotValType::RefNullForSharedHandleArray, "export_ctor_arr_scratch",
         );
         let host_handle = alloc_temp(component, LirSlotValType::I32, "export_ctor_host_handle");
         let ops = vec![
@@ -7389,11 +7212,9 @@ fn collect_global_fanout_blocks_if_ready(
     ctx: &CompilerContext,
     signal_def: DefId,
     signal_ty: Ty,
-    value: Option<ExprId>,
+    value: Option<LirExprId>,
 ) -> Option<Vec<(DefId, BlockId)>> {
-    if value.is_none() {
-        return None;
-    }
+    value?;
     if !is_inlineable_global(ctx, signal_def, signal_ty) {
         return None;
     }
@@ -7401,9 +7222,7 @@ fn collect_global_fanout_blocks_if_ready(
     for comp_def in ctx.defs.components() {
         // If this component hasn't finished lowering yet, we can't
         // tell whether it observes the signal — bail.
-        if ctx.lookup_component_lifecycle_blocks(comp_def).is_none() {
-            return None;
-        }
+        ctx.lookup_component_lifecycle_blocks(comp_def)?;
         if let Some(bid) = ctx.lookup_global_fanout_block(comp_def, signal_def) {
             blocks.push((comp_def, bid));
         }
@@ -7417,6 +7236,7 @@ fn collect_global_fanout_blocks_if_ready(
 ///   * the signal is a scalar `gc-only` global (i32/i64/f32/f64);
 ///   * every effect of this component that observes the signal has
 ///     "simple shape" (empty `params` AND empty `boundary_param_slots`).
+///
 /// Otherwise the pair is skipped — the writer side will fall back to
 /// emitting `LirOp::TriggerEffects` (legacy fanout helper).
 ///
@@ -7504,36 +7324,6 @@ pub(crate) fn synth_global_fanout_blocks(
         );
         ctx.register_global_fanout_block(component.def_id, signal_def, fanout_block_id);
     }
-}
-
-/// Predicate: signal is owned by a global block AND its type is a
-/// single-slot scalar (bool / sN / uN / char → i32; sN/uN 64 → i64;
-/// f32; f64). Excludes list, string, record, tuple, option/result,
-/// variant — those need the legacy memory/pointer paths.
-fn is_gc_only_scalar_global(
-    ctx: &CompilerContext,
-    signal_def: DefId,
-    signal_ty: Ty,
-) -> bool {
-    if ctx.defs.owning_global_block(signal_def).is_none() {
-        return false;
-    }
-    let kind = ctx.ty_kind(signal_ty);
-    matches!(
-        kind,
-        InternedTyKind::Bool
-            | InternedTyKind::S8
-            | InternedTyKind::S16
-            | InternedTyKind::S32
-            | InternedTyKind::U8
-            | InternedTyKind::U16
-            | InternedTyKind::U32
-            | InternedTyKind::S64
-            | InternedTyKind::U64
-            | InternedTyKind::Char
-            | InternedTyKind::F32
-            | InternedTyKind::F64
-    )
 }
 
 /// Phase 1.1c-102: predicate widening — accepts any non-unit-typed
@@ -7678,12 +7468,12 @@ fn synth_one_global_fanout_block(
         result: registry_isnull,
     });
     // If registry is null → early return.
-    outer.push(LirOp::If {
+    outer.push(LirOp::If(Box::new(LirIf {
         cond: registry_isnull,
         then_ops: vec![LirOp::Return],
         else_ops: Vec::new(),
         name: Some(format!("fanout_s{}_reg_null_guard", signal_def.0)),
-    });
+    })));
 
     // Inner: if entry is not null, load `entry.$inst` (anyref), then
     // cast to the typed component ref. The $handle struct's `$inst`
@@ -7905,11 +7695,7 @@ fn synth_one_global_fanout_block(
         gref: LirGlobalRef::RegistryLen(comp_def),
         result: len_slot,
     });
-    loop_body.push(LirOp::GeU {
-        index: idx_slot,
-        len: len_slot,
-        result: break_cond,
-    });
+    loop_body.push(LirOp::Compare { op: CompareOp::GeU, lhs: idx_slot, rhs: len_slot, result: break_cond });
     // ArrayGetTyped (registry, idx) → entry. The array element type
     // is `ref null $handle` (shared), keyed by SharedHandleArray.
     loop_body.push(LirOp::ArrayGetTyped {
@@ -7924,14 +7710,14 @@ fn synth_one_global_fanout_block(
     });
     // If entry is NOT null → branch (use If with negated arm).
     // Easiest: use If with then=empty, else=inner_if_entry.
-    loop_body.push(LirOp::If {
+    loop_body.push(LirOp::If(Box::new(LirIf {
         cond: entry_isnull,
         then_ops: Vec::new(),
         else_ops: inner_if_entry,
         name: Some(format!("fanout_s{}_entry_guard", signal_def.0)),
-    });
+    })));
     // Increment idx.
-    loop_body.push(LirOp::IncrSlot { slot: idx_slot });
+    loop_body.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: idx_slot, rhs: BinOperand::Const(1), result: idx_slot });
 
     outer.push(LirOp::Loop {
         break_cond,
@@ -7994,11 +7780,9 @@ fn count_mount_sites(ops: &[LirOp]) -> u32 {
     for op in ops {
         match op {
             LirOp::RegistryAlloc { .. } => n += 1,
-            LirOp::If {
-                then_ops, else_ops, ..
-            } => {
-                n += count_mount_sites(then_ops);
-                n += count_mount_sites(else_ops);
+            LirOp::If(if_op) => {
+                n += count_mount_sites(&if_op.then_ops);
+                n += count_mount_sites(&if_op.else_ops);
             }
             LirOp::Loop { body_ops, .. } => {
                 n += count_mount_sites(body_ops);
@@ -8017,11 +7801,9 @@ fn collect_mount_children(ops: &[LirOp], out: &mut Vec<DefId>) {
                     out.push(*component);
                 }
             }
-            LirOp::If {
-                then_ops, else_ops, ..
-            } => {
-                collect_mount_children(then_ops, out);
-                collect_mount_children(else_ops, out);
+            LirOp::If(if_op) => {
+                collect_mount_children(&if_op.then_ops, out);
+                collect_mount_children(&if_op.else_ops, out);
             }
             LirOp::Loop { body_ops, .. } => {
                 collect_mount_children(body_ops, out);
@@ -8044,16 +7826,16 @@ fn compute_flat_scratch_counts(
     let mut min_i64_for_extras: u32 = 0;
     let bump_extras =
         |e: &LirExpr, min_i32: &mut u32, min_i64: &mut u32, load_scratch: &mut bool| {
-            if expr_contains_fat_ptr_load(e, ctx) {
+            if expr_contains_fat_ptr_load(e, exprs, ctx) {
                 *load_scratch = true;
             }
-            if expr_contains_tuple_construct(e) {
+            if expr_contains_tuple_construct(e, exprs) {
                 *min_i32 = (*min_i32).max(1);
             }
-            if expr_contains_min_max_call(e, ctx) {
+            if expr_contains_min_max_call(e, exprs, ctx) {
                 *min_i32 = (*min_i32).max(2);
             }
-            let (need_i32, need_i64) = expr_contains_float_binop_scratch(e, ctx);
+            let (need_i32, need_i64) = expr_contains_float_binop_scratch(e, exprs, ctx);
             if need_i32 {
                 *min_i32 = (*min_i32).max(1);
             }
@@ -8073,7 +7855,7 @@ fn compute_flat_scratch_counts(
                     mf64 = m.3;
                 }
                 let e = &exprs[expr.0 as usize];
-                if expr_contains_composite_field_load(e, ctx, layout_ctx) {
+                if expr_contains_composite_field_load(e, exprs, ctx, layout_ctx) {
                     needs_load_scratch = true;
                 }
                 bump_extras(
@@ -8091,7 +7873,7 @@ fn compute_flat_scratch_counts(
                 mi64 = m.1;
                 mf32 = m.2;
                 mf64 = m.3;
-                if expr_contains_composite_field_load(e, ctx, layout_ctx) {
+                if expr_contains_composite_field_load(e, exprs, ctx, layout_ctx) {
                     needs_load_scratch = true;
                 }
                 bump_extras(
@@ -8101,17 +7883,15 @@ fn compute_flat_scratch_counts(
                     &mut needs_load_scratch,
                 );
             }
-            LirOp::If {
-                then_ops, else_ops, ..
-            } => {
+            LirOp::If(if_op) => {
                 let (a, b, c, d) =
-                    compute_flat_scratch_counts(then_ops, signals, exprs, ctx, layout_ctx);
+                    compute_flat_scratch_counts(&if_op.then_ops, signals, exprs, ctx, layout_ctx);
                 mi32 = mi32.max(a);
                 mi64 = mi64.max(b);
                 mf32 = mf32.max(c);
                 mf64 = mf64.max(d);
                 let (a, b, c, d) =
-                    compute_flat_scratch_counts(else_ops, signals, exprs, ctx, layout_ctx);
+                    compute_flat_scratch_counts(&if_op.else_ops, signals, exprs, ctx, layout_ctx);
                 mi32 = mi32.max(a);
                 mi64 = mi64.max(b);
                 mf32 = mf32.max(c);
@@ -8125,13 +7905,12 @@ fn compute_flat_scratch_counts(
                 mf32 = mf32.max(c);
                 mf64 = mf64.max(d);
             }
-            LirOp::PushExprAsString { expr }
-            | LirOp::PushExprAsAttrValue { expr }
+            LirOp::PushExpr { expr }
             | LirOp::EvalExpr { expr, .. }
             | LirOp::EvalExprToSlots { expr, .. }
             | LirOp::DropExpr { expr } => {
                 let e = &exprs[expr.0 as usize];
-                if expr_contains_composite_field_load(e, ctx, layout_ctx) {
+                if expr_contains_composite_field_load(e, exprs, ctx, layout_ctx) {
                     needs_load_scratch = true;
                 }
                 bump_extras(
@@ -8156,6 +7935,14 @@ fn compute_flat_scratch_counts(
     (mi32, mi64, mf32, mf64)
 }
 
+/// Resolve an expression handle against an arena slice. The `expr_contains_*`
+/// free functions recurse through `LirExprId` children, so they thread the
+/// owning arena (`&block.exprs`) and dereference handles through here.
+#[inline]
+fn arena_expr(exprs: &[LirExpr], id: LirExprId) -> &LirExpr {
+    &exprs[id.0 as usize]
+}
+
 /// True if `expr` contains a sub-expression typed as a fat pointer
 /// (string or list). The expression-emitter spills the second i32 of
 /// such pairs to an i32 scratch local in patterns like `len()` (drop
@@ -8163,7 +7950,7 @@ fn compute_flat_scratch_counts(
 /// expression must reserve at least one i32 flat-scratch local; using
 /// the legacy hardcoded `local 2` is unsafe in blocks whose signature
 /// places a typed boundary-ref param at that index.
-fn expr_contains_fat_ptr_load(expr: &LirExpr, ctx: &CompilerContext) -> bool {
+fn expr_contains_fat_ptr_load(expr: &LirExpr, exprs: &[LirExpr], ctx: &CompilerContext) -> bool {
     if matches!(
         ctx.ty_kind(expr.ty),
         InternedTyKind::String | InternedTyKind::List(_)
@@ -8173,39 +7960,47 @@ fn expr_contains_fat_ptr_load(expr: &LirExpr, ctx: &CompilerContext) -> bool {
 
     match &expr.kind {
         LirExprKind::Field { base, .. } | LirExprKind::Unary { operand: base, .. } => {
-            expr_contains_fat_ptr_load(base, ctx)
+            expr_contains_fat_ptr_load(arena_expr(exprs, *base), exprs, ctx)
         }
         LirExprKind::Binary { lhs, rhs, .. } => {
-            expr_contains_fat_ptr_load(lhs, ctx) || expr_contains_fat_ptr_load(rhs, ctx)
+            expr_contains_fat_ptr_load(arena_expr(exprs, *lhs), exprs, ctx)
+                || expr_contains_fat_ptr_load(arena_expr(exprs, *rhs), exprs, ctx)
         }
         LirExprKind::Index { base, index } => {
-            expr_contains_fat_ptr_load(base, ctx) || expr_contains_fat_ptr_load(index, ctx)
+            expr_contains_fat_ptr_load(arena_expr(exprs, *base), exprs, ctx)
+                || expr_contains_fat_ptr_load(arena_expr(exprs, *index), exprs, ctx)
         }
-        LirExprKind::Call { args, .. } | LirExprKind::GlobalCall { args, .. } => {
-            args.iter().any(|a| expr_contains_fat_ptr_load(a, ctx))
+        LirExprKind::Call { args, .. } => {
+            args.iter()
+                .any(|a| expr_contains_fat_ptr_load(arena_expr(exprs, *a), exprs, ctx))
         }
         LirExprKind::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            expr_contains_fat_ptr_load(condition, ctx)
-                || expr_contains_fat_ptr_load(then_expr, ctx)
-                || expr_contains_fat_ptr_load(else_expr, ctx)
+            expr_contains_fat_ptr_load(arena_expr(exprs, *condition), exprs, ctx)
+                || expr_contains_fat_ptr_load(arena_expr(exprs, *then_expr), exprs, ctx)
+                || expr_contains_fat_ptr_load(arena_expr(exprs, *else_expr), exprs, ctx)
         }
         LirExprKind::ListConstruct { elements, .. }
         | LirExprKind::TupleConstruct { elements, .. } => {
-            elements.iter().any(|e| expr_contains_fat_ptr_load(e, ctx))
+            elements
+                .iter()
+                .any(|e| expr_contains_fat_ptr_load(arena_expr(exprs, *e), exprs, ctx))
         }
         LirExprKind::RecordConstruct { fields, .. } => {
-            fields.iter().any(|f| expr_contains_fat_ptr_load(f, ctx))
+            fields
+                .iter()
+                .any(|f| expr_contains_fat_ptr_load(arena_expr(exprs, *f), exprs, ctx))
         }
         LirExprKind::Range { start, end, .. } => {
-            expr_contains_fat_ptr_load(start, ctx) || expr_contains_fat_ptr_load(end, ctx)
+            expr_contains_fat_ptr_load(arena_expr(exprs, *start), exprs, ctx)
+                || expr_contains_fat_ptr_load(arena_expr(exprs, *end), exprs, ctx)
         }
         LirExprKind::VariantCtor {
             payload: Some(p), ..
-        } => expr_contains_fat_ptr_load(p, ctx),
+        } => expr_contains_fat_ptr_load(arena_expr(exprs, *p), exprs, ctx),
         _ => false,
     }
 }
@@ -8214,45 +8009,53 @@ fn expr_contains_fat_ptr_load(expr: &LirExpr, ctx: &CompilerContext) -> bool {
 /// tuple-construct codegen spills the alloc'd base pointer to an i32
 /// scratch local while writing each element. Any block emitting a
 /// tuple constructor must reserve at least one i32 flat-scratch local.
-fn expr_contains_tuple_construct(expr: &LirExpr) -> bool {
+fn expr_contains_tuple_construct(expr: &LirExpr, exprs: &[LirExpr]) -> bool {
     if matches!(expr.kind, LirExprKind::TupleConstruct { .. }) {
         return true;
     }
     match &expr.kind {
         LirExprKind::Field { base, .. } | LirExprKind::Unary { operand: base, .. } => {
-            expr_contains_tuple_construct(base)
+            expr_contains_tuple_construct(arena_expr(exprs, *base), exprs)
         }
         LirExprKind::Binary { lhs, rhs, .. } => {
-            expr_contains_tuple_construct(lhs) || expr_contains_tuple_construct(rhs)
+            expr_contains_tuple_construct(arena_expr(exprs, *lhs), exprs)
+                || expr_contains_tuple_construct(arena_expr(exprs, *rhs), exprs)
         }
         LirExprKind::Index { base, index } => {
-            expr_contains_tuple_construct(base) || expr_contains_tuple_construct(index)
+            expr_contains_tuple_construct(arena_expr(exprs, *base), exprs)
+                || expr_contains_tuple_construct(arena_expr(exprs, *index), exprs)
         }
-        LirExprKind::Call { args, .. } | LirExprKind::GlobalCall { args, .. } => {
-            args.iter().any(expr_contains_tuple_construct)
+        LirExprKind::Call { args, .. } => {
+            args.iter()
+                .any(|a| expr_contains_tuple_construct(arena_expr(exprs, *a), exprs))
         }
         LirExprKind::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            expr_contains_tuple_construct(condition)
-                || expr_contains_tuple_construct(then_expr)
-                || expr_contains_tuple_construct(else_expr)
+            expr_contains_tuple_construct(arena_expr(exprs, *condition), exprs)
+                || expr_contains_tuple_construct(arena_expr(exprs, *then_expr), exprs)
+                || expr_contains_tuple_construct(arena_expr(exprs, *else_expr), exprs)
         }
         LirExprKind::ListConstruct { elements, .. }
         | LirExprKind::TupleConstruct { elements, .. } => {
-            elements.iter().any(expr_contains_tuple_construct)
+            elements
+                .iter()
+                .any(|e| expr_contains_tuple_construct(arena_expr(exprs, *e), exprs))
         }
         LirExprKind::RecordConstruct { fields, .. } => {
-            fields.iter().any(expr_contains_tuple_construct)
+            fields
+                .iter()
+                .any(|f| expr_contains_tuple_construct(arena_expr(exprs, *f), exprs))
         }
         LirExprKind::Range { start, end, .. } => {
-            expr_contains_tuple_construct(start) || expr_contains_tuple_construct(end)
+            expr_contains_tuple_construct(arena_expr(exprs, *start), exprs)
+                || expr_contains_tuple_construct(arena_expr(exprs, *end), exprs)
         }
         LirExprKind::VariantCtor {
             payload: Some(p), ..
-        } => expr_contains_tuple_construct(p),
+        } => expr_contains_tuple_construct(arena_expr(exprs, *p), exprs),
         _ => false,
     }
 }
@@ -8261,7 +8064,7 @@ fn expr_contains_tuple_construct(expr: &LirExpr) -> bool {
 /// stashes both args into a pair of i32 scratch locals; any block
 /// containing such a call must reserve at least two i32 flat-scratch
 /// locals.
-fn expr_contains_min_max_call(expr: &LirExpr, ctx: &CompilerContext) -> bool {
+fn expr_contains_min_max_call(expr: &LirExpr, exprs: &[LirExpr], ctx: &CompilerContext) -> bool {
     if let LirExprKind::Call { func, .. } = &expr.kind {
         let name = ctx.str(ctx.defs.name(*func));
         if name == "min" || name == "max" {
@@ -8270,39 +8073,47 @@ fn expr_contains_min_max_call(expr: &LirExpr, ctx: &CompilerContext) -> bool {
     }
     match &expr.kind {
         LirExprKind::Field { base, .. } | LirExprKind::Unary { operand: base, .. } => {
-            expr_contains_min_max_call(base, ctx)
+            expr_contains_min_max_call(arena_expr(exprs, *base), exprs, ctx)
         }
         LirExprKind::Binary { lhs, rhs, .. } => {
-            expr_contains_min_max_call(lhs, ctx) || expr_contains_min_max_call(rhs, ctx)
+            expr_contains_min_max_call(arena_expr(exprs, *lhs), exprs, ctx)
+                || expr_contains_min_max_call(arena_expr(exprs, *rhs), exprs, ctx)
         }
         LirExprKind::Index { base, index } => {
-            expr_contains_min_max_call(base, ctx) || expr_contains_min_max_call(index, ctx)
+            expr_contains_min_max_call(arena_expr(exprs, *base), exprs, ctx)
+                || expr_contains_min_max_call(arena_expr(exprs, *index), exprs, ctx)
         }
-        LirExprKind::Call { args, .. } | LirExprKind::GlobalCall { args, .. } => {
-            args.iter().any(|a| expr_contains_min_max_call(a, ctx))
+        LirExprKind::Call { args, .. } => {
+            args.iter()
+                .any(|a| expr_contains_min_max_call(arena_expr(exprs, *a), exprs, ctx))
         }
         LirExprKind::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            expr_contains_min_max_call(condition, ctx)
-                || expr_contains_min_max_call(then_expr, ctx)
-                || expr_contains_min_max_call(else_expr, ctx)
+            expr_contains_min_max_call(arena_expr(exprs, *condition), exprs, ctx)
+                || expr_contains_min_max_call(arena_expr(exprs, *then_expr), exprs, ctx)
+                || expr_contains_min_max_call(arena_expr(exprs, *else_expr), exprs, ctx)
         }
         LirExprKind::ListConstruct { elements, .. }
         | LirExprKind::TupleConstruct { elements, .. } => {
-            elements.iter().any(|e| expr_contains_min_max_call(e, ctx))
+            elements
+                .iter()
+                .any(|e| expr_contains_min_max_call(arena_expr(exprs, *e), exprs, ctx))
         }
         LirExprKind::RecordConstruct { fields, .. } => {
-            fields.iter().any(|f| expr_contains_min_max_call(f, ctx))
+            fields
+                .iter()
+                .any(|f| expr_contains_min_max_call(arena_expr(exprs, *f), exprs, ctx))
         }
         LirExprKind::Range { start, end, .. } => {
-            expr_contains_min_max_call(start, ctx) || expr_contains_min_max_call(end, ctx)
+            expr_contains_min_max_call(arena_expr(exprs, *start), exprs, ctx)
+                || expr_contains_min_max_call(arena_expr(exprs, *end), exprs, ctx)
         }
         LirExprKind::VariantCtor {
             payload: Some(p), ..
-        } => expr_contains_min_max_call(p, ctx),
+        } => expr_contains_min_max_call(arena_expr(exprs, *p), exprs, ctx),
         _ => false,
     }
 }
@@ -8311,11 +8122,15 @@ fn expr_contains_min_max_call(expr: &LirExpr, ctx: &CompilerContext) -> bool {
 /// binary op whose codegen needs scratch locals. F32 arms need an i32
 /// scratch; the F64 mod arm needs an i64 scratch. Returns
 /// `(needs_i32, needs_i64)`.
-fn expr_contains_float_binop_scratch(expr: &LirExpr, ctx: &CompilerContext) -> (bool, bool) {
+fn expr_contains_float_binop_scratch(
+    expr: &LirExpr,
+    exprs: &[LirExpr],
+    ctx: &CompilerContext,
+) -> (bool, bool) {
     let mut needs_i32 = false;
     let mut needs_i64 = false;
     if let LirExprKind::Binary { lhs, op, .. } = &expr.kind {
-        match (ctx.ty_kind(lhs.ty), op) {
+        match (ctx.ty_kind(arena_expr(exprs, *lhs).ty), op) {
             (
                 InternedTyKind::F32,
                 BinOp::Mod | BinOp::And | BinOp::BitAnd | BinOp::Or | BinOp::BitOr | BinOp::BitXor,
@@ -8328,27 +8143,27 @@ fn expr_contains_float_binop_scratch(expr: &LirExpr, ctx: &CompilerContext) -> (
             _ => {}
         }
     }
-    let recurse = |e: &LirExpr, acc: &mut (bool, bool)| {
-        let (a, b) = expr_contains_float_binop_scratch(e, ctx);
+    let recurse = |id: LirExprId, acc: &mut (bool, bool)| {
+        let (a, b) = expr_contains_float_binop_scratch(arena_expr(exprs, id), exprs, ctx);
         acc.0 |= a;
         acc.1 |= b;
     };
     let mut acc = (needs_i32, needs_i64);
     match &expr.kind {
         LirExprKind::Field { base, .. } | LirExprKind::Unary { operand: base, .. } => {
-            recurse(base, &mut acc);
+            recurse(*base, &mut acc);
         }
         LirExprKind::Binary { lhs, rhs, .. } => {
-            recurse(lhs, &mut acc);
-            recurse(rhs, &mut acc);
+            recurse(*lhs, &mut acc);
+            recurse(*rhs, &mut acc);
         }
         LirExprKind::Index { base, index } => {
-            recurse(base, &mut acc);
-            recurse(index, &mut acc);
+            recurse(*base, &mut acc);
+            recurse(*index, &mut acc);
         }
-        LirExprKind::Call { args, .. } | LirExprKind::GlobalCall { args, .. } => {
+        LirExprKind::Call { args, .. } => {
             for a in args {
-                recurse(a, &mut acc);
+                recurse(*a, &mut acc);
             }
         }
         LirExprKind::Ternary {
@@ -8356,29 +8171,29 @@ fn expr_contains_float_binop_scratch(expr: &LirExpr, ctx: &CompilerContext) -> (
             then_expr,
             else_expr,
         } => {
-            recurse(condition, &mut acc);
-            recurse(then_expr, &mut acc);
-            recurse(else_expr, &mut acc);
+            recurse(*condition, &mut acc);
+            recurse(*then_expr, &mut acc);
+            recurse(*else_expr, &mut acc);
         }
         LirExprKind::ListConstruct { elements, .. }
         | LirExprKind::TupleConstruct { elements, .. } => {
             for e in elements {
-                recurse(e, &mut acc);
+                recurse(*e, &mut acc);
             }
         }
         LirExprKind::RecordConstruct { fields, .. } => {
             for f in fields {
-                recurse(f, &mut acc);
+                recurse(*f, &mut acc);
             }
         }
         LirExprKind::Range { start, end, .. } => {
-            recurse(start, &mut acc);
-            recurse(end, &mut acc);
+            recurse(*start, &mut acc);
+            recurse(*end, &mut acc);
         }
         LirExprKind::VariantCtor {
             payload: Some(p), ..
         } => {
-            recurse(p, &mut acc);
+            recurse(*p, &mut acc);
         }
         _ => {}
     }
@@ -8392,18 +8207,19 @@ fn expr_contains_float_binop_scratch(expr: &LirExpr, ctx: &CompilerContext) -> (
 /// scratch local to stash the base pointer across per-slot loads.
 fn expr_contains_composite_field_load(
     expr: &LirExpr,
+    exprs: &[LirExpr],
     ctx: &CompilerContext,
     layout_ctx: &mut LirLayoutContext,
 ) -> bool {
     match &expr.kind {
         LirExprKind::Field { base, field_idx } => {
-            if expr_contains_composite_field_load(base, ctx, layout_ctx) {
+            if expr_contains_composite_field_load(arena_expr(exprs, *base), exprs, ctx, layout_ctx) {
                 return true;
             }
-            if let InternedTyKind::Adt(record_def_id) = ctx.ty_kind(base.ty) {
+            if let InternedTyKind::Adt(record_def_id) = ctx.ty_kind(arena_expr(exprs, *base).ty) {
                 let record_def_id = *record_def_id;
-                if let Some(record_layout) = layout_ctx.record_layout_by_id(record_def_id) {
-                    if let Some((_, _, field_ty)) =
+                if let Some(record_layout) = layout_ctx.record_layout_by_id(record_def_id)
+                    && let Some((_, _, field_ty)) =
                         record_layout.field_offsets.get(field_idx.0 as usize)
                     {
                         let field_ty = *field_ty;
@@ -8416,27 +8232,25 @@ fn expr_contains_composite_field_load(
                                 if let Some(v) = ctx.defs.as_variant(def_id) {
                                     let cases = v.cases.clone();
                                     for c in cases {
-                                        if let DefKind::VariantCase(case) = ctx.defs.kind(c) {
-                                            if case.payload.is_some() {
+                                        if let DefKind::VariantCase(case) = ctx.defs.kind(c)
+                                            && case.payload.is_some() {
                                                 return true;
                                             }
-                                        }
                                     }
                                 }
                             }
                             _ => {}
                         }
                     }
-                }
             }
             false
         }
         LirExprKind::Binary { lhs, rhs, .. } => {
-            expr_contains_composite_field_load(lhs, ctx, layout_ctx)
-                || expr_contains_composite_field_load(rhs, ctx, layout_ctx)
+            expr_contains_composite_field_load(arena_expr(exprs, *lhs), exprs, ctx, layout_ctx)
+                || expr_contains_composite_field_load(arena_expr(exprs, *rhs), exprs, ctx, layout_ctx)
         }
         LirExprKind::Unary { operand, .. } => {
-            expr_contains_composite_field_load(operand, ctx, layout_ctx)
+            expr_contains_composite_field_load(arena_expr(exprs, *operand), exprs, ctx, layout_ctx)
         }
         LirExprKind::Index { base, index } => {
             let elem_slot_count = layout_ctx.canonical_flat_valtypes(expr.ty).len();
@@ -8447,44 +8261,44 @@ fn expr_contains_composite_field_load(
             if elem_slot_count >= 2 && !is_fat_slot {
                 return true;
             }
-            expr_contains_composite_field_load(base, ctx, layout_ctx)
-                || expr_contains_composite_field_load(index, ctx, layout_ctx)
+            expr_contains_composite_field_load(arena_expr(exprs, *base), exprs, ctx, layout_ctx)
+                || expr_contains_composite_field_load(arena_expr(exprs, *index), exprs, ctx, layout_ctx)
         }
-        LirExprKind::Call { args, .. } | LirExprKind::GlobalCall { args, .. } => args
+        LirExprKind::Call { args, .. } => args
             .iter()
-            .any(|a| expr_contains_composite_field_load(a, ctx, layout_ctx)),
+            .any(|a| expr_contains_composite_field_load(arena_expr(exprs, *a), exprs, ctx, layout_ctx)),
         LirExprKind::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            expr_contains_composite_field_load(condition, ctx, layout_ctx)
-                || expr_contains_composite_field_load(then_expr, ctx, layout_ctx)
-                || expr_contains_composite_field_load(else_expr, ctx, layout_ctx)
+            expr_contains_composite_field_load(arena_expr(exprs, *condition), exprs, ctx, layout_ctx)
+                || expr_contains_composite_field_load(arena_expr(exprs, *then_expr), exprs, ctx, layout_ctx)
+                || expr_contains_composite_field_load(arena_expr(exprs, *else_expr), exprs, ctx, layout_ctx)
         }
         LirExprKind::VariantCtor {
             payload: Some(p), ..
-        } => expr_contains_composite_field_load(p, ctx, layout_ctx),
+        } => expr_contains_composite_field_load(arena_expr(exprs, *p), exprs, ctx, layout_ctx),
         LirExprKind::ListConstruct { elements, .. }
         | LirExprKind::TupleConstruct { elements, .. } => elements
             .iter()
-            .any(|e| expr_contains_composite_field_load(e, ctx, layout_ctx)),
+            .any(|e| expr_contains_composite_field_load(arena_expr(exprs, *e), exprs, ctx, layout_ctx)),
         LirExprKind::RecordConstruct { fields, .. } => fields
             .iter()
-            .any(|f| expr_contains_composite_field_load(f, ctx, layout_ctx)),
+            .any(|f| expr_contains_composite_field_load(arena_expr(exprs, *f), exprs, ctx, layout_ctx)),
         LirExprKind::Range { start, end, .. } => {
-            expr_contains_composite_field_load(start, ctx, layout_ctx)
-                || expr_contains_composite_field_load(end, ctx, layout_ctx)
+            expr_contains_composite_field_load(arena_expr(exprs, *start), exprs, ctx, layout_ctx)
+                || expr_contains_composite_field_load(arena_expr(exprs, *end), exprs, ctx, layout_ctx)
         }
         LirExprKind::Closure { .. } => false,
         // Phase 5e.5: IsCase / VariantField on a migrated parent are
         // single-slot ref ops — never produce a multi-slot composite
         // load. Recurse into base in case the base contains one.
         LirExprKind::IsCase { base, .. } => {
-            expr_contains_composite_field_load(base, ctx, layout_ctx)
+            expr_contains_composite_field_load(arena_expr(exprs, *base), exprs, ctx, layout_ctx)
         }
         LirExprKind::VariantField { base, .. } => {
-            expr_contains_composite_field_load(base, ctx, layout_ctx)
+            expr_contains_composite_field_load(arena_expr(exprs, *base), exprs, ctx, layout_ctx)
         }
         LirExprKind::Local(_)
         | LirExprKind::Def(_)

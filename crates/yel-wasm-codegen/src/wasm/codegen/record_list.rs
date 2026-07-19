@@ -270,7 +270,12 @@ impl<'a> WasmPackageBuilder<'a> {
     }
 
     /// Extract all SignalRead DefIds from an expression (used for filter captured signals).
-    pub(crate) fn extract_signal_reads(&self, expr: &LirExpr, signals: &mut Vec<(DefId, Ty)>) {
+    pub(crate) fn extract_signal_reads(
+        &self,
+        expr: &LirExpr,
+        exprs: &[LirExpr],
+        signals: &mut Vec<(DefId, Ty)>,
+    ) {
         match &expr.kind {
             LirExprKind::SignalRead(def_id) => {
                 if !signals.iter().any(|(id, _)| id == def_id) {
@@ -278,18 +283,18 @@ impl<'a> WasmPackageBuilder<'a> {
                 }
             }
             LirExprKind::Binary { lhs, rhs, .. } => {
-                self.extract_signal_reads(lhs, signals);
-                self.extract_signal_reads(rhs, signals);
+                self.extract_signal_reads(&exprs[lhs.0 as usize], exprs, signals);
+                self.extract_signal_reads(&exprs[rhs.0 as usize], exprs, signals);
             }
             LirExprKind::Unary { operand, .. } => {
-                self.extract_signal_reads(operand, signals);
+                self.extract_signal_reads(&exprs[operand.0 as usize], exprs, signals);
             }
             LirExprKind::Field { base, .. } => {
-                self.extract_signal_reads(base, signals);
+                self.extract_signal_reads(&exprs[base.0 as usize], exprs, signals);
             }
             LirExprKind::Call { args, .. } => {
                 for arg in args {
-                    self.extract_signal_reads(arg, signals);
+                    self.extract_signal_reads(&exprs[arg.0 as usize], exprs, signals);
                 }
             }
             LirExprKind::Ternary {
@@ -297,9 +302,9 @@ impl<'a> WasmPackageBuilder<'a> {
                 then_expr,
                 else_expr,
             } => {
-                self.extract_signal_reads(condition, signals);
-                self.extract_signal_reads(then_expr, signals);
-                self.extract_signal_reads(else_expr, signals);
+                self.extract_signal_reads(&exprs[condition.0 as usize], exprs, signals);
+                self.extract_signal_reads(&exprs[then_expr.0 as usize], exprs, signals);
+                self.extract_signal_reads(&exprs[else_expr.0 as usize], exprs, signals);
             }
             _ => {}
         }
@@ -355,7 +360,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Extract captured signals from predicate.
         let mut captured_signals: Vec<(DefId, Ty)> = Vec::new();
-        self.extract_signal_reads(&predicate, &mut captured_signals);
+        self.extract_signal_reads(&predicate, &component.exprs, &mut captured_signals);
 
         // Build param slot map: param 0 is src_arr; captured signals
         // start at param 1, each consuming `signal_storage_valtypes`

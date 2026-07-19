@@ -17,7 +17,6 @@ pub(super) mod repr;
 pub mod runtime;
 
 use std::collections::HashMap;
-use std::error::Error as _;
 use std::fmt::Write;
 
 use super::CodegenError;
@@ -317,8 +316,10 @@ pub fn generate_wasm_with_wit(
     options: &WasmWithWitOptions,
 ) -> Result<Vec<u8>, CodegenError> {
     let module = LirModule {
-        components: components.to_vec(),
+        resources: components.to_vec(),
         global_defaults: options.global_defaults.clone(),
+        global_default_exprs: options.global_default_exprs.clone(),
+        interfaces: ctx.build_import_interfaces(),
         package: None,
     };
     generate_wasm_module(&module, ctx, options)
@@ -333,6 +334,10 @@ pub struct WasmWithWitOptions {
     /// module start function stores them to each property's backing slot
     /// before any export runs.
     pub global_defaults: HashMap<DefId, LirExpr>,
+    /// Expression arena backing the global-default top-level nodes (their
+    /// `LirExprId` children index into this). Empty when there are no global
+    /// defaults or for legacy callers that pass only an empty map.
+    pub global_default_exprs: Vec<LirExpr>,
     /// Optional Binaryen `wasm-opt` invocation. When `Some`, the core
     /// module bytes are piped through the `wasm-opt` binary on `PATH`
     /// after build but before WIT-metadata embedding. The contained
@@ -348,6 +353,7 @@ impl Default for WasmWithWitOptions {
             name: "ui".to_string(),
             version: "0.1.0".to_string(),
             global_defaults: HashMap::new(),
+            global_default_exprs: Vec::new(),
             wasm_opt_args: None,
         }
     }
@@ -370,8 +376,9 @@ pub fn generate_wasm_module(
 ) -> Result<Vec<u8>, CodegenError> {
     let mut wit_builder =
         WitAstBuilder::new(ctx, &options.namespace, &options.name, &options.version);
-    let exported: Vec<&LirResource> = module.exported_components().collect();
-    let all: Vec<&LirResource> = module.components.iter().collect();
+    wit_builder.set_import_contract(module.interfaces.as_slice());
+    let exported: Vec<&LirResource> = module.exported_resources().collect();
+    let all: Vec<&LirResource> = module.resources.iter().collect();
     wit_builder.build_wit_with_all(&exported, &all)?;
     let (resolve, world_id) = wit_builder.into_resolve_and_world();
     generate_wasm_module_with_wit(module, ctx, options, resolve, world_id)
@@ -394,7 +401,7 @@ pub fn generate_wasm_module_with_wit(
     // module — allocator, memory, start function that seeds global defaults —
     // not a dummy stub. The only case we still stub is truly empty modules
     // with no state worth initializing.
-    let has_module_state = !module.components.is_empty() || !module.global_defaults.is_empty();
+    let has_module_state = !module.resources.is_empty() || !module.global_defaults.is_empty();
     if !has_module_state {
         let dummy = dummy_module(&resolve, world_id, ManglingAndAbi::Standard32);
         let mut dummy_bytes = dummy;
@@ -414,13 +421,16 @@ pub fn generate_wasm_module_with_wit(
     }
 
     // Build the core module
-    let mut builder = WasmPackageBuilder::new(&module.components, ctx);
+    let mut builder = WasmPackageBuilder::new(&module.resources, ctx);
 
     // Set WIT package info for interface-qualified export names
     builder.set_wit_package(&options.namespace, &options.name, &options.version);
 
     // Seed global singleton defaults — the start function emits these.
-    builder.set_global_defaults(module.global_defaults.clone());
+    builder.set_global_defaults(
+        module.global_defaults.clone(),
+        module.global_default_exprs.clone(),
+    );
 
     // Pre-intern common strings
     builder.strings.intern("true");
@@ -545,6 +555,38 @@ impl StoreWidth {
     }
 }
 
+/// Pick the store width for a variant/enum discriminant given its canonical
+/// in-memory byte size (`1`/`2`/`4`, per the case count). Keeps the stored
+/// width consistent with the bytes the layout reserves before the payload.
+fn discriminant_store_width(discriminant_size: u32) -> StoreWidth {
+    match discriminant_size {
+        1 => StoreWidth::I32_8,
+        2 => StoreWidth::I32_16,
+        _ => StoreWidth::I32,
+    }
+}
+
+/// Load instruction for a discriminant of the given canonical byte size at
+/// `offset` — the read counterpart of [`discriminant_store_width`]. The discriminant is
+/// unsigned, so sub-`i32` widths zero-extend. Keeps the size→memory-access
+/// mapping for discriminants in one place.
+pub(crate) fn discriminant_load_instr(
+    discriminant_size: u32,
+    offset: u32,
+) -> wasm_encoder::Instruction<'static> {
+    use wasm_encoder::{Instruction, MemArg};
+    let ma = |align: u32| MemArg {
+        offset: offset as u64,
+        align,
+        memory_index: 0,
+    };
+    match discriminant_size {
+        1 => Instruction::I32Load8U(ma(0)),
+        2 => Instruction::I32Load16U(ma(1)),
+        _ => Instruction::I32Load(ma(2)),
+    }
+}
+
 /// One entry of a value's canonical-ABI flat representation, annotated with
 /// the byte offset it should be stored at relative to the value's base address.
 #[derive(Clone, Copy, Debug)]
@@ -607,9 +649,7 @@ fn join_flat_valtypes(
                     // the more-permissive option. For Phase 5b-v.3 we don't
                     // expect this (only one ref kind per slot).
                     x
-                } else if is_ref(x) || is_ref(y) {
-                    ValType::I64
-                } else if is_64(x) || is_64(y) {
+                } else if is_ref(x) || is_ref(y) || is_64(x) || is_64(y) {
                     ValType::I64
                 } else {
                     ValType::I32
@@ -694,88 +734,52 @@ impl MemoryLayout {
     }
 }
 
-// ============================================================================
-// Constants - Import function indices (must match order in build_core_module)
-// ============================================================================
-
-pub(crate) const IMPORT_CREATE_ELEMENT: u32 = 0;
-pub(crate) const IMPORT_CREATE_TEXT: u32 = 1;
-pub(crate) const IMPORT_CREATE_COMMENT: u32 = 2;
-pub(crate) const IMPORT_SET_ATTRIBUTE: u32 = 3;
-pub(crate) const IMPORT_REMOVE_ATTRIBUTE: u32 = 4;
-pub(crate) const IMPORT_SET_TEXT_CONTENT: u32 = 5;
-pub(crate) const IMPORT_SET_STYLE: u32 = 6;
-pub(crate) const IMPORT_SET_CLASS: u32 = 7;
-pub(crate) const IMPORT_APPEND_CHILD: u32 = 8;
-pub(crate) const IMPORT_INSERT_BEFORE: u32 = 9;
-pub(crate) const IMPORT_REMOVE_CHILD: u32 = 10;
-pub(crate) const IMPORT_REMOVE: u32 = 11;
-pub(crate) const IMPORT_GET_PARENT: u32 = 12;
-pub(crate) const IMPORT_GET_NEXT_SIBLING: u32 = 13;
-pub(crate) const IMPORT_ADD_EVENT_LISTENER: u32 = 14;
-pub(crate) const IMPORT_REMOVE_EVENT_LISTENER: u32 = 15;
-/// Insert node after anchor (for conditional rendering).
-/// Signature: insert_after(parent: i32, node: i32, anchor: i32) -> ()
-/// Semantically: parent.insertBefore(node, anchor.nextSibling)
-pub(crate) const IMPORT_INSERT_AFTER: u32 = 16;
-/// Create a layout-neutral wrapper element used to group `for`
-/// iteration content and `if` branch content under a single DOM root.
-/// `host.remove(wrapper)` cascades to detach the entire subtree.
-/// Signature: create_fragment() -> i32
-pub(crate) const IMPORT_CREATE_FRAGMENT: u32 = 17;
-// After DOM imports (18 total), callbacks are imported dynamically
-// Then: resource-new, resource-drop, realloc
-pub(crate) const NUM_DOM_IMPORTS: u32 = 18;
-
-/// Round-trip a `DomImports.*` DefId back to its wasm import index.
-///
-/// Phase 2.1 lands this helper; Phase 2.2 invokes it from
-/// `LirOp::CallFunction` emission so the lowering can switch DOM-op
-/// sites to the generic call op against the pre-allocated DOM-import
-/// DefIds. Returns `None` if `def_id` is not one of the 18
-/// pre-allocated DOM-import DefIds.
-pub(crate) fn wasm_import_index_for_dom_def(ctx: &CompilerContext, def_id: DefId) -> Option<u32> {
-    let d = ctx.dom_imports();
-    if def_id == d.create_element {
-        Some(IMPORT_CREATE_ELEMENT)
-    } else if def_id == d.create_text {
-        Some(IMPORT_CREATE_TEXT)
-    } else if def_id == d.create_comment {
-        Some(IMPORT_CREATE_COMMENT)
-    } else if def_id == d.create_fragment {
-        Some(IMPORT_CREATE_FRAGMENT)
-    } else if def_id == d.set_attribute {
-        Some(IMPORT_SET_ATTRIBUTE)
-    } else if def_id == d.remove_attribute {
-        Some(IMPORT_REMOVE_ATTRIBUTE)
-    } else if def_id == d.set_text_content {
-        Some(IMPORT_SET_TEXT_CONTENT)
-    } else if def_id == d.set_style {
-        Some(IMPORT_SET_STYLE)
-    } else if def_id == d.set_class {
-        Some(IMPORT_SET_CLASS)
-    } else if def_id == d.append_child {
-        Some(IMPORT_APPEND_CHILD)
-    } else if def_id == d.insert_before {
-        Some(IMPORT_INSERT_BEFORE)
-    } else if def_id == d.insert_after {
-        Some(IMPORT_INSERT_AFTER)
-    } else if def_id == d.remove_child {
-        Some(IMPORT_REMOVE_CHILD)
-    } else if def_id == d.remove {
-        Some(IMPORT_REMOVE)
-    } else if def_id == d.get_parent {
-        Some(IMPORT_GET_PARENT)
-    } else if def_id == d.get_next_sibling {
-        Some(IMPORT_GET_NEXT_SIBLING)
-    } else if def_id == d.add_event_listener {
-        Some(IMPORT_ADD_EVENT_LISTENER)
-    } else if def_id == d.remove_event_listener {
-        Some(IMPORT_REMOVE_EVENT_LISTENER)
-    } else {
-        None
-    }
+/// Interned WASM function-type indices, named **by use** (one per role).
+/// Populated once during the type-section pass via `intern_type`; every
+/// consumer reads a compiler-checked field. Types are NOT shared across
+/// roles even when their shapes coincide (e.g. `alloc` and
+/// `mount_container` both `(i32,i32)->i32`) — per the codegen convention,
+/// each role gets its own type so the WAT shows the role and a later
+/// optimisation pass is free to dedup or specialise. Indices are pure
+/// allocation artifacts.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FuncTypes {
+    // Allocator runtime functions.
+    pub alloc: u32,           // (i32, i32) -> i32
+    pub free: u32,            // (i32, i32) -> ()
+    pub cabi_realloc: u32,    // (i32, i32, i32, i32) -> i32
+    // Component lifecycle.
+    pub constructor: u32,     // () -> i32
+    pub mount_container: u32, // (i32, i32) -> i32   (returns @children root)
+    pub mount_leaf: u32,      // (i32, i32) -> ()
+    pub unmount: u32,         // (i32) -> ()
+    pub resource_new: u32,    // (i32) -> i32        ([resource-new] host intrinsic)
+    // Signal getters, by value type.
+    pub getter_i32: u32,      // (i32) -> i32
+    pub getter_f32: u32,      // (i32) -> f32
+    pub getter_f64: u32,      // (i32) -> f64
+    pub getter_i64: u32,      // (i32) -> i64
+    // String-conversion runtime helpers.
+    pub s32_to_string: u32,   // (i32) -> (i32, i32)
+    pub bool_to_string: u32,  // (i32) -> (i32, i32)
+    pub f32_to_string: u32,   // (f32) -> (i32, i32)
+    pub s64_to_string: u32,   // (i64) -> (i32, i32)
+    // Fat-pointer runtime helpers.
+    pub store_fat_ptr: u32,   // (i32, i32, i32) -> ()
+    pub load_fat_ptr: u32,    // (i32) -> (i32, i32)
+    pub pack_fat_ptr: u32,    // (i32, i32) -> (i64, i32)
+    pub starts_with: u32,     // (i32, i32, i32, i32) -> i32
+    // Module start function + global fanout helpers.
+    pub globals_init: u32,    // () -> ()
+    pub fanout: u32,          // () -> ()
+    // Canonical-ABI post-return trampolines.
+    pub cabi_post: u32,       // (i32) -> ()
+    pub setter_spill: u32,    // (i32) -> ()
+    // String `concat`, indexed by `arity - 2` (concat2..concat8).
+    pub concat: [u32; 7],     // (i32 * 2n) -> (i32, i32)
 }
+// (Record/list ctors and signal setters intern their own per-shape types
+//  in the precompute pass, so they need no fixed entry here.)
 
 /// Import indices for a single component's callbacks and resource intrinsics.
 ///
@@ -790,7 +794,7 @@ pub(crate) fn wasm_import_index_for_dom_def(ctx: &CompilerContext, def_id: DefId
 pub(crate) struct ComponentCallbackLayout {
     /// DefIds of the callbacks (in order) - used for iteration/labeling.
     /// Import index for any individual DefId must be looked up via
-    /// `ImportLayout::callback_indices` because callbacks are deduped by
+    /// `ImportLayout::import_index` because callbacks are deduped by
     /// kebab-case name across the whole module at emission time.
     pub callback_def_ids: Vec<DefId>,
     /// Index of [resource-new]component import (for constructor return).
@@ -805,11 +809,14 @@ pub(crate) struct ComponentCallbackLayout {
 pub(crate) struct ImportLayout {
     /// Callback layouts for each component (in LirModule order)
     pub components: Vec<ComponentCallbackLayout>,
-    /// Authoritative map from callback DefId to its actual WASM import
-    /// index. Each component has its own callback namespace (no
-    /// cross-component dedup); this map is the direct DefId → import
-    /// index lookup used by expr.rs call emission.
-    pub callback_indices: HashMap<DefId, u32>,
+    /// Authoritative map from a host-import DefId to its WASM import
+    /// index — the single import registry. Holds **every** importable
+    /// `DefId`: the 18 `yel:ui/dom` functions (indices 0–17), then each
+    /// component's callbacks (and, in later phases, global callbacks).
+    /// All call-emission sites (`op_emit.rs` DOM ops, `expr.rs`
+    /// callbacks) resolve through `import_index` against this map, so
+    /// there is one lookup rather than the former DOM-vs-callback split.
+    pub import_indices: HashMap<DefId, u32>,
     /// Ordered list of unique callback entries as `(component_idx,
     /// cb_def_id)` pairs, in emission order. Each component owns its
     /// own callback namespace (one WIT interface per component), so two
@@ -817,6 +824,14 @@ pub(crate) struct ImportLayout {
     /// signatures without colliding. Used by the emission loops so
     /// `find_callback_index` and actual import order agree.
     pub unique_callbacks: Vec<(usize, DefId)>,
+    /// Global callbacks as `(global DefId, callback DefId)` pairs, in
+    /// emission order. Globals are singletons (not resources), so these
+    /// imports carry **no** `self` handle, unlike component callbacks.
+    /// Each global owns its own WIT interface (named after the global).
+    /// Indexed immediately after every component callback and before the
+    /// `[resource-new]` slots. Their import indices live in
+    /// `import_indices` alongside DOM + component callbacks.
+    pub global_callbacks: Vec<(DefId, DefId)>,
     /// Total number of imports
     pub num_imports: u32,
 }
@@ -872,9 +887,14 @@ impl ImportLayout {
         // import slots, so no collision. We still refuse duplicate names
         // WITHIN a single component (defence-in-depth; the parser shouldn't
         // produce this, but if it does we won't silently collapse).
-        let mut callback_indices: HashMap<DefId, u32> = HashMap::new();
+        // DOM has no special prefix: it's a built-in global, so its host
+        // functions are allocated import slots by the global-callback pass
+        // below like any other global's callbacks. Imports are keyed by
+        // DefId in `import_indices`; the index is just the allocation slot.
+        let mut import_indices: HashMap<DefId, u32> = HashMap::new();
+
         let mut unique_callbacks: Vec<(usize, DefId)> = Vec::new();
-        let mut current_idx = NUM_DOM_IMPORTS;
+        let mut current_idx = 0u32;
         for (comp_idx, callbacks) in per_component.iter().enumerate() {
             let mut seen_in_component: HashMap<String, DefId> = HashMap::new();
             for &cb_def_id in callbacks {
@@ -894,7 +914,44 @@ impl ImportLayout {
                 let idx = current_idx;
                 current_idx += 1;
                 unique_callbacks.push((comp_idx, cb_def_id));
-                callback_indices.insert(cb_def_id, idx);
+                import_indices.insert(cb_def_id, idx);
+            }
+        }
+
+        // Step 2.5: global callbacks. A global is a host-boundary
+        // singleton — its `func`-typed members (declared callbacks and
+        // func-typed properties, all in `GlobalDef.callbacks`) are host
+        // imports the component body can invoke via `Global.member(..)`.
+        // Globals are not resources, so these imports take no `self`
+        // handle. They follow every component callback in index order so
+        // adding them never disturbs the DOM (0–17) or component-callback
+        // indices. Names are unique within a single global (one interface
+        // per global); siblings cannot collide because each global has
+        // its own interface namespace.
+        let mut global_callbacks: Vec<(DefId, DefId)> = Vec::new();
+        for global_id in ctx.defs.globals() {
+            let Some(g) = ctx.defs.as_global(global_id) else {
+                continue;
+            };
+            let mut seen_in_global: HashMap<String, DefId> = HashMap::new();
+            for &cb_def_id in &g.callbacks {
+                let name = if let Some(func_def) = ctx.defs.as_function(cb_def_id) {
+                    ctx.str(func_def.name).to_string()
+                } else {
+                    continue;
+                };
+                if let Some(&prior) = seen_in_global.get(&name) {
+                    return Err(CodegenError::InvalidIR(format!(
+                        "global declares callback `{}` twice (DefIds {:?} and {:?}); \
+                         a single global cannot host two callbacks of the same name",
+                        name, prior, cb_def_id
+                    )));
+                }
+                seen_in_global.insert(name, cb_def_id);
+                let idx = current_idx;
+                current_idx += 1;
+                global_callbacks.push((global_id, cb_def_id));
+                import_indices.insert(cb_def_id, idx);
             }
         }
 
@@ -923,17 +980,18 @@ impl ImportLayout {
 
         Ok(Self {
             components,
-            callback_indices,
+            import_indices,
             unique_callbacks,
+            global_callbacks,
             num_imports,
         })
     }
 
-    /// Find the callback index for a given DefId. Each component's
-    /// callbacks get their own slots (one WIT interface per component),
-    /// so this is a direct DefId → index lookup.
-    pub fn find_callback_index(&self, def_id: DefId) -> Option<u32> {
-        self.callback_indices.get(&def_id).copied()
+    /// Resolve any host-import `DefId` (DOM function or callback) to its
+    /// WASM import index. The single registry lookup used by every
+    /// call-emission site.
+    pub fn import_index(&self, def_id: DefId) -> Option<u32> {
+        self.import_indices.get(&def_id).copied()
     }
 }
 
@@ -963,6 +1021,10 @@ pub(crate) struct WasmPackageBuilder<'a> {
     pub layout_ctx: LirLayoutContext<'a>,
     /// Import layout (set during build_core_module, used for callback lookups)
     pub import_layout: Option<ImportLayout>,
+    /// Interned WASM function-type indices, by role (set during the type
+    /// section). Replaces the former fixed 0–33 static type block + the
+    /// computed index bases — every consumer reads a named index here.
+    pub func_types: FuncTypes,
     /// Allocator function indices (set during build_core_module)
     pub alloc_funcs: Option<AllocatorFuncs>,
     /// Runtime function indices (set during build_core_module)
@@ -1036,7 +1098,10 @@ pub(crate) struct WasmPackageBuilder<'a> {
     pub global_block_def_to_idx: HashMap<DefId, usize>,
     /// Typed default expressions for global singleton properties, keyed by
     /// property DefId. Lowered at module start to seed each backing slot.
+    /// Each value's `LirExprId` children index into `global_default_exprs`.
     pub global_defaults: HashMap<DefId, LirExpr>,
+    /// Expression arena backing `global_defaults`' top-level nodes.
+    pub global_default_exprs: Vec<LirExpr>,
     /// Recorded `AddEventListener` sites: `(local_id, comp_idx, handler_block)`.
     /// `local_id` is the per-component 16-bit ordinal assigned when the
     /// op was emitted; combined with the host handle at runtime
@@ -1238,6 +1303,7 @@ impl<'a> WasmPackageBuilder<'a> {
             heap_ptr: 0,
             layout_ctx: LirLayoutContext::new(ctx),
             import_layout: None,
+            func_types: FuncTypes::default(),
             alloc_funcs: None,
             runtime_funcs: None,
             concat_arities: Vec::new(),
@@ -1251,6 +1317,7 @@ impl<'a> WasmPackageBuilder<'a> {
             globals_layouts: Vec::new(),
             global_block_def_to_idx: HashMap::new(),
             global_defaults: HashMap::new(),
+            global_default_exprs: Vec::new(),
             global_handler_map: Vec::new(),
             dispatch_func_idx: None,
             global_fanout_func_idx: HashMap::new(),
@@ -1304,8 +1371,13 @@ impl<'a> WasmPackageBuilder<'a> {
     /// Provide the LIR-lowered default expressions for global singleton
     /// properties. The module start function stores them to each property's
     /// backing slot before any export runs.
-    pub fn set_global_defaults(&mut self, defaults: HashMap<DefId, LirExpr>) {
+    pub fn set_global_defaults(
+        &mut self,
+        defaults: HashMap<DefId, LirExpr>,
+        default_exprs: Vec<LirExpr>,
+    ) {
         self.global_defaults = defaults;
+        self.global_default_exprs = default_exprs;
     }
 
     /// Reset handler counter (call before generating each component's functions)
@@ -1331,37 +1403,29 @@ impl<'a> WasmPackageBuilder<'a> {
     // ========================================================================
 
     pub(crate) fn collect_strings(&mut self) {
-        // Collect strings from all components
-        // LirResource now has pre-computed strings, so we just copy them
         for (comp_idx, component) in self.components.iter().enumerate() {
-            // Copy pre-interned strings from component
+            // Copy pre-interned strings from component.
             for s in &component.strings {
                 self.add_string(s);
             }
 
-            // Collect strings, concat arities, record types, list constructs, and filter calls from signal defaults
+            // FatPointer signals trigger load_fat_ptr/store_fat_ptr (a
+            // type-driven need, independent of any expression).
             for signal in &component.signals {
-                if let Some(default_expr) = &signal.default {
-                    self.collect_strings_from_expr(default_expr);
-                    self.collect_concat_arities(default_expr);
-                    self.collect_record_types(default_expr);
-                    self.collect_list_constructs(default_expr);
-                    self.collect_filter_calls(Some(comp_idx), default_expr);
-                    self.collect_runtime_needs(default_expr);
-                }
-                // FatPointer signals trigger load_fat_ptr/store_fat_ptr.
                 self.note_signal_runtime_needs(signal.ty);
             }
 
-            // Collect strings, concat arities, record types, list constructs, and filter calls from pre-lowered expressions
-            // IMPORTANT: Must collect strings here so layout calculation includes them
+            // The flat expression arena holds every subexpression — signal
+            // defaults (interned for `InitSignal`) and op exprs alike — so a
+            // single linear pass collects everything. The collectors are
+            // node-local; the arena *is* the traversal (no recursion).
             for expr in &component.exprs {
                 self.collect_strings_from_expr(expr);
                 self.collect_concat_arities(expr);
                 self.collect_record_types(expr);
                 self.collect_list_constructs(expr);
-                self.collect_filter_calls(Some(comp_idx), expr);
-                self.collect_runtime_needs(expr);
+                self.collect_runtime_needs(expr, &component.exprs);
+                self.collect_filter_calls(Some(comp_idx), expr, &component.exprs);
             }
 
             // Walk every block's ops to detect helpers triggered by ops
@@ -1374,91 +1438,44 @@ impl<'a> WasmPackageBuilder<'a> {
             }
         }
 
-        // Global singleton defaults are module-scoped — collect their strings
-        // (and any concat/record/list/filter machinery) so the module start
-        // function can emit them without allocating on the heap. Filter calls
-        // nested in a global default register under `None` (no owning comp).
-        let global_default_exprs: Vec<LirExpr> = self.global_defaults.values().cloned().collect();
-        for expr in &global_default_exprs {
+        // Global singleton defaults are module-scoped. Each property's
+        // top-level default node lives in the `global_defaults` map; its
+        // child subexpressions live in the shared global-default arena.
+        // Walk both so the module-start function can emit them. DefId order
+        // keeps string interning / type collection deterministic.
+        let mut global_default_entries: Vec<(&DefId, &LirExpr)> =
+            self.global_defaults.iter().collect();
+        global_default_entries.sort_by_key(|(def_id, _)| def_id.index());
+        let global_default_top: Vec<LirExpr> = global_default_entries
+            .into_iter()
+            .map(|(_, expr)| expr.clone())
+            .collect();
+        let global_arena = self.global_default_exprs.clone();
+        for expr in global_default_top.iter().chain(global_arena.iter()) {
             self.collect_strings_from_expr(expr);
             self.collect_concat_arities(expr);
             self.collect_record_types(expr);
             self.collect_list_constructs(expr);
-            self.collect_runtime_needs(expr);
-            self.collect_filter_calls(None, expr);
+            self.collect_runtime_needs(expr, &global_arena);
+            self.collect_filter_calls(None, expr, &global_arena);
         }
     }
 
     /// Collect literal strings from an expression for the data section.
     /// Also tracks concat arities for runtime function generation.
+    /// Single-node string/concat collection. The driver scans every entry of
+    /// the flat expression arena, so this no longer recurses — each
+    /// subexpression is its own arena entry and is visited in turn.
     fn collect_strings_from_expr(&mut self, expr: &LirExpr) {
         match &expr.kind {
             LirExprKind::Literal(LirLiteral::String(s)) => {
                 self.add_string(s);
             }
             LirExprKind::Call { func, args } => {
-                // Check if this is a concat call and track its arity
+                // Track concat arity (the concat helper is generated per arity).
                 let func_name = self.ctx.str(self.ctx.defs.name(*func));
                 if func_name == "concat" && args.len() >= 2 {
                     self.concat_arities.push(args.len());
-                }
-                for arg in args {
-                    self.collect_strings_from_expr(arg);
-                }
-            }
-            LirExprKind::Binary { lhs, rhs, .. } => {
-                self.collect_strings_from_expr(lhs);
-                self.collect_strings_from_expr(rhs);
-            }
-            LirExprKind::Unary { operand, .. } => {
-                self.collect_strings_from_expr(operand);
-            }
-            LirExprKind::Ternary {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                self.collect_strings_from_expr(condition);
-                self.collect_strings_from_expr(then_expr);
-                self.collect_strings_from_expr(else_expr);
-            }
-            LirExprKind::Field { base, .. } => {
-                self.collect_strings_from_expr(base);
-            }
-            LirExprKind::Index { base, index } => {
-                self.collect_strings_from_expr(base);
-                self.collect_strings_from_expr(index);
-            }
-            LirExprKind::ListConstruct { elements, .. } => {
-                for elem in elements {
-                    self.collect_strings_from_expr(elem);
-                }
-            }
-            LirExprKind::RecordConstruct { fields, .. } => {
-                for field in fields {
-                    self.collect_strings_from_expr(field);
-                }
-            }
-            LirExprKind::TupleConstruct { elements, .. } => {
-                for elem in elements {
-                    self.collect_strings_from_expr(elem);
-                }
-            }
-            LirExprKind::Range { start, end, .. } => {
-                self.collect_strings_from_expr(start);
-                self.collect_strings_from_expr(end);
-            }
-            LirExprKind::VariantCtor {
-                payload: Some(p), ..
-            } => {
-                self.collect_strings_from_expr(p);
-            }
-            LirExprKind::VariantCtor { payload: None, .. } => {}
-            LirExprKind::Closure { body, .. } => {
-                for stmt in body {
-                    if let yel_core::lir::expr::LirStatement::Expr(e) = stmt {
-                        self.collect_strings_from_expr(e);
-                    }
                 }
             }
             _ => {}
@@ -1466,284 +1483,38 @@ impl<'a> WasmPackageBuilder<'a> {
     }
 
     /// Collect concat arities from an expression (for runtime function generation).
+    /// Single-node concat-arity collection (driver scans the flat arena).
     fn collect_concat_arities(&mut self, expr: &LirExpr) {
-        match &expr.kind {
-            LirExprKind::Call { func, args } => {
-                let func_name = self.ctx.str(self.ctx.defs.name(*func));
-                if func_name == "concat" && args.len() >= 2 {
-                    self.concat_arities.push(args.len());
-                }
-                for arg in args {
-                    self.collect_concat_arities(arg);
-                }
-            }
-            LirExprKind::Binary { lhs, rhs, .. } => {
-                self.collect_concat_arities(lhs);
-                self.collect_concat_arities(rhs);
-            }
-            LirExprKind::Unary { operand, .. } => {
-                self.collect_concat_arities(operand);
-            }
-            LirExprKind::Ternary {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                self.collect_concat_arities(condition);
-                self.collect_concat_arities(then_expr);
-                self.collect_concat_arities(else_expr);
-            }
-            LirExprKind::Field { base, .. } => {
-                self.collect_concat_arities(base);
-            }
-            LirExprKind::Index { base, index } => {
-                self.collect_concat_arities(base);
-                self.collect_concat_arities(index);
-            }
-            LirExprKind::ListConstruct { elements, .. } => {
-                for elem in elements {
-                    self.collect_concat_arities(elem);
-                }
-            }
-            LirExprKind::RecordConstruct { fields, .. } => {
-                for field in fields {
-                    self.collect_concat_arities(field);
-                }
-            }
-            LirExprKind::TupleConstruct { elements, .. } => {
-                for elem in elements {
-                    self.collect_concat_arities(elem);
-                }
-            }
-            LirExprKind::Range { start, end, .. } => {
-                self.collect_concat_arities(start);
-                self.collect_concat_arities(end);
-            }
-            LirExprKind::VariantCtor { payload, .. } => {
-                if let Some(p) = payload {
-                    self.collect_concat_arities(p);
-                }
-            }
-            LirExprKind::IsCase { base, .. } => {
-                self.collect_concat_arities(base);
-            }
-            LirExprKind::VariantField { base, .. } => {
-                self.collect_concat_arities(base);
-            }
-            LirExprKind::Closure { body, .. } => {
-                for stmt in body {
-                    if let yel_core::lir::expr::LirStatement::Expr(e) = stmt {
-                        self.collect_concat_arities(e);
-                    }
-                }
-            }
-            LirExprKind::GlobalCall { args, .. } => {
-                for arg in args {
-                    self.collect_concat_arities(arg);
-                }
-            }
-            // Leaf expressions with no sub-expressions
-            LirExprKind::SignalRead(_)
-            | LirExprKind::Local(_)
-            | LirExprKind::Def(_)
-            | LirExprKind::Literal(_)
-            | LirExprKind::EnumCase { .. }
-            | LirExprKind::ListStatic { .. } => {
-                // No sub-expressions to traverse
+        if let LirExprKind::Call { func, args } = &expr.kind {
+            let func_name = self.ctx.str(self.ctx.defs.name(*func));
+            if func_name == "concat" && args.len() >= 2 {
+                self.concat_arities.push(args.len());
             }
         }
     }
 
     /// Collect record types that need constructor helpers.
     /// These are record types used in RecordConstruct expressions.
+    /// Single-node record-type collection (driver scans the flat arena).
     fn collect_record_types(&mut self, expr: &LirExpr) {
-        match &expr.kind {
-            LirExprKind::RecordConstruct {
-                record_def, fields, ..
-            } => {
-                // Add this record type if not already present
-                if !self.record_types.contains(record_def) {
-                    self.record_types.push(*record_def);
-                }
-                // Recurse into field expressions (may contain nested records)
-                for field in fields {
-                    self.collect_record_types(field);
-                }
-            }
-            LirExprKind::ListConstruct { elements, .. } => {
-                for elem in elements {
-                    self.collect_record_types(elem);
-                }
-            }
-            LirExprKind::TupleConstruct { elements, .. } => {
-                for elem in elements {
-                    self.collect_record_types(elem);
-                }
-            }
-            LirExprKind::Call { args, .. } => {
-                for arg in args {
-                    self.collect_record_types(arg);
-                }
-            }
-            LirExprKind::Binary { lhs, rhs, .. } => {
-                self.collect_record_types(lhs);
-                self.collect_record_types(rhs);
-            }
-            LirExprKind::Unary { operand, .. } => {
-                self.collect_record_types(operand);
-            }
-            LirExprKind::Ternary {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                self.collect_record_types(condition);
-                self.collect_record_types(then_expr);
-                self.collect_record_types(else_expr);
-            }
-            LirExprKind::Field { base, .. } => {
-                self.collect_record_types(base);
-            }
-            LirExprKind::Index { base, index } => {
-                self.collect_record_types(base);
-                self.collect_record_types(index);
-            }
-            LirExprKind::Range { start, end, .. } => {
-                self.collect_record_types(start);
-                self.collect_record_types(end);
-            }
-            LirExprKind::VariantCtor { payload, .. } => {
-                if let Some(p) = payload {
-                    self.collect_record_types(p);
-                }
-            }
-            LirExprKind::IsCase { base, .. } => {
-                self.collect_record_types(base);
-            }
-            LirExprKind::VariantField { base, .. } => {
-                self.collect_record_types(base);
-            }
-            LirExprKind::Closure { body, .. } => {
-                for stmt in body {
-                    if let yel_core::lir::expr::LirStatement::Expr(e) = stmt {
-                        self.collect_record_types(e);
-                    }
-                }
-            }
-            LirExprKind::GlobalCall { args, .. } => {
-                for arg in args {
-                    self.collect_record_types(arg);
-                }
-            }
-            // Leaf expressions
-            LirExprKind::SignalRead(_)
-            | LirExprKind::Local(_)
-            | LirExprKind::Def(_)
-            | LirExprKind::Literal(_)
-            | LirExprKind::EnumCase { .. }
-            | LirExprKind::ListStatic { .. } => {
-                // No sub-expressions to traverse
+        if let LirExprKind::RecordConstruct { record_def, .. } = &expr.kind {
+            if !self.record_types.contains(record_def) {
+                self.record_types.push(*record_def);
             }
         }
     }
 
     /// Collect list constructs from an expression (for runtime function generation).
     /// These are list literals that need runtime constructor helpers.
+    /// Single-node list-construct collection (driver scans the flat arena).
     fn collect_list_constructs(&mut self, expr: &LirExpr) {
-        match &expr.kind {
-            LirExprKind::ListConstruct { elements, .. } => {
-                // Get element type from the list type
-                let element_ty = match self.ctx.ty_kind(expr.ty) {
-                    InternedTyKind::List(elem_ty) => *elem_ty,
-                    _ => return, // Not a list type
-                };
-
-                let count = elements.len();
-                let key = (element_ty, count);
+        if let LirExprKind::ListConstruct { elements, .. } = &expr.kind {
+            // Element type comes from the list type.
+            if let InternedTyKind::List(elem_ty) = self.ctx.ty_kind(expr.ty) {
+                let key = (*elem_ty, elements.len());
                 if !self.list_constructs.contains(&key) {
                     self.list_constructs.push(key);
                 }
-
-                // Recurse into elements
-                for elem in elements {
-                    self.collect_list_constructs(elem);
-                }
-            }
-            LirExprKind::RecordConstruct { fields, .. } => {
-                for field in fields {
-                    self.collect_list_constructs(field);
-                }
-            }
-            LirExprKind::TupleConstruct { elements, .. } => {
-                for elem in elements {
-                    self.collect_list_constructs(elem);
-                }
-            }
-            LirExprKind::Call { args, .. } => {
-                for arg in args {
-                    self.collect_list_constructs(arg);
-                }
-            }
-            LirExprKind::Binary { lhs, rhs, .. } => {
-                self.collect_list_constructs(lhs);
-                self.collect_list_constructs(rhs);
-            }
-            LirExprKind::Unary { operand, .. } => {
-                self.collect_list_constructs(operand);
-            }
-            LirExprKind::Ternary {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                self.collect_list_constructs(condition);
-                self.collect_list_constructs(then_expr);
-                self.collect_list_constructs(else_expr);
-            }
-            LirExprKind::Field { base, .. } => {
-                self.collect_list_constructs(base);
-            }
-            LirExprKind::Index { base, index } => {
-                self.collect_list_constructs(base);
-                self.collect_list_constructs(index);
-            }
-            LirExprKind::Range { start, end, .. } => {
-                self.collect_list_constructs(start);
-                self.collect_list_constructs(end);
-            }
-            LirExprKind::VariantCtor { payload, .. } => {
-                // VariantCtor can have a payload expression (e.g., some(list_expr))
-                if let Some(p) = payload {
-                    self.collect_list_constructs(p);
-                }
-            }
-            LirExprKind::IsCase { base, .. } => {
-                self.collect_list_constructs(base);
-            }
-            LirExprKind::VariantField { base, .. } => {
-                self.collect_list_constructs(base);
-            }
-            LirExprKind::Closure { body, .. } => {
-                // Closures contain statements with expressions
-                for stmt in body {
-                    if let yel_core::lir::expr::LirStatement::Expr(e) = stmt {
-                        self.collect_list_constructs(e);
-                    }
-                }
-            }
-            LirExprKind::GlobalCall { args, .. } => {
-                for arg in args {
-                    self.collect_list_constructs(arg);
-                }
-            }
-            // Leaf expressions
-            LirExprKind::SignalRead(_)
-            | LirExprKind::Local(_)
-            | LirExprKind::Def(_)
-            | LirExprKind::Literal(_)
-            | LirExprKind::EnumCase { .. }
-            | LirExprKind::ListStatic { .. } => {
-                // No sub-expressions to traverse
             }
         }
     }
@@ -1758,101 +1529,38 @@ impl<'a> WasmPackageBuilder<'a> {
     /// `emit_expr_as_string` / `emit_expr_as_attr_value` flips its
     /// to_string helper on too (handled per-op in
     /// `collect_runtime_needs_for_op`).
-    fn collect_runtime_needs(&mut self, expr: &LirExpr) {
-        match &expr.kind {
-            LirExprKind::Call { func, args } => {
-                let func_name = self.ctx.str(self.ctx.defs.name(*func));
-                match func_name.as_str() {
-                    "s32-to-string" | "u32-to-string" | "char-to-string" => {
-                        self.runtime_needs.s32_to_string = true;
-                    }
-                    "s64-to-string" | "u64-to-string" => {
-                        self.runtime_needs.s64_to_string = true;
-                    }
-                    "bool-to-string" => self.runtime_needs.bool_to_string = true,
-                    "f32-to-string" => self.runtime_needs.f32_to_string = true,
-                    "f64-to-string" => {
-                        // f64-to-string demotes to f32 then calls f32_to_string.
-                        self.runtime_needs.f32_to_string = true;
-                    }
-                    "starts-with" | "starts_with" => self.runtime_needs.starts_with = true,
-                    "append" => {
-                        // list.append(elem) — register a per-list-Ty
-                        // runtime helper. The receiver (args[0]) carries
-                        // the list type.
-                        if let Some(receiver) = args.first() {
-                            let list_ty = receiver.ty;
-                            if !self.list_appends.contains(&list_ty) {
-                                self.list_appends.push(list_ty);
-                            }
+    /// Single-node runtime-needs flagging (driver scans the flat arena).
+    /// `exprs` is the owning arena, needed only to read the receiver type of
+    /// an `append` call (its first arg is a handle into the arena).
+    fn collect_runtime_needs(&mut self, expr: &LirExpr, exprs: &[LirExpr]) {
+        if let LirExprKind::Call { func, args } = &expr.kind {
+            let func_name = self.ctx.str(self.ctx.defs.name(*func));
+            match &*func_name {
+                "s32-to-string" | "u32-to-string" | "char-to-string" => {
+                    self.runtime_needs.s32_to_string = true;
+                }
+                "s64-to-string" | "u64-to-string" => {
+                    self.runtime_needs.s64_to_string = true;
+                }
+                "bool-to-string" => self.runtime_needs.bool_to_string = true,
+                "f32-to-string" => self.runtime_needs.f32_to_string = true,
+                "f64-to-string" => {
+                    // f64-to-string demotes to f32 then calls f32_to_string.
+                    self.runtime_needs.f32_to_string = true;
+                }
+                "starts-with" | "starts_with" => self.runtime_needs.starts_with = true,
+                "append" => {
+                    // list.append(elem) — register a per-list-Ty runtime
+                    // helper. The receiver (args[0]) carries the list type.
+                    if let Some(receiver) = args.first() {
+                        let list_ty = exprs[receiver.0 as usize].ty;
+                        if !self.list_appends.contains(&list_ty) {
+                            self.list_appends.push(list_ty);
                         }
                     }
-                    _ => {}
                 }
-                for arg in args {
-                    self.collect_runtime_needs(arg);
-                }
+                _ => {}
             }
-            LirExprKind::Binary { lhs, rhs, .. } => {
-                self.collect_runtime_needs(lhs);
-                self.collect_runtime_needs(rhs);
-            }
-            LirExprKind::Unary { operand, .. } => self.collect_runtime_needs(operand),
-            LirExprKind::Ternary {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                self.collect_runtime_needs(condition);
-                self.collect_runtime_needs(then_expr);
-                self.collect_runtime_needs(else_expr);
-            }
-            LirExprKind::Field { base, .. } => self.collect_runtime_needs(base),
-            LirExprKind::Index { base, index } => {
-                self.collect_runtime_needs(base);
-                self.collect_runtime_needs(index);
-            }
-            LirExprKind::ListConstruct { elements, .. }
-            | LirExprKind::TupleConstruct { elements, .. } => {
-                for e in elements {
-                    self.collect_runtime_needs(e);
-                }
-            }
-            LirExprKind::RecordConstruct { fields, .. } => {
-                for f in fields {
-                    self.collect_runtime_needs(f);
-                }
-            }
-            LirExprKind::Range { start, end, .. } => {
-                self.collect_runtime_needs(start);
-                self.collect_runtime_needs(end);
-            }
-            LirExprKind::VariantCtor { payload, .. } => {
-                if let Some(p) = payload {
-                    self.collect_runtime_needs(p);
-                }
-            }
-            LirExprKind::IsCase { base, .. } | LirExprKind::VariantField { base, .. } => {
-                self.collect_runtime_needs(base);
-            }
-            LirExprKind::Closure { body, .. } => {
-                for stmt in body {
-                    if let yel_core::lir::expr::LirStatement::Expr(e) = stmt {
-                        self.collect_runtime_needs(e);
-                    }
-                }
-            }
-            LirExprKind::GlobalCall { args, .. } => {
-                for a in args {
-                    self.collect_runtime_needs(a);
-                }
-            }
-            LirExprKind::SignalRead(_)
-            | LirExprKind::Local(_)
-            | LirExprKind::Def(_)
-            | LirExprKind::Literal(_)
-            | LirExprKind::EnumCase { .. }
-            | LirExprKind::ListStatic { .. } => {}
         }
     }
 
@@ -1873,16 +1581,24 @@ impl<'a> WasmPackageBuilder<'a> {
             // payload that the legacy DOM ops embedded. Mirror the
             // runtime-needs side-effects so stringify / fat-ptr helpers
             // remain materialized.
-            LirOp::PushExprAsString { expr } => {
+            LirOp::PushExpr { expr } => {
+                // Detect the helpers the pushed value's own emission needs:
+                // a `to_string` `Call` (set-text-content) is recognised by
+                // `collect_runtime_needs`; a `VariantCtor` (attribute-value)
+                // may promote a string pointer into an i64 slot via
+                // `pack_fat_ptr_to_i64` and carries its payload's needs.
                 let e = component.get_expr(*expr);
                 self.note_to_string_for_ty(e.ty);
-                self.collect_runtime_needs(e);
-            }
-            LirOp::PushExprAsAttrValue { expr } => {
-                let e = component.get_expr(*expr);
-                self.runtime_needs.pack_fat_ptr_to_i64 = true;
-                self.note_to_string_for_ty(e.ty);
-                self.collect_runtime_needs(e);
+                self.collect_runtime_needs(e, &component.exprs);
+                if let LirExprKind::VariantCtor {
+                    payload: Some(p), ..
+                } = &e.kind
+                {
+                    self.runtime_needs.pack_fat_ptr_to_i64 = true;
+                    let pe = component.get_expr(*p);
+                    self.note_to_string_for_ty(pe.ty);
+                    self.collect_runtime_needs(pe, &component.exprs);
+                }
             }
             _ => {}
         }
@@ -1936,111 +1652,35 @@ impl<'a> WasmPackageBuilder<'a> {
     /// `comp_idx` is `Some(i)` when walking an expression that lives inside
     /// component `i`, `None` when walking a module-scope expression (e.g. a
     /// global-singleton default).
-    fn collect_filter_calls(&mut self, comp_idx: Option<usize>, expr: &LirExpr) {
-        match &expr.kind {
-            LirExprKind::Call { func, args } => {
-                let func_name = self.ctx.str(self.ctx.defs.name(*func));
-                if func_name == "filter" && args.len() == 2 {
-                    // Extract closure from second arg
-                    if let LirExprKind::Closure { params, body } = &args[1].kind {
-                        // Get element type and size from source list
-                        if let InternedTyKind::List(elem_ty) = self.ctx.ty_kind(args[0].ty) {
-                            let elem_size = self.layout_ctx.size_of(*elem_ty);
-
-                            // Get predicate expression (last statement in body)
-                            if let Some(yel_core::lir::expr::LirStatement::Expr(predicate)) =
-                                body.last()
-                                && let Some(param) = params.first()
-                            {
-                                self.filter_calls.push((
-                                    comp_idx,
-                                    args[0].ty,
-                                    elem_size,
-                                    *param,
-                                    predicate.clone(),
-                                ));
-                            }
-                        }
-                    }
+    /// Single-node filter-call collection (driver scans the flat arena).
+    /// `exprs` is the owning arena: `filter`'s args (the source list and the
+    /// predicate closure) are handles resolved through it.
+    fn collect_filter_calls(&mut self, comp_idx: Option<usize>, expr: &LirExpr, exprs: &[LirExpr]) {
+        let LirExprKind::Call { func, args } = &expr.kind else {
+            return;
+        };
+        let func_name = self.ctx.str(self.ctx.defs.name(*func));
+        if func_name != "filter" || args.len() != 2 {
+            return;
+        }
+        // args[1] is the predicate closure; args[0] is the source list.
+        let closure_expr = &exprs[args[1].0 as usize];
+        if let LirExprKind::Closure { params, body } = &closure_expr.kind {
+            let list_expr = &exprs[args[0].0 as usize];
+            if let InternedTyKind::List(elem_ty) = self.ctx.ty_kind(list_expr.ty) {
+                let elem_size = self.layout_ctx.size_of(*elem_ty);
+                // Predicate = the closure body's last statement expression.
+                if let Some(yel_core::lir::expr::LirStatement::Expr(predicate)) = body.last()
+                    && let Some(param) = params.first()
+                {
+                    self.filter_calls.push((
+                        comp_idx,
+                        list_expr.ty,
+                        elem_size,
+                        *param,
+                        predicate.clone(),
+                    ));
                 }
-                // Recurse into args
-                for arg in args {
-                    self.collect_filter_calls(comp_idx, arg);
-                }
-            }
-            LirExprKind::Binary { lhs, rhs, .. } => {
-                self.collect_filter_calls(comp_idx, lhs);
-                self.collect_filter_calls(comp_idx, rhs);
-            }
-            LirExprKind::Unary { operand, .. } => {
-                self.collect_filter_calls(comp_idx, operand);
-            }
-            LirExprKind::Ternary {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                self.collect_filter_calls(comp_idx, condition);
-                self.collect_filter_calls(comp_idx, then_expr);
-                self.collect_filter_calls(comp_idx, else_expr);
-            }
-            LirExprKind::Field { base, .. } => {
-                self.collect_filter_calls(comp_idx, base);
-            }
-            LirExprKind::Index { base, index } => {
-                self.collect_filter_calls(comp_idx, base);
-                self.collect_filter_calls(comp_idx, index);
-            }
-            LirExprKind::ListConstruct { elements, .. } => {
-                for elem in elements {
-                    self.collect_filter_calls(comp_idx, elem);
-                }
-            }
-            LirExprKind::RecordConstruct { fields, .. } => {
-                for field in fields {
-                    self.collect_filter_calls(comp_idx, field);
-                }
-            }
-            LirExprKind::TupleConstruct { elements, .. } => {
-                for elem in elements {
-                    self.collect_filter_calls(comp_idx, elem);
-                }
-            }
-            LirExprKind::Range { start, end, .. } => {
-                self.collect_filter_calls(comp_idx, start);
-                self.collect_filter_calls(comp_idx, end);
-            }
-            LirExprKind::VariantCtor { payload, .. } => {
-                if let Some(p) = payload {
-                    self.collect_filter_calls(comp_idx, p);
-                }
-            }
-            LirExprKind::IsCase { base, .. } => {
-                self.collect_filter_calls(comp_idx, base);
-            }
-            LirExprKind::VariantField { base, .. } => {
-                self.collect_filter_calls(comp_idx, base);
-            }
-            LirExprKind::Closure { body, .. } => {
-                for stmt in body {
-                    if let yel_core::lir::expr::LirStatement::Expr(e) = stmt {
-                        self.collect_filter_calls(comp_idx, e);
-                    }
-                }
-            }
-            LirExprKind::GlobalCall { args, .. } => {
-                for arg in args {
-                    self.collect_filter_calls(comp_idx, arg);
-                }
-            }
-            // Leaf expressions
-            LirExprKind::SignalRead(_)
-            | LirExprKind::Local(_)
-            | LirExprKind::Def(_)
-            | LirExprKind::Literal(_)
-            | LirExprKind::EnumCase { .. }
-            | LirExprKind::ListStatic { .. } => {
-                // No sub-expressions to traverse
             }
         }
     }
@@ -2154,14 +1794,13 @@ impl<'a> WasmPackageBuilder<'a> {
         // setters) must use `canonical_flat_valtypes` instead — that
         // path keeps the multi-slot (ptr, len) shape required by the
         // WIT canonical ABI.
-        if self.is_scalar_list_ty(ty) {
-            if let Some(&arr_idx) = self.record_gc_types.list_array_type_idx.get(&ty) {
+        if self.is_scalar_list_ty(ty)
+            && let Some(&arr_idx) = self.record_gc_types.list_array_type_idx.get(&ty) {
                 return vec![ValType::Ref(RefType {
                     nullable: true,
                     heap_type: HeapType::Concrete(arr_idx),
                 })];
             }
-        }
         // Option-of-ref collapse: option<T> where T's internal repr
         // is itself a GC ref becomes a single nullable ref slot.
         if let Some(arr_idx) = self.option_collapses_to_ref(ty) {
@@ -2409,13 +2048,20 @@ impl<'a> WasmPackageBuilder<'a> {
                     // User variant: discriminant at base, joined payload
                     // slots laid out back-to-back starting at the variant
                     // layout's payload_offset.
+                    let vd = var_def.clone();
+                    let var_layout = self.layout_ctx.compute_variant_layout_from_def_public(&vd);
+                    // Canonical ABI: the discriminant's in-memory width is sized
+                    // by the case count (u8 ≤256, u16 ≤65536, else u32). The
+                    // layout reserves `discriminant_size` bytes before the
+                    // payload, so the store must write that full width — writing
+                    // a fixed byte would leave the high bytes of a >256-case
+                    // discriminant uninitialised. (For the common ≤256-case
+                    // variant this stays a 1-byte store, unchanged.)
                     out.push(FlatSlot {
                         valtype: ValType::I32,
                         offset: base_offset,
-                        store: StoreWidth::I32_8,
+                        store: discriminant_store_width(var_layout.discriminant_size),
                     });
-                    let vd = var_def.clone();
-                    let var_layout = self.layout_ctx.compute_variant_layout_from_def_public(&vd);
                     let payload_offset = var_layout.payload_offset;
                     let mut case_flats: Vec<Vec<ValType>> = Vec::new();
                     for &case_def_id in &vd.cases {

@@ -102,11 +102,10 @@ pub fn generate_dot(
             }
             // Two-way bind targets are written by codegen-only logic;
             // they won't appear in the op walk above.
-            if let Some(&target) = comp.input_binding_handlers.get(&handler_block) {
-                if !local_signals.contains(&target) && !global_refs.contains(&target) {
+            if let Some(&target) = comp.input_binding_handlers.get(&handler_block)
+                && !local_signals.contains(&target) && !global_refs.contains(&target) {
                     global_refs.push(target);
                 }
-            }
         }
     }
 
@@ -511,7 +510,7 @@ fn block_label(comp: &LirResource, ctx: &CompilerContext, block_id: BlockId) -> 
         s.push_str(&format!("-b{}", bp.0));
     }
     if let Some(sig) = info.signal {
-        s.push_str(&format!("-s{}", sig));
+        s.push_str(&format!("-s{}", sig.index()));
     }
     s
 }
@@ -580,20 +579,18 @@ fn render_call_chain(
         // callee node itself. Emit only on first emission so multi-caller
         // fan-in doesn't duplicate sinks/edges.
         if first_emit {
-            render_block_outputs(out, comp_idx, comp, ctx, &callee_node, callee, options);
+            render_block_outputs(
+                out,
+                comp_idx,
+                comp,
+                ctx,
+                &callee_node,
+                callee,
+                options,
+            );
         }
 
-        render_call_chain(
-            out,
-            comp_idx,
-            comp,
-            ctx,
-            &callee_node,
-            callee,
-            seen,
-            path,
-            options,
-        );
+        render_call_chain(out, comp_idx, comp, ctx, &callee_node, callee, seen, path, options);
     }
 
     path.pop();
@@ -617,7 +614,7 @@ fn render_block_outputs(
     let block = comp.get_block(block_id);
     let mut writes: Vec<DefId> = Vec::new();
     let mut mutations: Vec<String> = Vec::new();
-    walk_ops_shallow(&block.ops, comp, ctx, &mut writes, &mut mutations);
+    walk_ops_shallow(&block.ops, ctx, &mut writes, &mut mutations);
 
     for &written in &writes {
         writeln!(
@@ -661,7 +658,7 @@ fn describe_block_local(comp: &LirResource, ctx: &CompilerContext, block_id: Blo
     let block = comp.get_block(block_id);
     let mut writes: Vec<DefId> = Vec::new();
     let mut mutations: Vec<String> = Vec::new();
-    walk_ops_shallow(&block.ops, comp, ctx, &mut writes, &mut mutations);
+    walk_ops_shallow(&block.ops, ctx, &mut writes, &mut mutations);
 
     let mut parts: Vec<String> = Vec::new();
     if let Some((bid, kind)) = boundary_kind_for_block(comp, block_id) {
@@ -704,7 +701,6 @@ fn boundary_kind_for_block(comp: &LirResource, block_id: BlockId) -> Option<(u32
 /// `If` / `Loop` bodies because those are inline within the same block.
 fn walk_ops_shallow(
     ops: &[LirOp],
-    comp: &LirResource,
     ctx: &CompilerContext,
     writes: &mut Vec<DefId>,
     mutations: &mut Vec<String>,
@@ -734,14 +730,12 @@ fn walk_ops_shallow(
                     push_unique(mutations, "remove dom".into());
                 }
             }
-            LirOp::If {
-                then_ops, else_ops, ..
-            } => {
-                walk_ops_shallow(then_ops, comp, ctx, writes, mutations);
-                walk_ops_shallow(else_ops, comp, ctx, writes, mutations);
+            LirOp::If(if_op) => {
+                walk_ops_shallow(&if_op.then_ops, ctx, writes, mutations);
+                walk_ops_shallow(&if_op.else_ops, ctx, writes, mutations);
             }
             LirOp::Loop { body_ops, .. } => {
-                walk_ops_shallow(body_ops, comp, ctx, writes, mutations);
+                walk_ops_shallow(body_ops, ctx, writes, mutations);
             }
             _ => {}
         }
@@ -755,11 +749,9 @@ fn collect_call_targets(ops: &[LirOp], out: &mut Vec<BlockId>) {
     for op in ops {
         match op {
             LirOp::CallBlock { block, .. } => out.push(*block),
-            LirOp::If {
-                then_ops, else_ops, ..
-            } => {
-                collect_call_targets(then_ops, out);
-                collect_call_targets(else_ops, out);
+            LirOp::If(if_op) => {
+                collect_call_targets(&if_op.then_ops, out);
+                collect_call_targets(&if_op.else_ops, out);
             }
             LirOp::Loop { body_ops, .. } => {
                 collect_call_targets(body_ops, out);
@@ -797,15 +789,13 @@ fn collect_add_event_listener(
             LirOp::PushHandlerId { handler } => {
                 let event_name = last_event_string
                     .map(|sid| _comp.get_string(sid).to_string())
-                    .unwrap_or_else(|| "".to_string());
+                    .unwrap_or_default();
                 out.push((event_name, *handler));
                 last_event_string = None;
             }
-            LirOp::If {
-                then_ops, else_ops, ..
-            } => {
-                collect_add_event_listener(then_ops, _comp, out);
-                collect_add_event_listener(else_ops, _comp, out);
+            LirOp::If(if_op) => {
+                collect_add_event_listener(&if_op.then_ops, _comp, out);
+                collect_add_event_listener(&if_op.else_ops, _comp, out);
             }
             LirOp::Loop { body_ops, .. } => {
                 collect_add_event_listener(body_ops, _comp, out);
@@ -928,11 +918,9 @@ fn walk_ops(
                     push_unique(mutations, "mount/unmount branch".into());
                 }
             }
-            LirOp::If {
-                then_ops, else_ops, ..
-            } => {
-                walk_ops(then_ops, comp, ctx, visited, writes, mutations);
-                walk_ops(else_ops, comp, ctx, visited, writes, mutations);
+            LirOp::If(if_op) => {
+                walk_ops(&if_op.then_ops, comp, ctx, visited, writes, mutations);
+                walk_ops(&if_op.else_ops, comp, ctx, visited, writes, mutations);
             }
             LirOp::Loop { body_ops, .. } => {
                 walk_ops(body_ops, comp, ctx, visited, writes, mutations);

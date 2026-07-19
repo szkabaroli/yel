@@ -71,13 +71,13 @@ impl LocalsBudget {
     /// `to_local_decls`.
     pub(super) fn resolve_bases(&self, param_count: u32) -> ScratchBases {
         let mut next = param_count;
-        let i32_base = next;
+        let _i32_base = next;
         next += self.i32_count;
-        let i64_base = next;
+        let _i64_base = next;
         next += self.i64_count;
-        let f32_base = next;
+        let _f32_base = next;
         next += self.f32_count;
-        let f64_base = next;
+        let _f64_base = next;
         next += self.f64_count;
         let mut typed_ref_bases = Vec::with_capacity(self.typed_refs.len());
         for (_vt, count) in &self.typed_refs {
@@ -139,10 +139,10 @@ impl<'a> WasmPackageBuilder<'a> {
             return Ok(None);
         }
         Ok(Some(match flat[0] {
-            ValType::I32 => 4,
-            ValType::F32 => 10,
-            ValType::F64 => 12,
-            ValType::I64 => 14,
+            ValType::I32 => self.func_types.getter_i32,
+            ValType::F32 => self.func_types.getter_f32,
+            ValType::F64 => self.func_types.getter_f64,
+            ValType::I64 => self.func_types.getter_i64,
             other => {
                 return Err(CodegenError::InvalidIR(format!(
                     "single_slot_getter_type: composite type {:?} flattens to \
@@ -151,6 +151,309 @@ impl<'a> WasmPackageBuilder<'a> {
                 )));
             }
         }))
+    }
+
+    /// Whether a canonical value of `ty` transitively contains a `list`,
+    /// i.e. whether materialising it into linear memory allocates any fresh
+    /// element buffer that a post-return must reclaim. Strings are *aliased*
+    /// (their bytes live in persistent / interned storage and are never freshly
+    /// copied by a getter), so they do not count; scalars are inline.
+    pub(super) fn ty_contains_fresh_list(&self, ty: Ty) -> bool {
+        let mut visited = std::collections::HashSet::new();
+        self.ty_contains_fresh_list_rec(ty, &mut visited)
+    }
+
+    fn ty_contains_fresh_list_rec(
+        &self,
+        ty: Ty,
+        visited: &mut std::collections::HashSet<DefId>,
+    ) -> bool {
+        match self.ctx.ty_kind(ty) {
+            InternedTyKind::List(_) => true,
+            InternedTyKind::Option(inner) => self.ty_contains_fresh_list_rec(*inner, visited),
+            InternedTyKind::Result { ok, err } => {
+                ok.is_some_and(|t| self.ty_contains_fresh_list_rec(t, visited))
+                    || err.is_some_and(|t| self.ty_contains_fresh_list_rec(t, visited))
+            }
+            InternedTyKind::Tuple(elems) => elems
+                .iter()
+                .any(|&t| self.ty_contains_fresh_list_rec(t, visited)),
+            InternedTyKind::Adt(def_id) => {
+                if !visited.insert(*def_id) {
+                    return false; // recursive type guard
+                }
+                if let Some(rec) = self.ctx.defs.as_record(*def_id) {
+                    rec.fields.iter().any(|&fid| {
+                        matches!(self.ctx.defs.kind(fid), DefKind::Field(f)
+                            if self.ty_contains_fresh_list_rec(f.ty, visited))
+                    })
+                } else if let Some(var) = self.ctx.defs.as_variant(*def_id) {
+                    var.cases.iter().any(|&cid| {
+                        matches!(self.ctx.defs.kind(cid),
+                            yel_core::definitions::DefKind::VariantCase(c)
+                            if c.payload.is_some_and(|t| self.ty_contains_fresh_list_rec(t, visited)))
+                    })
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Emit the `cabi_post_*` (post-return) body for an aggregate-returning
+    /// getter whose result was freshly materialised into linear memory. Only
+    /// `signal_in_struct` (GC-migrated) getters reach here — memory-resident
+    /// getters return a pointer *into live signal storage* and must never be
+    /// freed. Param 0 is the returned pointer. The body frees the freshly
+    /// allocated buffer graph: nested `list` element buffers (recursively, via
+    /// runtime loops over element counts), then the top-level scratch.
+    pub(super) fn generate_cabi_post_getter(
+        &mut self,
+        ty: Ty,
+        free_fn: u32,
+    ) -> Result<Function, CodegenError> {
+        use wasm_encoder::Instruction;
+        let mut out: Vec<Instruction<'static>> = Vec::new();
+        let mut locals: u32 = 0;
+        let ret_ptr: u32 = 0;
+        self.emit_free_region(&mut out, &mut locals, ty, ret_ptr, 0, free_fn)?;
+        // Free the top-level scratch itself (size = its canonical in-memory
+        // size; `size_of(string|list) == 8`, the fat-pointer pair).
+        let size = self.layout_ctx.size_of(ty);
+        out.push(Instruction::LocalGet(ret_ptr));
+        out.push(Instruction::I32Const(size as i32));
+        out.push(Instruction::Call(free_fn));
+        out.push(Instruction::End);
+        let mut func = Function::new([(locals, ValType::I32)]);
+        for ins in &out {
+            func.instruction(ins);
+        }
+        Ok(func)
+    }
+
+    /// Recursively emit instructions that free every freshly-allocated `list`
+    /// element buffer reachable from a canonical value of `ty` located at
+    /// `[base_local] + byte_off`. Does NOT free the region holding the value
+    /// itself (the caller owns that). `locals` tracks the count of i32 locals
+    /// allocated so far; new loop/scratch locals are handed out at index
+    /// `1 + (prior count)` to line up with the function's declared locals.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_free_region(
+        &mut self,
+        out: &mut Vec<wasm_encoder::Instruction<'static>>,
+        locals: &mut u32,
+        ty: Ty,
+        base_local: u32,
+        byte_off: u32,
+        free_fn: u32,
+    ) -> Result<(), CodegenError> {
+        use wasm_encoder::{BlockType, Instruction, MemArg};
+        if !self.ty_contains_fresh_list(ty) {
+            return Ok(()); // no fresh buffers under this value
+        }
+        let ma = |offset: u32, align: u32| MemArg {
+            offset: offset as u64,
+            align,
+            memory_index: 0,
+        };
+        let alloc_local = |locals: &mut u32| -> u32 {
+            *locals += 1;
+            *locals
+        };
+        match self.ctx.ty_kind(ty) {
+            InternedTyKind::List(elem) => {
+                let elem = *elem;
+                let data = alloc_local(locals);
+                let len = alloc_local(locals);
+                // data = mem[base+byte_off]; len = mem[base+byte_off+4]
+                out.push(Instruction::LocalGet(base_local));
+                out.push(Instruction::I32Load(ma(byte_off, 2)));
+                out.push(Instruction::LocalSet(data));
+                out.push(Instruction::LocalGet(base_local));
+                out.push(Instruction::I32Load(ma(byte_off + 4, 2)));
+                out.push(Instruction::LocalSet(len));
+                let (elem_size, _elem_align) =
+                    gc_list_elem_canonical_info(self.ctx, &mut self.layout_ctx, elem);
+                // If elements themselves carry fresh buffers, loop and recurse.
+                if self.ty_contains_fresh_list(elem) {
+                    let i = alloc_local(locals);
+                    let elem_base = alloc_local(locals);
+                    out.push(Instruction::I32Const(0));
+                    out.push(Instruction::LocalSet(i));
+                    out.push(Instruction::Block(BlockType::Empty));
+                    out.push(Instruction::Loop(BlockType::Empty));
+                    out.push(Instruction::LocalGet(i));
+                    out.push(Instruction::LocalGet(len));
+                    out.push(Instruction::I32GeU);
+                    out.push(Instruction::BrIf(1));
+                    // elem_base = data + i * elem_size
+                    out.push(Instruction::LocalGet(data));
+                    out.push(Instruction::LocalGet(i));
+                    out.push(Instruction::I32Const(elem_size as i32));
+                    out.push(Instruction::I32Mul);
+                    out.push(Instruction::I32Add);
+                    out.push(Instruction::LocalSet(elem_base));
+                    self.emit_free_region(out, locals, elem, elem_base, 0, free_fn)?;
+                    out.push(Instruction::LocalGet(i));
+                    out.push(Instruction::I32Const(1));
+                    out.push(Instruction::I32Add);
+                    out.push(Instruction::LocalSet(i));
+                    out.push(Instruction::Br(0));
+                    out.push(Instruction::End); // loop
+                    out.push(Instruction::End); // block
+                }
+                // free(data, len * elem_size)
+                out.push(Instruction::LocalGet(data));
+                out.push(Instruction::LocalGet(len));
+                out.push(Instruction::I32Const(elem_size as i32));
+                out.push(Instruction::I32Mul);
+                out.push(Instruction::Call(free_fn));
+            }
+            InternedTyKind::Tuple(elems) => {
+                let elems: Vec<Ty> = elems.to_vec();
+                let mut offset: u32 = 0;
+                for elem_ty in elems {
+                    let l = self.layout_ctx.layout_of(elem_ty);
+                    offset = yel_core::lir::align_to(offset, l.align);
+                    self.emit_free_region(out, locals, elem_ty, base_local, byte_off + offset, free_fn)?;
+                    offset += l.size;
+                }
+            }
+            InternedTyKind::Option(inner) => {
+                let inner = *inner;
+                let payload_off = yel_core::lir::align_to(1, self.layout_ctx.align_of(inner));
+                // if disc != 0 (some) { free inner }
+                out.push(Instruction::LocalGet(base_local));
+                out.push(Instruction::I32Load8U(ma(byte_off, 0)));
+                out.push(Instruction::If(BlockType::Empty));
+                self.emit_free_region(out, locals, inner, base_local, byte_off + payload_off, free_fn)?;
+                out.push(Instruction::End);
+            }
+            InternedTyKind::Result { ok, err } => {
+                let (ok, err) = (*ok, *err);
+                let a = ok.map(|t| self.layout_ctx.align_of(t)).unwrap_or(1);
+                let b = err.map(|t| self.layout_ctx.align_of(t)).unwrap_or(1);
+                let payload_off = yel_core::lir::align_to(1, a.max(b).max(1));
+                // disc == 0 → ok, else → err
+                out.push(Instruction::LocalGet(base_local));
+                out.push(Instruction::I32Load8U(ma(byte_off, 0)));
+                out.push(Instruction::If(BlockType::Empty)); // disc != 0 → err
+                if let Some(err_ty) = err {
+                    self.emit_free_region(out, locals, err_ty, base_local, byte_off + payload_off, free_fn)?;
+                }
+                out.push(Instruction::Else);
+                if let Some(ok_ty) = ok {
+                    self.emit_free_region(out, locals, ok_ty, base_local, byte_off + payload_off, free_fn)?;
+                }
+                out.push(Instruction::End);
+            }
+            InternedTyKind::Adt(def_id) => {
+                let def_id = *def_id;
+                if let Some(rec) = self.ctx.defs.as_record(def_id) {
+                    let fields = rec.fields.clone();
+                    let layout = self
+                        .layout_ctx
+                        .record_layout_by_id(def_id)
+                        .ok_or_else(|| {
+                            CodegenError::InvalidIR(format!(
+                                "cabi_post: record layout missing for {:?}",
+                                def_id
+                            ))
+                        })?;
+                    for (i, _fid) in fields.iter().enumerate() {
+                        let (_, foff, fty) = layout.field_offsets[i].clone();
+                        self.emit_free_region(out, locals, fty, base_local, byte_off + foff, free_fn)?;
+                    }
+                } else if let Some(var) = self.ctx.defs.as_variant(def_id) {
+                    let vd = var.clone();
+                    let var_layout = self.layout_ctx.compute_variant_layout_from_def_public(&vd);
+                    let payload_off = var_layout.payload_offset;
+                    let discriminant = alloc_local(locals);
+                    // Load the discriminant at its canonical width (read
+                    // counterpart of `discriminant_store_width`).
+                    out.push(Instruction::LocalGet(base_local));
+                    out.push(crate::wasm::discriminant_load_instr(
+                        var_layout.discriminant_size,
+                        byte_off,
+                    ));
+                    out.push(Instruction::LocalSet(discriminant));
+                    for (c, &cid) in vd.cases.iter().enumerate() {
+                        let payload = match self.ctx.defs.kind(cid) {
+                            yel_core::definitions::DefKind::VariantCase(case) => case.payload,
+                            _ => None,
+                        };
+                        if let Some(pty) = payload {
+                            if self.ty_contains_fresh_list(pty) {
+                                out.push(Instruction::LocalGet(discriminant));
+                                out.push(Instruction::I32Const(c as i32));
+                                out.push(Instruction::I32Eq);
+                                out.push(Instruction::If(BlockType::Empty));
+                                self.emit_free_region(out, locals, pty, base_local, byte_off + payload_off, free_fn)?;
+                                out.push(Instruction::End);
+                            }
+                        }
+                    }
+                }
+                // Enums carry no payload — nothing to free.
+            }
+            // String (aliased) and scalars: no fresh buffer.
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Gap 3 — pointer-spill trampoline for an exported setter whose flattened
+    /// params exceed the canonical-ABI limit (`MAX_FLAT_PARAMS = 16`). The
+    /// canonical ABI then passes ALL params via a single pointer to a region
+    /// holding the param tuple `(self: borrow, value: T)` in canonical memory
+    /// layout. This thin `(ptr) -> ()` shim loads `self` and each of the
+    /// value's flat slots from that region and calls the existing wide-signature
+    /// setter (`wide_setter_idx`), so the large branch-heavy setter body needs
+    /// no changes. `self` occupies offset 0 (a 4-byte handle); the value starts
+    /// at its natural alignment after it.
+    pub(super) fn generate_setter_spill_trampoline(
+        &mut self,
+        value_ty: Ty,
+        wide_setter_idx: u32,
+    ) -> Result<Function, CodegenError> {
+        use crate::wasm::StoreWidth;
+        use wasm_encoder::{Instruction, MemArg};
+        let slots = self.flatten_core_slots(value_ty);
+        debug_assert_eq!(
+            slots.len(),
+            self.canonical_flat_valtypes(value_ty).len(),
+            "spill trampoline: flat-slot count must match the wide setter's param count"
+        );
+        let value_base = yel_core::lir::align_to(4, self.layout_ctx.align_of(value_ty));
+        let ma = |off: u32, align: u32| MemArg {
+            offset: off as u64,
+            align,
+            memory_index: 0,
+        };
+        let mut func = Function::new(Vec::<(u32, ValType)>::new());
+        // self handle at region+0
+        func.instruction(&Instruction::LocalGet(0));
+        func.instruction(&Instruction::I32Load(ma(0, 2)));
+        // value's flat slots, loaded from the region at their canonical
+        // memory offsets, in the SAME order the wide setter expects. Small
+        // ints load zero-extended — the setter narrows on store, so the high
+        // bits are irrelevant.
+        for s in &slots {
+            let off = value_base + s.offset;
+            func.instruction(&Instruction::LocalGet(0));
+            match s.store {
+                StoreWidth::I32 => func.instruction(&Instruction::I32Load(ma(off, 2))),
+                StoreWidth::I32_8 => func.instruction(&Instruction::I32Load8U(ma(off, 0))),
+                StoreWidth::I32_16 => func.instruction(&Instruction::I32Load16U(ma(off, 1))),
+                StoreWidth::I64 => func.instruction(&Instruction::I64Load(ma(off, 3))),
+                StoreWidth::F32 => func.instruction(&Instruction::F32Load(ma(off, 2))),
+                StoreWidth::F64 => func.instruction(&Instruction::F64Load(ma(off, 3))),
+            };
+        }
+        func.instruction(&Instruction::Call(wide_setter_idx));
+        func.instruction(&Instruction::End);
+        Ok(func)
     }
 
     /// When `comp_idx` is `Some` and the signal has been migrated to
@@ -258,11 +561,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     self.current_self_local = Some(self_ref_local);
                     self.current_self_comp_idx = Some(ci);
                     // Allocate 8-byte canonical scratch (ptr, len).
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32Const(4));
-                    func.instruction(&Instruction::I32Const(8));
-                    func.instruction(&Instruction::Call(cabi_realloc));
+                    super::scratch::emit_cabi_realloc_fixed(&mut func, 4, 8, cabi_realloc);
                     func.instruction(&Instruction::LocalSet(scratch_local));
                     // Load array ref + call materializer → (ptr, len).
                     self.emit_self_ref(&mut func, ci)?;
@@ -394,13 +693,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::ArrayLen);
                 func.instruction(&Instruction::LocalSet(len_local));
                 // data_ptr = cabi_realloc(0, 0, elem_align, len * elem_size)
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(elem_align as i32));
-                func.instruction(&Instruction::LocalGet(len_local));
-                func.instruction(&Instruction::I32Const(elem_size as i32));
-                func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::Call(cabi_realloc));
+                super::scratch::emit_cabi_realloc_array(&mut func, len_local, elem_size, elem_align, cabi_realloc);
                 func.instruction(&Instruction::LocalSet(data_ptr_local));
                 // Copy loop: for idx in 0..len { data[idx*sz] = arr.get(idx) }
                 func.instruction(&Instruction::I32Const(0));
@@ -534,11 +827,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::End); // loop
                 func.instruction(&Instruction::End); // block
                 // scratch = cabi_realloc(0, 0, 4, 8) — allocate (ptr, len) pair
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(4));
-                func.instruction(&Instruction::I32Const(8));
-                func.instruction(&Instruction::Call(cabi_realloc));
+                super::scratch::emit_cabi_realloc_fixed(&mut func, 4, 8, cabi_realloc);
                 func.instruction(&Instruction::LocalSet(scratch_ptr_local));
                 // scratch[0] = data_ptr
                 func.instruction(&Instruction::LocalGet(scratch_ptr_local));
@@ -686,11 +975,7 @@ impl<'a> WasmPackageBuilder<'a> {
                             )));
                         }
                         // Allocate scratch.
-                        func.instruction(&Instruction::I32Const(0));
-                        func.instruction(&Instruction::I32Const(0));
-                        func.instruction(&Instruction::I32Const(layout_info.align as i32));
-                        func.instruction(&Instruction::I32Const(layout_info.size as i32));
-                        func.instruction(&Instruction::Call(cabi_realloc));
+                        super::scratch::emit_cabi_realloc_fixed(&mut func, layout_info.align, layout_info.size, cabi_realloc);
                         func.instruction(&Instruction::LocalSet(scratch_ptr_local));
                         // Read the ref, null-check.
                         self.emit_self_ref(&mut func, ci)?;
@@ -792,11 +1077,7 @@ impl<'a> WasmPackageBuilder<'a> {
                         })?
                         .cabi_realloc;
                     // Allocate lift scratch.
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32Const(layout_info.align as i32));
-                    func.instruction(&Instruction::I32Const(layout_info.size as i32));
-                    func.instruction(&Instruction::Call(cabi_realloc));
+                    super::scratch::emit_cabi_realloc_fixed(&mut func, layout_info.align, layout_info.size, cabi_realloc);
                     func.instruction(&Instruction::LocalSet(scratch_ptr_local));
 
                     // Phase 4: recurse into the record (and any
@@ -844,11 +1125,7 @@ impl<'a> WasmPackageBuilder<'a> {
                         })?
                         .cabi_realloc;
                     // Allocate lift scratch.
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::I32Const(layout_info.align as i32));
-                    func.instruction(&Instruction::I32Const(layout_info.size as i32));
-                    func.instruction(&Instruction::Call(cabi_realloc));
+                    super::scratch::emit_cabi_realloc_fixed(&mut func, layout_info.align, layout_info.size, cabi_realloc);
                     func.instruction(&Instruction::LocalSet(scratch_ptr_local));
                     // For each tuple element, compute canonical offset
                     // and store the field's value.
@@ -952,11 +1229,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     })?
                     .cabi_realloc;
                 // cabi_realloc(0, 0, align, size) -> ptr
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(layout_info.align as i32));
-                func.instruction(&Instruction::I32Const(layout_info.size as i32));
-                func.instruction(&Instruction::Call(cabi_realloc));
+                super::scratch::emit_cabi_realloc_fixed(&mut func, layout_info.align, layout_info.size, cabi_realloc);
                 func.instruction(&Instruction::LocalSet(scratch_ptr_local));
                 // Walk struct fields in declaration order. Each non-ref
                 // field maps 1:1 to one canonical slot. Each GC array
@@ -1802,8 +2075,7 @@ impl<'a> WasmPackageBuilder<'a> {
                                     && self
                                         .record_gc_types
                                         .list_array_type_idx
-                                        .get(&payload_ty)
-                                        .is_some();
+                                        .contains_key(&payload_ty);
                             if is_typed_list {
                                 let arr_type_idx = *self
                                     .record_gc_types
@@ -1828,24 +2100,23 @@ impl<'a> WasmPackageBuilder<'a> {
                             } else {
                                 let payload_flat = self.canonical_flat_valtypes(payload_ty);
                                 let parent_canonical = self.canonical_flat_valtypes(ty);
-                                let mut next_param: u32 = 2;
-                                for (i, vt_payload) in payload_flat.iter().enumerate() {
+                                for (next_param, (i, vt_payload)) in
+                                    (2_u32..).zip(payload_flat.iter().enumerate())
+                                {
                                     func.instruction(&Instruction::LocalGet(next_param));
                                     let vt_joined =
                                         parent_canonical.get(1 + i).copied().unwrap_or(*vt_payload);
                                     emit_canonical_reinterpret(&mut func, vt_joined, *vt_payload)?;
-                                    next_param += 1;
                                 }
                                 let is_fat_box =
                                     matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
                                         || (matches!(
                                             self.ctx.ty_kind(payload_ty),
                                             InternedTyKind::List(_)
-                                        ) && self
+                                        ) && !self
                                             .record_gc_types
                                             .list_array_type_idx
-                                            .get(&payload_ty)
-                                            .is_none());
+                                            .contains_key(&payload_ty));
                                 if is_fat_box {
                                     let fat_value_idx = self
                                         .record_gc_types
@@ -2170,11 +2441,7 @@ impl<'a> WasmPackageBuilder<'a> {
         })?;
 
         // scratch = cabi_realloc(0, 0, align, size)
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::I32Const(layout_info.align as i32));
-        func.instruction(&Instruction::I32Const(layout_info.size as i32));
-        func.instruction(&Instruction::Call(cabi_realloc));
+        super::scratch::emit_cabi_realloc_fixed(func, layout_info.align, layout_info.size, cabi_realloc);
         func.instruction(&Instruction::LocalSet(scratch_ptr_local));
 
         let case_count = *self
@@ -2301,11 +2568,7 @@ impl<'a> WasmPackageBuilder<'a> {
         let payload_slots: Vec<_> = canonical_slots.iter().skip(1).cloned().collect();
 
         // Allocate scratch.
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::I32Const(layout_info.align as i32));
-        func.instruction(&Instruction::I32Const(layout_info.size as i32));
-        func.instruction(&Instruction::Call(cabi_realloc));
+        super::scratch::emit_cabi_realloc_fixed(func, layout_info.align, layout_info.size, cabi_realloc);
         func.instruction(&Instruction::LocalSet(scratch_ptr_local));
 
         // Read collapsed ref → inner_ref_local.
@@ -2627,11 +2890,10 @@ impl<'a> WasmPackageBuilder<'a> {
         // unboxing — or a direct value (primitive scalar / typed ref).
         let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
             || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                && self
+                && !self
                     .record_gc_types
                     .list_array_type_idx
-                    .get(&payload_ty)
-                    .is_none());
+                    .contains_key(&payload_ty));
 
         // Typed list payload (in list_array_type_idx): the case-subtype
         // field is a `(ref null $list_arr)`. Canonical-ABI lowering
@@ -2642,8 +2904,7 @@ impl<'a> WasmPackageBuilder<'a> {
             && self
                 .record_gc_types
                 .list_array_type_idx
-                .get(&payload_ty)
-                .is_some()
+                .contains_key(&payload_ty)
         {
             let arr_type_idx = *self
                 .record_gc_types
@@ -3202,11 +3463,10 @@ impl<'a> WasmPackageBuilder<'a> {
                 {
                     let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
                         || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                            && self
+                            && !self
                                 .record_gc_types
                                 .list_array_type_idx
-                                .get(&payload_ty)
-                                .is_none());
+                                .contains_key(&payload_ty));
                     if is_fat_box {
                         let fv = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
                             CodegenError::InvalidIR(
@@ -3346,8 +3606,8 @@ impl<'a> WasmPackageBuilder<'a> {
         // this branch the array is left filled with default (null)
         // refs, which then traps every downstream `struct.get` that
         // tries to read a Person field.
-        if let yel_core::types::InternedTyKind::Adt(d) = self.ctx.ty_kind(elem_ty) {
-            if matches!(
+        if let yel_core::types::InternedTyKind::Adt(d) = self.ctx.ty_kind(elem_ty)
+            && matches!(
                 self.ctx.defs.kind(*d),
                 yel_core::definitions::DefKind::Record(_)
             ) && self.record_gc_types.record_type_idx.contains_key(d)
@@ -3386,7 +3646,6 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::End); // function
                 return Ok(func);
             }
-        }
         // For other element shapes we just return the empty default
         // array. Callers that hit this with a non-string element will
         // see runtime missing-element behavior; the corresponding
@@ -3460,13 +3719,7 @@ impl<'a> WasmPackageBuilder<'a> {
             func.instruction(&wasm_encoder::Instruction::ArrayLen);
             func.instruction(&wasm_encoder::Instruction::LocalSet(len_local));
             // data_ptr = cabi_realloc(0, 0, elem_align, len * elem_size)
-            func.instruction(&wasm_encoder::Instruction::I32Const(0));
-            func.instruction(&wasm_encoder::Instruction::I32Const(0));
-            func.instruction(&wasm_encoder::Instruction::I32Const(elem_align as i32));
-            func.instruction(&wasm_encoder::Instruction::LocalGet(len_local));
-            func.instruction(&wasm_encoder::Instruction::I32Const(elem_size as i32));
-            func.instruction(&wasm_encoder::Instruction::I32Mul);
-            func.instruction(&wasm_encoder::Instruction::Call(cabi_realloc));
+            super::scratch::emit_cabi_realloc_array(&mut func, len_local, elem_size, elem_align, cabi_realloc);
             func.instruction(&wasm_encoder::Instruction::LocalSet(data_ptr_local));
             func.instruction(&wasm_encoder::Instruction::I32Const(0));
             func.instruction(&wasm_encoder::Instruction::LocalSet(idx_local));
@@ -3578,13 +3831,7 @@ impl<'a> WasmPackageBuilder<'a> {
             func.instruction(&wasm_encoder::Instruction::ArrayLen);
             func.instruction(&wasm_encoder::Instruction::LocalSet(len_local));
             // data_ptr = cabi_realloc(0, 0, 4, len * 8)
-            func.instruction(&wasm_encoder::Instruction::I32Const(0));
-            func.instruction(&wasm_encoder::Instruction::I32Const(0));
-            func.instruction(&wasm_encoder::Instruction::I32Const(elem_align as i32));
-            func.instruction(&wasm_encoder::Instruction::LocalGet(len_local));
-            func.instruction(&wasm_encoder::Instruction::I32Const(elem_size as i32));
-            func.instruction(&wasm_encoder::Instruction::I32Mul);
-            func.instruction(&wasm_encoder::Instruction::Call(cabi_realloc));
+            super::scratch::emit_cabi_realloc_array(&mut func, len_local, elem_size, elem_align, cabi_realloc);
             func.instruction(&wasm_encoder::Instruction::LocalSet(data_ptr_local));
             // idx = 0
             func.instruction(&wasm_encoder::Instruction::I32Const(0));
@@ -3693,13 +3940,7 @@ impl<'a> WasmPackageBuilder<'a> {
             func.instruction(&wasm_encoder::Instruction::ArrayLen);
             func.instruction(&wasm_encoder::Instruction::LocalSet(len_local));
             // data_ptr = cabi_realloc(0, 0, elem_align, len * elem_size)
-            func.instruction(&wasm_encoder::Instruction::I32Const(0));
-            func.instruction(&wasm_encoder::Instruction::I32Const(0));
-            func.instruction(&wasm_encoder::Instruction::I32Const(elem_align as i32));
-            func.instruction(&wasm_encoder::Instruction::LocalGet(len_local));
-            func.instruction(&wasm_encoder::Instruction::I32Const(elem_size as i32));
-            func.instruction(&wasm_encoder::Instruction::I32Mul);
-            func.instruction(&wasm_encoder::Instruction::Call(cabi_realloc));
+            super::scratch::emit_cabi_realloc_array(&mut func, len_local, elem_size, elem_align, cabi_realloc);
             func.instruction(&wasm_encoder::Instruction::LocalSet(data_ptr_local));
             // idx = 0
             func.instruction(&wasm_encoder::Instruction::I32Const(0));
@@ -3775,13 +4016,7 @@ impl<'a> WasmPackageBuilder<'a> {
         func.instruction(&wasm_encoder::Instruction::ArrayLen);
         func.instruction(&wasm_encoder::Instruction::LocalSet(len_local));
         // data_ptr = cabi_realloc(0, 0, elem_align, len * elem_size)
-        func.instruction(&wasm_encoder::Instruction::I32Const(0));
-        func.instruction(&wasm_encoder::Instruction::I32Const(0));
-        func.instruction(&wasm_encoder::Instruction::I32Const(elem_align as i32));
-        func.instruction(&wasm_encoder::Instruction::LocalGet(len_local));
-        func.instruction(&wasm_encoder::Instruction::I32Const(elem_size as i32));
-        func.instruction(&wasm_encoder::Instruction::I32Mul);
-        func.instruction(&wasm_encoder::Instruction::Call(cabi_realloc));
+        super::scratch::emit_cabi_realloc_array(&mut func, len_local, elem_size, elem_align, cabi_realloc);
         func.instruction(&wasm_encoder::Instruction::LocalSet(data_ptr_local));
         // idx = 0
         func.instruction(&wasm_encoder::Instruction::I32Const(0));
@@ -3861,8 +4096,8 @@ impl<'a> WasmPackageBuilder<'a> {
             })?
             .cabi_realloc;
         let layout_info = self.layout_ctx.layout_of(elem_ty);
-        let elem_size = layout_info.size as u32;
-        let elem_align = layout_info.align as u32;
+        let elem_size = layout_info.size;
+        let elem_align = layout_info.align;
         let canonical_slots = self.flatten_core_slots(elem_ty);
         let case_count = *self
             .record_gc_types
@@ -3897,13 +4132,7 @@ impl<'a> WasmPackageBuilder<'a> {
         func.instruction(&Instruction::ArrayLen);
         func.instruction(&Instruction::LocalSet(len_local));
         // data_ptr = cabi_realloc(0, 0, elem_align, len * elem_size)
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::I32Const(elem_align as i32));
-        func.instruction(&Instruction::LocalGet(len_local));
-        func.instruction(&Instruction::I32Const(elem_size as i32));
-        func.instruction(&Instruction::I32Mul);
-        func.instruction(&Instruction::Call(cabi_realloc));
+        super::scratch::emit_cabi_realloc_array(&mut func, len_local, elem_size, elem_align, cabi_realloc);
         func.instruction(&Instruction::LocalSet(data_ptr_local));
         // idx = 0
         func.instruction(&Instruction::I32Const(0));
@@ -3957,11 +4186,10 @@ impl<'a> WasmPackageBuilder<'a> {
             if let Some(payload_ty) = case_payload_ty(self.ctx, elem_ty, k) {
                 let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
                     || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                        && self
+                        && !self
                             .record_gc_types
                             .list_array_type_idx
-                            .get(&payload_ty)
-                            .is_none());
+                            .contains_key(&payload_ty));
                 if is_fat_box {
                     let fat_value_idx =
                         self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
@@ -4170,11 +4398,10 @@ impl<'a> WasmPackageBuilder<'a> {
                 use yel_core::types::InternedTyKind;
                 let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
                     || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                        && self
+                        && !self
                             .record_gc_types
                             .list_array_type_idx
-                            .get(&payload_ty)
-                            .is_none());
+                            .contains_key(&payload_ty));
 
                 if is_fat_box {
                     let ptr_slot = canonical_slots.get(1).ok_or_else(|| {
@@ -4805,11 +5032,10 @@ impl<'a> WasmPackageBuilder<'a> {
         // `(ref null $fat_value)`.
         let is_fat_box = matches!(self.ctx.ty_kind(inner_payload_ty), InternedTyKind::String)
             || (matches!(self.ctx.ty_kind(inner_payload_ty), InternedTyKind::List(_))
-                && self
+                && !self
                     .record_gc_types
                     .list_array_type_idx
-                    .get(&inner_payload_ty)
-                    .is_none());
+                    .contains_key(&inner_payload_ty));
 
         if is_fat_box {
             let fat_value_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
@@ -4994,11 +5220,10 @@ impl<'a> WasmPackageBuilder<'a> {
                     }
                     let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
                         || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                            && self
+                            && !self
                                 .record_gc_types
                                 .list_array_type_idx
-                                .get(&payload_ty)
-                                .is_none());
+                                .contains_key(&payload_ty));
                     if is_fat_box {
                         let fv = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
                             CodegenError::InvalidIR(
@@ -5041,6 +5266,7 @@ impl<'a> WasmPackageBuilder<'a> {
     /// - string / list<scalar>: load (ptr, len) at field offset and
     ///   wrap in `struct.new $fat_value`
     /// - nested DTR record: recurse with adjusted base+field_offset
+    ///
     /// Ends with `struct.new $<rec>` consuming the pushed field values
     /// and leaving the record GC ref on the stack.
     ///
@@ -5173,11 +5399,13 @@ impl<'a> WasmPackageBuilder<'a> {
     /// - string / list<scalar>: struct.get the $fat_value box, unbox
     ///   (ptr, len) and store both at field offset / +4
     /// - nested DTR record: recurse on the inner ref
+    ///
     /// Optional scratch i32 locals used by the typed-array list-field
     /// path to stash (ptr, len) returned by the per-array materializer
     /// before storing them into canonical memory. Pass `None` from
     /// callers that don't yet declare the scratch locals — the lift
     /// will return an error if it actually needs them.
+    ///
     /// Phase 5e.5: lift a single FlatGcStruct *field* of a parent
     /// record into the record's canonical-ABI memory layout. Used by
     /// `emit_record_lift_to_memory` when a record contains a migrated
@@ -5311,11 +5539,10 @@ impl<'a> WasmPackageBuilder<'a> {
 
         let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
             || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                && self
+                && !self
                     .record_gc_types
                     .list_array_type_idx
-                    .get(&payload_ty)
-                    .is_none());
+                    .contains_key(&payload_ty));
 
         // Helper closure to push <record>.struct.get $rec field;
         // ref.cast to case subtype.

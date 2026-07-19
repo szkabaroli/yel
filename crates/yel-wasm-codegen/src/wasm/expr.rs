@@ -51,7 +51,7 @@ impl WasmPackageBuilder<'_> {
         match &expr.kind {
             LirExprKind::Literal(lit) => {
                 let n = self.emit_literal_count(func, lit, expr.ty);
-                return Ok(n);
+                Ok(n)
             }
 
             LirExprKind::Local(local_id) => {
@@ -273,7 +273,7 @@ impl WasmPackageBuilder<'_> {
                         1
                     }
                 };
-                return Ok(n);
+                Ok(n)
             }
 
             LirExprKind::SignalRead(def_id) => {
@@ -399,32 +399,23 @@ impl WasmPackageBuilder<'_> {
                         func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
                     }
                 }
-                return Ok(self.flatten_core_valtypes(expr.ty).len());
-            }
-
-            LirExprKind::GlobalCall { args, .. } => {
-                // TODO: Wire up actual host-imported callback calls.
-                // For now, evaluate args for side effects but discard results.
-                for arg in args {
-                    let count = self.emit_expr(func, arg, component, layout)?;
-                    for _ in 0..count {
-                        func.instruction(&Instruction::Drop);
-                    }
-                }
-                return Ok(0);
+                Ok(self.flatten_core_valtypes(expr.ty).len())
             }
 
             LirExprKind::Binary { op, lhs, rhs } => {
+                let lhs = component.get_expr(*lhs);
+                let rhs = component.get_expr(*rhs);
                 self.emit_expr(func, lhs, component, layout)?;
                 self.emit_expr(func, rhs, component, layout)?;
                 self.emit_binary_op(func, op, lhs.ty);
-                return Ok(1);
+                Ok(1)
             }
 
             LirExprKind::Unary { op, operand } => {
+                let operand = component.get_expr(*operand);
                 self.emit_expr(func, operand, component, layout)?;
                 self.emit_unary_op(func, op, operand.ty);
-                return Ok(1);
+                Ok(1)
             }
 
             LirExprKind::Ternary {
@@ -432,6 +423,9 @@ impl WasmPackageBuilder<'_> {
                 then_expr,
                 else_expr,
             } => {
+                let condition = component.get_expr(*condition);
+                let then_expr = component.get_expr(*then_expr);
+                let else_expr = component.get_expr(*else_expr);
                 self.emit_expr(func, condition, component, layout)?;
                 // Single source of truth for the block type — covers
                 // primitives (`Result(valtype)`), multi-slot composites
@@ -444,7 +438,7 @@ impl WasmPackageBuilder<'_> {
                 func.instruction(&Instruction::Else);
                 self.emit_expr(func, else_expr, component, layout)?;
                 func.instruction(&Instruction::End);
-                return Ok(self.flatten_core_valtypes(expr.ty).len());
+                Ok(self.flatten_core_valtypes(expr.ty).len())
             }
 
             LirExprKind::Call {
@@ -454,11 +448,11 @@ impl WasmPackageBuilder<'_> {
                 let func_name = self.ctx.str(self.ctx.defs.name(*func_def_id));
 
                 // Handle builtin functions by name
-                match func_name.as_str() {
+                match &*func_name {
                     "s32-to-string" => {
                         // Call s32_to_string runtime function
                         if let Some(arg) = args.first() {
-                            self.emit_expr(func, arg, component, layout)?;
+                            self.emit_expr(func, component.get_expr(*arg), component, layout)?;
                         } else {
                             todo!("s32-to-string requires 1 arg: {:?}", expr.kind)
                         }
@@ -470,7 +464,7 @@ impl WasmPackageBuilder<'_> {
                     "bool-to-string" => {
                         // Call bool_to_string runtime function
                         if let Some(arg) = args.first() {
-                            self.emit_expr(func, arg, component, layout)?;
+                            self.emit_expr(func, component.get_expr(*arg), component, layout)?;
                         } else {
                             todo!("bool-to-string requires 1 arg: {:?}", expr.kind)
                         }
@@ -482,7 +476,7 @@ impl WasmPackageBuilder<'_> {
                     "u32-to-string" => {
                         // u32 can be converted using s32_to_string (values fit in positive i32 range)
                         if let Some(arg) = args.first() {
-                            self.emit_expr(func, arg, component, layout)?;
+                            self.emit_expr(func, component.get_expr(*arg), component, layout)?;
                         } else {
                             todo!("u32-to-string requires 1 arg: {:?}", expr.kind)
                         }
@@ -498,7 +492,7 @@ impl WasmPackageBuilder<'_> {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR(format!("{} requires 1 arg", func_name))
                         })?;
-                        self.emit_expr(func, arg, component, layout)?;
+                        self.emit_expr(func, component.get_expr(*arg), component, layout)?;
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
@@ -508,7 +502,7 @@ impl WasmPackageBuilder<'_> {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR("f32-to-string requires 1 arg".to_string())
                         })?;
-                        self.emit_expr(func, arg, component, layout)?;
+                        self.emit_expr(func, component.get_expr(*arg), component, layout)?;
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
@@ -518,7 +512,7 @@ impl WasmPackageBuilder<'_> {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR("f64-to-string requires 1 arg".to_string())
                         })?;
-                        self.emit_expr(func, arg, component, layout)?;
+                        self.emit_expr(func, component.get_expr(*arg), component, layout)?;
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
@@ -538,7 +532,7 @@ impl WasmPackageBuilder<'_> {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR("char-to-string requires 1 arg".to_string())
                         })?;
-                        self.emit_expr(func, arg, component, layout)?;
+                        self.emit_expr(func, component.get_expr(*arg), component, layout)?;
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
@@ -547,7 +541,7 @@ impl WasmPackageBuilder<'_> {
                     "object-to-string" => {
                         // Return "[object]" string
                         if let Some(arg) = args.first() {
-                            let count = self.emit_expr(func, arg, component, layout)?;
+                            let count = self.emit_expr(func, component.get_expr(*arg), component, layout)?;
                             for _ in 0..count {
                                 func.instruction(&Instruction::Drop);
                             }
@@ -566,11 +560,11 @@ impl WasmPackageBuilder<'_> {
                             func.instruction(&Instruction::I32Const(len as i32));
                         } else if arity == 1 {
                             // Single arg - just emit it directly
-                            self.emit_expr(func, &args[0], component, layout)?;
+                            self.emit_expr(func, component.get_expr(args[0]), component, layout)?;
                         } else {
                             // Emit all args (each produces ptr, len)
                             for arg in args {
-                                self.emit_expr(func, arg, component, layout)?;
+                                self.emit_expr(func, component.get_expr(*arg), component, layout)?;
                             }
                             // Call concat<n>
                             if let Some(ref runtime_funcs) = self.runtime_funcs
@@ -594,13 +588,17 @@ impl WasmPackageBuilder<'_> {
                             let mut handled_via_emit = false;
                             // GcArrayRef path: array.len instruction.
                             use super::repr::InternalRepr;
-                            if let InternalRepr::GcArrayRef(_) = self.internal_repr(arg.ty) {
-                                self.emit_expr(func, arg, component, layout)?;
+                            if let InternalRepr::GcArrayRef(_) = self.internal_repr(component.get_expr(*arg).ty) {
+                                self.emit_expr(func, component.get_expr(*arg), component, layout)?;
                                 func.instruction(&Instruction::ArrayLen);
                                 handled_via_emit = true;
                             }
                             if !handled_via_emit {
-                                if let LirExprKind::SignalRead(def_id) = &arg.kind {
+                                if let LirExprKind::SignalRead(def_id) = &component.get_expr(*arg).kind {
+                                    // Not a `zip`: the intermediate `filter` consumes
+                                    // `sig_idx` and the tuple is `(ci, sig_idx)`, neither
+                                    // of which `Option::zip` can express.
+                                    #[allow(clippy::manual_option_zip)]
                                     let comp_local_struct = self
                                         .signal_index_in(component, *def_id)
                                         .and_then(|sig_idx| {
@@ -623,7 +621,7 @@ impl WasmPackageBuilder<'_> {
                                             .as_ref()
                                             .map(|s| s.i32_base)
                                             .unwrap_or(2);
-                                        self.emit_expr(func, arg, component, layout)?;
+                                        self.emit_expr(func, component.get_expr(*arg), component, layout)?;
                                         func.instruction(&Instruction::LocalSet(scratch));
                                         func.instruction(&Instruction::Drop);
                                         func.instruction(&Instruction::LocalGet(scratch));
@@ -652,7 +650,7 @@ impl WasmPackageBuilder<'_> {
                                         .as_ref()
                                         .map(|s| s.i32_base)
                                         .unwrap_or(2);
-                                    self.emit_expr(func, arg, component, layout)?;
+                                    self.emit_expr(func, component.get_expr(*arg), component, layout)?;
                                     func.instruction(&Instruction::LocalSet(scratch));
                                     func.instruction(&Instruction::Drop);
                                     func.instruction(&Instruction::LocalGet(scratch));
@@ -682,11 +680,11 @@ impl WasmPackageBuilder<'_> {
                         }
 
                         // First arg is the string (produces ptr, len on stack)
-                        self.emit_expr(func, &args[0], component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[0]), component, layout)?;
                         // Stack: [str_ptr, str_len]
 
                         // Second arg is the prefix (produces ptr, len on stack)
-                        self.emit_expr(func, &args[1], component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[1]), component, layout)?;
                         // Stack: [str_ptr, str_len, prefix_ptr, prefix_len]
 
                         // Call starts_with(str_ptr, str_len, prefix_ptr, prefix_len) -> bool
@@ -703,8 +701,8 @@ impl WasmPackageBuilder<'_> {
                             return Err(CodegenError::InvalidIR("min requires 2 args".to_string()));
                         }
                         // Emit both args
-                        self.emit_expr(func, &args[0], component, layout)?;
-                        self.emit_expr(func, &args[1], component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[0]), component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[1]), component, layout)?;
                         // Stack: [a, b]
                         // Duplicate for comparison: [a, b, a, b]
                         let s_a = self
@@ -729,8 +727,8 @@ impl WasmPackageBuilder<'_> {
                             return Err(CodegenError::InvalidIR("max requires 2 args".to_string()));
                         }
                         // Emit both args
-                        self.emit_expr(func, &args[0], component, layout)?;
-                        self.emit_expr(func, &args[1], component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[0]), component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[1]), component, layout)?;
                         // Stack: [a, b]
                         let s_a = self
                             .current_flat_scratch
@@ -758,10 +756,10 @@ impl WasmPackageBuilder<'_> {
                                 "append requires 2 args: list, element".to_string(),
                             ));
                         }
-                        let list_ty = args[0].ty;
+                        let list_ty = component.get_expr(args[0]).ty;
                         // Push src list (ref null $arr) and the new element.
-                        self.emit_expr(func, &args[0], component, layout)?;
-                        self.emit_expr(func, &args[1], component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[0]), component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[1]), component, layout)?;
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
@@ -799,13 +797,13 @@ impl WasmPackageBuilder<'_> {
                                 ))
                             })?;
                         let mut captured_signals: Vec<(DefId, Ty)> = Vec::new();
-                        self.extract_signal_reads(&predicate, &mut captured_signals);
+                        self.extract_signal_reads(&predicate, &component.exprs, &mut captured_signals);
 
                         // Push src list as typed array ref. Internal
                         // repr must be GcArrayRef post Stage 6 — the
                         // LIR builder only registers filter calls when
                         // args[0] has typed list type.
-                        self.emit_expr(func, &args[0], component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[0]), component, layout)?;
 
                         // Push each captured signal in its natural
                         // storage shape (typed list = 1 ref, string =
@@ -866,14 +864,20 @@ impl WasmPackageBuilder<'_> {
                         // (interpolation, default initializer, etc.).
                         if let Some(import_layout) = &self.import_layout {
                             if let Some(cb_func_idx) =
-                                import_layout.find_callback_index(*func_def_id)
+                                import_layout.import_index(*func_def_id)
                             {
                                 let result_flat = self.flatten_core_valtypes(expr.ty);
                                 let uses_indirect_return = result_flat.len() > 1;
 
-                                self.emit_self_handle_load(func, component)?;
+                                // Component callbacks are resource methods —
+                                // their import signature leads with a `self`
+                                // handle. Global callbacks are freestanding
+                                // (singletons, no receiver), so they skip it.
+                                if !self.ctx.defs.is_global_callback(*func_def_id) {
+                                    self.emit_self_handle_load(func, component)?;
+                                }
                                 for arg in args {
-                                    self.emit_expr(func, arg, component, layout)?;
+                                    self.emit_expr(func, component.get_expr(*arg), component, layout)?;
                                 }
 
                                 if uses_indirect_return {
@@ -907,14 +911,15 @@ impl WasmPackageBuilder<'_> {
                     }
                     _ => self.flatten_core_valtypes(expr.ty).len(),
                 };
-                return Ok(slots_produced);
+                Ok(slots_produced)
             }
 
             LirExprKind::Field { base, field_idx } => {
+                let base = component.get_expr(*base);
                 // Phase 5e.3: tuple field access via struct.get when
                 // the base tuple has GC-ref internal repr.
-                if let InternedTyKind::Tuple(_) = self.ctx.ty_kind(base.ty) {
-                    if let super::repr::InternalRepr::GcRef(tup_idx) =
+                if let InternedTyKind::Tuple(_) = self.ctx.ty_kind(base.ty)
+                    && let super::repr::InternalRepr::GcRef(tup_idx) =
                         self.internal_repr(base.ty)
                     {
                         self.emit_expr(func, base, component, layout)?;
@@ -925,7 +930,6 @@ impl WasmPackageBuilder<'_> {
                         });
                         return Ok(self.flatten_core_valtypes(expr.ty).len());
                     }
-                }
                 // Phase 2 GC migration: if the base is a primitive-only
                 // record, it sits on the stack as `(ref null $<rec>_record)`
                 // — replace the legacy `add offset; load` with one
@@ -1298,28 +1302,30 @@ impl WasmPackageBuilder<'_> {
                                     )));
                                 }
                             }
-                            return Ok(self.flatten_core_valtypes(expr.ty).len());
+                            Ok(self.flatten_core_valtypes(expr.ty).len())
                         } else {
-                            return Err(CodegenError::InvalidIR(format!(
+                            Err(CodegenError::InvalidIR(format!(
                                 "emit_expr: field index {} not found in record_layout for {:?}",
                                 field_idx.0, expr.kind
-                            )));
+                            )))
                         }
                     } else {
-                        return Err(CodegenError::InvalidIR(format!(
+                        Err(CodegenError::InvalidIR(format!(
                             "emit_expr: no record layout for field access: {:?}",
                             expr.kind
-                        )));
+                        )))
                     }
                 } else {
-                    return Err(CodegenError::InvalidIR(format!(
+                    Err(CodegenError::InvalidIR(format!(
                         "emit_expr: base of FieldAccess is not a record type: {:?}",
                         self.ctx.ty_kind(base.ty)
-                    )));
+                    )))
                 }
             }
 
             LirExprKind::Index { base, index } => {
+                let base = component.get_expr(*base);
+                let index = component.get_expr(*index);
                 // Phase 5b-v.3 / 5e.4: GC array — emit base (array
                 // ref), index, then `array.get`. For string elements,
                 // unbox the resulting `(ref null $fat_value)` into
@@ -1375,23 +1381,24 @@ impl WasmPackageBuilder<'_> {
                 // base type wasn't seeded into `list_array_type_idx`
                 // — investigate `extra_seed_tys` coverage rather than
                 // re-add a fallback.
-                return Err(CodegenError::InvalidIR(format!(
+                Err(CodegenError::InvalidIR(format!(
                     "Index: base type {:?} has no GcArrayRef registration; \
                      legacy list_get path was removed in Phase 7 cleanup. \
                      Check that `build.rs::extra_seed_tys` walks the LirExpr \
                      tree containing this index's base.",
                     self.ctx.ty_kind(base.ty)
-                )));
+                )))
             }
 
             LirExprKind::EnumCase { discriminant, .. } => {
                 func.instruction(&Instruction::I32Const(*discriminant as i32));
-                return Ok(1);
+                Ok(1)
             }
 
             LirExprKind::VariantCtor {
                 case_idx, payload, ..
             } => {
+                let payload = payload.as_ref().map(|p| component.get_expr(*p));
                 use super::repr::InternalRepr;
                 // Phase 5e.5 (Stage 3): when the parent type is migrated to
                 // the W3C subtype-hierarchy GC representation, emit a single
@@ -1405,7 +1412,7 @@ impl WasmPackageBuilder<'_> {
                         func,
                         expr.ty,
                         *case_idx,
-                        payload.as_deref(),
+                        payload,
                         component,
                         layout,
                     )?;
@@ -1419,7 +1426,7 @@ impl WasmPackageBuilder<'_> {
                     component,
                     layout,
                 )?;
-                return Ok(self.flatten_core_valtypes(expr.ty).len());
+                Ok(self.flatten_core_valtypes(expr.ty).len())
             }
 
             // List/Record/Tuple constructs - placeholder implementations
@@ -1516,7 +1523,7 @@ impl WasmPackageBuilder<'_> {
                 // Legacy: return (ptr, len) for static list (memory-backed).
                 func.instruction(&Instruction::I32Const(*data_offset as i32));
                 func.instruction(&Instruction::I32Const(*len as i32));
-                return Ok(2);
+                Ok(2)
             }
 
             LirExprKind::ListConstruct { elements, .. } => {
@@ -1538,10 +1545,10 @@ impl WasmPackageBuilder<'_> {
                         // expects.
                         let elem_is_string = elements
                             .first()
-                            .map(|e| matches!(self.ctx.ty_kind(e.ty), InternedTyKind::String))
+                            .map(|e| matches!(self.ctx.ty_kind(component.get_expr(*e).ty), InternedTyKind::String))
                             .unwrap_or(false);
                         for elem in elements {
-                            self.emit_expr(func, elem, component, layout)?;
+                            self.emit_expr(func, component.get_expr(*elem), component, layout)?;
                             if elem_is_string {
                                 let fv = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
                                     CodegenError::InvalidIR(
@@ -1565,24 +1572,24 @@ impl WasmPackageBuilder<'_> {
                     func.instruction(&Instruction::I32Const(0));
                     func.instruction(&Instruction::I32Const(0));
                 } else {
-                    let elem_ty = elements[0].ty;
+                    let elem_ty = component.get_expr(elements[0]).ty;
                     let count = elements.len();
 
                     // Emit all element values onto the stack
                     for elem in elements {
                         // For RecordConstruct elements, emit field values directly (not calling ctor)
                         // This is because list_ctor stores fields inline
-                        if let LirExprKind::RecordConstruct { fields, .. } = &elem.kind {
+                        if let LirExprKind::RecordConstruct { fields, .. } = &component.get_expr(*elem).kind {
                             for field in fields {
-                                self.emit_expr(func, field, component, layout)?;
+                                self.emit_expr(func, component.get_expr(*field), component, layout)?;
                                 // Phase 5e.4: legacy list_ctor expects
                                 // canonical-flat slots per record
                                 // field. If the field's emit pushed a
                                 // typed GC array ref, materialize it
                                 // back to (ptr, len).
-                                if self.is_scalar_list_ty(field.ty) {
-                                    if let super::repr::InternalRepr::GcArrayRef(arr_idx) =
-                                        self.internal_repr(field.ty)
+                                if self.is_scalar_list_ty(component.get_expr(*field).ty)
+                                    && let super::repr::InternalRepr::GcArrayRef(arr_idx) =
+                                        self.internal_repr(component.get_expr(*field).ty)
                                     {
                                         let mat_fn = *self
                                             .gc_list_materializer_fn_indices
@@ -1592,11 +1599,10 @@ impl WasmPackageBuilder<'_> {
                                             ))?;
                                         func.instruction(&Instruction::Call(mat_fn));
                                     }
-                                }
                             }
                         } else {
                             // Other elements: emit normally
-                            self.emit_expr(func, elem, component, layout)?;
+                            self.emit_expr(func, component.get_expr(*elem), component, layout)?;
                         }
                     }
 
@@ -1613,7 +1619,7 @@ impl WasmPackageBuilder<'_> {
                         })?;
                     func.instruction(&Instruction::Call(list_ctor_idx));
                 }
-                return Ok(2);
+                Ok(2)
             }
 
             LirExprKind::RecordConstruct {
@@ -1634,8 +1640,8 @@ impl WasmPackageBuilder<'_> {
                 // `struct.new`. For string/list fields the field expr
                 // pushes (ptr, len) — wrap in `struct.new $fat_value`
                 // before the parent struct.new consumes it.
-                if self.is_single_level_record(expr.ty) {
-                    if let Some(type_idx) = self
+                if self.is_single_level_record(expr.ty)
+                    && let Some(type_idx) = self
                         .record_gc_types
                         .record_type_idx
                         .get(record_def)
@@ -1694,7 +1700,7 @@ impl WasmPackageBuilder<'_> {
                                 .record_gc_types
                                 .list_array_type_idx
                                 .contains_key(&field_ty);
-                            self.emit_expr(func, field_expr, component, layout)?;
+                            self.emit_expr(func, component.get_expr(*field_expr), component, layout)?;
                             if field_stored_as_typed_array {
                                 // emit_expr on a list<elem> with
                                 // GcArrayRef repr already pushes a
@@ -1709,8 +1715,8 @@ impl WasmPackageBuilder<'_> {
                                             .into(),
                                     )
                                 })?;
-                                if needs_gc_materialize {
-                                    if let super::repr::InternalRepr::GcArrayRef(arr_idx) =
+                                if needs_gc_materialize
+                                    && let super::repr::InternalRepr::GcArrayRef(arr_idx) =
                                         self.internal_repr(field_ty)
                                     {
                                         let mat_fn = *self
@@ -1721,7 +1727,6 @@ impl WasmPackageBuilder<'_> {
                                             ))?;
                                         func.instruction(&Instruction::Call(mat_fn));
                                     }
-                                }
                                 // Stack now has (ptr, len) — pack into $fat_value.
                                 func.instruction(&Instruction::StructNew(fv_idx));
                             }
@@ -1729,11 +1734,10 @@ impl WasmPackageBuilder<'_> {
                         func.instruction(&Instruction::StructNew(type_idx));
                         return Ok(1);
                     }
-                }
                 // Use record constructor helper - no local conflicts!
                 // Emit all field values onto the stack, then call $ctor_X
                 for field in fields {
-                    self.emit_expr(func, field, component, layout)?;
+                    self.emit_expr(func, component.get_expr(*field), component, layout)?;
                 }
 
                 // Call the record constructor helper
@@ -1747,7 +1751,7 @@ impl WasmPackageBuilder<'_> {
                     ))
                 })?;
                 func.instruction(&Instruction::Call(ctor_idx));
-                return Ok(1);
+                Ok(1)
             }
 
             LirExprKind::TupleConstruct {
@@ -1761,7 +1765,7 @@ impl WasmPackageBuilder<'_> {
                 use super::repr::InternalRepr;
                 if let InternalRepr::GcRef(tup_idx) = self.internal_repr(expr.ty) {
                     for elem in elements {
-                        self.emit_expr(func, elem, component, layout)?;
+                        self.emit_expr(func, component.get_expr(*elem), component, layout)?;
                     }
                     func.instruction(&Instruction::StructNew(tup_idx));
                     return Ok(1);
@@ -1796,32 +1800,33 @@ impl WasmPackageBuilder<'_> {
                         func.instruction(&Instruction::I32Const(offset as i32));
                         func.instruction(&Instruction::I32Add);
                     }
-                    self.emit_expr(func, elem, component, layout)?;
+                    self.emit_expr(func, component.get_expr(*elem), component, layout)?;
                     func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
                     offset += 4;
                 }
 
                 func.instruction(&Instruction::LocalGet(scratch));
-                return Ok(1);
+                Ok(1)
             }
 
             LirExprKind::Closure { .. } => {
                 // Closures are not emitted directly - they're handled specially
                 // when used as arguments to filter/map/etc.
-                return Err(CodegenError::InvalidIR(
+                Err(CodegenError::InvalidIR(
                     "Closure expressions should be handled by their containing call".to_string(),
-                ));
+                ))
             }
 
             LirExprKind::Range { .. } => {
                 // Range expressions are not emitted directly - they're handled specially
                 // in for-loop iteration setup.
-                return Err(CodegenError::InvalidIR(
+                Err(CodegenError::InvalidIR(
                     "Range expressions should be handled by for-loop iteration".to_string(),
-                ));
+                ))
             }
 
             LirExprKind::IsCase { base, case_idx } => {
+                let base = component.get_expr(*base);
                 // Phase 5e.5: discriminant test on a migrated parent —
                 // emit `ref.test (ref $<parent>_<case>)`. For non-migrated
                 // parents we fall through to the legacy "load disc slot,
@@ -1867,7 +1872,7 @@ impl WasmPackageBuilder<'_> {
                 func.instruction(&Instruction::RefTestNonNull(
                     wasm_encoder::HeapType::Concrete(case_sub_idx),
                 ));
-                return Ok(1);
+                Ok(1)
             }
 
             LirExprKind::VariantField {
@@ -1875,6 +1880,7 @@ impl WasmPackageBuilder<'_> {
                 case_idx,
                 field_idx,
             } => {
+                let base = component.get_expr(*base);
                 // Phase 5e.5: payload extraction from a known case —
                 // `ref.cast (ref $<parent>_<case>); struct.get_<u|s>?
                 // $<parent>_<case> <field_idx>`.
@@ -1941,7 +1947,7 @@ impl WasmPackageBuilder<'_> {
                         });
                     }
                 }
-                return Ok(self.flatten_core_valtypes(expr.ty).len());
+                Ok(self.flatten_core_valtypes(expr.ty).len())
             }
         }
     }
@@ -2065,7 +2071,7 @@ impl WasmPackageBuilder<'_> {
         // `(ref null $fat_value)` for string / non-typed-array list.
         let is_fat_box = matches!(self.ctx.ty_kind(inner), InternedTyKind::String)
             || (matches!(self.ctx.ty_kind(inner), InternedTyKind::List(_))
-                && self.record_gc_types.list_array_type_idx.get(&inner).is_none());
+                && !self.record_gc_types.list_array_type_idx.contains_key(&inner));
 
         if is_fat_box {
             // Canonical: 2 i32 slots (ptr, len). Some-arm unboxes
@@ -2237,15 +2243,14 @@ impl WasmPackageBuilder<'_> {
         }
         // Width-promotion / mixed-valtype joined payload not yet
         // supported.
-        if let (Some(o), Some(e)) = (ok_flat.first(), err_flat.first()) {
-            if o != e {
+        if let (Some(o), Some(e)) = (ok_flat.first(), err_flat.first())
+            && o != e {
                 return Err(CodegenError::InvalidIR(format!(
                     "result field materialize: mixed payload valtypes \
                      {:?}/{:?} (width promotion) not yet supported for {:?}",
                     o, e, field_ty
                 )));
             }
-        }
 
         // Slot 0: discriminant. Ok=0, Err=1.
         // Cascade: ref.test $res_ok ? 0 : 1.
@@ -2452,6 +2457,18 @@ impl WasmPackageBuilder<'_> {
             &parent_flat[1..]
         };
 
+        // A nested FlatGcStruct variant payload (today: the language `color`
+        // value inside `attribute-value::color`) is on the stack as a ref,
+        // not as the parent's joined flat slots. Pack it via the reused
+        // per-program color packer, which pushes the discriminant + the
+        // parent's color slots itself. (Generalizes to a nested-variant
+        // lift once a non-color case appears.)
+        if let Some(p) = payload {
+            if self.is_color_ty(p.ty) {
+                return self.emit_attr_value_color_arm(func, p, component, layout);
+            }
+        }
+
         // Push discriminant.
         func.instruction(&Instruction::I32Const(case_idx as i32));
 
@@ -2461,6 +2478,47 @@ impl WasmPackageBuilder<'_> {
             Some(p) => self.flatten_core_valtypes(p.ty),
             None => Vec::new(),
         };
+
+        // A string/fat-pointer payload flattens to `(ptr: i32, len: i32)`,
+        // but when the parent's joined shape promotes slot 0 to `i64` (any
+        // variant that also has a 64-bit case), the pointer must move into
+        // the i64 slot while `len` stays i32 — a *non-terminal* promotion
+        // the per-slot path below can't do. Reuse the boundary-lowering
+        // `pack_fat_ptr_to_i64` helper, then pad the remaining slots.
+        if let Some(p) = payload {
+            if matches!(self.ctx.ty_kind(p.ty), InternedTyKind::String)
+                && joined_payload_slots.first() == Some(&ValType::I64)
+            {
+                self.emit_expr(func, p, component, layout)?; // ptr, len
+                let helper = self
+                    .runtime_funcs
+                    .as_ref()
+                    .and_then(|r| r.pack_fat_ptr_to_i64)
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR(
+                            "string variant payload needs pack_fat_ptr_to_i64, but it was \
+                             not registered in runtime_needs"
+                                .into(),
+                        )
+                    })?;
+                func.instruction(&Instruction::Call(helper)); // -> (i64, i32)
+                for vt in &joined_payload_slots[2..] {
+                    match vt {
+                        ValType::I32 => func.instruction(&Instruction::I32Const(0)),
+                        ValType::I64 => func.instruction(&Instruction::I64Const(0)),
+                        ValType::F32 => func.instruction(&Instruction::F32Const(Ieee32::from(0.0))),
+                        ValType::F64 => func.instruction(&Instruction::F64Const(Ieee64::from(0.0))),
+                        other => {
+                            return Err(CodegenError::InvalidIR(format!(
+                                "unsupported pad slot valtype {:?} after string payload (parent_ty={:?})",
+                                other, parent_ty
+                            )));
+                        }
+                    };
+                }
+                return Ok(());
+            }
+        }
 
         if payload_flat.len() > joined_payload_slots.len() {
             return Err(CodegenError::InvalidIR(format!(
@@ -2866,226 +2924,15 @@ impl WasmPackageBuilder<'_> {
         }
     }
 
-    pub(super) fn emit_expr_as_string(
-        &mut self,
-        func: &mut Function,
-        expr: &LirExpr,
-        component: &LirResource,
-        layout: &MemoryLayout,
-    ) -> Result<(), CodegenError> {
-        let runtime_funcs = self
-            .runtime_funcs
-            .as_ref()
-            .ok_or_else(|| {
-                CodegenError::InvalidIR("Runtime functions not initialized".to_string())
-            })?
-            .clone();
-
-        match self.ctx.ty_kind(expr.ty) {
-            InternedTyKind::String => {
-                self.emit_expr(func, expr, component, layout)?;
-            }
-            InternedTyKind::S32 | InternedTyKind::U32 => {
-                self.emit_expr(func, expr, component, layout)?;
-                func.instruction(&Instruction::Call(runtime_funcs.s32_to_string.expect("s32_to_string must be in runtime_needs (scan missed it?)")));
-            }
-            InternedTyKind::S64 | InternedTyKind::U64 => {
-                self.emit_expr(func, expr, component, layout)?;
-                func.instruction(&Instruction::Call(runtime_funcs.s64_to_string.expect("s64_to_string must be in runtime_needs (scan missed it?)")));
-            }
-            InternedTyKind::Bool => {
-                self.emit_expr(func, expr, component, layout)?;
-                func.instruction(&Instruction::Call(runtime_funcs.bool_to_string.expect("bool_to_string must be in runtime_needs (scan missed it?)")));
-            }
-            InternedTyKind::F32 => {
-                self.emit_expr(func, expr, component, layout)?;
-                func.instruction(&Instruction::Call(runtime_funcs.f32_to_string.expect("f32_to_string must be in runtime_needs (scan missed it?)")));
-            }
-            other => {
-                return Err(CodegenError::InvalidIR(format!(
-                    "emit_expr_as_string: unsupported type {:?}. \
-                     Add a branch that calls the matching runtime helper.",
-                    other
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    /// Emit an expression as an attribute-value variant using canonical ABI flattening.
-    /// Canonical ABI: (discrim: i32, payload_i64: i64, payload_i32_slot1..4: i32 x 4)
-    /// - payload_i64: Used for string (ptr<<32|len), i64/u64 values, or f64 reinterpreted as i64
-    /// - payload_i32_slot1: Used for i32/u32/bool/s8-s32/u8-u32/char/f32-as-i32, str len, or color disc
-    /// - payload_i32_slot2..4: Color rgba tuple bytes (zero for non-color cases)
-    ///
-    /// Variant cases: 0=str, 1=bool, 2=s8, 3=s16, 4=s32, 5=s64, 6=u8,
-    ///                7=u16, 8=u32, 9=u64, 10=f32, 11=f64, 12=char,
-    ///                13=color.
-    pub(super) fn emit_expr_as_attr_value(
-        &mut self,
-        func: &mut Function,
-        expr: &LirExpr,
-        component: &LirResource,
-        layout: &MemoryLayout,
-    ) -> Result<(), CodegenError> {
-        // Phase 7: handle the language-level `color` primitive (now a
-        // FlatGcStruct variant on the stack) BEFORE the generic
-        // `Adt` arm — color values flow through the typed
-        // `attribute-value::color(color)` case (disc=13) via the
-        // per-program `pack_color_to_attr_slots` helper.
-        if self.is_color_ty(expr.ty) {
-            return self.emit_attr_value_color_arm(func, expr, component, layout);
-        }
-        // Determine discriminant and emit variant based on type
-        // Canonical ABI: (discrim: i32, payload_i64: i64, payload_i32: i32)
-        match self.ctx.ty_kind(expr.ty) {
-            InternedTyKind::String => {
-                // discrim=0, payload_i64 = ptr (extended), payload_i32 = len
-                // Canonical ABI "join" puts ptr in i64 slot, len in i32 slot
-                func.instruction(&Instruction::I32Const(0)); // discrim
-                self.emit_expr(func, expr, component, layout)?; // pushes ptr, len
-                // Call helper to promote (ptr, len) -> (ptr_i64, len)
-                if let Some(runtime_funcs) = &self.runtime_funcs {
-                    func.instruction(&Instruction::Call(runtime_funcs.pack_fat_ptr_to_i64.expect("pack_fat_ptr_to_i64 must be in runtime_needs (scan missed it?)")));
-                }
-                // Trailing color-payload pad slots.
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-            }
-            InternedTyKind::Bool
-            | InternedTyKind::S8
-            | InternedTyKind::S16
-            | InternedTyKind::S32
-            | InternedTyKind::U8
-            | InternedTyKind::U16
-            | InternedTyKind::U32
-            | InternedTyKind::Char
-            | InternedTyKind::Brush => {
-                // Canonical-ABI variant flattening joins all payload
-                // arms to `(slot0: i64, slot1: i32, slot2..4: i32)`.
-                // Narrow integer arms carry their value in slot0 with
-                // slots 1-4 zero — matches the f32/f64 arms, which
-                // also extend payload into slot0.
-                let kind = self.ctx.ty_kind(expr.ty).clone();
-                let discrim = match kind {
-                    InternedTyKind::Bool => 1,
-                    InternedTyKind::S8 => 2,
-                    InternedTyKind::S16 => 3,
-                    InternedTyKind::S32 => 4,
-                    InternedTyKind::U8 => 6,
-                    InternedTyKind::U16 => 7,
-                    InternedTyKind::U32 | InternedTyKind::Brush => 8,
-                    InternedTyKind::Char => 12,
-                    _ => {
-                        return Err(CodegenError::InternalError(format!(
-                            "emit_expr_as_attr_value: discriminant mapping mismatch for {:?}",
-                            kind
-                        )));
-                    }
-                };
-                let signed = matches!(
-                    kind,
-                    InternedTyKind::S8 | InternedTyKind::S16 | InternedTyKind::S32
-                );
-                func.instruction(&Instruction::I32Const(discrim)); // discrim
-                self.emit_expr(func, expr, component, layout)?; // i32 value
-                if signed {
-                    func.instruction(&Instruction::I64ExtendI32S);
-                } else {
-                    func.instruction(&Instruction::I64ExtendI32U);
-                }
-                func.instruction(&Instruction::I32Const(0)); // slot1 padding
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-            }
-            InternedTyKind::S64 | InternedTyKind::U64 => {
-                // These use payload_i64, slots 1-4 = 0.
-                let discrim = if matches!(self.ctx.ty_kind(expr.ty), InternedTyKind::S64) {
-                    5
-                } else {
-                    9
-                };
-                func.instruction(&Instruction::I32Const(discrim)); // discrim
-                self.emit_expr(func, expr, component, layout)?; // payload_i64 = value (i64)
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-            }
-            InternedTyKind::F32
-            | InternedTyKind::Length
-            | InternedTyKind::PhysicalLength
-            | InternedTyKind::Angle
-            | InternedTyKind::Duration
-            | InternedTyKind::Percent
-            | InternedTyKind::RelativeFontSize => {
-                // f32 (and f32-backed UI types) go in payload_i64
-                // (reinterpreted as i32, then extended to i64) per
-                // canonical ABI variant "join".
-                func.instruction(&Instruction::I32Const(10)); // discrim
-                self.emit_expr(func, expr, component, layout)?; // f32 value
-                func.instruction(&Instruction::I32ReinterpretF32);
-                func.instruction(&Instruction::I64ExtendI32U);
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-            }
-            InternedTyKind::F64 => {
-                // f64 uses payload_i64 with reinterpret, slots 1-4 = 0.
-                func.instruction(&Instruction::I32Const(11)); // discrim
-                self.emit_expr(func, expr, component, layout)?; // f64 value
-                func.instruction(&Instruction::I64ReinterpretF64);
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-            }
-            InternedTyKind::Adt(_)
-            | InternedTyKind::List(_)
-            | InternedTyKind::Option(_)
-            | InternedTyKind::Result { .. }
-            | InternedTyKind::Tuple(_) => {
-                // No canonical attribute encoding yet for compound/ADT values;
-                // match the `object-to-string` fallback: evaluate for side
-                // effects, discard the representation, and pass "[object]" as
-                // the string discriminant (case 0).
-                let count = self.emit_expr(func, expr, component, layout)?;
-                for _ in 0..count {
-                    func.instruction(&Instruction::Drop);
-                }
-                let (ptr, len) = self.add_string("[object]");
-                func.instruction(&Instruction::I32Const(0)); // discrim (str)
-                // payload_i64: pack (ptr_i64, len) = (ptr << 32 | 0) via the
-                // runtime helper used by the String arm above.
-                func.instruction(&Instruction::I32Const(ptr as i32));
-                func.instruction(&Instruction::I32Const(len as i32));
-                if let Some(runtime_funcs) = &self.runtime_funcs {
-                    func.instruction(&Instruction::Call(runtime_funcs.pack_fat_ptr_to_i64.expect("pack_fat_ptr_to_i64 must be in runtime_needs (scan missed it?)")));
-                }
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(0));
-            }
-            other => {
-                todo!("emit_expr_as_attr_value: unsupported type {:?}", other)
-            }
-        }
-        Ok(())
-    }
-
     /// True iff `ty` is the language-level `color` builtin variant.
     /// Hex literals (`#2563eb`) and named cases (`Color.red` etc.) all
     /// resolve to this single ADT (see `register_builtin_variants` in
     /// `yel-core/src/stdlib_lookup.rs`).
     fn is_color_ty(&self, ty: Ty) -> bool {
-        if let InternedTyKind::Adt(d) = self.ctx.ty_kind(ty) {
-            if let Some(color_def) = self.ctx.known.variants.color {
+        if let InternedTyKind::Adt(d) = self.ctx.ty_kind(ty)
+            && let Some(color_def) = self.ctx.known.variants.color {
                 return *d == color_def;
             }
-        }
         false
     }
 
@@ -3361,11 +3208,10 @@ impl WasmPackageBuilder<'_> {
         let payload_canonical = self.flatten_core_valtypes(payload_ty);
         let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
             || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                && self
+                && !self
                     .record_gc_types
                     .list_array_type_idx
-                    .get(&payload_ty)
-                    .is_none());
+                    .contains_key(&payload_ty));
 
         if is_fat_box {
             let fat_value_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
@@ -4126,506 +3972,7 @@ mod tests {
     // (unique per field) so a `Call(sentinel)` in the emitted stream
     // uniquely identifies which runtime helper was selected.
 
-    use super::super::runtime::RuntimeFunctions;
-    use yel_core::lir::LirExpr;
 
-    /// Build a `RuntimeFunctions` with every field set to a distinct
-    /// sentinel index so assertions can identify which runtime helper an
-    /// emitter called.
-    fn sentinel_runtime_funcs() -> RuntimeFunctions {
-        RuntimeFunctions {
-            s32_to_string: Some(100),
-            s64_to_string: Some(103),
-            bool_to_string: Some(101),
-            f32_to_string: Some(102),
-            concat_indices: std::collections::HashMap::new(),
-            store_fat_ptr: Some(110),
-            load_fat_ptr: Some(111),
-            starts_with: Some(140),
-            record_ctors: std::collections::HashMap::new(),
-            record_ctors_at: std::collections::HashMap::new(),
-            list_ctors: std::collections::HashMap::new(),
-            list_appends: std::collections::HashMap::new(),
-            pack_fat_ptr_to_i64: Some(150),
-            filter_indices: std::collections::HashMap::new(),
-            count: 200,
-        }
-    }
-
-    /// Literal-expr helper: wrap a LirLiteral as a typed LirExpr.
-    fn lit_expr(lit: LirLiteral, ty: Ty) -> LirExpr {
-        LirExpr::new(LirExprKind::Literal(lit), ty)
-    }
-
-    /// Build a builder with sentinel runtime funcs installed; the
-    /// as_string / as_attr_value emitters require `self.runtime_funcs` to
-    /// be populated.
-    fn builder_with_runtime(ctx: &CompilerContext) -> WasmPackageBuilder<'_> {
-        let mut b = make_builder(ctx);
-        b.runtime_funcs = Some(sentinel_runtime_funcs());
-        b
-    }
-
-    /// Minimal LirResource + MemoryLayout sufficient for the literal path.
-    fn empty_component(ctx: &CompilerContext) -> yel_core::lir::LirResource {
-        yel_core::lir::LirResource::empty_module_carrier(ctx.intern("test"))
-    }
-    fn empty_layout() -> MemoryLayout {
-        MemoryLayout {
-            base: 0,
-            signal_offsets: Vec::new(),
-            size: 0,
-        }
-    }
-
-    // ---- emit_expr_as_string: per-type branches ----
-
-    #[test]
-    fn as_string_on_string_is_identity() {
-        let mut ctx = CompilerContext::new();
-        let ty = ctx.intern_ty(InternedTyKind::String);
-        let comp = empty_component(&ctx);
-        let layout = empty_layout();
-        let mut builder = builder_with_runtime(&ctx);
-        let mut func = Function::new([]);
-        let expr = lit_expr(LirLiteral::String("hi".into()), ty);
-        builder
-            .emit_expr_as_string(&mut func, &expr, &comp, &layout)
-            .unwrap();
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::End);
-        let ops = finish_and_read_ops(func);
-        // String-as-string must NOT call any conversion helper; it should
-        // just push (ptr, len) directly — two i32.const, no calls.
-        let call_count = ops
-            .iter()
-            .filter(|op| matches!(op, Operator::Call { .. }))
-            .count();
-        assert_eq!(
-            call_count, 0,
-            "string identity path should not call any runtime helper; got {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn as_string_on_s32_calls_s32_to_string() {
-        let mut ctx = CompilerContext::new();
-        let ty = ctx.intern_ty(InternedTyKind::S32);
-        let comp = empty_component(&ctx);
-        let layout = empty_layout();
-        let mut builder = builder_with_runtime(&ctx);
-        let mut func = Function::new([]);
-        let expr = lit_expr(LirLiteral::S32(42), ty);
-        builder
-            .emit_expr_as_string(&mut func, &expr, &comp, &layout)
-            .unwrap();
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::End);
-        let ops = finish_and_read_ops(func);
-        assert!(
-            ops.iter().any(|op| matches!(
-                op,
-                Operator::Call {
-                    function_index: 100
-                }
-            )),
-            "s32 coercion must call s32_to_string (idx 100); got {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn as_string_on_u32_calls_s32_to_string() {
-        // U32 shares the s32_to_string branch per current impl.
-        let mut ctx = CompilerContext::new();
-        let ty = ctx.intern_ty(InternedTyKind::U32);
-        let comp = empty_component(&ctx);
-        let layout = empty_layout();
-        let mut builder = builder_with_runtime(&ctx);
-        let mut func = Function::new([]);
-        let expr = lit_expr(LirLiteral::U32(7), ty);
-        builder
-            .emit_expr_as_string(&mut func, &expr, &comp, &layout)
-            .unwrap();
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::End);
-        let ops = finish_and_read_ops(func);
-        assert!(
-            ops.iter().any(|op| matches!(
-                op,
-                Operator::Call {
-                    function_index: 100
-                }
-            )),
-            "u32 coercion must call s32_to_string (shared branch); got {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn as_string_on_bool_calls_bool_to_string() {
-        let mut ctx = CompilerContext::new();
-        let ty = ctx.intern_ty(InternedTyKind::Bool);
-        let comp = empty_component(&ctx);
-        let layout = empty_layout();
-        let mut builder = builder_with_runtime(&ctx);
-        let mut func = Function::new([]);
-        let expr = lit_expr(LirLiteral::Bool(true), ty);
-        builder
-            .emit_expr_as_string(&mut func, &expr, &comp, &layout)
-            .unwrap();
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::End);
-        let ops = finish_and_read_ops(func);
-        assert!(
-            ops.iter().any(|op| matches!(
-                op,
-                Operator::Call {
-                    function_index: 101
-                }
-            )),
-            "bool coercion must call bool_to_string (idx 101); got {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn as_string_on_f32_calls_f32_to_string() {
-        let mut ctx = CompilerContext::new();
-        let ty = ctx.intern_ty(InternedTyKind::F32);
-        let comp = empty_component(&ctx);
-        let layout = empty_layout();
-        let mut builder = builder_with_runtime(&ctx);
-        let mut func = Function::new([]);
-        let expr = lit_expr(LirLiteral::F32(1.5), ty);
-        builder
-            .emit_expr_as_string(&mut func, &expr, &comp, &layout)
-            .unwrap();
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::End);
-        let ops = finish_and_read_ops(func);
-        assert!(
-            ops.iter().any(|op| matches!(
-                op,
-                Operator::Call {
-                    function_index: 102
-                }
-            )),
-            "f32 coercion must call f32_to_string (idx 102); got {:?}",
-            ops
-        );
-    }
-
-    /// Documents current behaviour: `emit_expr_as_string` has a catch-all
-    /// fallback for compound / unsupported types that drops the evaluated
-    /// value and substitutes an empty string. Any regression that changes
-    /// this (e.g. crashes instead, or emits a Call to an uninitialised
-    /// runtime helper) will fail here. This test does NOT assert the
-    /// fallback is *correct* — it pins the behaviour so fixing it requires
-    /// an intentional update.
-    #[test]
-    fn as_string_on_list_returns_err_rather_than_silent_fallback() {
-        let mut ctx = CompilerContext::new();
-        let inner = ctx.intern_ty(InternedTyKind::S32);
-        let ty = ctx.intern_ty(InternedTyKind::List(inner));
-        let comp = empty_component(&ctx);
-        let layout = empty_layout();
-        let mut builder = builder_with_runtime(&ctx);
-        let expr = lit_expr(LirLiteral::String("x".into()), ty);
-        let mut func = Function::new([]);
-        let result = builder.emit_expr_as_string(&mut func, &expr, &comp, &layout);
-        // Per CLAUDE.md "No Silent Fallbacks": unsupported types must yield
-        // a typed error instead of an empty-string dummy. This pins that
-        // contract so any future change is intentional.
-        assert!(
-            result.is_err(),
-            "emit_expr_as_string on list<s32> must return Err, not silently coerce; got {:?}",
-            result
-        );
-    }
-
-    // ---- emit_expr_as_attr_value: per-discriminant branches ----
-    //
-    // The attribute-value encoding is a canonical-ABI variant with fixed
-    // case discriminants (0=str, 1=bool, 2=s8, 3=s16, 4=s32, 5=s64, 6=u8,
-    // 7=u16, 8=u32, 9=u64, 10=f32, 11=f64, 12=char).  The emitter must
-    // push exactly (discrim: i32, payload_i64: i64, payload_i32: i32) —
-    // getting the discriminant wrong silently mis-tags every attribute
-    // binding of that type.
-
-    /// Assert that the first I32Const operator in `ops` equals `expected`.
-    fn first_i32_const(ops: &[Operator<'_>]) -> i32 {
-        for op in ops {
-            if let Operator::I32Const { value } = op {
-                return *value;
-            }
-        }
-        panic!("no i32.const in ops: {:?}", ops);
-    }
-
-    #[test]
-    fn attr_value_string_uses_discrim_0() {
-        let mut ctx = CompilerContext::new();
-        let ty = ctx.intern_ty(InternedTyKind::String);
-        let comp = empty_component(&ctx);
-        let layout = empty_layout();
-        let mut builder = builder_with_runtime(&ctx);
-        let mut func = Function::new([]);
-        let expr = lit_expr(LirLiteral::String("x".into()), ty);
-        builder
-            .emit_expr_as_attr_value(&mut func, &expr, &comp, &layout)
-            .unwrap();
-        func.instruction(&Instruction::Drop); // i32 payload
-        func.instruction(&Instruction::Drop); // i64 payload
-        func.instruction(&Instruction::Drop); // discrim
-        func.instruction(&Instruction::End);
-        let ops = finish_and_read_ops(func);
-        assert_eq!(
-            first_i32_const(&ops),
-            0,
-            "string discrim must be 0; got {:?}",
-            ops
-        );
-        // Must also call pack_fat_ptr_to_i64 (idx 150) to promote (ptr, len).
-        assert!(
-            ops.iter().any(|op| matches!(
-                op,
-                Operator::Call {
-                    function_index: 150
-                }
-            )),
-            "string attr value must call pack_fat_ptr_to_i64; got {:?}",
-            ops
-        );
-    }
-
-    /// Table-driven: bool/s8/s16/s32/u8/u16/u32/char all share the same
-    /// shape (discrim, i64.const 0, payload-i32). Asserts the discrim
-    /// constant is correct per type — a regression in this table would
-    /// mis-tag every attribute binding.
-    #[test]
-    fn attr_value_small_ints_use_correct_discriminants() {
-        let cases: &[(InternedTyKind, LirLiteral, i32)] = &[
-            (InternedTyKind::Bool, LirLiteral::Bool(true), 1),
-            (InternedTyKind::S8, LirLiteral::S8(-1), 2),
-            (InternedTyKind::S16, LirLiteral::S16(-1), 3),
-            (InternedTyKind::S32, LirLiteral::S32(-1), 4),
-            (InternedTyKind::U8, LirLiteral::U8(1), 6),
-            (InternedTyKind::U16, LirLiteral::U16(1), 7),
-            (InternedTyKind::U32, LirLiteral::U32(1), 8),
-            (InternedTyKind::Char, LirLiteral::Char('a'), 12),
-        ];
-        for (kind, lit, expected_discrim) in cases {
-            let mut ctx = CompilerContext::new();
-            let ty = ctx.intern_ty(kind.clone());
-            let comp = empty_component(&ctx);
-            let layout = empty_layout();
-            let mut builder = builder_with_runtime(&ctx);
-            let mut func = Function::new([]);
-            let expr = lit_expr(lit.clone(), ty);
-            builder
-                .emit_expr_as_attr_value(&mut func, &expr, &comp, &layout)
-                .unwrap();
-            func.instruction(&Instruction::Drop);
-            func.instruction(&Instruction::Drop);
-            func.instruction(&Instruction::Drop);
-            func.instruction(&Instruction::End);
-            let ops = finish_and_read_ops(func);
-            assert_eq!(
-                first_i32_const(&ops),
-                *expected_discrim,
-                "{:?} should use discrim {} but first i32.const was {}; got {:?}",
-                kind,
-                expected_discrim,
-                first_i32_const(&ops),
-                ops,
-            );
-        }
-    }
-
-    #[test]
-    fn attr_value_s64_uses_discrim_5_and_no_reinterpret() {
-        let mut ctx = CompilerContext::new();
-        let ty = ctx.intern_ty(InternedTyKind::S64);
-        let comp = empty_component(&ctx);
-        let layout = empty_layout();
-        let mut builder = builder_with_runtime(&ctx);
-        let mut func = Function::new([]);
-        let expr = lit_expr(LirLiteral::S64(1), ty);
-        builder
-            .emit_expr_as_attr_value(&mut func, &expr, &comp, &layout)
-            .unwrap();
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::End);
-        let ops = finish_and_read_ops(func);
-        assert_eq!(
-            first_i32_const(&ops),
-            5,
-            "s64 discrim must be 5; got {:?}",
-            ops
-        );
-        // s64 should NOT use I64ReinterpretF64 — it's already an i64.
-        assert!(
-            !ops.iter()
-                .any(|op| matches!(op, Operator::I64ReinterpretF64)),
-            "s64 must not reinterpret from f64; got {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn attr_value_u64_uses_discrim_9() {
-        let mut ctx = CompilerContext::new();
-        let ty = ctx.intern_ty(InternedTyKind::U64);
-        let comp = empty_component(&ctx);
-        let layout = empty_layout();
-        let mut builder = builder_with_runtime(&ctx);
-        let mut func = Function::new([]);
-        let expr = lit_expr(LirLiteral::U64(1), ty);
-        builder
-            .emit_expr_as_attr_value(&mut func, &expr, &comp, &layout)
-            .unwrap();
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::End);
-        let ops = finish_and_read_ops(func);
-        assert_eq!(
-            first_i32_const(&ops),
-            9,
-            "u64 discrim must be 9; got {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn attr_value_f32_uses_discrim_10_and_reinterprets_to_i32() {
-        let mut ctx = CompilerContext::new();
-        let ty = ctx.intern_ty(InternedTyKind::F32);
-        let comp = empty_component(&ctx);
-        let layout = empty_layout();
-        let mut builder = builder_with_runtime(&ctx);
-        let mut func = Function::new([]);
-        let expr = lit_expr(LirLiteral::F32(1.5), ty);
-        builder
-            .emit_expr_as_attr_value(&mut func, &expr, &comp, &layout)
-            .unwrap();
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::End);
-        let ops = finish_and_read_ops(func);
-        assert_eq!(
-            first_i32_const(&ops),
-            10,
-            "f32 discrim must be 10; got {:?}",
-            ops
-        );
-        assert!(
-            ops.iter()
-                .any(|op| matches!(op, Operator::I32ReinterpretF32)),
-            "f32 attr value must reinterpret f32 -> i32; got {:?}",
-            ops
-        );
-        assert!(
-            ops.iter().any(|op| matches!(op, Operator::I64ExtendI32U)),
-            "f32 attr value must extend i32 -> i64 for payload_i64 slot; got {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn attr_value_f64_uses_discrim_11_and_reinterprets_to_i64() {
-        let mut ctx = CompilerContext::new();
-        let ty = ctx.intern_ty(InternedTyKind::F64);
-        let comp = empty_component(&ctx);
-        let layout = empty_layout();
-        let mut builder = builder_with_runtime(&ctx);
-        let mut func = Function::new([]);
-        let expr = lit_expr(LirLiteral::F64(1.5), ty);
-        builder
-            .emit_expr_as_attr_value(&mut func, &expr, &comp, &layout)
-            .unwrap();
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::End);
-        let ops = finish_and_read_ops(func);
-        assert_eq!(
-            first_i32_const(&ops),
-            11,
-            "f64 discrim must be 11; got {:?}",
-            ops
-        );
-        assert!(
-            ops.iter()
-                .any(|op| matches!(op, Operator::I64ReinterpretF64)),
-            "f64 attr value must reinterpret f64 -> i64; got {:?}",
-            ops
-        );
-    }
-
-    /// The compound/ADT fallback (list, option, result, tuple, adt) drops
-    /// the payload and encodes as `[object]` string (discrim 0). This
-    /// isn't the long-term correct behaviour, but until a proper encoding
-    /// exists the fallback must at least produce a typed-valid variant
-    /// shape. Pinning it here catches any regression that changes the
-    /// shape (e.g. dropping the pack_fat_ptr_to_i64 call and leaving a
-    /// stack-type mismatch).
-    #[test]
-    fn attr_value_list_falls_back_to_object_string() {
-        let mut ctx = CompilerContext::new();
-        let inner = ctx.intern_ty(InternedTyKind::S32);
-        let ty = ctx.intern_ty(InternedTyKind::List(inner));
-        let comp = empty_component(&ctx);
-        let layout = empty_layout();
-        let mut builder = builder_with_runtime(&ctx);
-        // We need an expression whose emission doesn't panic; a string
-        // literal typed as list<s32> is fine because emit_expr for
-        // a string literal pushes two i32s regardless of declared type.
-        let expr = lit_expr(LirLiteral::String("x".into()), ty);
-        let mut func = Function::new([]);
-        builder
-            .emit_expr_as_attr_value(&mut func, &expr, &comp, &layout)
-            .unwrap();
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::Drop);
-        func.instruction(&Instruction::End);
-        let ops = finish_and_read_ops(func);
-        // The fallback must: (a) call pack_fat_ptr_to_i64 (sentinel 150)
-        // to promote the `[object]` static string, and (b) emit exactly
-        // one I32Const(0) — the str-case discriminant. Other const values
-        // are either the original dropped payload or the (ptr, len) of
-        // "[object]", none of which equal zero for a non-empty string.
-        let zero_consts = ops
-            .iter()
-            .filter(|op| matches!(op, Operator::I32Const { value: 0 }))
-            .count();
-        assert!(
-            zero_consts >= 1,
-            "list fallback must include i32.const 0 as the str discriminant; got {:?}",
-            ops
-        );
-        assert!(
-            ops.iter().any(|op| matches!(
-                op,
-                Operator::Call {
-                    function_index: 150
-                }
-            )),
-            "list fallback must call pack_fat_ptr_to_i64; got {:?}",
-            ops
-        );
-    }
 
     // ---- parser-visible smoke: the wrapper produces a valid module ----
 

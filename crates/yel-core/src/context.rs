@@ -1,7 +1,7 @@
 //! Central compiler context.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::sync::Arc;
 
 use crate::definitions::{Definitions, Namespace};
@@ -12,6 +12,7 @@ use crate::interner::{Interner, Name};
 use crate::known::KnownDefinitions;
 use crate::source::SourceMap;
 use crate::syntax::ast::TyKind as AstTyKind;
+use crate::thir::signalck::SignalDependencies;
 use crate::types::{InternedTyKind, Ty, TypeInterner};
 
 /// Stores global compiler state.
@@ -31,7 +32,7 @@ pub struct CompilerContext {
     /// `lookup_known_definitions` has run; afterwards always `Some`.
     /// Phase 2.2 will emit `LirOp::CallFunction` against these DefIds;
     /// codegen resolves them back to wasm import indices.
-    dom_imports: Option<DomImports>,
+    dom_global: Option<DefId>,
     /// Source file management.
     pub source_map: SourceMap,
     /// Accumulated diagnostics.
@@ -68,6 +69,14 @@ pub struct CompilerContext {
     /// Key: `(observing_component_def_id, global_signal_def_id)`. Value:
     /// module-wide BlockId allocated via `alloc_block_id`.
     global_fanout_blocks: RefCell<HashMap<(DefId, DefId), BlockId>>,
+    /// Per-component / per-global signal-dependency analysis, keyed by the
+    /// owning component/global `DefId`. Produced by [`crate::thir::signalck`]
+    /// after typeck. This is a DefId-keyed *side table*, not a field on the
+    /// THIR node: signalck is a read-only analysis (it does not mutate THIR),
+    /// so its output belongs next to the other analysis tables rather than
+    /// bolted onto the node it analysed. Staged for the Phase 1.1c
+    /// effect-fanout consumer.
+    signal_deps: HashMap<DefId, SignalDependencies>,
 }
 
 /// Snapshot of the lifecycle BlockIds for a lowered component,
@@ -105,7 +114,7 @@ pub struct BlockDebugName {
     pub kind: std::borrow::Cow<'static, str>,
     /// Signal id this block is keyed to. `Some` only for the
     /// per-(boundary, signal) update fns (`kind == "update"`).
-    pub signal: Option<u32>,
+    pub signal: Option<DefId>,
 }
 
 impl BlockDebugName {
@@ -116,7 +125,7 @@ impl BlockDebugName {
         }
     }
 
-    pub fn update(signal: u32) -> Self {
+    pub fn update(signal: DefId) -> Self {
         Self {
             kind: std::borrow::Cow::Borrowed("update"),
             signal: Some(signal),
@@ -147,11 +156,12 @@ impl CompilerContext {
             known: KnownDefinitions::new(),
             source_map: SourceMap::new(),
             diagnostics: Diagnostics::new(),
-            dom_imports: None,
-            block_names: RefCell::new(HashMap::new()),
+            dom_global: None,
+            block_names: RefCell::new(HashMap::default()),
             block_id_counter: std::cell::Cell::new(0),
-            component_lifecycle_blocks: RefCell::new(HashMap::new()),
-            global_fanout_blocks: RefCell::new(HashMap::new()),
+            component_lifecycle_blocks: RefCell::new(HashMap::default()),
+            global_fanout_blocks: RefCell::new(HashMap::default()),
+            signal_deps: HashMap::default(),
         }
     }
 
@@ -164,12 +174,25 @@ impl CompilerContext {
             known: KnownDefinitions::new(),
             source_map: SourceMap::new(),
             diagnostics: Diagnostics::new(),
-            dom_imports: None,
-            block_names: RefCell::new(HashMap::new()),
+            dom_global: None,
+            block_names: RefCell::new(HashMap::default()),
             block_id_counter: std::cell::Cell::new(0),
-            component_lifecycle_blocks: RefCell::new(HashMap::new()),
-            global_fanout_blocks: RefCell::new(HashMap::new()),
+            component_lifecycle_blocks: RefCell::new(HashMap::default()),
+            global_fanout_blocks: RefCell::new(HashMap::default()),
+            signal_deps: HashMap::default(),
         }
+    }
+
+    /// Record the signal-dependency analysis for a component or global,
+    /// keyed by its `DefId`. Called by the typeck driver right after
+    /// [`crate::thir::signalck`] runs.
+    pub fn set_signal_deps(&mut self, owner: DefId, deps: SignalDependencies) {
+        self.signal_deps.insert(owner, deps);
+    }
+
+    /// Look up the signal-dependency analysis for a component or global.
+    pub fn signal_deps(&self, owner: DefId) -> Option<&SignalDependencies> {
+        self.signal_deps.get(&owner)
     }
 
     // ========================================================================
@@ -339,20 +362,123 @@ impl CompilerContext {
     // DOM imports
     // ========================================================================
 
-    /// Set the DOM import DefId table. Called once during
-    /// `lookup_known_definitions`.
-    pub fn set_dom_imports(&mut self, imports: DomImports) {
-        self.dom_imports = Some(imports);
+    /// Build the **import-side boundary contract** — one [`LirInterface`]
+    /// per *foreign-package* global (today only the built-in `Dom`
+    /// global). Each entry carries its package, the ADTs it owns inline
+    /// (`owned_types`), and its functions as plain signatures, so the
+    /// backend renders it directly instead of re-deriving DOM from
+    /// `dom_imports()`. Local globals still flow through the existing
+    /// `create_globals_interfaces` path; they migrate onto the contract
+    /// next.
+    pub fn build_import_interfaces(
+        &self,
+    ) -> crate::index_vec::IndexVec<crate::ids::InterfaceId, crate::lir::LirInterface> {
+        use crate::lir::{InterfaceDirection, LirIfaceFn, LirInterface};
+        use crate::types::{InternedTyKind, Ty};
+
+        let ctx = self;
+        let mut interfaces = crate::index_vec::IndexVec::new();
+        let global_ids: Vec<crate::ids::DefId> = ctx.defs.globals().collect();
+        for g_id in global_ids {
+            let (g_name, g_package, callbacks) = match ctx.defs.as_global(g_id) {
+                // Only foreign-package globals are contract-rendered today.
+                Some(g) if g.package.is_some() => (g.name, g.package.clone(), g.callbacks.clone()),
+                _ => continue,
+            };
+
+            let mut functions = Vec::new();
+            let mut owned_types: Vec<Ty> = Vec::new();
+            let note_adt = |ty: Ty, owned: &mut Vec<Ty>| {
+                if matches!(ctx.ty_kind(ty), InternedTyKind::Adt(_)) && !owned.contains(&ty) {
+                    owned.push(ty);
+                }
+            };
+            for cb in callbacks {
+                let (fname, fparams, fret) = match ctx.defs.as_function(cb) {
+                    Some(f) => (f.name, f.params.clone(), f.ret_ty),
+                    None => continue,
+                };
+                let mut params = Vec::new();
+                for p in fparams {
+                    let pty = match ctx.defs.type_of(p) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    note_adt(pty, &mut owned_types);
+                    params.push((ctx.defs.name(p), pty));
+                }
+                let result = if fret == Ty::UNIT {
+                    None
+                } else {
+                    note_adt(fret, &mut owned_types);
+                    Some(fret)
+                };
+                functions.push(LirIfaceFn {
+                    name: fname,
+                    params,
+                    result,
+                    def: cb,
+                });
+            }
+
+            interfaces.push(LirInterface {
+                name: g_name,
+                direction: InterfaceDirection::Import,
+                package: g_package,
+                owned_types,
+                resources: Vec::new(),
+                functions,
+            });
+        }
+        interfaces
     }
 
-    /// Get the DOM import DefId table. Panics if called before
-    /// `lookup_known_definitions` — every compilation pipeline initialises
-    /// the stdlib before any LIR/codegen runs, so missing imports here
-    /// is a programmer error, not a recoverable condition.
-    pub fn dom_imports(&self) -> &DomImports {
-        self.dom_imports
-            .as_ref()
-            .expect("dom_imports not initialised — call lookup_known_definitions(ctx) first")
+    /// The `to_string` builtin function for converting a value of `ty` to a
+    /// string: type-specific helpers for primitives, `object_to_string` for
+    /// everything else. Shared by interpolation lowering and the
+    /// `set-text-content` / dynamic-text paths so a value is stringified by
+    /// a real `Call`, not a bespoke codegen dispatch.
+    pub fn to_string_func_for(&self, ty: Ty) -> DefId {
+        match self.types.kind(ty) {
+            crate::types::InternedTyKind::Bool => self.known.functions.bool_to_string(),
+            crate::types::InternedTyKind::S8
+            | crate::types::InternedTyKind::S16
+            | crate::types::InternedTyKind::S32 => self.known.functions.s32_to_string(),
+            crate::types::InternedTyKind::U8
+            | crate::types::InternedTyKind::U16
+            | crate::types::InternedTyKind::U32 => self.known.functions.u32_to_string(),
+            crate::types::InternedTyKind::S64 => self.known.functions.s64_to_string(),
+            crate::types::InternedTyKind::U64 => self.known.functions.u64_to_string(),
+            crate::types::InternedTyKind::F32 => self.known.functions.f32_to_string(),
+            crate::types::InternedTyKind::F64 => self.known.functions.f64_to_string(),
+            crate::types::InternedTyKind::Char => self.known.functions.char_to_string(),
+            _ => self.known.functions.object_to_string(),
+        }
+    }
+
+    /// Record the built-in `Dom` global's `DefId`. Called once during
+    /// `lookup_known_definitions`. The global's `callbacks` ARE the DOM
+    /// functions — the single source of truth — so we store only the
+    /// global id, not a separate table.
+    pub fn set_dom_global(&mut self, dom_global: DefId) {
+        self.dom_global = Some(dom_global);
+    }
+
+    /// The DOM functions as a typed view, reconstructed on demand from the
+    /// `Dom` global's `callbacks`. DOM is nothing more than that global's
+    /// callbacks; `DomImports` is just a typed lens over them. Panics if
+    /// called before `lookup_known_definitions` — every pipeline
+    /// initialises the stdlib before any LIR/codegen runs, so a missing
+    /// `Dom` global here is a programmer error, not a recoverable state.
+    pub fn dom_imports(&self) -> DomImports {
+        let dom_global = self
+            .dom_global
+            .expect("Dom global not initialised — call lookup_known_definitions(ctx) first");
+        let global = self
+            .defs
+            .as_global(dom_global)
+            .expect("Dom global id does not resolve to a global def");
+        DomImports::from_callbacks(&global.callbacks)
     }
 
     // ========================================================================

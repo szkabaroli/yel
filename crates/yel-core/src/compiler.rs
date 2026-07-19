@@ -4,18 +4,15 @@
 //! through the entire pipeline: Parse → HIR → THIR → LIR → Codegen.
 
 use crate::context::CompilerContext;
-use crate::diagnostic::Diagnostic;
-use crate::hir::{lower_file, HirComponent};
+use crate::diagnostic::{Diagnostic, ErrorCode};
+use crate::hir::{lower_file, HirItem};
 use crate::ids::DefId;
 use crate::lir::{lower_component as lower_to_lir, lower_globals, LirExpr, LirResource};
 use crate::source::{SourceId, Span};
 use crate::stdlib_lookup::lookup_known_definitions;
 use crate::syntax::ast::File;
 use crate::syntax::parser::{parse_file_with_source_id, CatchedError, ParseError};
-use crate::thir::{
-    type_check, type_check_globals, type_check_globals_structured, ThirComponent, ThirExpr,
-    ThirGlobal,
-};
+use crate::thir::{type_check, ThirComponent, ThirExpr, ThirItem};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -24,43 +21,28 @@ use std::path::Path;
 pub type CompileResult<T> = Result<T, CompileError>;
 
 /// Compilation error.
-#[derive(Debug)]
+///
+/// Type-checking failures are reported through [`crate::diagnostic`], not this
+/// type — it only covers the up-front parse and IO failures that abort the
+/// pipeline before diagnostics accumulate. Each variant preserves its
+/// underlying error as the [`std::error::Error::source`] so callers can walk
+/// the chain.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CompileError {
     /// Parse error.
-    Parse(ParseError),
-    /// Type error (from diagnostics).
-    Type(String),
+    #[error("parse error: {0}")]
+    Parse(#[from] ParseError),
     /// IO error.
-    Io(std::io::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }
-
-impl From<ParseError> for CompileError {
-    fn from(e: ParseError) -> Self {
-        CompileError::Parse(e)
-    }
-}
-
-impl From<std::io::Error> for CompileError {
-    fn from(e: std::io::Error) -> Self {
-        CompileError::Io(e)
-    }
-}
-
-impl std::fmt::Display for CompileError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CompileError::Parse(e) => write!(f, "parse error: {}", e),
-            CompileError::Type(e) => write!(f, "type error: {}", e),
-            CompileError::Io(e) => write!(f, "io error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for CompileError {}
 
 /// Convert a CatchedError to a Diagnostic.
 fn catched_error_to_diagnostic(e: &CatchedError) -> Diagnostic {
-    Diagnostic::error(&e.message).with_span(e.span)
+    Diagnostic::error(&e.message)
+        .with_span(e.span)
+        .with_code(ErrorCode::SyntaxError)
 }
 
 /// Validate that `s` is a valid WIT kebab-case identifier:
@@ -104,7 +86,7 @@ fn validate_kebab_identifier(s: &str) -> Result<(), String> {
 fn parse_error_to_diagnostic(e: &ParseError, source_id: SourceId) -> Diagnostic {
     match e {
         ParseError::Syntax { message, span, .. } => {
-            let diag = Diagnostic::error(message.clone());
+            let diag = Diagnostic::error(message.clone()).with_code(ErrorCode::SyntaxError);
             if let Some(s) = span {
                 diag.with_span(*s)
             } else {
@@ -117,20 +99,21 @@ fn parse_error_to_diagnostic(e: &ParseError, source_id: SourceId) -> Diagnostic 
             found,
             span,
         } => {
-            let diag = Diagnostic::error(format!("expected {}, found {}", expected, found));
+            let diag = Diagnostic::error(format!("expected {}, found {}", expected, found))
+                .with_code(ErrorCode::SyntaxError);
             if let Some(s) = span {
                 diag.with_span(*s)
             } else {
                 diag
             }
         }
-        ParseError::Missing(what) => {
-            Diagnostic::error(format!("missing required element: {}", what))
-        }
+        ParseError::Missing(what) => Diagnostic::error(format!("missing required element: {}", what))
+            .with_code(ErrorCode::MissingElement),
         ParseError::InvalidCallBase { span } => {
             let diag = Diagnostic::error(
                 "invalid call base: only identifiers and member expressions can be called",
-            );
+            )
+            .with_code(ErrorCode::InvalidCallBase);
             if let Some(s) = span {
                 diag.with_span(*s)
             } else {
@@ -168,6 +151,20 @@ impl Compiler {
     /// Get mutable compiler context.
     pub fn context_mut(&mut self) -> &mut CompilerContext {
         &mut self.ctx
+    }
+
+    /// Build the **import-side boundary contract** as data on the module:
+    /// one [`LirInterface`] per *foreign-package* global (today only the
+    /// built-in `Dom` global). Each entry carries its package, the ADTs it
+    /// owns inline (`owned_types`), and its functions as plain signatures —
+    /// the backend renders this directly instead of re-deriving DOM from
+    /// `ctx.dom_imports()`. Local globals still flow through the existing
+    /// `create_globals_interfaces` path (they reference shared types, not
+    /// inline ones); they migrate onto the contract next.
+    pub fn build_import_interfaces(
+        &self,
+    ) -> crate::index_vec::IndexVec<crate::ids::InterfaceId, crate::lir::LirInterface> {
+        self.ctx.build_import_interfaces()
     }
 
     /// Load and parse a source file.
@@ -265,6 +262,7 @@ impl Compiler {
             if let Err(reason) = validate_kebab_identifier(value) {
                 self.ctx.diagnostics.error(
                     full_span,
+                    ErrorCode::InvalidPackageName,
                     format!(
                         "invalid package {} `{}`: {}. WIT package identifiers \
                          must be kebab-case (ASCII letters, digits, hyphens; \
@@ -276,14 +274,16 @@ impl Compiler {
         }
     }
 
-    /// Lower an AST file to HIR.
-    pub fn lower_to_hir(&mut self, file: &File) -> Vec<HirComponent> {
+    /// Lower an AST file to HIR, producing one item per top-level unit
+    /// (components and globals alike).
+    pub fn lower_to_hir(&mut self, file: &File) -> Vec<HirItem> {
         lower_file(file, &mut self.ctx)
     }
 
-    /// Type check an HIR component to THIR.
-    pub fn type_check(&mut self, hir: &HirComponent) -> ThirComponent {
-        type_check(hir, &mut self.ctx)
+    /// Type check one HIR item to THIR. The single type-checking entry —
+    /// dispatches on the item kind internally.
+    pub fn type_check(&mut self, item: &HirItem) -> ThirItem {
+        type_check(item, &mut self.ctx)
     }
 
     /// Lower a THIR component to LIR.
@@ -291,24 +291,11 @@ impl Compiler {
         lower_to_lir(thir, &self.ctx)
     }
 
-    /// Type check all global-singleton property defaults.
-    pub fn type_check_globals(&mut self) -> HashMap<DefId, ThirExpr> {
-        type_check_globals(&mut self.ctx)
-    }
-
-    /// Phase 1.1c-k: type-check all global blocks, producing one
-    /// [`ThirGlobal`] per global declaration with signalck dependency
-    /// analysis already attached. Next phase (1.1c-l) will drive global
-    /// fanout lowering from these structures.
-    pub fn type_check_globals_structured(&mut self) -> Vec<ThirGlobal> {
-        type_check_globals_structured(&mut self.ctx)
-    }
-
     /// Lower type-checked global property defaults to LIR.
     pub fn lower_globals_to_lir(
         &self,
         thir_defaults: &HashMap<DefId, ThirExpr>,
-    ) -> HashMap<DefId, LirExpr> {
+    ) -> (HashMap<DefId, LirExpr>, Vec<LirExpr>) {
         lower_globals(thir_defaults, &self.ctx)
     }
 
@@ -404,7 +391,7 @@ mod tests {
         assert_eq!(hir.len(), 1, "Expected 1 component");
 
         // Type check
-        let thir = compiler.type_check(&hir[0]);
+        let thir = compiler.type_check(&hir[0]).into_component().expect("component");
 
         // Lower to LIR
         let lir = compiler.lower_to_lir(&thir);
@@ -782,7 +769,7 @@ mod tests {
 
         assert!(!compiler.has_errors());
 
-        let thir = compiler.type_check(&hir[0]);
+        let thir = compiler.type_check(&hir[0]).into_component().expect("component");
         assert!(
             !compiler.has_errors(),
             "Type check failed: {}",

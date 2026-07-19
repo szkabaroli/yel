@@ -6,7 +6,7 @@
 
 use serde::{Serialize, Deserialize};
 use std::borrow::Borrow;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -15,14 +15,17 @@ use parking_lot::Mutex;
 
 /// An interned string identifier.
 ///
-/// This is a lightweight handle (just a `usize`) that can be used to
+/// This is a lightweight handle (a `u32` index) that can be used to
 /// retrieve the original string from an [`Interner`].
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
-pub struct Name(pub usize);
+pub struct Name(pub u32);
 
 /// A reference-counted string wrapper.
+///
+/// Backed by `Arc<str>` (a single heap allocation, fat pointer) rather than
+/// `Arc<String>` (which adds a second indirection and allocation per string).
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct ArcStr(Arc<String>);
+pub struct ArcStr(Arc<str>);
 
 impl fmt::Display for ArcStr {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
@@ -37,40 +40,43 @@ impl fmt::Debug for ArcStr {
 }
 
 impl ArcStr {
-    fn new(value: String) -> ArcStr {
-        ArcStr(Arc::new(value))
+    /// Build from a string slice in a single allocation. `Arc::<str>::from(&str)`
+    /// allocates once and copies the bytes; going through an owned `String`
+    /// first would allocate twice.
+    fn new(value: &str) -> ArcStr {
+        ArcStr(Arc::from(value))
     }
 }
 
 impl Borrow<str> for ArcStr {
     fn borrow(&self) -> &str {
-        &self.0[..]
+        &self.0
     }
 }
 
 impl Deref for ArcStr {
-    type Target = String;
+    type Target = str;
 
-    fn deref(&self) -> &String {
+    fn deref(&self) -> &str {
         &self.0
     }
 }
 
 impl PartialEq<str> for ArcStr {
     fn eq(&self, other: &str) -> bool {
-        self.0.as_str() == other
+        &*self.0 == other
     }
 }
 
 impl PartialEq<&str> for ArcStr {
     fn eq(&self, other: &&str) -> bool {
-        self.0.as_str() == *other
+        &*self.0 == *other
     }
 }
 
 impl PartialEq<String> for ArcStr {
     fn eq(&self, other: &String) -> bool {
-        self.0.as_str() == other.as_str()
+        &*self.0 == other.as_str()
     }
 }
 
@@ -96,7 +102,7 @@ impl Interner {
     pub fn new() -> Interner {
         Interner {
             data: Mutex::new(Internal {
-                map: HashMap::new(),
+                map: HashMap::default(),
                 vec: Vec::new(),
             }),
         }
@@ -112,8 +118,8 @@ impl Interner {
             return val;
         }
 
-        let key = ArcStr::new(String::from(name));
-        let value = Name(data.vec.len());
+        let key = ArcStr::new(name);
+        let value = Name(u32::try_from(data.vec.len()).expect("interner exceeded u32::MAX names"));
 
         data.vec.push(key.clone());
         data.map.insert(key, value);
@@ -124,7 +130,7 @@ impl Interner {
     /// Get the string for a previously interned [`Name`].
     pub fn str(&self, name: Name) -> ArcStr {
         let data = self.data.lock();
-        data.vec[name.0].clone()
+        data.vec[name.0 as usize].clone()
     }
 }
 
@@ -148,12 +154,12 @@ mod tests {
         assert_eq!(Name(1), interner.intern("world"));
         assert_eq!(Name(1), interner.intern("world"));
 
-        assert_eq!("hello", *interner.str(Name(0)));
-        assert_eq!("world", *interner.str(Name(1)));
+        assert_eq!("hello", &*interner.str(Name(0)));
+        assert_eq!("world", &*interner.str(Name(1)));
 
         assert_eq!(Name(2), interner.intern("keyword"));
         assert_eq!(Name(2), interner.intern("keyword"));
 
-        assert_eq!("keyword", *interner.str(Name(2)));
+        assert_eq!("keyword", &*interner.str(Name(2)));
     }
 }

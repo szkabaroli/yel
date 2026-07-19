@@ -191,15 +191,13 @@ fn line_col_to_offset(source: &str, line: usize, column: usize) -> usize {
     let mut current_line = 1;
     for (i, ch) in source.char_indices() {
         if current_line == line {
-            let mut col = 1;
-            for (j, c) in source[i..].char_indices() {
-                if col == column {
+            for (idx, (j, c)) in source[i..].char_indices().enumerate() {
+                if idx + 1 == column {
                     return i + j;
                 }
                 if c == '\n' {
                     break;
                 }
-                col += 1;
             }
             return i + (column - 1).min(source[i..].find('\n').unwrap_or(source.len() - i));
         }
@@ -1135,20 +1133,24 @@ fn parse_element_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node,
 
                         // If it's a value binding (no modifier) with a closure (no params), treat as handler
                         // Set bindings are kept as bindings (for setter handlers)
-                        if binding.modifier == PropModifier::None {
-                            if let Expr::Closure { params, body } = &binding.value.node {
-                                if params.is_empty() {
-                                    handlers.push(Spanned::new(
-                                        Handler {
-                                            name: binding.name.clone(),
-                                            name_span: binding.name_span,
-                                            body: body.clone(),
-                                        },
-                                        span,
-                                    ));
-                                    continue; // Don't add to bindings
-                                }
-                            }
+                        if binding.modifier == PropModifier::None
+                            && matches!(&binding.value.node, Expr::Closure { params, .. } if params.is_empty())
+                        {
+                            // Param-less closure → event handler. The owned
+                            // `binding` is discarded here, so move its body out
+                            // instead of cloning the statement vector.
+                            let Expr::Closure { body, .. } = binding.value.node else {
+                                unreachable!("guarded by the matches! above")
+                            };
+                            handlers.push(Spanned::new(
+                                Handler {
+                                    name: binding.name,
+                                    name_span: binding.name_span,
+                                    body,
+                                },
+                                span,
+                            ));
+                            continue; // Don't add to bindings
                         }
 
                         bindings.push(Spanned::new(binding, span));
@@ -1287,12 +1289,12 @@ fn parse_if_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node, Pars
         }
     }
 
-    Ok(Node::If(IfNode {
+    Ok(Node::If(Box::new(IfNode {
         condition,
         then_branch,
         else_if_branches,
         else_branch,
-    }))
+    })))
 }
 
 fn parse_for_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node, ParseError> {
@@ -1342,13 +1344,13 @@ fn parse_for_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node, Par
         }
     }
 
-    Ok(Node::For(ForNode {
+    Ok(Node::For(Box::new(ForNode {
         item_name,
         item_name_span,
         iterable,
         key,
         body,
-    }))
+    })))
 }
 
 fn parse_binding(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Binding, ParseError> {
@@ -2039,11 +2041,10 @@ fn parse_string_expr(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Expr, Pars
     if parts.is_empty() {
         return Ok(Expr::Literal(Literal::String(String::new())));
     }
-    if parts.len() == 1 {
-        if let InterpolationPart::Literal(s) = &parts[0] {
+    if parts.len() == 1
+        && let InterpolationPart::Literal(s) = &parts[0] {
             return Ok(Expr::Literal(Literal::String(s.clone())));
         }
-    }
 
     Ok(Expr::Interpolation(parts))
 }

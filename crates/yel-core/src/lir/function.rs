@@ -248,11 +248,10 @@ pub fn ui_block_calling_conv(
     // nothing else is present at all.
     let mut implicit_post = Vec::new();
     for slot_id in &block.boundary_param_slots {
-        if let Some(info) = slots.get(slot_id.legacy_u32() as usize) {
-            if let LirSlotValType::RefNullForBoundary(b_id) = info.val_ty {
+        if let Some(info) = slots.get(slot_id.legacy_u32() as usize)
+            && let LirSlotValType::RefNullForBoundary(b_id) = info.val_ty {
                 implicit_post.push(ImplicitParam::Boundary(b_id));
             }
-        }
     }
     if block.params.is_empty() && block.boundary_param_slots.is_empty() {
         implicit_post.push(ImplicitParam::LegacyI32);

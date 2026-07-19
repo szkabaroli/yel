@@ -7,12 +7,12 @@ digraph yel_signal_graph {
     label="component App (export)";
     style=rounded;
     color="#888";
-    "c0_sig_408" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="visible\n: M", class="yel-signal"];
-    "c0_sig_409" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="selected\n: M", class="yel-signal"];
-    "c0_eff_0" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 0\nupdate-b0-s408 #3", class="yel-effect"];
-    "c0_sig_408" -> "c0_eff_0" [label="reads", color="#3366cc", class="yel-reads"];
+    "c0_sig_458" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="visible\n: M", class="yel-signal"];
+    "c0_sig_459" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="selected\n: M", class="yel-signal"];
+    "c0_eff_0" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 0\nupdate-b0-s458 #3", class="yel-effect"];
+    "c0_sig_458" -> "c0_eff_0" [label="reads", color="#3366cc", class="yel-reads"];
     "c0_fn_2" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="derived-update #2\nwrites selected", class="yel-fn"];
     "c0_eff_0" -> "c0_fn_2" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
-    "c0_fn_2" -> "c0_sig_409" [label="writes", color="#cc3333", class="yel-writes"];
+    "c0_fn_2" -> "c0_sig_459" [label="writes", color="#cc3333", class="yel-writes"];
   }
 }

@@ -557,7 +557,7 @@ mod tests {
     use crate::source::{SourceId, Span};
 
     fn dummy_span() -> Span {
-        Span::new(SourceId(0), 0, 0)
+        Span::default()
     }
 
     #[test]

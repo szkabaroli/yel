@@ -91,16 +91,14 @@ impl WasmPackageBuilder<'_> {
         if let Some(type_idx) = self.por_record_type_idx(ty) {
             return InternalRepr::GcRef(type_idx);
         }
-        if let yel_core::types::InternedTyKind::Tuple(_) = self.ctx.ty_kind(ty) {
-            if let Some(&tup_idx) = self.record_gc_types.tuple_struct_type_idx.get(&ty) {
+        if let yel_core::types::InternedTyKind::Tuple(_) = self.ctx.ty_kind(ty)
+            && let Some(&tup_idx) = self.record_gc_types.tuple_struct_type_idx.get(&ty) {
                 return InternalRepr::GcRef(tup_idx);
             }
-        }
-        if self.is_scalar_list_ty(ty) {
-            if let Some(&arr_idx) = self.record_gc_types.list_array_type_idx.get(&ty) {
+        if self.is_scalar_list_ty(ty)
+            && let Some(&arr_idx) = self.record_gc_types.list_array_type_idx.get(&ty) {
                 return InternalRepr::GcArrayRef(arr_idx);
             }
-        }
         // Option-of-ref collapse: option<T> where T has a ref repr is
         // itself just a nullable ref of T's heap type (none = null,
         // some(v) = v). No discriminant slot internally.
@@ -115,11 +113,10 @@ impl WasmPackageBuilder<'_> {
         // The `flat_gc_migrated` predicate is mirrored in
         // `yel_core::lir::block_lower::is_flat_gc_migrated_ty`; both
         // sides MUST agree per Ty.
-        if self.flat_gc_migrated(ty) {
-            if let Some(&super_idx) = self.record_gc_types.flat_gc_super_idx.get(&ty) {
+        if self.flat_gc_migrated(ty)
+            && let Some(&super_idx) = self.record_gc_types.flat_gc_super_idx.get(&ty) {
                 return InternalRepr::FlatGcStruct(super_idx);
             }
-        }
         match self.ctx.ty_kind(ty) {
             InternedTyKind::Unit | InternedTyKind::Error | InternedTyKind::Unknown => {
                 InternalRepr::Zero
@@ -590,13 +587,14 @@ pub(super) fn collect_ternary_block_shapes(
 
     for exprs in &expr_tables {
         for e in exprs {
-            visit_expr(builder, e, into);
+            visit_expr(builder, e, exprs, into);
         }
     }
 
     fn visit_expr(
         builder: &mut WasmPackageBuilder<'_>,
         e: &LirExpr,
+        exprs: &[LirExpr],
         into: &mut HashMap<Vec<ValType>, ()>,
     ) {
         // Only Ternary produces a value whose exact stack shape the
@@ -619,9 +617,9 @@ pub(super) fn collect_ternary_block_shapes(
                     into.insert(shape, ());
                 }
             }
-            visit_expr(builder, condition, into);
-            visit_expr(builder, then_expr, into);
-            visit_expr(builder, else_expr, into);
+            visit_expr(builder, &exprs[condition.0 as usize], exprs, into);
+            visit_expr(builder, &exprs[then_expr.0 as usize], exprs, into);
+            visit_expr(builder, &exprs[else_expr.0 as usize], exprs, into);
             return;
         }
 
@@ -632,18 +630,22 @@ pub(super) fn collect_ternary_block_shapes(
         // for shape X" message, pointing at exactly this function.
         match &e.kind {
             LirExprKind::Binary { lhs, rhs, .. } => {
-                visit_expr(builder, lhs, into);
-                visit_expr(builder, rhs, into);
+                visit_expr(builder, &exprs[lhs.0 as usize], exprs, into);
+                visit_expr(builder, &exprs[rhs.0 as usize], exprs, into);
             }
-            LirExprKind::Unary { operand, .. } => visit_expr(builder, operand, into),
-            LirExprKind::Field { base, .. } => visit_expr(builder, base, into),
+            LirExprKind::Unary { operand, .. } => {
+                visit_expr(builder, &exprs[operand.0 as usize], exprs, into)
+            }
+            LirExprKind::Field { base, .. } => {
+                visit_expr(builder, &exprs[base.0 as usize], exprs, into)
+            }
             LirExprKind::Index { base, index } => {
-                visit_expr(builder, base, into);
-                visit_expr(builder, index, into);
+                visit_expr(builder, &exprs[base.0 as usize], exprs, into);
+                visit_expr(builder, &exprs[index.0 as usize], exprs, into);
             }
-            LirExprKind::Call { args, .. } | LirExprKind::GlobalCall { args, .. } => {
+            LirExprKind::Call { args, .. } => {
                 for a in args {
-                    visit_expr(builder, a, into);
+                    visit_expr(builder, &exprs[a.0 as usize], exprs, into);
                 }
             }
             LirExprKind::Ternary {
@@ -651,31 +653,31 @@ pub(super) fn collect_ternary_block_shapes(
                 then_expr,
                 else_expr,
             } => {
-                visit_expr(builder, condition, into);
-                visit_expr(builder, then_expr, into);
-                visit_expr(builder, else_expr, into);
+                visit_expr(builder, &exprs[condition.0 as usize], exprs, into);
+                visit_expr(builder, &exprs[then_expr.0 as usize], exprs, into);
+                visit_expr(builder, &exprs[else_expr.0 as usize], exprs, into);
             }
             LirExprKind::VariantCtor {
                 payload: Some(p), ..
-            } => visit_expr(builder, p, into),
+            } => visit_expr(builder, &exprs[p.0 as usize], exprs, into),
             LirExprKind::ListConstruct { elements, .. } => {
                 for el in elements {
-                    visit_expr(builder, el, into);
+                    visit_expr(builder, &exprs[el.0 as usize], exprs, into);
                 }
             }
             LirExprKind::RecordConstruct { fields, .. } => {
                 for f in fields {
-                    visit_expr(builder, f, into);
+                    visit_expr(builder, &exprs[f.0 as usize], exprs, into);
                 }
             }
             LirExprKind::TupleConstruct { elements, .. } => {
                 for el in elements {
-                    visit_expr(builder, el, into);
+                    visit_expr(builder, &exprs[el.0 as usize], exprs, into);
                 }
             }
             LirExprKind::Range { start, end, .. } => {
-                visit_expr(builder, start, into);
-                visit_expr(builder, end, into);
+                visit_expr(builder, &exprs[start.0 as usize], exprs, into);
+                visit_expr(builder, &exprs[end.0 as usize], exprs, into);
             }
             _ => {}
         }

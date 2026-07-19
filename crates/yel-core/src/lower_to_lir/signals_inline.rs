@@ -16,8 +16,8 @@
 //! independent and not mutually exclusive.
 
 use crate::context::CompilerContext;
-use crate::lir::block::{LirOp, LirSlotId, LirSlotValType};
-use crate::lir::signal_layout::{MemSlot, SignalLayout};
+use crate::lir::block::{LirOp, LirSlotId, LirSlotValType, MemoryValueType, StoreWidth};
+use crate::lir::signal_layout::MemSlot;
 use crate::types::{InternedTyKind, Ty};
 
 /// Slot-allocator callback used by every helper. Phase 1.2 wires this
@@ -56,88 +56,64 @@ pub fn lower_signal_write_to_memory(
     let addr = base_addr + mem.offset;
     let mut ops = Vec::new();
 
+    // Emit `MemConst <addr> -> a; StoreAddr a <- value` for `value` at the
+    // scalar type/width that backs `signal_ty`.
+    let mut store_scalar = |ops: &mut Vec<LirOp>, slot_addr: u32, value: LirSlotId, ty, width| {
+        let a = alloc(LirSlotValType::I32);
+        ops.push(LirOp::MemConst {
+            addr: slot_addr,
+            result: a,
+        });
+        ops.push(LirOp::StoreAddr {
+            addr: a,
+            value,
+            ty,
+            width,
+        });
+    };
+    use MemoryValueType::*;
+    use StoreWidth::*;
+
     match ctx.ty_kind(signal_ty) {
         InternedTyKind::F32 => {
             let v = expect_one_slot(value_slots, "F32 signal write")?;
-            let a = alloc(LirSlotValType::I32);
-            ops.push(LirOp::MemConst { addr, result: a });
-            ops.push(LirOp::StoreF32Addr { addr: a, value: v });
+            store_scalar(&mut ops, addr, v, F32, Full);
         }
         InternedTyKind::F64 => {
             let v = expect_one_slot(value_slots, "F64 signal write")?;
-            let a = alloc(LirSlotValType::I32);
-            ops.push(LirOp::MemConst { addr, result: a });
-            ops.push(LirOp::StoreF64Addr { addr: a, value: v });
+            store_scalar(&mut ops, addr, v, F64, Full);
         }
         InternedTyKind::S64 | InternedTyKind::U64 => {
             let v = expect_one_slot(value_slots, "I64 signal write")?;
-            let a = alloc(LirSlotValType::I32);
-            ops.push(LirOp::MemConst { addr, result: a });
-            ops.push(LirOp::StoreI64Addr { addr: a, value: v });
+            store_scalar(&mut ops, addr, v, I64, Full);
         }
         InternedTyKind::Option(_) => {
             // [0]: discriminant byte at addr; [1]: payload i32 at addr+4.
             if value_slots.len() != 2 {
                 return None;
             }
-            let disc = value_slots[0];
-            let payload = value_slots[1];
-            let a0 = alloc(LirSlotValType::I32);
-            let a1 = alloc(LirSlotValType::I32);
-            ops.push(LirOp::MemConst { addr, result: a0 });
-            ops.push(LirOp::StoreI32Narrow8Addr {
-                addr: a0,
-                value: disc,
-            });
-            ops.push(LirOp::MemConst {
-                addr: addr + 4,
-                result: a1,
-            });
-            ops.push(LirOp::StoreI32Addr {
-                addr: a1,
-                value: payload,
-            });
+            store_scalar(&mut ops, addr, value_slots[0], I32, Narrow8);
+            store_scalar(&mut ops, addr + 4, value_slots[1], I32, Full);
         }
         InternedTyKind::String | InternedTyKind::List(_) => {
             // Fat pointer: [ptr at addr, len at addr+4].
             if value_slots.len() != 2 {
                 return None;
             }
-            let ptr = value_slots[0];
-            let len = value_slots[1];
-            let a0 = alloc(LirSlotValType::I32);
-            let a1 = alloc(LirSlotValType::I32);
-            ops.push(LirOp::MemConst { addr, result: a0 });
-            ops.push(LirOp::StoreI32Addr {
-                addr: a0,
-                value: ptr,
-            });
-            ops.push(LirOp::MemConst {
-                addr: addr + 4,
-                result: a1,
-            });
-            ops.push(LirOp::StoreI32Addr {
-                addr: a1,
-                value: len,
-            });
+            store_scalar(&mut ops, addr, value_slots[0], I32, Full);
+            store_scalar(&mut ops, addr + 4, value_slots[1], I32, Full);
         }
         InternedTyKind::Bool | InternedTyKind::U8 | InternedTyKind::S8 | InternedTyKind::Char => {
             let v = expect_one_slot(value_slots, "narrow8 signal write")?;
-            let a = alloc(LirSlotValType::I32);
-            ops.push(LirOp::MemConst { addr, result: a });
-            ops.push(LirOp::StoreI32Narrow8Addr { addr: a, value: v });
+            store_scalar(&mut ops, addr, v, I32, Narrow8);
         }
         InternedTyKind::U16 | InternedTyKind::S16 => {
             let v = expect_one_slot(value_slots, "narrow16 signal write")?;
-            let a = alloc(LirSlotValType::I32);
-            ops.push(LirOp::MemConst { addr, result: a });
-            ops.push(LirOp::StoreI32Narrow16Addr { addr: a, value: v });
+            store_scalar(&mut ops, addr, v, I32, Narrow16);
         }
         _ => {
             let v = expect_one_slot(value_slots, "default i32 signal write")?;
-            let a = alloc(LirSlotValType::I32);
-            ops.push(LirOp::MemConst { addr, result: a });
-            ops.push(LirOp::StoreI32Addr { addr: a, value: v });
+            store_scalar(&mut ops, addr, v, I32, Full);
         }
     }
 
@@ -178,99 +154,6 @@ pub fn lower_signal_write_to_global_memory(
         })
         .collect();
     Some(rewritten)
-}
-
-/// Lower a memory-backed `SignalRead` to a `MemConst` + typed-load
-/// sequence. Returns `None` when the signal has no memory backing.
-///
-/// `result_slots` mirrors `value_slots` in `lower_signal_write_to_memory`:
-/// one slot per canonical flat ABI valtype. Caller pre-allocates these
-/// with the right `val_ty` (i32 for scalars / ptrs / discs; i64 / f32 /
-/// f64 for the wide types).
-///
-/// NOTE: today's codegen never produces `LirOp::SignalRead` (the read
-/// side is folded into `LirExprKind::SignalRead` at expression-emit
-/// time — see `op_emit.rs:987-995`). This helper exists for parity and
-/// for Phase 1.2's future-proofing; Phase 1.1c may relocate it once
-/// the call shape settles.
-pub fn lower_signal_read_from_memory(
-    ctx: &CompilerContext,
-    signal_ty: Ty,
-    mem: MemSlot,
-    base_addr: u32,
-    result_slots: &[LirSlotId],
-    alloc: SlotAlloc<'_>,
-) -> LoweredOps {
-    let addr = base_addr + mem.offset;
-    let mut ops = Vec::new();
-
-    match ctx.ty_kind(signal_ty) {
-        InternedTyKind::F32 => {
-            let r = expect_one_slot(result_slots, "F32 signal read")?;
-            let a = alloc(LirSlotValType::I32);
-            ops.push(LirOp::MemConst { addr, result: a });
-            ops.push(LirOp::LoadF32Addr { addr: a, result: r });
-        }
-        InternedTyKind::F64 => {
-            let r = expect_one_slot(result_slots, "F64 signal read")?;
-            let a = alloc(LirSlotValType::I32);
-            ops.push(LirOp::MemConst { addr, result: a });
-            ops.push(LirOp::LoadF64Addr { addr: a, result: r });
-        }
-        InternedTyKind::S64 | InternedTyKind::U64 => {
-            let r = expect_one_slot(result_slots, "I64 signal read")?;
-            let a = alloc(LirSlotValType::I32);
-            ops.push(LirOp::MemConst { addr, result: a });
-            ops.push(LirOp::LoadI64Addr { addr: a, result: r });
-        }
-        InternedTyKind::Option(_) | InternedTyKind::String | InternedTyKind::List(_) => {
-            // Two-slot reads. Today's `LirExprKind::SignalRead` does
-            // these with widened i32-loads (the narrow-discriminant
-            // case sign/zero-extends from the byte). Mirror that:
-            // both halves are loaded as i32 at `addr` / `addr+4`.
-            if result_slots.len() != 2 {
-                return None;
-            }
-            let a0 = alloc(LirSlotValType::I32);
-            let a1 = alloc(LirSlotValType::I32);
-            ops.push(LirOp::MemConst { addr, result: a0 });
-            ops.push(LirOp::LoadI32Addr {
-                addr: a0,
-                result: result_slots[0],
-            });
-            ops.push(LirOp::MemConst {
-                addr: addr + 4,
-                result: a1,
-            });
-            ops.push(LirOp::LoadI32Addr {
-                addr: a1,
-                result: result_slots[1],
-            });
-        }
-        // Narrow signed/unsigned reads currently round-trip through
-        // `LoadI32Addr` because today's codegen uses widened i32-loads
-        // for everything <= 4 bytes (sign/zero extension is handled at
-        // the expression level). When Phase 1.1c grows narrow-load
-        // variants (`LoadI32Narrow8S/U`, `LoadI32Narrow16S/U`), wire
-        // them here. Until then bail out so the caller keeps the
-        // original `SignalRead` and codegen handles the right load.
-        InternedTyKind::Bool
-        | InternedTyKind::U8
-        | InternedTyKind::S8
-        | InternedTyKind::Char
-        | InternedTyKind::U16
-        | InternedTyKind::S16 => {
-            return None;
-        }
-        _ => {
-            let r = expect_one_slot(result_slots, "default i32 signal read")?;
-            let a = alloc(LirSlotValType::I32);
-            ops.push(LirOp::MemConst { addr, result: a });
-            ops.push(LirOp::LoadI32Addr { addr: a, result: r });
-        }
-    }
-
-    Some(ops)
 }
 
 /// Lower `InitSignalDefault` for a memory-backed signal — zero the
@@ -314,22 +197,16 @@ pub fn lower_init_signal_default_to_memory(
                 slot: zero,
                 value: 0,
             });
-            ops.push(LirOp::StoreI32Addr {
+            ops.push(LirOp::StoreAddr {
                 addr: a,
                 value: zero,
+                ty: MemoryValueType::I32,
+                width: StoreWidth::Full,
             });
         }
     }
 
     Some(ops)
-}
-
-/// Convenience: returns the `MemSlot` for `sig_idx` if the signal has a
-/// memory backing in `layout`, else `None`. Callers gate the helper
-/// dispatch on this so struct-only signals fall through to the
-/// existing `LirOp::Signal*` path.
-pub fn signal_mem_slot(layout: &SignalLayout, sig_idx: usize) -> Option<MemSlot> {
-    layout.signals.get(sig_idx).and_then(|s| s.mem)
 }
 
 fn expect_one_slot(slots: &[LirSlotId], _what: &str) -> Option<LirSlotId> {
@@ -340,80 +217,3 @@ fn expect_one_slot(slots: &[LirSlotId], _what: &str) -> Option<LirSlotId> {
     }
 }
 
-// =============================================================================
-// Stubs / deferred helpers
-// =============================================================================
-//
-// The following ops have more complex expansions today; Phase 1.1
-// reserves their helper names but leaves the body deferred. Each
-// `todo!()` carries a precise pointer at the source-of-truth emit arm
-// that Phase 1.2 / 1.1c will mirror here.
-
-/// Lower `LirOp::SignalWriteExpr` for memory-backed signals.
-///
-/// Today's emit arm (`op_emit.rs:699-731`) routes through
-/// `emit_signal_store`, which evaluates the expression onto the stack
-/// in canonical-ABI flat form then peels each result valtype off in
-/// reverse and stores it at its offset. The peel sequence depends on
-/// the expression's flat valtype list — neutral LirOp doesn't yet
-/// expose a "drain stack into slots" primitive, so this helper is a
-/// Phase 1.2-or-later concern.
-///
-/// Phase 1.2 will likely pre-materialize the expression to slots via
-/// `EvalExpr` + a per-flat-valtype scratch and then call
-/// `lower_signal_write_to_memory` with the slot list — the same
-/// machinery `emit_signal_store` builds at codegen time.
-pub fn lower_signal_write_expr_to_memory(
-    _ctx: &CompilerContext,
-    _signal_ty: Ty,
-    _mem: MemSlot,
-    _base_addr: u32,
-    _expr: crate::lir::block::ExprId,
-    _alloc: SlotAlloc<'_>,
-) -> LoweredOps {
-    todo!(
-        "Phase 1.2: lower_signal_write_expr_to_memory — needs an \
-         eval-to-flat-slots primitive (see emit_signal_store in \
-         op_emit.rs). For Phase 1.1 leave the original LirOp::SignalWriteExpr."
-    )
-}
-
-/// Lower `LirOp::InitSignal` (memory path) — evaluates the default
-/// expression and writes it. Same constraint as
-/// `lower_signal_write_expr_to_memory`: needs the eval-to-flat-slots
-/// primitive. Phase 1.2 follow-up.
-pub fn lower_init_signal_to_memory(
-    _ctx: &CompilerContext,
-    _signal_ty: Ty,
-    _mem: MemSlot,
-    _base_addr: u32,
-    _expr: crate::lir::block::ExprId,
-    _alloc: SlotAlloc<'_>,
-) -> LoweredOps {
-    todo!(
-        "Phase 1.2: lower_init_signal_to_memory — same eval-to-flat-slots \
-         dependency as lower_signal_write_expr_to_memory. \
-         See emit_signal_store in op_emit.rs."
-    )
-}
-
-/// Lower `LirOp::TriggerEffects` to a sequence of `CallBlock` ops, one
-/// per registered effect for the signal. Phase 1.1 keeps this as a
-/// stub because the effect-table lookup requires the per-component
-/// effect map (lives on `LirResource.effects`) and the choice of
-/// `CallBlock` vs. `CallBlock2` parameters depends on the effect
-/// block's signature — both of which need a settled API for the
-/// helper to consume. Phase 3 (mount + lifecycle) revisits this with
-/// the lifecycle inline helpers.
-pub fn lower_trigger_effects(
-    _signal: crate::ids::DefId,
-    _component_def: crate::ids::DefId,
-    _effects: &[crate::lir::block::LirBlockEffect],
-    _parent_slot: LirSlotId,
-) -> LoweredOps {
-    todo!(
-        "Phase 3: lower_trigger_effects — fans out to per-effect \
-         CallBlock ops. Today's emit arm: op_emit.rs:1123 + \
-         emit_trigger_effects helper."
-    )
-}

@@ -7,6 +7,6 @@ digraph yel_signal_graph {
     label="component App (export)";
     style=rounded;
     color="#888";
-    "c0_sig_403" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="maybe\n: option<option<s32>>", class="yel-signal"];
+    "c0_sig_453" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="maybe\n: option<option<s32>>", class="yel-signal"];
   }
 }

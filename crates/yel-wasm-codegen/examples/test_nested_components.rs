@@ -35,24 +35,27 @@ fn main() {
     println!("Parsed successfully");
 
     // Lower to HIR
-    let hir_components = compiler.lower_to_hir(&file);
-    assert!(!hir_components.is_empty(), "No components found");
-    println!("HIR lowering complete: {} components", hir_components.len());
-    for hir in &hir_components {
-        println!("  - {}", compiler.context().str(hir.name));
+    let items = compiler.lower_to_hir(&file);
+    assert!(!items.is_empty(), "No items found");
+    println!("HIR lowering complete: {} items", items.len());
+    for hir in &items {
+        if let Some(c) = hir.as_component() {
+            println!("  - {}", compiler.context().str(c.name));
+        }
     }
 
-    // Type check all components
-    let mut thir_components = Vec::new();
-    for hir in &hir_components {
-        let thir = compiler.type_check(hir);
-        println!("Type checked: {}", compiler.context().str(thir.name));
-        thir_components.push(thir);
+    // Type check all items, keeping the component THIR for lowering.
+    let mut thir_items = Vec::new();
+    for hir in &items {
+        if let yel_core::thir::ThirItem::Component(thir) = compiler.type_check(hir) {
+            println!("Type checked: {}", compiler.context().str(thir.name));
+            thir_items.push(thir);
+        }
     }
 
     // Lower all to LIR
     let mut lir_components = Vec::new();
-    for thir in &thir_components {
+    for thir in &thir_items {
         let lir = compiler.lower_to_lir(thir);
         println!("LIR lowered: {} (export={})", compiler.context().str(lir.name), lir.is_export);
         println!("  Mount block: {:?}", lir.mount_block);

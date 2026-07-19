@@ -115,6 +115,12 @@ pub struct NarrowedScope {
     pub narrowed_type: ResolvedType,
 }
 
+impl Default for TypeNarrowings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TypeNarrowings {
     pub fn new() -> Self {
         TypeNarrowings
@@ -242,13 +248,12 @@ fn find_hover_content(
         if contains(&comp.node.name_span, offset, source_id) {
             return Some(format_component(&comp.node));
         }
-        if contains(&comp.span, offset, source_id) {
-            if let Some(content) =
+        if contains(&comp.span, offset, source_id)
+            && let Some(content) =
                 find_in_component(&comp.node, file, offset, source_id, narrowings)
             {
                 return Some(content);
             }
-        }
     }
     None
 }
@@ -269,11 +274,10 @@ fn find_in_component(
             if contains(&prop.node.ty.span, offset, sid) {
                 return Some(format_type(&prop.node.ty.kind));
             }
-            if let Some(ref def) = prop.node.default {
-                if contains(&def.span, offset, sid) {
+            if let Some(ref def) = prop.node.default
+                && contains(&def.span, offset, sid) {
                     return find_in_expr(&def.node, comp, file, offset, sid, narrowings);
                 }
-            }
             return Some(format_property(&prop.node, &comp.name));
         }
     }
@@ -295,11 +299,10 @@ fn find_in_component(
 
     // Body nodes
     for node in &comp.body {
-        if contains(&node.span, offset, sid) {
-            if let Some(c) = find_in_node(&node.node, comp, file, offset, sid, narrowings) {
+        if contains(&node.span, offset, sid)
+            && let Some(c) = find_in_node(&node.node, comp, file, offset, sid, narrowings) {
                 return Some(c);
             }
-        }
     }
     None
 }
@@ -402,11 +405,10 @@ fn find_in_node(
                     for_node.item_name
                 ));
             }
-            if let Some(ref key) = for_node.key {
-                if contains(&key.span, offset, sid) {
+            if let Some(ref key) = for_node.key
+                && contains(&key.span, offset, sid) {
                     return find_in_expr(&key.node, comp, file, offset, sid, narrowings);
                 }
-            }
             for child in &for_node.body {
                 if contains(&child.span, offset, sid) {
                     return find_in_node(&child.node, comp, file, offset, sid, narrowings);
@@ -524,11 +526,10 @@ fn find_in_expr(
         }
         Expr::Interpolation(parts) => {
             for part in parts {
-                if let InterpolationPart::Expr(e) = part {
-                    if contains(&e.span, offset, sid) {
+                if let InterpolationPart::Expr(e) = part
+                    && contains(&e.span, offset, sid) {
                         return find_in_expr(&e.node, comp, file, offset, sid, narrowings);
                     }
-                }
             }
             None
         }
@@ -757,14 +758,13 @@ fn format_member_field(
     match &base_ty {
         ResolvedType::Named(type_name) => {
             // Look up in user-defined records
-            if let Some(rec) = file.records.iter().find(|r| &r.node.name == type_name) {
-                if let Some(field_def) = rec.node.fields.iter().find(|f| f.node.name == field) {
+            if let Some(rec) = file.records.iter().find(|r| &r.node.name == type_name)
+                && let Some(field_def) = rec.node.fields.iter().find(|f| f.node.name == field) {
                     return format!(
                         "```yel\n{}: {}\n```\n---\nField of `{}`",
                         field, field_def.node.ty.kind, type_name
                     );
                 }
-            }
             format!(
                 "```yel\n.{}\n```\n---\nField access on `{}`",
                 field, type_name
@@ -836,8 +836,8 @@ fn format_optional_member_field(
             match inner.as_ref() {
                 ResolvedType::Named(type_name) => {
                     // Look up in user-defined records
-                    if let Some(rec) = file.records.iter().find(|r| &r.node.name == type_name) {
-                        if let Some(field_def) =
+                    if let Some(rec) = file.records.iter().find(|r| &r.node.name == type_name)
+                        && let Some(field_def) =
                             rec.node.fields.iter().find(|f| f.node.name == field)
                         {
                             return format!(
@@ -848,7 +848,6 @@ fn format_optional_member_field(
                                 format_resolved_type(&result_ty)
                             );
                         }
-                    }
                     format!(
                         "```yel\n?.{}: {}\n```\n---\nOptional field access on `option<{}>`",
                         field,
@@ -924,11 +923,10 @@ fn infer_member_type(base_ty: &ResolvedType, field: &str, file: &File) -> Resolv
     match base_ty {
         ResolvedType::Named(type_name) => {
             // Look up in user-defined records
-            if let Some(rec) = file.records.iter().find(|r| &r.node.name == type_name) {
-                if let Some(field_def) = rec.node.fields.iter().find(|f| f.node.name == field) {
+            if let Some(rec) = file.records.iter().find(|r| &r.node.name == type_name)
+                && let Some(field_def) = rec.node.fields.iter().find(|f| f.node.name == field) {
                     return resolve_ast_type(&field_def.node.ty.kind);
                 }
-            }
             ResolvedType::Unknown
         }
         ResolvedType::Option(inner) => match field {
@@ -1119,8 +1117,8 @@ fn format_literal(lit: &Literal) -> String {
 
 fn format_handler(handler_name: &str, element_name: &str, file: &File) -> Option<String> {
     // Check if element is a user-defined component
-    if let Some(comp) = file.components.iter().find(|c| c.node.name == element_name) {
-        if let Some(func) = comp
+    if let Some(comp) = file.components.iter().find(|c| c.node.name == element_name)
+        && let Some(func) = comp
             .node
             .functions
             .iter()
@@ -1146,7 +1144,6 @@ fn format_handler(handler_name: &str, element_name: &str, file: &File) -> Option
                 element_name
             ));
         }
-    }
 
     // TODO: stdlib lookup not available in current API
     None
@@ -1154,8 +1151,8 @@ fn format_handler(handler_name: &str, element_name: &str, file: &File) -> Option
 
 fn format_binding(prop_name: &str, element_name: &str, file: &File) -> Option<String> {
     // Check if element is a user-defined component
-    if let Some(comp) = file.components.iter().find(|c| c.node.name == element_name) {
-        if let Some(prop) = comp
+    if let Some(comp) = file.components.iter().find(|c| c.node.name == element_name)
+        && let Some(prop) = comp
             .node
             .properties
             .iter()
@@ -1166,16 +1163,14 @@ fn format_binding(prop_name: &str, element_name: &str, file: &File) -> Option<St
                 prop_name, prop.node.ty.kind, element_name
             ));
         }
-    }
 
-    if let Some(builtin) = builtins_catalog::get_builtin(element_name) {
-        if let Some(prop) = builtin.properties.iter().find(|p| p.name == prop_name) {
+    if let Some(builtin) = builtins_catalog::get_builtin(element_name)
+        && let Some(prop) = builtin.properties.iter().find(|p| p.name == prop_name) {
             return Some(format!(
                 "```yel\n{}: {}\n```\n---\nProperty of `{}`.",
                 prop_name, prop.ty, element_name
             ));
         }
-    }
 
     None
 }
@@ -1189,7 +1184,7 @@ fn format_builtin(builtin: &builtins_catalog::BuiltinElement) -> String {
     let main_props: Vec<_> = builtin
         .properties
         .iter()
-        .filter(|p| !is_common_prop(&p.name))
+        .filter(|p| !is_common_prop(p.name))
         .collect();
 
     if !main_props.is_empty() {
@@ -1206,7 +1201,7 @@ fn format_builtin(builtin: &builtins_catalog::BuiltinElement) -> String {
         }
     }
 
-    if !builtins_catalog::accepts_children(&builtin.name) {
+    if !builtins_catalog::accepts_children(builtin.name) {
         s.push_str("\n*Does not accept children.*");
     }
 
@@ -1251,7 +1246,7 @@ fn format_enum_case(case_name: &str, file: &File) -> Option<String> {
     }
     // Check builtin enums
     for builtin_enum in builtins_catalog::builtin_enums() {
-        if builtin_enum.cases.iter().any(|c| *c == case_name) {
+        if builtin_enum.cases.contains(&case_name) {
             return Some(format!(
                 "```yel\n{}.{}\n```\n---\n`{}` enum value",
                 builtin_enum.name, case_name, builtin_enum.name

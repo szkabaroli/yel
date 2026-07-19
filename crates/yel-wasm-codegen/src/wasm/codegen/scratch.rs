@@ -8,10 +8,41 @@
 //! (`LirBlock::mount_component_count`); codegen reads that field directly
 //! instead of re-walking the op tree.
 
-use wasm_encoder::{Instruction, ValType};
+use wasm_encoder::{Function, Instruction, ValType};
 
 use super::super::CodegenError;
 use yel_core::lir::{LirBlock, LirResource, LirSlotId, LirSlotInfo, LirSlotKind};
+
+/// Emit `cabi_realloc(0, 0, align, size)`, leaving the freshly-allocated
+/// pointer on the stack. The canonical-ABI realloc with `old_ptr = 0` and
+/// `old_size = 0` is a plain allocation of `size` bytes at `align`. The caller
+/// consumes the pointer (e.g. `local.set`).
+pub(super) fn emit_cabi_realloc_fixed(func: &mut Function, align: u32, size: u32, cabi_realloc: u32) {
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32Const(align as i32));
+    func.instruction(&Instruction::I32Const(size as i32));
+    func.instruction(&Instruction::Call(cabi_realloc));
+}
+
+/// Emit `cabi_realloc(0, 0, elem_align, len * elem_size)`, leaving the
+/// element-buffer pointer on the stack — a fresh buffer for a `len`-element
+/// array of `elem_size`-byte elements. `len` is read from `len_local`.
+pub(super) fn emit_cabi_realloc_array(
+    func: &mut Function,
+    len_local: u32,
+    elem_size: u32,
+    elem_align: u32,
+    cabi_realloc: u32,
+) {
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32Const(0));
+    func.instruction(&Instruction::I32Const(elem_align as i32));
+    func.instruction(&Instruction::LocalGet(len_local));
+    func.instruction(&Instruction::I32Const(elem_size as i32));
+    func.instruction(&Instruction::I32Mul);
+    func.instruction(&Instruction::Call(cabi_realloc));
+}
 
 /// Compute the total `MountComponent` retention count for a component.
 /// Every mount site (regardless of whether it lives inside a for-body)
@@ -34,10 +65,9 @@ pub(super) fn compute_mount_retention_counts(component: &LirResource) -> u32 {
 /// - `WasmParam { idx }` → `idx` (the slot *is* a wasm param; the
 ///   enclosing function's `local_offset` is ignored).
 ///
-/// Panics on Memory / BoundaryField — those must never reach a
-/// `LocalGet` / `LocalSet` emission path (they're only addressable via
-/// `StoreHandle` / `LoadHandle` or struct-get/set against a tree
-/// boundary ref). Hitting the panic indicates a lowering bug.
+/// Panics on Memory — those must never reach a `LocalGet` / `LocalSet`
+/// emission path (they're only addressable via `StoreHandle` /
+/// `LoadHandle`). Hitting the panic indicates a lowering bug.
 ///
 /// Phase 0.3i: callers pass `local_offset` here instead of adding it
 /// at the call site, so the `WasmParam` variant can bypass the offset.
@@ -70,10 +100,6 @@ pub(crate) fn slot_local(
         LirSlotKind::WasmParam { idx } => idx,
         LirSlotKind::Memory { .. } => panic!(
             "slot {:?} is a Memory slot but was used as a WASM local (LocalGet/LocalSet)",
-            slot
-        ),
-        LirSlotKind::BoundaryField { .. } => panic!(
-            "slot {:?} is a BoundaryField slot but was used as a WASM local (LocalGet/LocalSet)",
             slot
         ),
     }
@@ -118,10 +144,6 @@ pub(crate) fn slot_local_resource_only(
             LirSlotKind::WasmParam { idx } => idx,
             LirSlotKind::Memory { .. } => panic!(
                 "slot {:?} is a Memory slot but was used as a WASM local (LocalGet/LocalSet)",
-                slot
-            ),
-            LirSlotKind::BoundaryField { .. } => panic!(
-                "slot {:?} is a BoundaryField slot but was used as a WASM local (LocalGet/LocalSet)",
                 slot
             ),
         },

@@ -4,6 +4,11 @@
 //! - WIT (WebAssembly Interface Types) generation
 //! - WebAssembly component generation
 
+// Codegen/lowering routines legitimately thread many positional parameters;
+// bundling them into immediately-destructured structs hurt readability more
+// than it helped, so the lint is allowed crate-wide.
+#![allow(clippy::too_many_arguments)]
+
 use thiserror::Error;
 
 pub mod dot;

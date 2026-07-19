@@ -17,12 +17,15 @@ use crate::ids::{DefId, LocalId, NodeId};
 use crate::interner::Name;
 use super::blocks::BlockLowering;
 use crate::source::Span;
+use crate::thir::expr::ThirClosure;
+use crate::thir::visit::{walk_expr, ThirVisitor};
 use crate::thir::{
     ThirBinding, ThirComponent, ThirExpr, ThirExprKind, ThirHandler, ThirInterpolationPart,
     ThirNode, ThirNodeKind, ThirStatement,
 };
 use crate::types::{InternedTyKind, Ty};
 
+use crate::lir::block::LirExprId;
 use crate::lir::expr::{LirExpr, LirExprKind, LirLiteral, LirStatement};
 use crate::lir::layout::LirLayoutContext;
 
@@ -88,6 +91,10 @@ pub(crate) struct TreeLirResource {
     pub signals: Vec<LirSignal>,
     pub effects: Vec<LirEffect>,
     pub body: Vec<LirNode>,
+    /// Expression arena: `LirExprId`s in `signals`/`effects`/`body` index into
+    /// this. Built by `lower_expr` during the tree stage; the block stage
+    /// continues appending to it (see `BlockLowering::new`).
+    pub exprs: Vec<LirExpr>,
 }
 
 /// Lower a THIR component to block-based LIR (ready for codegen).
@@ -103,17 +110,21 @@ pub fn lower_component(component: &ThirComponent, ctx: &CompilerContext) -> LirR
 ///
 /// Global defaults are module-scoped (not attached to any single component),
 /// so they use their own lowering pass. Returns a map from property DefId to
-/// the LIR expression that should seed its backing memory slot at module start.
+/// the top-level LIR expression that seeds its backing slot at module start,
+/// plus the shared expression arena those expressions' `LirExprId` children
+/// index into.
 pub fn lower_globals(
     thir_defaults: &HashMap<DefId, crate::thir::ThirExpr>,
     ctx: &CompilerContext,
-) -> HashMap<DefId, LirExpr> {
+) -> (HashMap<DefId, LirExpr>, Vec<LirExpr>) {
     let empty_locals = crate::hir::local_scope::LocalScope::new();
     let lowering = LirLowering::for_module(ctx, &empty_locals);
-    thir_defaults
+    let map = thir_defaults
         .iter()
         .map(|(def_id, thir_expr)| (*def_id, lowering.lower_expr(thir_expr)))
-        .collect()
+        .collect();
+    let exprs = lowering.exprs.into_inner();
+    (map, exprs)
 }
 
 /// Scope for LIR lowering: either a specific component or module-scoped
@@ -148,6 +159,11 @@ struct LirLowering<'ctx, 'comp> {
     locals: &'comp crate::hir::local_scope::LocalScope,
     /// Layout context for computing type sizes (uses RefCell for interior mutability).
     layout_ctx: RefCell<LirLayoutContext<'ctx>>,
+    /// Expression arena built bottom-up as `lower_expr` interns children.
+    /// Flows into `TreeLirResource::exprs` and onward to `LirResource::exprs`;
+    /// `LirExprId`s in lowered expressions index into it. `RefCell` because
+    /// `lower_expr` is `&self` (matching `layout_ctx`).
+    exprs: RefCell<Vec<LirExpr>>,
     /// Monotonic counter for minting `ForId`s. Each `ThirNodeKind::For` we
     /// lower mints one id; the id is pushed onto `for_stack` for the
     /// duration of the body lowering so effects registered inside pick
@@ -181,6 +197,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
             signal_def_ids,
             locals,
             layout_ctx: RefCell::new(LirLayoutContext::new(ctx)),
+            exprs: RefCell::new(Vec::new()),
             next_for_id: 0,
             for_stack: Vec::new(),
         }
@@ -202,9 +219,24 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
             signal_def_ids,
             locals,
             layout_ctx: RefCell::new(LirLayoutContext::new(ctx)),
+            exprs: RefCell::new(Vec::new()),
             next_for_id: 0,
             for_stack: Vec::new(),
         }
+    }
+
+    /// Push a lowered expression into the arena, returning its handle.
+    fn intern(&self, e: LirExpr) -> LirExprId {
+        let mut exprs = self.exprs.borrow_mut();
+        let id = LirExprId(exprs.len() as u32);
+        exprs.push(e);
+        id
+    }
+
+    /// Lower a THIR child expression and intern it, returning its handle.
+    fn lower_child(&self, e: &ThirExpr) -> LirExprId {
+        let lowered = self.lower_expr(e);
+        self.intern(lowered)
     }
 
     /// Append every global-singleton property's DefId to `signal_def_ids` so
@@ -243,6 +275,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
             signals,
             effects: std::mem::take(&mut self.effects),
             body,
+            exprs: std::mem::take(&mut *self.exprs.borrow_mut()),
         }
     }
 
@@ -599,13 +632,13 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
 
             ThirExprKind::Binary { op, lhs, rhs } => LirExprKind::Binary {
                 op: *op,
-                lhs: Box::new(self.lower_expr(lhs)),
-                rhs: Box::new(self.lower_expr(rhs)),
+                lhs: self.lower_child(lhs),
+                rhs: self.lower_child(rhs),
             },
 
             ThirExprKind::Unary { op, operand } => LirExprKind::Unary {
                 op: *op,
-                operand: Box::new(self.lower_expr(operand)),
+                operand: self.lower_child(operand),
             },
 
             ThirExprKind::Field {
@@ -613,7 +646,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                 field_idx,
                 field_def: _,
             } => LirExprKind::Field {
-                base: Box::new(self.lower_expr(base)),
+                base: self.lower_child(base),
                 field_idx: *field_idx,
             },
 
@@ -625,14 +658,14 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                 // For now, treat optional field same as regular field
                 // TODO: Desugar to match expression
                 LirExprKind::Field {
-                    base: Box::new(self.lower_expr(base)),
+                    base: self.lower_child(base),
                     field_idx: *field_idx,
                 }
             }
 
             ThirExprKind::Index { base, index } => LirExprKind::Index {
-                base: Box::new(self.lower_expr(base)),
-                index: Box::new(self.lower_expr(index)),
+                base: self.lower_child(base),
+                index: self.lower_child(index),
             },
 
             ThirExprKind::Call { func, args } => {
@@ -640,7 +673,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                 // Codegen will handle known functions specially based on DefId.
                 LirExprKind::Call {
                     func: *func,
-                    args: args.iter().map(|a| self.lower_expr(a)).collect(),
+                    args: args.iter().map(|a| self.lower_child(a)).collect(),
                 }
             }
 
@@ -649,8 +682,8 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                 end,
                 inclusive,
             } => LirExprKind::Range {
-                start: Box::new(self.lower_expr(start)),
-                end: Box::new(self.lower_expr(end)),
+                start: self.lower_child(start),
+                end: self.lower_child(end),
                 inclusive: *inclusive,
             },
 
@@ -659,16 +692,16 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                 then_expr,
                 else_expr,
             } => LirExprKind::Ternary {
-                condition: Box::new(self.lower_expr(condition)),
-                then_expr: Box::new(self.lower_expr(then_expr)),
-                else_expr: Box::new(self.lower_expr(else_expr)),
+                condition: self.lower_child(condition),
+                then_expr: self.lower_child(then_expr),
+                else_expr: self.lower_child(else_expr),
             },
 
-            ThirExprKind::Closure { params, body, .. } => {
+            ThirExprKind::Closure(closure) => {
                 // Lower closure to LirExprKind::Closure for use in filter/map/etc.
-                let lowered_params: Vec<(LocalId, Ty)> = params.clone();
+                let lowered_params: Vec<(LocalId, Ty)> = closure.params.clone();
                 let lowered_body: Vec<LirStatement> =
-                    body.iter().map(|s| self.lower_statement(s)).collect();
+                    closure.body.iter().map(|s| self.lower_statement(s)).collect();
                 LirExprKind::Closure {
                     params: lowered_params,
                     body: lowered_body,
@@ -695,7 +728,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                                 LirExpr::new(
                                     LirExprKind::Call {
                                         func: conv_func,
-                                        args: vec![lowered],
+                                        args: vec![self.intern(lowered)],
                                     },
                                     Ty::STRING,
                                 )
@@ -711,10 +744,10 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                     return exprs.into_iter().next().unwrap();
                 }
 
-                // Multi-part: wrap in a call to concat
+                // Multi-part: intern each part and wrap in a call to concat.
                 LirExprKind::Call {
                     func: concat_func,
-                    args: exprs,
+                    args: exprs.into_iter().map(|e| self.intern(e)).collect(),
                 }
             }
 
@@ -730,7 +763,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
             } => LirExprKind::VariantCtor {
                 ty_def: *ty_def,
                 case_idx: case_idx.0,
-                payload: payload.as_ref().map(|p| Box::new(self.lower_expr(p))),
+                payload: payload.as_ref().map(|p| self.lower_child(p)),
             },
 
             // ========== List/Record/Tuple Literals ==========
@@ -742,8 +775,8 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                 let element_size = self.layout_ctx.borrow_mut().layout_of(*element_ty).size;
 
                 // Lower all element expressions
-                let lowered_elements: Vec<_> =
-                    elements.iter().map(|e| self.lower_expr(e)).collect();
+                let lowered_elements: Vec<LirExprId> =
+                    elements.iter().map(|e| self.lower_child(e)).collect();
 
                 LirExprKind::ListConstruct {
                     elements: lowered_elements,
@@ -756,7 +789,8 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                 let record_layout = self.layout_ctx.borrow_mut().layout_of(expr.ty);
 
                 // Lower all field expressions
-                let lowered_fields: Vec<_> = fields.iter().map(|f| self.lower_expr(f)).collect();
+                let lowered_fields: Vec<LirExprId> =
+                    fields.iter().map(|f| self.lower_child(f)).collect();
 
                 LirExprKind::RecordConstruct {
                     record_def: *record_def,
@@ -770,8 +804,8 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                 let tuple_layout = self.layout_ctx.borrow_mut().layout_of(expr.ty);
 
                 // Lower all element expressions
-                let lowered_elements: Vec<_> =
-                    elements.iter().map(|e| self.lower_expr(e)).collect();
+                let lowered_elements: Vec<LirExprId> =
+                    elements.iter().map(|e| self.lower_child(e)).collect();
 
                 LirExprKind::TupleConstruct {
                     elements: lowered_elements,
@@ -781,9 +815,15 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
 
             ThirExprKind::GlobalRead { prop, .. } => LirExprKind::SignalRead(*prop),
 
-            ThirExprKind::GlobalCall { function, args, .. } => LirExprKind::GlobalCall {
-                function: *function,
-                args: args.iter().map(|a| self.lower_expr(a)).collect(),
+            // A call on a global singleton lowers to the same generic
+            // `Call` as a component callback — both are calls to a
+            // host-imported function resolved by `DefId`. Codegen decides
+            // whether to push a receiver handle from the callee's kind
+            // (resource method vs freestanding global/host fn); the LIR
+            // call op is uniform.
+            ThirExprKind::GlobalCall { function, args, .. } => LirExprKind::Call {
+                func: *function,
+                args: args.iter().map(|a| self.lower_child(a)).collect(),
             },
 
             ThirExprKind::Error => {
@@ -791,7 +831,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
             }
         };
 
-        LirExpr::new(kind, expr.ty)
+        LirExpr::new_spanned(kind, expr.ty, expr.span)
     }
 
     // ========== Statement lowering ==========
@@ -861,46 +901,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
     /// Get the appropriate to-string conversion function for a given type.
     /// Primitives get type-specific functions, complex types get object_to_string.
     fn get_to_string_func_for_type(&self, ty: Ty) -> DefId {
-        let ty_kind = self.ctx.types.kind(ty);
-        match ty_kind {
-            InternedTyKind::Bool => self.ctx.known.functions.bool_to_string(),
-            InternedTyKind::S8 | InternedTyKind::S16 | InternedTyKind::S32 => {
-                self.ctx.known.functions.s32_to_string()
-            }
-            InternedTyKind::U8 | InternedTyKind::U16 | InternedTyKind::U32 => {
-                self.ctx.known.functions.u32_to_string()
-            }
-            InternedTyKind::S64 => self.ctx.known.functions.s64_to_string(),
-            InternedTyKind::U64 => self.ctx.known.functions.u64_to_string(),
-            InternedTyKind::F32 => self.ctx.known.functions.f32_to_string(),
-            InternedTyKind::F64 => self.ctx.known.functions.f64_to_string(),
-            InternedTyKind::Char => self.ctx.known.functions.char_to_string(),
-            // All complex types use the generic object_to_string
-            InternedTyKind::String => {
-                // Should not happen - string doesn't need conversion
-                // But return object_to_string as fallback
-                self.ctx.known.functions.object_to_string()
-            }
-            InternedTyKind::List(_)
-            | InternedTyKind::Option(_)
-            | InternedTyKind::Result { .. }
-            | InternedTyKind::Tuple(_)
-            | InternedTyKind::Adt(_)
-            | InternedTyKind::Func { .. }
-            | InternedTyKind::Length
-            | InternedTyKind::PhysicalLength
-            | InternedTyKind::Angle
-            | InternedTyKind::Duration
-            | InternedTyKind::Percent
-            | InternedTyKind::RelativeFontSize
-            | InternedTyKind::Color
-            | InternedTyKind::Brush
-            | InternedTyKind::Image
-            | InternedTyKind::Easing
-            | InternedTyKind::Error
-            | InternedTyKind::Unknown
-            | InternedTyKind::Unit => self.ctx.known.functions.object_to_string(),
-        }
+        self.ctx.to_string_func_for(ty)
     }
 
     // ========== Dependency tracking ==========
@@ -908,120 +909,56 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
     /// Collect signal dependencies from an expression.
     fn collect_dependencies(&self, expr: &ThirExpr) -> Vec<DefId> {
         let mut deps = Vec::new();
-        self.collect_dependencies_inner(expr, &mut deps);
+        DepCollector {
+            signal_def_ids: &self.signal_def_ids,
+            locals: self.locals,
+            deps: &mut deps,
+        }
+        .visit_expr(expr);
         deps.sort_by_key(|d| d.0);
         deps.dedup();
         deps
     }
+}
 
-    fn collect_dependencies_inner(&self, expr: &ThirExpr, deps: &mut Vec<DefId>) {
+/// Visitor that collects the signal `DefId`s an expression depends on, for the
+/// reactive-update graph. Unlike the THIR read collector in `signalck`, this
+/// (a) keys off `signal_def_ids` rather than a predicate, (b) counts
+/// `GlobalRead` of a signal property as a dependency, and (c) treats closure
+/// bodies as opaque (filter/map predicates run later, not at the dependency's
+/// recompute site). The recursion itself lives in `thir::visit::walk_expr`.
+struct DepCollector<'a> {
+    signal_def_ids: &'a [DefId],
+    locals: &'a crate::hir::local_scope::LocalScope,
+    deps: &'a mut Vec<DefId>,
+}
+
+impl ThirVisitor for DepCollector<'_> {
+    fn visit_expr(&mut self, expr: &ThirExpr) {
         match &expr.kind {
             ThirExprKind::Def(def_id) => {
                 if self.signal_def_ids.contains(def_id) {
-                    deps.push(*def_id);
+                    self.deps.push(*def_id);
                 }
             }
-
-            ThirExprKind::Binary { lhs, rhs, .. } => {
-                self.collect_dependencies_inner(lhs, deps);
-                self.collect_dependencies_inner(rhs, deps);
-            }
-
-            ThirExprKind::Unary { operand, .. } => {
-                self.collect_dependencies_inner(operand, deps);
-            }
-
-            ThirExprKind::Field { base, .. } | ThirExprKind::OptionalField { base, .. } => {
-                self.collect_dependencies_inner(base, deps);
-            }
-
-            ThirExprKind::Index { base, index } => {
-                self.collect_dependencies_inner(base, deps);
-                self.collect_dependencies_inner(index, deps);
-            }
-
-            ThirExprKind::Call { args, .. } => {
-                for arg in args {
-                    self.collect_dependencies_inner(arg, deps);
-                }
-            }
-
-            ThirExprKind::Ternary {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                self.collect_dependencies_inner(condition, deps);
-                self.collect_dependencies_inner(then_expr, deps);
-                self.collect_dependencies_inner(else_expr, deps);
-            }
-
-            ThirExprKind::Interpolation(parts) => {
-                for part in parts {
-                    if let ThirInterpolationPart::Expr(e) = part {
-                        self.collect_dependencies_inner(e, deps);
-                    }
-                }
-            }
-
-            ThirExprKind::Range { start, end, .. } => {
-                self.collect_dependencies_inner(start, deps);
-                self.collect_dependencies_inner(end, deps);
-            }
-
-            ThirExprKind::VariantCtor { payload, .. } => {
-                if let Some(p) = payload {
-                    self.collect_dependencies_inner(p, deps);
-                }
-            }
-
             ThirExprKind::Local(local_id) => {
-                // Check if this local corresponds to a signal
-                let local_info = self.locals.get(*local_id);
-                if let Some(def_id) = local_info.def_id {
-                    if self.signal_def_ids.contains(&def_id) {
-                        deps.push(def_id);
-                    }
+                if let Some(def_id) = self.locals.get(*local_id).def_id
+                    && self.signal_def_ids.contains(&def_id)
+                {
+                    self.deps.push(def_id);
                 }
             }
-
-            // List/Record/Tuple literals - collect deps from elements/fields
-            ThirExprKind::ListLiteral { elements, .. } => {
-                for elem in elements {
-                    self.collect_dependencies_inner(elem, deps);
-                }
-            }
-
-            ThirExprKind::RecordLiteral { fields, .. } => {
-                for field in fields {
-                    self.collect_dependencies_inner(field, deps);
-                }
-            }
-
-            ThirExprKind::TupleLiteral { elements } => {
-                for elem in elements {
-                    self.collect_dependencies_inner(elem, deps);
-                }
-            }
-
-            // No dependencies
-            ThirExprKind::Literal(_)
-            | ThirExprKind::EnumCase { .. }
-            | ThirExprKind::Closure { .. }
-            | ThirExprKind::Error => {}
-
             ThirExprKind::GlobalRead { prop, .. } => {
                 if self.signal_def_ids.contains(prop) {
-                    deps.push(*prop);
+                    self.deps.push(*prop);
                 }
             }
-            ThirExprKind::GlobalCall { args, .. } => {
-                for arg in args {
-                    self.collect_dependencies_inner(arg, deps);
-                }
-            }
+            _ => walk_expr(self, expr),
         }
     }
+
+    /// Dependency collection does not descend into closure bodies.
+    fn visit_closure(&mut self, _closure: &ThirClosure) {}
 }
 
 #[cfg(test)]
@@ -1031,22 +968,24 @@ mod tests {
     use crate::hir::local_scope::LocalScope;
     use crate::interner::Name;
     use crate::lir::LirOp;
-    use crate::source::{SourceId, Span};
+    use crate::source::Span;
 
     fn dummy_span() -> Span {
-        Span::new(SourceId(0), 0, 0)
+        Span::default()
     }
 
     fn create_test_ctx_with_component(name: &str) -> (CompilerContext, DefId) {
         let mut ctx = CompilerContext::new();
-        // Phase 2.2: lowering reads `ctx.dom_imports()` to construct
-        // `LirOp::CallFunction` for DOM ops. Register them on the test
-        // ctx so the helper produces a ctx ready for the lowering pass.
-        let dom = crate::dom_imports::register_dom_imports(&mut ctx);
-        ctx.set_dom_imports(dom);
+        // Full known-definitions init: registers builtin types/variants
+        // (incl. `AttributeValue`, which the DOM signatures reference) and
+        // the `dom_imports` table the lowering reads to build
+        // `LirOp::CallFunction` for DOM ops.
+        crate::stdlib_lookup::lookup_known_definitions(&mut ctx);
         let comp_name = ctx.intern(name);
         // Pre-allocate a DefId for the component
-        let def_id = DefId::new(ctx.defs.len() as u32);
+        let def_id = DefId::new(
+            u32::try_from(ctx.defs.len()).expect("definitions table exceeded u32::MAX entries"),
+        );
         ctx.defs.alloc(
             comp_name,
             DefKind::Component(ComponentDef {
@@ -1074,7 +1013,6 @@ mod tests {
             body: vec![],
             locals: LocalScope::new(),
             signal_defaults: HashMap::new(),
-            signal_deps: crate::thir::signalck::SignalDependencies::default(),
         };
 
         let lir = lower_component(&component, &ctx);
@@ -1103,7 +1041,6 @@ mod tests {
             span: dummy_span(),
             is_export: true,
             signal_defaults: HashMap::new(),
-            signal_deps: crate::thir::signalck::SignalDependencies::default(),
             body: vec![ThirNode::new(
                 NodeId::new(0),
                 ThirNodeKind::Text(ThirExpr::new(

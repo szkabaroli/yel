@@ -178,6 +178,9 @@ pub fn project_tree_shape(
     // ChildrenArray fields can index by struct boundary.
     // Keyed by iter-body boundary index — that's what the
     // ChildrenArray field decl carries as `arr_target_idx`.
+    // The block lowering keys `Array*` ops by the same registry index via
+    // `for_anchor_array_idx` (the Nth ForAnchor in boundary order → array
+    // index N), which mirrors this allocation order.
     let mut iter_body_to_array: HashMap<u32, LirArrayTypeIdx> = HashMap::new();
     for boundary in &tree.boundaries {
         if let TreeBoundaryKind::ForAnchor {
@@ -243,7 +246,7 @@ fn project_field(
         },
         TreeFieldDecl::LoopVar { name, val_ty } => LirStructFieldDecl {
             name: name.clone(),
-            val_ty: val_ty.clone(),
+            val_ty: *val_ty,
             ref_target: None,
             role: LirFieldRole::LoopVar,
             mutable: true,

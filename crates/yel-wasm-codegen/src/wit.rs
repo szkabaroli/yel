@@ -9,7 +9,7 @@
 use super::CodegenError;
 use crate::wit_ast::WitAstBuilder;
 use yel_core::context::CompilerContext;
-use yel_core::lir::LirResource;
+use yel_core::lir::{LirInterface, LirResource};
 
 use wit_encoder::packages_from_parsed;
 
@@ -34,6 +34,7 @@ pub struct WitOptions {
 /// world — no special casing at the call site.
 pub fn generate_wit(
     components: &[LirResource],
+    interfaces: &[LirInterface],
     ctx: &CompilerContext,
     options: &WitOptions,
 ) -> Result<String, CodegenError> {
@@ -41,6 +42,7 @@ pub fn generate_wit(
     let all: Vec<&LirResource> = components.iter().collect();
 
     let mut builder = WitAstBuilder::new(ctx, &options.namespace, &options.name, &options.version);
+    builder.set_import_contract(interfaces);
     builder.build_wit_with_all(&exported, &all)?;
 
     let (resolve, _world_id) = builder.into_resolve_and_world();

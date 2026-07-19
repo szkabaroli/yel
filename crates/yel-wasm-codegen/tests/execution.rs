@@ -114,22 +114,32 @@ fn compile_to_component(source: &str) -> Vec<u8> {
         compiler.render_diagnostics()
     );
     let mut lir_components = Vec::new();
-    for h in &hir {
-        let thir = compiler.type_check(h);
-        assert!(
-            !compiler.has_errors(),
-            "typeck errors:\n{}",
-            compiler.render_diagnostics()
-        );
-        lir_components.push(compiler.lower_to_lir(&thir));
+    let mut global_thir_defaults: std::collections::HashMap<
+        yel_core::DefId,
+        yel_core::thir::ThirExpr,
+    > = std::collections::HashMap::new();
+    for item in &hir {
+        match compiler.type_check(item) {
+            yel_core::thir::ThirItem::Component(thir) => {
+                assert!(
+                    !compiler.has_errors(),
+                    "typeck errors:\n{}",
+                    compiler.render_diagnostics()
+                );
+                lir_components.push(compiler.lower_to_lir(&thir));
+            }
+            yel_core::thir::ThirItem::Global(global) => {
+                assert!(
+                    !compiler.has_errors(),
+                    "global typeck errors:\n{}",
+                    compiler.render_diagnostics()
+                );
+                global_thir_defaults.extend(global.signal_defaults);
+            }
+        }
     }
-    let thir_globals = compiler.type_check_globals();
-    assert!(
-        !compiler.has_errors(),
-        "global typeck errors:\n{}",
-        compiler.render_diagnostics()
-    );
-    let lir_globals = compiler.lower_globals_to_lir(&thir_globals);
+    let (lir_globals, lir_global_default_exprs) =
+        compiler.lower_globals_to_lir(&global_thir_defaults);
 
     let (namespace, name, version) = match file.package {
         Some(ref pkg) => (
@@ -140,9 +150,12 @@ fn compile_to_component(source: &str) -> Vec<u8> {
         None => ("yel".into(), "app".into(), "0.1.0".into()),
     };
 
+    let interfaces = compiler.build_import_interfaces();
     let module = yel_core::lir::LirModule {
-        components: lir_components,
+        resources: lir_components,
         global_defaults: lir_globals.clone(),
+        global_default_exprs: lir_global_default_exprs.clone(),
+        interfaces,
         package: file.package.clone(),
     };
     let opts = codegen::WasmWithWitOptions {
@@ -150,6 +163,7 @@ fn compile_to_component(source: &str) -> Vec<u8> {
         name,
         version,
         global_defaults: lir_globals,
+        global_default_exprs: lir_global_default_exprs,
         wasm_opt_args: None,
     };
     codegen::generate_wasm_module(&module, compiler.context(), &opts).expect("wasm codegen")
@@ -466,7 +480,6 @@ fn ctor_and_mount(h: &mut Harness, iface: &str, resource: &str) -> ResourceAny {
     let ctor = get_func(h, iface, &format!("[constructor]{}", resource));
     let mut out = [Val::Bool(false)];
     ctor.call(&mut h.store, &[], &mut out).expect("ctor call");
-    ctor.post_return(&mut h.store).ok();
     let resource_val = std::mem::replace(&mut out[0], Val::Bool(false));
     let self_res = match resource_val {
         Val::Resource(r) => r,
@@ -485,7 +498,6 @@ fn ctor_and_mount(h: &mut Harness, iface: &str, resource: &str) -> ResourceAny {
             &mut mount_out,
         )
         .expect("mount call");
-    mount.post_return(&mut h.store).ok();
     self_res
 }
 
@@ -497,7 +509,6 @@ fn call_dispatch_with_event(h: &mut Harness, handler_id: u32, event: Val) {
     let mut out: Vec<Val> = Vec::new();
     f.call(&mut h.store, &[Val::U32(handler_id), event], &mut out)
         .expect("dispatch");
-    f.post_return(&mut h.store).ok();
 }
 
 /// Convenience wrapper for payload-less events (click / hover / pressed /
@@ -513,29 +524,6 @@ fn dispatch_input_number(h: &mut Harness, handler_id: u32, value: f64) {
         h,
         handler_id,
         Val::Variant("input-f64".into(), Some(Box::new(Val::Float64(value)))),
-    );
-}
-
-/// Dispatch a DOM `input` event whose underlying `<input>` had
-/// `type="text"` — wraps `event-value::input-text(value)`.
-fn dispatch_input_text(h: &mut Harness, handler_id: u32, value: &str) {
-    call_dispatch_with_event(
-        h,
-        handler_id,
-        Val::Variant(
-            "input-text".into(),
-            Some(Box::new(Val::String(value.to_string()))),
-        ),
-    );
-}
-
-/// Dispatch a DOM `input` event whose underlying `<input>` had
-/// `type="checkbox"` — wraps `event-value::input-bool(value)`.
-fn dispatch_input_bool(h: &mut Harness, handler_id: u32, value: bool) {
-    call_dispatch_with_event(
-        h,
-        handler_id,
-        Val::Variant("input-bool".into(), Some(Box::new(Val::Bool(value)))),
     );
 }
 
@@ -556,7 +544,6 @@ fn call_setter(
     let mut out: Vec<Val> = Vec::new();
     f.call(&mut h.store, &[Val::Resource(*self_res), value], &mut out)
         .expect("setter");
-    f.post_return(&mut h.store).ok();
 }
 
 fn find_listener_handler(dom: &SharedDom, event: &str) -> Option<u32> {
@@ -711,14 +698,12 @@ fn two_instances_have_independent_signals() {
     let ctor = get_func(&mut h, iface, "[constructor]app");
     let mut out_a = [Val::Bool(false)];
     ctor.call(&mut h.store, &[], &mut out_a).expect("ctor A");
-    ctor.post_return(&mut h.store).ok();
     let a = match std::mem::replace(&mut out_a[0], Val::Bool(false)) {
         Val::Resource(r) => r,
         other => panic!("ctor A non-resource {:?}", other),
     };
     let mut out_b = [Val::Bool(false)];
     ctor.call(&mut h.store, &[], &mut out_b).expect("ctor B");
-    ctor.post_return(&mut h.store).ok();
     let b = match std::mem::replace(&mut out_b[0], Val::Bool(false)) {
         Val::Resource(r) => r,
         other => panic!("ctor B non-resource {:?}", other),
@@ -733,7 +718,6 @@ fn two_instances_have_independent_signals() {
         get_count
             .call(&mut h.store, &[Val::Resource(*r)], &mut out)
             .expect("get-count");
-        get_count.post_return(&mut h.store).ok();
         match &out[0] {
             Val::S32(v) => *v,
             other => panic!("get-count returned non-s32 {:?}", other),
@@ -784,7 +768,6 @@ fn two_parents_each_mount_independent_children() {
         get_count
             .call(&mut h.store, &[Val::Resource(*r)], &mut out)
             .expect("get-count");
-        get_count.post_return(&mut h.store).ok();
         match &out[0] {
             Val::S32(v) => *v,
             other => panic!("get-count non-s32 {:?}", other),
@@ -919,7 +902,6 @@ fn dispatch_routes_to_correct_handler() {
     get_count
         .call(&mut h.store, &[Val::Resource(self_res)], &mut out)
         .expect("get-count");
-    get_count.post_return(&mut h.store).ok();
     let count = match &out[0] {
         Val::S32(v) => *v,
         other => panic!("get-count returned non-s32 {:?}", other),
@@ -1006,7 +988,6 @@ fn two_instances_dispatch_to_correct_handler() {
         get_count
             .call(&mut h.store, &[Val::Resource(*r)], &mut out)
             .expect("get-count");
-        get_count.post_return(&mut h.store).ok();
         match &out[0] {
             Val::S32(v) => *v,
             other => panic!("get-count returned non-s32 {:?}", other),
@@ -1259,7 +1240,6 @@ fn button_click_propagates_through_full_reactive_chain() {
     get_on
         .call(&mut h.store, &[Val::Resource(self_res)], &mut out)
         .expect("get-on");
-    get_on.post_return(&mut h.store).ok();
     let value = match &out[0] {
         Val::Bool(v) => *v,
         other => panic!("get-on returned non-bool {:?}", other),
@@ -1323,7 +1303,6 @@ fn narrow_type_signal_write_preserves_adjacent_string() {
         get_flag
             .call(&mut h.store, &[Val::Resource(self_res)], &mut out)
             .unwrap();
-        get_flag.post_return(&mut h.store).ok();
         let flipped = match out[0] {
             Val::Bool(b) => !b,
             _ => panic!(),
@@ -1350,7 +1329,6 @@ fn narrow_type_signal_write_preserves_adjacent_string() {
     get_label
         .call(&mut h.store, &[Val::Resource(self_res)], &mut out)
         .expect("get-label");
-    get_label.post_return(&mut h.store).ok();
     let label = match &out[0] {
         Val::String(s) => s.clone(),
         other => panic!("get-label returned non-string {:?}", other),
@@ -3906,4 +3884,325 @@ fn count_struct_types_with_name_prefix(bytes: &[u8], prefix: &str) -> usize {
         }
     }
     count
+}
+
+// ============================================================================
+// Gap 1 — post-return (`cabi_post_*`) free-walk for aggregate getters
+// ============================================================================
+
+/// A GC-migrated `list` signal's getter materialises a fresh linear-memory
+/// buffer per call and returns a pointer to it; the canonical ABI reclaims it
+/// through an exported `cabi_post_*`. This is both a correctness AND a leak
+/// test:
+///
+/// * **Wiring/validation** — the component is encoded with `.validate(true)`
+///   and decoded+instantiated by wasmtime; a malformed post-return fails here.
+/// * **Reclamation** — the bump allocator never calls `memory.grow`, so the
+///   heap is capped at the initial 17 pages (~1.1 MiB). Each call materialises
+///   a 256-element (~1 KiB) buffer; 4000 calls would allocate ~4 MiB. Without
+///   the free this exhausts the heap and the next store traps; with the
+///   `cabi_post` free-walk reclaiming each buffer the heap stays bounded and
+///   every call returns the correct list. wasmtime invokes the guest's
+///   post-return automatically after lifting each result.
+#[test]
+fn aggregate_list_getter_post_return_frees_and_stays_correct() {
+    const N: u32 = 256;
+    let elems = (0..N).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+    let source = format!(
+        r#"
+        package yel:agg@0.1.0;
+        export component App {{
+            nums: list<u32> = [{elems}];
+            VStack {{ Text {{ "x" }} }}
+        }}
+    "#
+    );
+    let bytes = compile_to_component(&source);
+    let iface = "yel:agg/app-component@0.1.0";
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let res = ctor_and_mount(&mut h, iface, "app");
+    let getter = get_func(&mut h, iface, "[method]app.get-nums");
+    let expected: Vec<u32> = (0..N).collect();
+    // 4000 * ~1 KiB = ~4 MiB > 1.1 MiB heap: only reclamation keeps this alive.
+    for i in 0..4000u32 {
+        let mut out = [Val::Bool(false)];
+        getter
+            .call(&mut h.store, &[Val::Resource(res)], &mut out)
+            .unwrap_or_else(|e| panic!("get-nums call #{i} failed (heap exhausted = leak?): {e}"));
+        match &out[0] {
+            Val::List(items) => {
+                let got: Vec<u32> = items
+                    .iter()
+                    .map(|v| match v {
+                        Val::U32(n) => *n,
+                        other => panic!("non-u32 list elem: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(got, expected, "wrong list on iteration #{i}");
+            }
+            other => panic!("get-nums returned non-list: {other:?}"),
+        }
+    }
+}
+
+/// Nested `list<list<u32>>` getter — exercises the RECURSIVE arm of the
+/// free-walk: each call materialises one outer element buffer plus an inner
+/// element buffer per outer element, and the post-return must free every inner
+/// buffer (via a runtime loop) before the outer buffer and the scratch. Sized
+/// so that leaking even one level would exhaust the ~1.1 MiB heap.
+#[test]
+fn nested_list_getter_post_return_frees_recursively() {
+    const OUTER: u32 = 32;
+    const INNER: u32 = 32;
+    let inner_lit = (0..INNER).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+    let outer_lit = (0..OUTER)
+        .map(|_| format!("[{inner_lit}]"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        r#"
+        package yel:agg2@0.1.0;
+        export component App {{
+            grid: list<list<u32>> = [{outer_lit}];
+            VStack {{ Text {{ "x" }} }}
+        }}
+    "#
+    );
+    let bytes = compile_to_component(&source);
+    let iface = "yel:agg2/app-component@0.1.0";
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let res = ctor_and_mount(&mut h, iface, "app");
+    let getter = get_func(&mut h, iface, "[method]app.get-grid");
+    let expected_inner: Vec<u32> = (0..INNER).collect();
+    // 4000 * (32*32*4) ≈ 16 MiB if leaking; heap is ~1.1 MiB.
+    for i in 0..4000u32 {
+        let mut out = [Val::Bool(false)];
+        getter
+            .call(&mut h.store, &[Val::Resource(res)], &mut out)
+            .unwrap_or_else(|e| panic!("get-grid #{i} failed (heap exhausted = leak?): {e}"));
+        match &out[0] {
+            Val::List(rows) => {
+                assert_eq!(rows.len(), OUTER as usize, "row count #{i}");
+                if let Val::List(first) = &rows[0] {
+                    let got: Vec<u32> = first
+                        .iter()
+                        .map(|v| match v {
+                            Val::U32(n) => *n,
+                            o => panic!("non-u32: {o:?}"),
+                        })
+                        .collect();
+                    assert_eq!(got, expected_inner, "inner row #{i}");
+                } else {
+                    panic!("row 0 not a list: {:?}", rows[0]);
+                }
+            }
+            other => panic!("get-grid returned non-list: {other:?}"),
+        }
+    }
+}
+
+/// `option<list<u32>>` getter — exercises the discriminant-branch arm: the
+/// free-walk must read the option tag and free the inner list buffer only when
+/// the value is `some`. Sized to OOM-without-free.
+#[test]
+fn option_list_getter_post_return_frees_payload() {
+    const N: u32 = 256;
+    let elems = (0..N).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+    let source = format!(
+        r#"
+        package yel:agg3@0.1.0;
+        export component App {{
+            maybe: option<list<u32>> = some([{elems}]);
+            VStack {{ Text {{ "x" }} }}
+        }}
+    "#
+    );
+    let bytes = compile_to_component(&source);
+    let iface = "yel:agg3/app-component@0.1.0";
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let res = ctor_and_mount(&mut h, iface, "app");
+    let getter = get_func(&mut h, iface, "[method]app.get-maybe");
+    let expected: Vec<u32> = (0..N).collect();
+    for i in 0..4000u32 {
+        let mut out = [Val::Bool(false)];
+        getter
+            .call(&mut h.store, &[Val::Resource(res)], &mut out)
+            .unwrap_or_else(|e| panic!("get-maybe #{i} failed (heap exhausted = leak?): {e}"));
+        match &out[0] {
+            Val::Option(Some(inner)) => match inner.as_ref() {
+                Val::List(items) => {
+                    let got: Vec<u32> = items
+                        .iter()
+                        .map(|v| match v {
+                            Val::U32(n) => *n,
+                            o => panic!("non-u32: {o:?}"),
+                        })
+                        .collect();
+                    assert_eq!(got, expected, "inner list #{i}");
+                }
+                o => panic!("some payload not a list: {o:?}"),
+            },
+            other => panic!("get-maybe returned non-some-option: {other:?}"),
+        }
+    }
+}
+
+/// `list<record>` getter where the record has a `string` field — exercises the
+/// Record arm of the free-walk AND the critical safety boundary that aliased
+/// strings are NOT freed. Each record's `label` points into the static string
+/// section / persistent storage; if the free-walk wrongly freed it, that
+/// address would be pushed onto the allocator free-list and corrupt a later
+/// call. Stable correct values across 4000 calls prove strings are treated as
+/// leaves while the element buffer + scratch are reclaimed.
+#[test]
+fn list_of_record_getter_frees_buffer_but_not_aliased_strings() {
+    const N: u32 = 256;
+    let items = (0..N)
+        .map(|i| format!(r#"{{ label: "item", n: {i} }}"#))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        r#"
+        package yel:agg4@0.1.0;
+        record Item {{ label: string, n: u32 }}
+        export component App {{
+            items: list<Item> = [{items}];
+            VStack {{ Text {{ "x" }} }}
+        }}
+    "#
+    );
+    let bytes = compile_to_component(&source);
+    let iface = "yel:agg4/app-component@0.1.0";
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let res = ctor_and_mount(&mut h, iface, "app");
+    let getter = get_func(&mut h, iface, "[method]app.get-items");
+    for i in 0..4000u32 {
+        let mut out = [Val::Bool(false)];
+        getter
+            .call(&mut h.store, &[Val::Resource(res)], &mut out)
+            .unwrap_or_else(|e| panic!("get-items #{i} failed (heap exhausted = leak?): {e}"));
+        match &out[0] {
+            Val::List(items) => {
+                assert_eq!(items.len(), N as usize, "item count #{i}");
+                // Spot-check first/last records: label intact (not freed) + n correct.
+                for (idx, slot) in [(0usize, 0u32), (N as usize - 1, N - 1)] {
+                    if let Val::Record(fields) = &items[idx] {
+                        let label = fields.iter().find(|(k, _)| k == "label").map(|(_, v)| v);
+                        let n = fields.iter().find(|(k, _)| k == "n").map(|(_, v)| v);
+                        assert_eq!(label, Some(&Val::String("item".into())), "label #{i}[{idx}]");
+                        assert_eq!(n, Some(&Val::U32(slot)), "n #{i}[{idx}]");
+                    } else {
+                        panic!("element {idx} not a record: {:?}", items[idx]);
+                    }
+                }
+            }
+            other => panic!("get-items returned non-list: {other:?}"),
+        }
+    }
+}
+
+/// `variant` signal with a `list` payload case — exercises the multi-case
+/// discriminant-branch arm of the free-walk: it must read the variant tag and
+/// free the payload's list buffer only for the matching case. Sized to
+/// OOM-without-free.
+#[test]
+fn variant_with_list_payload_getter_frees_active_case() {
+    const N: u32 = 256;
+    let elems = (0..N).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+    let source = format!(
+        r#"
+        package yel:agg5@0.1.0;
+        variant Choice {{ empty, picked(list<u32>) }}
+        export component App {{
+            choice: Choice = picked([{elems}]);
+            VStack {{ Text {{ "x" }} }}
+        }}
+    "#
+    );
+    let bytes = compile_to_component(&source);
+    let iface = "yel:agg5/app-component@0.1.0";
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let res = ctor_and_mount(&mut h, iface, "app");
+    let getter = get_func(&mut h, iface, "[method]app.get-choice");
+    let expected: Vec<u32> = (0..N).collect();
+    for i in 0..4000u32 {
+        let mut out = [Val::Bool(false)];
+        getter
+            .call(&mut h.store, &[Val::Resource(res)], &mut out)
+            .unwrap_or_else(|e| panic!("get-choice #{i} failed (heap exhausted = leak?): {e}"));
+        match &out[0] {
+            Val::Variant(case, Some(payload)) if case == "picked" => match payload.as_ref() {
+                Val::List(items) => {
+                    let got: Vec<u32> = items
+                        .iter()
+                        .map(|v| match v {
+                            Val::U32(n) => *n,
+                            o => panic!("non-u32: {o:?}"),
+                        })
+                        .collect();
+                    assert_eq!(got, expected, "payload list #{i}");
+                }
+                o => panic!("picked payload not a list: {o:?}"),
+            },
+            other => panic!("get-choice returned unexpected: {other:?}"),
+        }
+    }
+}
+
+// ============================================================================
+// Gap 3 — >16 flat-param pointer-spill trampoline for exported setters
+// ============================================================================
+
+/// A 16-field record signal makes the setter take `self` + 16 = 17 flat
+/// params, exceeding the canonical-ABI `MAX_FLAT_PARAMS` (16). Before the fix,
+/// the encoder rejected the wide `(i32 x17) -> ()` core signature (expected
+/// `(i32) -> ()`). The spill trampoline now presents `(i32 ptr) -> ()`,
+/// decodes the param tuple `(self, value)` from linear memory, and forwards to
+/// the wide setter. This test proves (a) the component now compiles + encodes,
+/// and (b) a 16-field record round-trips correctly through set→get.
+#[test]
+fn wide_record_setter_spills_params_and_round_trips() {
+    let source = r#"
+        package yel:wide@0.1.0;
+        record Big { a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32,
+                     i: u32, j: u32, k: u32, l: u32, m: u32, n: u32, o: u32, p: u32 }
+        export component App {
+            big: Big = { a:1,b:2,c:3,d:4,e:5,f:6,g:7,h:8,i:9,j:10,k:11,l:12,m:13,n:14,o:15,p:16 };
+            VStack { Text { "x" } }
+        }
+    "#;
+    let bytes = compile_to_component(source); // would panic pre-fix (encode error)
+    let iface = "yel:wide/app-component@0.1.0";
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let res = ctor_and_mount(&mut h, iface, "app");
+
+    let names = ["a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p"];
+    // New values 100..115; set via the spilled setter (wasmtime lowers the
+    // 17 flat params to a single pointer → our trampoline decodes it).
+    let new_fields: Vec<(String, Val)> = names
+        .iter()
+        .enumerate()
+        .map(|(idx, n)| (n.to_string(), Val::U32(100 + idx as u32)))
+        .collect();
+    call_setter(&mut h, iface, "app", "big", &res, Val::Record(new_fields));
+
+    // Read it back and assert every field survived the spill round-trip.
+    let getter = get_func(&mut h, iface, "[method]app.get-big");
+    let mut out = [Val::Bool(false)];
+    getter
+        .call(&mut h.store, &[Val::Resource(res)], &mut out)
+        .expect("get-big");
+    match &out[0] {
+        Val::Record(fields) => {
+            for (idx, n) in names.iter().enumerate() {
+                let got = fields.iter().find(|(k, _)| k == n).map(|(_, v)| v);
+                assert_eq!(
+                    got,
+                    Some(&Val::U32(100 + idx as u32)),
+                    "field `{n}` did not round-trip through the spilled setter"
+                );
+            }
+        }
+        other => panic!("get-big returned non-record: {other:?}"),
+    }
 }

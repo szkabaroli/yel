@@ -216,16 +216,34 @@ impl KnownEnums {
     }
 }
 
-/// Known builtin variants (Color, Brush).
+/// Known builtin variants (Color, Brush, AttributeValue).
 #[derive(Debug, Default)]
 pub struct KnownVariants {
     pub color: Option<DefId>,
     pub brush: Option<DefId>,
+    /// The `attribute-value` variant from `yel:ui/dom` — the value type
+    /// of `set-attribute`. Its canonical-ABI flattening backs the DOM
+    /// `set-attribute` import signature.
+    pub attribute_value: Option<DefId>,
+    /// Interned `Ty` for [`Self::attribute_value`], cached so THIR→LIR
+    /// (which holds `ctx` immutably) can build an `attribute-value`
+    /// `VariantCtor` without re-interning.
+    pub attribute_value_ty: Option<crate::types::Ty>,
 }
 
 impl KnownVariants {
     pub fn color(&self) -> DefId {
         self.color.expect("Color not initialized")
+    }
+
+    pub fn attribute_value(&self) -> DefId {
+        self.attribute_value
+            .expect("AttributeValue not initialized")
+    }
+
+    pub fn attribute_value_ty(&self) -> crate::types::Ty {
+        self.attribute_value_ty
+            .expect("AttributeValue Ty not initialized")
     }
 
     pub fn brush(&self) -> DefId {

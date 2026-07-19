@@ -229,7 +229,6 @@ fn collect_tokens_from_file(
                     &default.node,
                     default.span.start,
                     content,
-                    record_names,
                     enum_names,
                     variant_names,
                     tokens,
@@ -258,7 +257,6 @@ fn collect_tokens_from_file(
                     &default.node,
                     default.span.start,
                     content,
-                    record_names,
                     enum_names,
                     variant_names,
                     tokens,
@@ -271,7 +269,6 @@ fn collect_tokens_from_file(
             collect_tokens_from_node(
                 &node.node,
                 content,
-                record_names,
                 enum_names,
                 variant_names,
                 tokens,
@@ -375,7 +372,6 @@ fn collect_tokens_from_expr(
     expr: &Expr,
     _offset: usize,
     content: &str,
-    record_names: &[&str],
     enum_names: &[&str],
     variant_names: &[&str],
     tokens: &mut Vec<Token>,
@@ -383,8 +379,8 @@ fn collect_tokens_from_expr(
     match expr {
         Expr::Member(obj, _field) => {
             // Check for EnumName.case pattern
-            if let Expr::Ident(name) = &obj.node {
-                if enum_names.contains(&name.as_str()) || variant_names.contains(&name.as_str()) {
+            if let Expr::Ident(name) = &obj.node
+                && (enum_names.contains(&name.as_str()) || variant_names.contains(&name.as_str())) {
                     let (line, col) = offset_to_line_col(content, obj.span.start);
                     tokens.push(Token {
                         line,
@@ -394,7 +390,6 @@ fn collect_tokens_from_expr(
                         modifiers: 0,
                     });
                 }
-            }
         }
         Expr::Literal(lit) => {
             match lit {
@@ -405,7 +400,6 @@ fn collect_tokens_from_expr(
                             &value.node,
                             value.span.start,
                             content,
-                            record_names,
                             enum_names,
                             variant_names,
                             tokens,
@@ -419,7 +413,6 @@ fn collect_tokens_from_expr(
                             &item.node,
                             item.span.start,
                             content,
-                            record_names,
                             enum_names,
                             variant_names,
                             tokens,
@@ -434,7 +427,6 @@ fn collect_tokens_from_expr(
                 &left.node,
                 left.span.start,
                 content,
-                record_names,
                 enum_names,
                 variant_names,
                 tokens,
@@ -443,7 +435,6 @@ fn collect_tokens_from_expr(
                 &right.node,
                 right.span.start,
                 content,
-                record_names,
                 enum_names,
                 variant_names,
                 tokens,
@@ -454,7 +445,6 @@ fn collect_tokens_from_expr(
                 &inner.node,
                 inner.span.start,
                 content,
-                record_names,
                 enum_names,
                 variant_names,
                 tokens,
@@ -469,7 +459,6 @@ fn collect_tokens_from_expr(
                 &condition.node,
                 condition.span.start,
                 content,
-                record_names,
                 enum_names,
                 variant_names,
                 tokens,
@@ -478,7 +467,6 @@ fn collect_tokens_from_expr(
                 &then_expr.node,
                 then_expr.span.start,
                 content,
-                record_names,
                 enum_names,
                 variant_names,
                 tokens,
@@ -487,7 +475,6 @@ fn collect_tokens_from_expr(
                 &else_expr.node,
                 else_expr.span.start,
                 content,
-                record_names,
                 enum_names,
                 variant_names,
                 tokens,
@@ -499,7 +486,6 @@ fn collect_tokens_from_expr(
                     &arg.node,
                     arg.span.start,
                     content,
-                    record_names,
                     enum_names,
                     variant_names,
                     tokens,
@@ -513,7 +499,6 @@ fn collect_tokens_from_expr(
 fn collect_tokens_from_node(
     node: &Node,
     content: &str,
-    record_names: &[&str],
     enum_names: &[&str],
     variant_names: &[&str],
     tokens: &mut Vec<Token>,
@@ -526,7 +511,6 @@ fn collect_tokens_from_node(
                     &binding.node.value.node,
                     binding.node.value.span.start,
                     content,
-                    record_names,
                     enum_names,
                     variant_names,
                     tokens,
@@ -541,7 +525,6 @@ fn collect_tokens_from_node(
                             &expr.node,
                             expr.span.start,
                             content,
-                            record_names,
                             enum_names,
                             variant_names,
                             tokens,
@@ -555,7 +538,6 @@ fn collect_tokens_from_node(
                 collect_tokens_from_node(
                     &child.node,
                     content,
-                    record_names,
                     enum_names,
                     variant_names,
                     tokens,
@@ -567,7 +549,6 @@ fn collect_tokens_from_node(
                 &if_node.condition.node,
                 if_node.condition.span.start,
                 content,
-                record_names,
                 enum_names,
                 variant_names,
                 tokens,
@@ -576,7 +557,6 @@ fn collect_tokens_from_node(
                 collect_tokens_from_node(
                     &child.node,
                     content,
-                    record_names,
                     enum_names,
                     variant_names,
                     tokens,
@@ -587,7 +567,6 @@ fn collect_tokens_from_node(
                     &cond.node,
                     cond.span.start,
                     content,
-                    record_names,
                     enum_names,
                     variant_names,
                     tokens,
@@ -596,7 +575,6 @@ fn collect_tokens_from_node(
                     collect_tokens_from_node(
                         &child.node,
                         content,
-                        record_names,
                         enum_names,
                         variant_names,
                         tokens,
@@ -608,7 +586,6 @@ fn collect_tokens_from_node(
                     collect_tokens_from_node(
                         &child.node,
                         content,
-                        record_names,
                         enum_names,
                         variant_names,
                         tokens,
@@ -621,7 +598,6 @@ fn collect_tokens_from_node(
                 &for_node.iterable.node,
                 for_node.iterable.span.start,
                 content,
-                record_names,
                 enum_names,
                 variant_names,
                 tokens,
@@ -630,7 +606,6 @@ fn collect_tokens_from_node(
                 collect_tokens_from_node(
                     &child.node,
                     content,
-                    record_names,
                     enum_names,
                     variant_names,
                     tokens,

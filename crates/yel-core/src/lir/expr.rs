@@ -8,7 +8,9 @@ use serde::{Serialize, Deserialize};
 // frontend) and shouldn't reach into any one of them.
 use crate::ops::{BinOp, UnaryOp};
 use crate::ids::{DefId, FieldIdx, LocalId};
+use crate::source::Span;
 use crate::types::Ty;
+use super::block::LirExprId;
 
 /// LIR literal values (primitives only - compound types use dedicated constructs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,11 +39,23 @@ pub enum LirLiteral {
 pub struct LirExpr {
     pub kind: LirExprKind,
     pub ty: Ty,
+    /// Source span this expression was lowered from, when known. Carried
+    /// through THIR→LIR so diagnostics raised during or after lowering can
+    /// still point at the user's code (`ir-preserve-spans`). `None` for
+    /// synthetic expressions with no source origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<Span>,
 }
 
 impl LirExpr {
     pub fn new(kind: LirExprKind, ty: Ty) -> Self {
-        Self { kind, ty }
+        Self { kind, ty, span: None }
+    }
+
+    /// Like [`LirExpr::new`], but records the source span the expression was
+    /// lowered from so later phases can still produce located diagnostics.
+    pub fn new_spanned(kind: LirExprKind, ty: Ty, span: Span) -> Self {
+        Self { kind, ty, span: Some(span) }
     }
 }
 
@@ -57,29 +71,32 @@ pub enum LirExprKind {
     /// Binary operation.
     Binary {
         op: BinOp,
-        lhs: Box<LirExpr>,
-        rhs: Box<LirExpr>,
+        lhs: LirExprId,
+        rhs: LirExprId,
     },
     /// Unary operation.
-    Unary { op: UnaryOp, operand: Box<LirExpr> },
+    Unary { op: UnaryOp, operand: LirExprId },
     /// Field access (by index).
-    Field { base: Box<LirExpr>, field_idx: FieldIdx },
+    Field { base: LirExprId, field_idx: FieldIdx },
     /// Index access.
     Index {
-        base: Box<LirExpr>,
-        index: Box<LirExpr>,
+        base: LirExprId,
+        index: LirExprId,
     },
-    /// Function call.
-    Call { func: DefId, args: Vec<LirExpr> },
+    /// Function call by callee `DefId`. The callee may be a host import
+    /// (DOM function, component callback, or global callback) or a local
+    /// function; codegen resolves it through the import registry /
+    /// function table and decides whether to push a receiver handle from
+    /// the callee's kind. Global-singleton calls (`Global.fn(..)`) lower
+    /// to this same variant.
+    Call { func: DefId, args: Vec<LirExprId> },
     /// Signal read (component-local or global property).
     SignalRead(DefId),
-    /// Call a function on a global singleton (e.g. a host-implemented function).
-    GlobalCall { function: DefId, args: Vec<LirExpr> },
     /// Ternary expression.
     Ternary {
-        condition: Box<LirExpr>,
-        then_expr: Box<LirExpr>,
-        else_expr: Box<LirExpr>,
+        condition: LirExprId,
+        then_expr: LirExprId,
+        else_expr: LirExprId,
     },
     /// Enum case reference (pre-computed discriminant).
     EnumCase {
@@ -95,7 +112,7 @@ pub enum LirExprKind {
         /// Case index.
         case_idx: u32,
         /// Payload (if any).
-        payload: Option<Box<LirExpr>>,
+        payload: Option<LirExprId>,
     },
 
     /// Phase 5e.5: discriminant test on an `option<T>` / `result<T,E>` /
@@ -111,7 +128,7 @@ pub enum LirExprKind {
     ///   - User variant: declaration order in `VariantDef::cases`.
     IsCase {
         /// The option/result/variant value being tested.
-        base: Box<LirExpr>,
+        base: LirExprId,
         /// Case index to test against.
         case_idx: u32,
     },
@@ -132,7 +149,7 @@ pub enum LirExprKind {
     /// `u8`, `u16`); plain `struct.get` otherwise.
     VariantField {
         /// The option/result/variant value.
-        base: Box<LirExpr>,
+        base: LirExprId,
         /// Case index whose payload is being read (caller must have
         /// already discriminated; reading a field from a non-active case
         /// traps via `ref.cast`'s type-check).
@@ -160,7 +177,7 @@ pub enum LirExprKind {
     /// Allocates memory and stores each element.
     ListConstruct {
         /// Element expressions to evaluate and store.
-        elements: Vec<LirExpr>,
+        elements: Vec<LirExprId>,
         /// Size of each element in bytes.
         element_size: u32,
     },
@@ -171,7 +188,7 @@ pub enum LirExprKind {
         /// Record type DefId (for layout lookup).
         record_def: DefId,
         /// Field expressions in definition order.
-        fields: Vec<LirExpr>,
+        fields: Vec<LirExprId>,
         /// Total size of the record in bytes.
         total_size: u32,
     },
@@ -179,7 +196,7 @@ pub enum LirExprKind {
     /// Tuple literal construction.
     TupleConstruct {
         /// Element expressions.
-        elements: Vec<LirExpr>,
+        elements: Vec<LirExprId>,
         /// Total size of the tuple in bytes.
         total_size: u32,
     },
@@ -196,8 +213,8 @@ pub enum LirExprKind {
     /// Range expression (for iteration).
     /// Represents start..end (exclusive) or start..=end (inclusive).
     Range {
-        start: Box<LirExpr>,
-        end: Box<LirExpr>,
+        start: LirExprId,
+        end: LirExprId,
         /// If true, the range is inclusive (start..=end).
         inclusive: bool,
     },

@@ -44,8 +44,7 @@ pub fn convert_yel_diagnostic(
         severity: Some(convert_severity(diag.severity)),
         code: diag
             .code
-            .clone()
-            .map(tower_lsp::lsp_types::NumberOrString::String),
+            .map(|c| tower_lsp::lsp_types::NumberOrString::String(c.code().to_string())),
         source: Some("yel".to_string()),
         message,
         related_information: None,
@@ -117,10 +116,9 @@ pub fn convert_compile_error(
 }
 
 fn parse_error_range(pe: &ParseError, expected_source: SourceId, rope: &Rope) -> Range {
-    if let Some(span) = pe.span() {
-        if span.source == expected_source {
+    if let Some(span) = pe.span()
+        && span.source == expected_source {
             return span_to_range(&span, rope);
         }
-    }
     Range::new(Position::new(0, 0), Position::new(0, 1))
 }

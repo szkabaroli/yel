@@ -41,11 +41,56 @@ When changing guest codegen or host behavior, prefer **matching the WIT** in `wi
 
 Keep **`HostState`** shared unless you need separate tables per scenario.
 
+## Subcommands (`Cmd` in `main.rs`)
+
+`inspect` (import/export tree) · `run` (mount + print DOM) · `dump` (signals +
+DOM, with `--set`) · `gc-dump` (walk the internal Wasm-GC heap; needs
+`patches/apply.sh`) · `repl` (line-based lifecycle driver) · **`tui`**
+(full-screen ratatui shell).
+
+The **`tui`** subcommand wraps the same machinery in a `Session` (one live,
+mounted `Store`/`Instance`/`ResourceAny` + the GC type-name map) with tabbed
+panels — **State** (signals), **DOM**, **GC Heap**, **Handlers** (Enter = fire =
+"click"), **Inspect**, **Log** — and a `:` command line (`load`/`unload`/
+`reload`/`set`/`get`/`fire`/`gc`). It keeps the session **non-tracing** so the
+DOM stub's `if self.trace` prints don't corrupt the alternate screen.
+
+**State, DOM, Inspect and GC Heap are interactive trees** — a React-DevTools-style
+inspector. All four reuse one generic `TreeState` (an `INode` arena with
+parent/children indices: expand/collapse, `/` whole-tree search with ancestor
+auto-expand, and a detail pane). Builders all produce the same `INode` shape:
+`build_state_tree`/`build_val_node` (signals → expandable values),
+`build_dom_tree`/`build_dom_node` (the in-memory DOM as an Elements tree;
+detail = attributes/text/events), `build_inspect_tree` (imports/exports with
+`fmt_component_ty` signatures), and `gc_build_tree` (the live typed Wasm-GC
+heap; needs the `core_instance` patch). Tree nav routes through
+`App::active_tree_mut` keyed on the active tab; `Mode::TreeFilter` drives search.
+State/DOM/GC rebuild on tab entry / `r` / after `set`/`fire`; Inspect is built
+once per load. The shared theme (`panel`, `selected_style`, `ACCENT`) keeps every
+panel visually identical, and literal values are syntax-coloured using named
+terminal tokens: each `INode` carries optional styled `spans` (built by
+`value_color` / the DOM + GC builders) — numbers/bools cyan, strings light-blue,
+enum/variant cases magenta, DOM tags green, none/type/size dim (DarkGray).
+
+The **Log** tab is a `tracing` + `tui-logger` panel: `init_tui_logging` installs
+a `TuiTracingSubscriberLayer` (capped at Info so wasmtime trace/debug stays out),
+and all host actions log via `tracing::{info,warn,error}!` instead of an ad-hoc
+buffer — so the panel gets levels, colours, timestamps, and scrollback (driven by
+a `TuiWidgetState`). `?` opens a modal help overlay (`render_help_overlay`)
+rather than logging into the panel.
+
+The `println!` formatters were split into line-producing variants
+(`named_val_lines`/`push_val`, `inspect_lines`, `gc_walk_lines`) shared by the
+CLI subcommands; the `gc-dump` CLI keeps its line-based `gc_walk_lines` path
+(parallel to the tree builder).
+
 ## Dependencies
 
 - **`wasmtime` / `wasmtime-wasi`**: component runtime + WASI.
 - **`anyhow`**: CLI errors.
 - **`clap`**: argument parsing (see **`Args`** in `main.rs`; the derive still names the command `yel-run` in metadata — align names if it causes confusion).
+- **`ratatui` / `crossterm`**: the `tui` subcommand's terminal UI.
+- **`tracing` / `tracing-subscriber` / `tui-logger`**: the `tui` Log panel.
 
 ## Relationship to the rest of the repo
 

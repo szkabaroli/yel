@@ -1,67 +1,68 @@
-//! Stage 3 of lir-resource-flatten: rewrite `LoadHandle` / `StoreHandle`
-//! against `BoundaryField` slots into explicit `BoundaryStructGet` /
-//! `BoundaryStructSet` ops with the boundary-ref slot resolved
-//! statically at lowering time.
+//! lir-resource-flatten Stage 5e: resolve the lowerer's symbolic
+//! `StructField{Get,Set,SetConst}` ops — each carrying a `struct_ty`
+//! (a `TreeBoundaryId`) + `field_idx` — into concrete `StructGet` /
+//! `StructSet` / `StructSetConst` ops whose `rec` (the boundary's GC
+//! struct ref) is resolved at the LIR layer.
 //!
-//! Runs as a post-pass after `lower_component`. Walks each block's ops
-//! linearly, mirroring the same `current_boundary_locals` tracking
-//! codegen does today, and rewrites in place. Boundary IDs that come
-//! from a block's `boundary_params` (passed in as WASM function params,
-//! never materialized via a `BindBoundaryLocal` op) cannot be resolved
-//! at the LIR layer — those uses stay as `LoadHandle` / `StoreHandle`
-//! and continue to be handled by codegen's fallback chain walk. Stage 4
-//! folds boundary_params into typed `block.params` so this fallback
-//! disappears; Stage 5 deletes both `BoundaryField` and the codegen
-//! fallback entirely.
+//! **Coverage is total, and enforced.** Runs as a post-pass after
+//! `lower_component`, which then `debug_assert!`s that
+//! [`count_remaining_struct_field_ops`] is 0. Codegen has **no** fallback
+//! for an unresolved symbolic op — it `unreachable!`s. The `$self.tree`
+//! chain walk (`emit_boundary_ref`) survives only as the codegen of the
+//! *explicit* `BoundaryRefFromSelf` op and of the `CallBlock` boundary-
+//! param calling convention — never as an implicit fallback.
 //!
-//! Conservatively only rewrites at the top level of each block plus
-//! immediate children inside `If` / `Loop` bodies — we do not propagate
-//! bindings across `CallBlock` boundaries.
+//! Per block, the rewriter resolves each symbolic op's `struct_ty` to a
+//! ref slot by, in order:
+//!   1. seeding bindings from the block's `boundary_param_slots` and from
+//!      in-flow `BindBoundaryLocal` / `Alloc*Boundary` ops;
+//!   2. for an otherwise-unbound boundary reachable from `$self.tree`
+//!      (registry `kind == Root` or a static `parent` chain), prepending
+//!      a synthesized `BoundaryRefFromSelf` at the block head;
+//!   3. for an unbound boundary that descends from an already-bound
+//!      ancestor (typically a `boundary_param_slot`), synthesizing a
+//!      `StructGet` chain from that ancestor down to it.
+//! It recurses into `If` / `Loop` bodies; it does not propagate bindings
+//! across `CallBlock` boundaries (the callee receives its own params).
 //!
-//! Invariant preserved: every LoadHandle/StoreHandle this pass replaces
-//! continues to read/write the same wasm field with the same value
-//! semantics (codegen of the new ops mirrors the old chain-walked
-//! sequence exactly: `local.get rec; struct.get/set <ty> <field>`).
+//! Invariant preserved: every op this pass replaces reads/writes the same
+//! wasm field with the same value semantics (the resolved op's codegen
+//! emits exactly `local.get rec; struct.get/set <ty> <field>`, with `<ty>`
+//! recovered from the `rec` slot's `val_ty`).
 
 use std::collections::HashMap;
 
 use crate::ids::TreeBoundaryId;
 
-use super::block::{LirOp, LirSlotId, LirSlotInfo, LirSlotKind};
+use super::block::{LirIf, LirOp, LirSlotId, LirSlotInfo, LirSlotKind};
 use super::node::LirResource;
 
-/// Walks every block looking for `LoadHandle` / `StoreHandle` ops
-/// against `BoundaryField` slots. Returns the count. After
-/// [`rewrite_boundary_field_loadstore`] runs, this should be 0 — if
-/// it isn't, the codegen chain walk is still live and Stage 5e
-/// can't delete `BoundaryField` / `boundary_params` yet.
-pub fn count_remaining_boundary_field_loadstore(component: &LirResource) -> usize {
+/// Walks every block counting unresolved symbolic `StructField{Get,Set,
+/// SetConst}` ops. After [`rewrite_struct_field_ops`] runs this
+/// must be 0 — every symbolic struct-field access should have lowered to
+/// a concrete `StructGet`/`StructSet`. `lower_component` `debug_assert`s
+/// this; codegen `unreachable!`s on any survivor.
+pub fn count_remaining_struct_field_ops(component: &LirResource) -> usize {
     let mut total = 0usize;
     for block in &component.blocks {
-        count_in_ops(&block.ops, &component.slots, &mut total);
+        count_in_ops(&block.ops, &mut total);
     }
     total
 }
 
-fn count_in_ops(ops: &[LirOp], slots: &[LirSlotInfo], total: &mut usize) {
+fn count_in_ops(ops: &[LirOp], total: &mut usize) {
     for op in ops {
         match op {
-            LirOp::LoadHandle { slot, .. }
-            | LirOp::StoreHandle { slot, .. }
-            | LirOp::LoadI32 { slot, .. }
-            | LirOp::StoreI32Slot { slot, .. }
-            | LirOp::StoreI32 { slot, .. } => {
-                if slot_boundary_field(slots, *slot).is_some() {
-                    *total += 1;
-                }
+            LirOp::StructFieldGet { .. }
+            | LirOp::StructFieldSet { .. }
+            | LirOp::StructFieldSetConst { .. } => {
+                *total += 1;
             }
-            LirOp::If {
-                then_ops, else_ops, ..
-            } => {
-                count_in_ops(then_ops, slots, total);
-                count_in_ops(else_ops, slots, total);
+            LirOp::If(if_op) => {
+                count_in_ops(&if_op.then_ops, total);
+                count_in_ops(&if_op.else_ops, total);
             }
-            LirOp::Loop { body_ops, .. } => count_in_ops(body_ops, slots, total),
+            LirOp::Loop { body_ops, .. } => count_in_ops(body_ops, total),
             _ => {}
         }
     }
@@ -69,8 +70,7 @@ fn count_in_ops(ops: &[LirOp], slots: &[LirSlotInfo], total: &mut usize) {
 
 /// Rewrite every block's ops in-place. Returns the number of
 /// LoadHandle/StoreHandle pairs replaced (for telemetry / tests).
-pub fn rewrite_boundary_field_loadstore(component: &mut LirResource) -> usize {
-    let slots_snapshot = component.slots.clone();
+pub fn rewrite_struct_field_ops(component: &mut LirResource) -> usize {
     let mut total = 0usize;
     let block_count = component.blocks.len();
     for bi in 0..block_count {
@@ -105,7 +105,7 @@ pub fn rewrite_boundary_field_loadstore(component: &mut LirResource) -> usize {
         // also fails. The rewriter's job is to reduce surface, not
         // to fix bugs.
         let all_unbound: Vec<TreeBoundaryId> =
-            collect_unbound_boundary_ids(&component.blocks[bi].ops, &slots_snapshot, &current);
+            collect_unbound_boundary_ids(&component.blocks[bi].ops, &current);
         let mut prologue: Vec<LirOp> = Vec::new();
         for b_id in &all_unbound {
             // Strategy 1: chain from `$self.tree` (Root) down to
@@ -149,18 +149,20 @@ pub fn rewrite_boundary_field_loadstore(component: &mut LirResource) -> usize {
         // (to walk parent links). Pass the latter by clone-free
         // immutable borrow alongside the mutable slots vec.
         let original_ops = std::mem::take(&mut component.blocks[bi].ops);
-        let struct_types_snapshot = component.struct_types.clone();
+        // `struct_types` is read-only here while `slots` is mutated; pass them
+        // as a disjoint field borrow (same shape as `try_synthesize_ancestor_chain`
+        // above) instead of cloning the whole table per block.
         let mut new_ops = rewrite_ops(
             original_ops,
             &mut component.slots,
-            &struct_types_snapshot,
+            &component.struct_types,
             &mut current,
             &mut total,
         );
         // Prepend prologue.
         if !prologue.is_empty() {
             let mut combined = prologue;
-            combined.extend(new_ops.drain(..));
+            combined.append(&mut new_ops);
             new_ops = combined;
         }
         component.blocks[bi].ops = new_ops;
@@ -267,10 +269,9 @@ fn try_synthesize_ancestor_chain(
             name: Some(format!("ancestor_walk_b{}", b_hop.0)),
         });
         current.insert(*b_hop, slot_id);
-        out.push(LirOp::BoundaryStructGet {
-            boundary_id: parent_id,
-            field_idx: *fidx_in_parent,
+        out.push(LirOp::StructGet {
             rec: rec_slot,
+            field_idx: *fidx_in_parent,
             result: slot_id,
         });
     }
@@ -296,18 +297,16 @@ fn next_local_idx(slots: &[LirSlotInfo]) -> u32 {
 /// statically; whatever this scan returns is genuinely unbound.
 fn collect_unbound_boundary_ids(
     ops: &[LirOp],
-    slots: &[LirSlotInfo],
     current: &HashMap<TreeBoundaryId, LirSlotId>,
 ) -> Vec<TreeBoundaryId> {
     let mut seen: Vec<TreeBoundaryId> = Vec::new();
     let mut bound_in_flow: HashMap<TreeBoundaryId, ()> = HashMap::new();
-    walk(ops, slots, current, &mut bound_in_flow, &mut seen);
+    walk(ops, current, &mut bound_in_flow, &mut seen);
     seen
 }
 
 fn walk(
     ops: &[LirOp],
-    slots: &[LirSlotInfo],
     initial: &HashMap<TreeBoundaryId, LirSlotId>,
     in_flow: &mut HashMap<TreeBoundaryId, ()>,
     seen: &mut Vec<TreeBoundaryId>,
@@ -319,25 +318,20 @@ fn walk(
             | LirOp::AllocSubBoundary { boundary_id, .. } => {
                 in_flow.insert(*boundary_id, ());
             }
-            LirOp::LoadHandle { slot, .. }
-            | LirOp::StoreHandle { slot, .. }
-            | LirOp::LoadI32 { slot, .. }
-            | LirOp::StoreI32Slot { slot, .. }
-            | LirOp::StoreI32 { slot, .. } => {
-                if let Some((b_id, _)) = slot_boundary_field(slots, *slot) {
-                    let resolvable = initial.contains_key(&b_id) || in_flow.contains_key(&b_id);
-                    if !resolvable && !seen.contains(&b_id) {
-                        seen.push(b_id);
-                    }
+            LirOp::StructFieldGet { struct_ty, .. }
+            | LirOp::StructFieldSet { struct_ty, .. }
+            | LirOp::StructFieldSetConst { struct_ty, .. } => {
+                let b_id = *struct_ty;
+                let resolvable = initial.contains_key(&b_id) || in_flow.contains_key(&b_id);
+                if !resolvable && !seen.contains(&b_id) {
+                    seen.push(b_id);
                 }
             }
-            LirOp::If {
-                then_ops, else_ops, ..
-            } => {
-                walk(then_ops, slots, initial, in_flow, seen);
-                walk(else_ops, slots, initial, in_flow, seen);
+            LirOp::If(if_op) => {
+                walk(&if_op.then_ops, initial, in_flow, seen);
+                walk(&if_op.else_ops, initial, in_flow, seen);
             }
-            LirOp::Loop { body_ops, .. } => walk(body_ops, slots, initial, in_flow, seen),
+            LirOp::Loop { body_ops, .. } => walk(body_ops, initial, in_flow, seen),
             _ => {}
         }
     }
@@ -399,92 +393,69 @@ fn rewrite_ops(
                     ref_slot,
                 });
             }
-            // The two rewrite targets.
-            LirOp::LoadHandle { slot, to } => {
-                if let Some((boundary_id, field_idx)) = slot_boundary_field(slots, slot) {
-                    if let Some(rec) = resolve_rec(boundary_id, current, slots, struct_types, &mut out)
-                    {
-                        *total += 1;
-                        out.push(LirOp::BoundaryStructGet {
-                            boundary_id,
-                            field_idx,
-                            rec,
-                            result: to,
-                        });
-                        continue;
-                    }
+            // Symbolic struct-field ops (Stage 5e-4): the lowerer emits
+            // these directly with `struct_ty` (= boundary id). Resolve the
+            // rec and lower to the generic `Struct{Get,Set,SetConst}`.
+            // Unresolvable uses pass through unchanged (counted as remaining).
+            LirOp::StructFieldGet {
+                struct_ty,
+                field_idx,
+                result,
+            } => {
+                if let Some(rec) = resolve_rec(struct_ty, current, slots, struct_types, &mut out) {
+                    *total += 1;
+                    out.push(LirOp::StructGet {
+                        rec,
+                        field_idx,
+                        result,
+                    });
+                    continue;
                 }
-                out.push(LirOp::LoadHandle { slot, to });
+                out.push(LirOp::StructFieldGet {
+                    struct_ty,
+                    field_idx,
+                    result,
+                });
             }
-            LirOp::StoreHandle { slot, from } => {
-                if let Some((boundary_id, field_idx)) = slot_boundary_field(slots, slot) {
-                    if let Some(rec) = resolve_rec(boundary_id, current, slots, struct_types, &mut out)
-                    {
-                        *total += 1;
-                        out.push(LirOp::BoundaryStructSet {
-                            boundary_id,
-                            field_idx,
-                            rec,
-                            value: from,
-                        });
-                        continue;
-                    }
+            LirOp::StructFieldSet {
+                struct_ty,
+                field_idx,
+                value,
+            } => {
+                if let Some(rec) = resolve_rec(struct_ty, current, slots, struct_types, &mut out) {
+                    *total += 1;
+                    out.push(LirOp::StructSet {
+                        rec,
+                        field_idx,
+                        value,
+                    });
+                    continue;
                 }
-                out.push(LirOp::StoreHandle { slot, from });
+                out.push(LirOp::StructFieldSet {
+                    struct_ty,
+                    field_idx,
+                    value,
+                });
             }
-            // Stage 5b: i32-typed reads / writes to BoundaryField
-            // slots (active-tag flags, DOM-handle fields written
-            // through `LoadI32` / `StoreI32Slot`). Same translation
-            // as the handle-typed pair above — codegen uses the
-            // same `local.get rec; struct.get/set` sequence either
-            // way; the slot's `val_ty` carries the type.
-            LirOp::LoadI32 { slot, to } => {
-                if let Some((boundary_id, field_idx)) = slot_boundary_field(slots, slot) {
-                    if let Some(rec) = resolve_rec(boundary_id, current, slots, struct_types, &mut out)
-                    {
-                        *total += 1;
-                        out.push(LirOp::BoundaryStructGet {
-                            boundary_id,
-                            field_idx,
-                            rec,
-                            result: to,
-                        });
-                        continue;
-                    }
+            LirOp::StructFieldSetConst {
+                struct_ty,
+                field_idx,
+                value,
+            } => {
+                if let Some(rec) = resolve_rec(struct_ty, current, slots, struct_types, &mut out) {
+                    *total += 1;
+                    out.push(LirOp::StructSetConst {
+                        rec,
+                        field_idx,
+                        value,
+                    });
+                    continue;
                 }
-                out.push(LirOp::LoadI32 { slot, to });
-            }
-            LirOp::StoreI32Slot { slot, from } => {
-                if let Some((boundary_id, field_idx)) = slot_boundary_field(slots, slot) {
-                    if let Some(rec) = resolve_rec(boundary_id, current, slots, struct_types, &mut out)
-                    {
-                        *total += 1;
-                        out.push(LirOp::BoundaryStructSet {
-                            boundary_id,
-                            field_idx,
-                            rec,
-                            value: from,
-                        });
-                        continue;
-                    }
-                }
-                out.push(LirOp::StoreI32Slot { slot, from });
-            }
-            LirOp::StoreI32 { slot, value } => {
-                if let Some((boundary_id, field_idx)) = slot_boundary_field(slots, slot) {
-                    if let Some(rec) = resolve_rec(boundary_id, current, slots, struct_types, &mut out)
-                    {
-                        *total += 1;
-                        out.push(LirOp::BoundaryStructSetConst {
-                            boundary_id,
-                            field_idx,
-                            rec,
-                            value,
-                        });
-                        continue;
-                    }
-                }
-                out.push(LirOp::StoreI32 { slot, value });
+                out.push(LirOp::StructFieldSetConst {
+                    struct_ty,
+                    field_idx,
+                    value,
+                });
             }
             // Recurse into compound op bodies. Bindings established
             // inside an `If` arm or `Loop` body are visible to
@@ -492,20 +463,21 @@ fn rewrite_ops(
             // out — except they currently DO leak today (codegen's
             // current_boundary_locals never pops). Match that
             // behaviour: pass `current` through by mutable ref.
-            LirOp::If {
-                cond,
-                then_ops,
-                else_ops,
-                name,
-            } => {
-                let then_ops = rewrite_ops(then_ops, slots, struct_types, current, total);
-                let else_ops = rewrite_ops(else_ops, slots, struct_types, current, total);
-                out.push(LirOp::If {
+            LirOp::If(if_op) => {
+                let LirIf {
                     cond,
                     then_ops,
                     else_ops,
                     name,
-                });
+                } = *if_op;
+                let then_ops = rewrite_ops(then_ops, slots, struct_types, current, total);
+                let else_ops = rewrite_ops(else_ops, slots, struct_types, current, total);
+                out.push(LirOp::If(Box::new(LirIf {
+                    cond,
+                    then_ops,
+                    else_ops,
+                    name,
+                })));
             }
             LirOp::Loop {
                 break_cond,
@@ -527,17 +499,6 @@ fn rewrite_ops(
 
 /// Returns the boundary-id + field-idx if `slot` is a `BoundaryField`
 /// slot, otherwise None.
-fn slot_boundary_field(slots: &[LirSlotInfo], slot: LirSlotId) -> Option<(TreeBoundaryId, u32)> {
-    let info = slots.get(slot.legacy_u32() as usize)?;
-    match info.kind {
-        LirSlotKind::BoundaryField {
-            boundary_id,
-            field_idx,
-        } => Some((boundary_id, field_idx)),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,24 +515,17 @@ mod tests {
         }
     }
 
-    /// LoadHandle/StoreHandle on BoundaryField slots inside a block
-    /// rewrite to BoundaryStructGet/Set when a BindBoundaryLocal
-    /// established the binding earlier.
+    /// Symbolic `StructFieldGet`/`StructFieldSet` ops rewrite to the
+    /// concrete `StructGet`/`StructSet` when a `BindBoundaryLocal`
+    /// established the boundary's ref binding earlier.
     #[test]
     fn rewrite_after_bind() {
         let mut comp = LirResource::empty_module_carrier(Name(0));
         comp.def_id = DefId::INVALID;
-        // slot 0 = ref slot, slot 1 = BoundaryField, slot 2 = result
+        // slot 0 = ref slot, slot 1 = result
         comp.slots = vec![
             mk_slot(0, LirSlotKind::Temp { local_idx: 0 }),
-            mk_slot(
-                1,
-                LirSlotKind::BoundaryField {
-                    boundary_id: TreeBoundaryId(0),
-                    field_idx: 3,
-                },
-            ),
-            mk_slot(2, LirSlotKind::Temp { local_idx: 1 }),
+            mk_slot(1, LirSlotKind::Temp { local_idx: 1 }),
         ];
         comp.blocks = vec![LirBlock {
             id: BlockId(0),
@@ -580,68 +534,63 @@ mod tests {
                     boundary_id: TreeBoundaryId(0),
                     slot: LirSlotId::resource(0),
                 },
-                LirOp::LoadHandle {
-                    slot: LirSlotId::resource(1),
-                    to: LirSlotId::resource(2),
+                LirOp::StructFieldGet {
+                    struct_ty: TreeBoundaryId(0),
+                    field_idx: 3,
+                    result: LirSlotId::resource(1),
                 },
-                LirOp::StoreHandle {
-                    slot: LirSlotId::resource(1),
-                    from: LirSlotId::resource(2),
+                LirOp::StructFieldSet {
+                    struct_ty: TreeBoundaryId(0),
+                    field_idx: 3,
+                    value: LirSlotId::resource(1),
                 },
             ],
             ..LirBlock::new(BlockId(0))
         }];
 
-        let n = rewrite_boundary_field_loadstore(&mut comp);
-        assert_eq!(n, 2, "one Load + one Store rewritten");
+        let n = rewrite_struct_field_ops(&mut comp);
+        assert_eq!(n, 2, "one Get + one Set rewritten");
         let ops = &comp.blocks[0].ops;
         assert!(matches!(
             ops[1],
-            LirOp::BoundaryStructGet {
-                boundary_id: TreeBoundaryId(0),
-                field_idx: 3,
+            LirOp::StructGet {
                 rec: LirSlotId::Resource { idx: 0 },
-                result: LirSlotId::Resource { idx: 2 },
+                field_idx: 3,
+                result: LirSlotId::Resource { idx: 1 },
             }
         ));
         assert!(matches!(
             ops[2],
-            LirOp::BoundaryStructSet {
-                boundary_id: TreeBoundaryId(0),
-                field_idx: 3,
+            LirOp::StructSet {
                 rec: LirSlotId::Resource { idx: 0 },
-                value: LirSlotId::Resource { idx: 2 },
+                field_idx: 3,
+                value: LirSlotId::Resource { idx: 1 },
             }
         ));
     }
 
-    /// LoadHandle/StoreHandle without an in-scope binding stays as-is
-    /// (codegen's chain walk handles it via the legacy path).
+    /// A symbolic op with no in-scope binding and an unrooted boundary
+    /// stays as-is (counted as remaining; codegen would surface it).
     #[test]
     fn no_rewrite_without_bind() {
         let mut comp = LirResource::empty_module_carrier(Name(0));
-        comp.slots = vec![
-            mk_slot(
-                0,
-                LirSlotKind::BoundaryField {
-                    boundary_id: TreeBoundaryId(0),
-                    field_idx: 0,
-                },
-            ),
-            mk_slot(1, LirSlotKind::Temp { local_idx: 0 }),
-        ];
+        comp.slots = vec![mk_slot(0, LirSlotKind::Temp { local_idx: 0 })];
         comp.blocks = vec![LirBlock {
             id: BlockId(0),
-            ops: vec![LirOp::LoadHandle {
-                slot: LirSlotId::resource(0),
-                to: LirSlotId::resource(1),
+            ops: vec![LirOp::StructFieldGet {
+                struct_ty: TreeBoundaryId(0),
+                field_idx: 0,
+                result: LirSlotId::resource(0),
             }],
             ..LirBlock::new(BlockId(0))
         }];
 
-        let n = rewrite_boundary_field_loadstore(&mut comp);
+        let n = rewrite_struct_field_ops(&mut comp);
         assert_eq!(n, 0);
-        assert!(matches!(comp.blocks[0].ops[0], LirOp::LoadHandle { .. }));
+        assert!(matches!(
+            comp.blocks[0].ops[0],
+            LirOp::StructFieldGet { .. }
+        ));
     }
 }
 
@@ -666,19 +615,9 @@ mod stage4_tests {
                 val_ty: LirSlotValType::RefNullForBoundary(TreeBoundaryId(0)),
                 name: None,
             },
-            // slot 1 = BoundaryField(0, 5)
+            // slot 1 = result
             LirSlotInfo {
                 id: LirSlotId::resource(1),
-                kind: LirSlotKind::BoundaryField {
-                    boundary_id: TreeBoundaryId(0),
-                    field_idx: 5,
-                },
-                val_ty: LirSlotValType::I32,
-                name: None,
-            },
-            // slot 2 = result
-            LirSlotInfo {
-                id: LirSlotId::resource(2),
                 kind: LirSlotKind::Temp { local_idx: 1 },
                 val_ty: LirSlotValType::I32,
                 name: None,
@@ -686,24 +625,24 @@ mod stage4_tests {
         ];
         comp.blocks = vec![LirBlock {
             id: BlockId(0),
-            ops: vec![LirOp::LoadHandle {
-                slot: LirSlotId::resource(1),
-                to: LirSlotId::resource(2),
+            ops: vec![LirOp::StructFieldGet {
+                struct_ty: TreeBoundaryId(0),
+                field_idx: 5,
+                result: LirSlotId::resource(1),
             }],
             boundary_params: vec![TreeBoundaryId(0)],
             boundary_param_slots: vec![LirSlotId::resource(0)],
             ..LirBlock::new(BlockId(0))
         }];
 
-        let n = rewrite_boundary_field_loadstore(&mut comp);
+        let n = rewrite_struct_field_ops(&mut comp);
         assert_eq!(n, 1, "boundary_param_slot binding seeds the rewrite");
         assert!(matches!(
             comp.blocks[0].ops[0],
-            LirOp::BoundaryStructGet {
-                boundary_id: TreeBoundaryId(0),
-                field_idx: 5,
+            LirOp::StructGet {
                 rec: LirSlotId::Resource { idx: 0 },
-                result: LirSlotId::Resource { idx: 2 },
+                field_idx: 5,
+                result: LirSlotId::Resource { idx: 1 },
             }
         ));
     }

@@ -9,7 +9,7 @@ use crate::definitions::{
     VariantCaseDef, VariantDef,
 };
 use crate::syntax::ast::PropertyDirection;
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, ErrorCode};
 use crate::ids::{DefId, FieldIdx, NodeId, VariantIdx};
 use crate::source::Span;
 use crate::syntax::ast::{self, PropModifier};
@@ -18,7 +18,9 @@ use crate::types::{InternedTyKind, Ty};
 
 use super::expr::{BinOp, HirExpr, HirExprKind, HirInterpolationPart, HirLiteral, HirStatement, UnaryOp};
 use super::local_scope::LocalScope;
-use super::node::{HirBinding, HirComponent, HirHandler, HirNode, HirNodeKind};
+use super::node::{
+    HirBinding, HirComponent, HirGlobal, HirHandler, HirItem, HirNode, HirNodeKind,
+};
 
 /// Parse a `#rrggbb` or `#rrggbbaa` color hex literal into (r, g, b, a) bytes.
 /// Invalid input yields fully-transparent black.
@@ -38,7 +40,7 @@ fn parse_color_hex(hex: &str) -> (u8, u8, u8, u8) {
 }
 
 /// Lower an AST file, populating definitions in ctx.
-pub fn lower_file(file: &ast::File, ctx: &mut CompilerContext) -> Vec<HirComponent> {
+pub fn lower_file(file: &ast::File, ctx: &mut CompilerContext) -> Vec<HirItem> {
     let mut lowering = HirLowering::new(ctx);
     lowering.lower_file(file)
 }
@@ -105,11 +107,12 @@ impl<'ctx> HirLowering<'ctx> {
         self.ctx.diagnostics.push(
             Diagnostic::error(format!("duplicate definition of `{}`", name))
                 .with_span(new_span)
+                .with_code(ErrorCode::DuplicateDefinition)
                 .with_note(format!("previously defined at {}:{}", source_name, line)),
         );
     }
 
-    fn lower_file(&mut self, file: &ast::File) -> Vec<HirComponent> {
+    fn lower_file(&mut self, file: &ast::File) -> Vec<HirItem> {
         // Phase 1: Register all top-level type definitions
         for record in &file.records {
             self.register_record(&record.node, record.span);
@@ -141,15 +144,38 @@ impl<'ctx> HirLowering<'ctx> {
             self.register_component(&component.node, component.span);
         }
 
-        // Phase 3: Lower component bodies
-        let mut hir_components = Vec::new();
+        // Phase 3: Lower component bodies, then surface globals as items.
+        // Components come first so the type-check order (and therefore
+        // diagnostic order) matches the previous components-then-globals
+        // pipeline.
+        let mut items = Vec::new();
         for component in &file.components {
             if let Some(hir) = self.lower_component(&component.node, component.span) {
-                hir_components.push(hir);
+                items.push(HirItem::Component(hir));
+            }
+        }
+        for global in &file.globals {
+            // The global was registered in phase 1b; emit a handle so it
+            // flows through the shared item pipeline. Its name/export flag
+            // and defaults already live in the `GlobalDef`.
+            let name = self.ctx.intern(&global.node.name);
+            if let Some(def_id) = self.ctx.defs.lookup(name, Namespace::Global) {
+                let is_export = self
+                    .ctx
+                    .defs
+                    .as_global(def_id)
+                    .map(|g| g.is_export)
+                    .unwrap_or(false);
+                items.push(HirItem::Global(HirGlobal {
+                    def_id,
+                    name,
+                    span: global.span,
+                    is_export,
+                }));
             }
         }
 
-        hir_components
+        items
     }
 
     fn register_record(&mut self, record: &ast::Record, span: Span) {
@@ -391,7 +417,7 @@ impl<'ctx> HirLowering<'ctx> {
                             owner: DefId::INVALID, // will update
                             name: pname,
                             ty: pty,
-                            idx: idx as u32,
+                            idx: crate::ids::ParamIdx::new(idx as u32),
                         }),
                         method.span,
                     );
@@ -461,6 +487,7 @@ impl<'ctx> HirLowering<'ctx> {
                 property_directions: vec![],
                 property_defaults: vec![],
                 callbacks: vec![],
+                package: None,
             }),
             span,
         );
@@ -579,7 +606,7 @@ impl<'ctx> HirLowering<'ctx> {
                         owner: DefId::INVALID,
                         name: interned,
                         ty,
-                        idx: idx as u32,
+                        idx: crate::ids::ParamIdx::new(idx as u32),
                     }),
                     span,
                 );
@@ -635,6 +662,7 @@ impl<'ctx> HirLowering<'ctx> {
                             .to_string(),
                     )
                     .with_span(*dup_span)
+                    .with_code(ErrorCode::DuplicateChildrenSlot)
                     .with_note(format!(
                         "first slot declared at {}",
                         self.ctx
@@ -729,7 +757,7 @@ impl<'ctx> HirLowering<'ctx> {
                         owner: DefId::INVALID, // Will update
                         name: pname,
                         ty: pty,
-                        idx: idx as u32,
+                        idx: crate::ids::ParamIdx::new(idx as u32),
                     }),
                     func.span,
                 );
@@ -932,6 +960,7 @@ impl<'ctx> HirLowering<'ctx> {
                 if setter.is_some() && value.is_none() {
                     self.ctx.diagnostics.error(
                         name_span,
+                        ErrorCode::InvalidValueBinding,
                         format!(
                             "binding `{}` has a setter but no getter; add a value binding like `{}: <expr>`",
                             name, name
@@ -1173,9 +1202,9 @@ impl<'ctx> HirLowering<'ctx> {
                 if let ast::Expr::Ident(name) = &base.node {
                     let interned = self.ctx.intern(name);
                     // Enum/variant case: Enum.case, Variant.ctor
-                    if let Some(def_id) = self.ctx.defs.lookup(interned, Namespace::Type) {
-                        if self.ctx.defs.as_enum(def_id).is_some()
-                            || self.ctx.defs.as_variant(def_id).is_some()
+                    if let Some(def_id) = self.ctx.defs.lookup(interned, Namespace::Type)
+                        && (self.ctx.defs.as_enum(def_id).is_some()
+                            || self.ctx.defs.as_variant(def_id).is_some())
                         {
                             return HirExpr::new(
                                 HirExprKind::Path {
@@ -1184,7 +1213,6 @@ impl<'ctx> HirLowering<'ctx> {
                                 span,
                             );
                         }
-                    }
                     // Global property read: MailStore.items
                     if self.ctx.defs.lookup(interned, Namespace::Global).is_some() {
                         return HirExpr::new(

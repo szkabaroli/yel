@@ -8,20 +8,24 @@
 use wasm_encoder::{BlockType, Function, Instruction};
 use wasm_encoder::{Ieee32, Ieee64};
 use yel_core::{DefId, Ty};
-use yel_core::lir::{LirExprKind, LirGlobalRef, LirOp, LirSlotKind, LirTypeRef};
+use yel_core::lir::{
+    ArithOp, ArrayItemRepr, BinOperand, CompareOp, LirExprKind, LirGlobalRef, LirOp, LirSlotKind, LirSlotValType, LirTypeRef,
+    MemoryValueType, StoreWidth,
+};
 use yel_core::types::InternedTyKind;
 
 use super::super::CodegenError;
 use super::super::{MemoryLayout, WasmPackageBuilder};
 use super::constants::{HANDLER_ID_HANDLE_SHIFT, MAX_HANDLERS_PER_COMPONENT};
 use super::scratch::{mem_arg, slot_info, slot_local};
-use yel_core::lir::LirBlock;
+use yel_core::lir::{LirBlock, LirResource, LirSlotId};
 
 impl<'a> WasmPackageBuilder<'a> {
     /// Emit a single block operation as WASM instructions.
     /// `local_offset` is added to slot indices for local variable access:
     /// - Mount function: 2 (for self, root params)
     /// - Block functions: 1 (for parent param) or 2 (for parent, item_ptr params)
+    ///
     /// Emit a single LIR op into `func` against the component at
     /// `comp_idx`. The flow-frontend codegen calls this directly (via
     /// `crate::flow`), so it's `pub(crate)` rather than `pub(super)`
@@ -68,14 +72,6 @@ impl<'a> WasmPackageBuilder<'a> {
                             )));
                             func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
                         }
-                        // Stage 5e-1: BoundaryField → BoundaryStructSet
-                        // op rewrite happens in `boundary_rewrite`. This
-                        // arm is now dead; trip on any leakage so we
-                        // notice gaps in the rewriter's coverage.
-                        LirSlotKind::BoundaryField { .. } => unreachable!(
-                            "StoreHandle on BoundaryField slot reached codegen — \
-                             boundary_rewrite pass missed it"
-                        ),
                         LirSlotKind::Temp { .. } | LirSlotKind::WasmParam { .. } => {}
                     }
                 }
@@ -92,10 +88,6 @@ impl<'a> WasmPackageBuilder<'a> {
                                 local_offset,
                             )));
                         }
-                        LirSlotKind::BoundaryField { .. } => unreachable!(
-                            "LoadHandle on BoundaryField slot reached codegen — \
-                             boundary_rewrite pass missed it"
-                        ),
                         LirSlotKind::Temp { .. } | LirSlotKind::WasmParam { .. } => {}
                     }
                 }
@@ -108,11 +100,6 @@ impl<'a> WasmPackageBuilder<'a> {
                             func.instruction(&Instruction::I32Const(*value));
                             func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
                         }
-                        // Stage 5e-1: dead path — see other arms.
-                        LirSlotKind::BoundaryField { .. } => unreachable!(
-                            "StoreI32 on BoundaryField slot reached codegen — \
-                             boundary_rewrite pass missed it"
-                        ),
                         LirSlotKind::Temp { .. } | LirSlotKind::WasmParam { .. } => {
                             // Temp / WasmParam target: `i32.const <value>;
                             // local.set <abs_idx>`. The if-update block in
@@ -145,11 +132,6 @@ impl<'a> WasmPackageBuilder<'a> {
                             )));
                             func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
                         }
-                        // Stage 5e-1: dead path — see other arms.
-                        LirSlotKind::BoundaryField { .. } => unreachable!(
-                            "StoreI32Slot on BoundaryField slot reached codegen — \
-                             boundary_rewrite pass missed it"
-                        ),
                         LirSlotKind::Temp { .. } | LirSlotKind::WasmParam { .. } => {
                             // Temp-to-Temp copy is a plain local.set/get.
                             func.instruction(&Instruction::LocalGet(slot_local(
@@ -166,7 +148,12 @@ impl<'a> WasmPackageBuilder<'a> {
                     }
                 }
             }
-            LirOp::I32Ne { lhs, rhs, result } => {
+            LirOp::Compare {
+                op,
+                lhs,
+                rhs,
+                result,
+            } => {
                 func.instruction(&Instruction::LocalGet(slot_local(
                     component, block,
                     *lhs,
@@ -177,7 +164,11 @@ impl<'a> WasmPackageBuilder<'a> {
                     *rhs,
                     local_offset,
                 )));
-                func.instruction(&Instruction::I32Ne);
+                func.instruction(&match op {
+                    CompareOp::GeU => Instruction::I32GeU,
+                    CompareOp::LtU => Instruction::I32LtU,
+                    CompareOp::Ne => Instruction::I32Ne,
+                });
                 func.instruction(&Instruction::LocalSet(slot_local(
                     component, block,
                     *result,
@@ -210,11 +201,6 @@ impl<'a> WasmPackageBuilder<'a> {
                                 local_offset,
                             )));
                         }
-                        // Stage 5e-1: dead path — see other arms.
-                        LirSlotKind::BoundaryField { .. } => unreachable!(
-                            "LoadI32 on BoundaryField slot reached codegen — \
-                             boundary_rewrite pass missed it"
-                        ),
                         LirSlotKind::Temp { .. } | LirSlotKind::WasmParam { .. } => {}
                     }
                 }
@@ -387,34 +373,29 @@ impl<'a> WasmPackageBuilder<'a> {
                     }
                 }
             }
-            LirOp::If {
-                cond,
-                then_ops,
-                else_ops,
-                name,
-            } => {
+            LirOp::If(if_op) => {
                 // Mint a label index for this `if` structural op before
                 // emitting (preorder walk). Nested ifs/loops inside the
                 // branches will get subsequent indices as they're visited.
                 let if_label_idx = self.current_label_counter;
                 self.current_label_counter += 1;
-                if let Some(n) = name {
+                if let Some(n) = &if_op.name {
                     self.current_function_labels.push((if_label_idx, n.clone()));
                 }
                 func.instruction(&Instruction::LocalGet(slot_local(
                     component, block,
-                    *cond,
+                    if_op.cond,
                     local_offset,
                 )));
                 func.instruction(&Instruction::If(BlockType::Empty));
 
-                for nested_op in then_ops {
+                for nested_op in &if_op.then_ops {
                     self.emit_op(func, nested_op, comp_idx, block, local_offset)?;
                 }
 
-                if !else_ops.is_empty() {
+                if !if_op.else_ops.is_empty() {
                     func.instruction(&Instruction::Else);
-                    for nested_op in else_ops {
+                    for nested_op in &if_op.else_ops {
                         self.emit_op(func, nested_op, comp_idx, block, local_offset)?;
                     }
                 }
@@ -453,20 +434,30 @@ impl<'a> WasmPackageBuilder<'a> {
                 })?;
                 func.instruction(&Instruction::I32Const(len as i32));
             }
-            LirOp::PushExprAsString { expr } => {
-                // Stack-push primitive: emit the (ptr, len) fat-pointer
-                // pair produced by `emit_expr_as_string` (type-dispatched
-                // toString helpers + value materialization). Followed by
-                // a CallFunction that consumes the pair.
+            LirOp::PushExpr { expr } => {
+                // Generic stack-push for a host-call argument: emit the
+                // value's canonical-ABI flat representation. A `VariantCtor`
+                // (set-attribute's `attribute-value`) must use the FLAT
+                // boundary lowering even when the type's in-memory repr is a
+                // GC struct — `emit_expr` would otherwise dispatch to the GC
+                // ctor and push a ref. Other exprs flatten via `emit_expr`.
                 let lir_expr = component.get_expr(*expr);
-                self.emit_expr_as_string(func, lir_expr, component, &layout)?;
-            }
-            LirOp::PushExprAsAttrValue { expr } => {
-                // Stack-push primitive: emit the 6-field attribute-value
-                // variant payload (discrim, p0..p4) produced by
-                // `emit_expr_as_attr_value`.
-                let lir_expr = component.get_expr(*expr);
-                self.emit_expr_as_attr_value(func, lir_expr, component, &layout)?;
+                if let LirExprKind::VariantCtor {
+                    case_idx, payload, ..
+                } = &lir_expr.kind
+                {
+                    let payload_expr = payload.map(|p| component.get_expr(p));
+                    self.emit_variant_ctor_flat(
+                        func,
+                        lir_expr.ty,
+                        *case_idx,
+                        payload_expr.as_deref(),
+                        component,
+                        &layout,
+                    )?;
+                } else {
+                    self.emit_expr(func, lir_expr, component, &layout)?;
+                }
             }
             LirOp::PushHandlerId { handler } => {
                 // Stack-push primitive: replicate the legacy
@@ -510,15 +501,18 @@ impl<'a> WasmPackageBuilder<'a> {
                 args,
                 result,
             } => {
-                // Phase 2.2: DOM imports resolve via the per-context
-                // `dom_imports` table → wasm import index. The lowering
-                // emits `CallFunction { func: ctx.dom_imports().<name>,
-                // … }` against the DefIds registered in Phase 2.1; here
-                // we map back to the matching `IMPORT_*` constant so the
-                // emitted Call instruction matches the legacy DOM-op
-                // arms byte-for-byte.
-                let callee_idx = if let Some(import_idx) =
-                    super::super::wasm_import_index_for_dom_def(self.ctx, *callee_def)
+                // Host imports (DOM functions, and later global
+                // callbacks) resolve through the single import registry
+                // on `ImportLayout`. The lowering emits `CallFunction {
+                // func: <import DefId>, … }`; the registry maps it back
+                // to the wasm import index. `import_layout` is `None` on
+                // the flow-frontend function-module path, which never
+                // targets host imports and instead populates
+                // `def_id_to_func_idx`.
+                let callee_idx = if let Some(import_idx) = self
+                    .import_layout
+                    .as_ref()
+                    .and_then(|l| l.import_index(*callee_def))
                 {
                     import_idx
                 } else {
@@ -832,16 +826,17 @@ impl<'a> WasmPackageBuilder<'a> {
                 }
             }
 
-            LirOp::BoundaryStructGet {
-                boundary_id,
-                field_idx,
+            LirOp::StructGet {
                 rec,
+                field_idx,
                 result,
             } => {
-                // Stage 3: explicit struct.get on a boundary's GC
-                // struct. The boundary-ref slot is passed directly;
-                // no `current_boundary_locals` chain walk needed.
-                let struct_ty = self.gc_layouts[comp_idx].tree_struct_type_idx[boundary_id];
+                // Generic struct.get. The wasm struct-type index is
+                // resolved from `rec`'s val_ty (RefNullForBoundary /
+                // RefNullForComponent / RefNull) — the op carries no
+                // frontend concept. The ref is passed directly; no
+                // `current_boundary_locals` chain walk needed.
+                let struct_ty = self.struct_ty_idx_from_rec(comp_idx, component, block, *rec)?;
                 let rec_local = slot_local(component, block, *rec, local_offset);
                 func.instruction(&Instruction::LocalGet(rec_local));
                 func.instruction(&Instruction::RefAsNonNull);
@@ -856,13 +851,12 @@ impl<'a> WasmPackageBuilder<'a> {
                 )));
             }
 
-            LirOp::BoundaryStructSet {
-                boundary_id,
-                field_idx,
+            LirOp::StructSet {
                 rec,
+                field_idx,
                 value,
             } => {
-                let struct_ty = self.gc_layouts[comp_idx].tree_struct_type_idx[boundary_id];
+                let struct_ty = self.struct_ty_idx_from_rec(comp_idx, component, block, *rec)?;
                 let rec_local = slot_local(component, block, *rec, local_offset);
                 func.instruction(&Instruction::LocalGet(rec_local));
                 func.instruction(&Instruction::RefAsNonNull);
@@ -877,13 +871,12 @@ impl<'a> WasmPackageBuilder<'a> {
                 });
             }
 
-            LirOp::BoundaryStructSetConst {
-                boundary_id,
-                field_idx,
+            LirOp::StructSetConst {
                 rec,
+                field_idx,
                 value,
             } => {
-                let struct_ty = self.gc_layouts[comp_idx].tree_struct_type_idx[boundary_id];
+                let struct_ty = self.struct_ty_idx_from_rec(comp_idx, component, block, *rec)?;
                 let rec_local = slot_local(component, block, *rec, local_offset);
                 func.instruction(&Instruction::LocalGet(rec_local));
                 func.instruction(&Instruction::RefAsNonNull);
@@ -903,13 +896,27 @@ impl<'a> WasmPackageBuilder<'a> {
                 // codegen used to do implicitly via
                 // `emit_boundary_ref`'s fallback path; the result
                 // is now stashed into a slot the rewriter has
-                // bound for subsequent BoundaryStructGet/Set ops.
+                // bound for subsequent StructGet/StructSet ops.
                 self.emit_boundary_ref(func, comp_idx, *boundary_id)?;
                 func.instruction(&Instruction::LocalSet(slot_local(
                     component, block,
                     *result,
                     local_offset,
                 )));
+            }
+
+            // Pre-rewrite symbolic struct-field ops (Stage 5e-4). The
+            // `boundary_rewrite` pass resolves these into generic
+            // `Struct{Get,Set,SetConst}` ops before codegen. Reaching here
+            // means the pass missed one — same invariant the LIR-layer
+            // `debug_assert` in `lower_component` guards.
+            LirOp::StructFieldGet { struct_ty, field_idx, .. }
+            | LirOp::StructFieldSet { struct_ty, field_idx, .. }
+            | LirOp::StructFieldSetConst { struct_ty, field_idx, .. } => {
+                unreachable!(
+                    "symbolic StructField op (struct_ty {struct_ty:?} field {field_idx}) \
+                     reached codegen — boundary_rewrite pass missed it"
+                );
             }
 
             LirOp::BindBoundaryLocal { boundary_id, slot } => {
@@ -1003,13 +1010,6 @@ impl<'a> WasmPackageBuilder<'a> {
                             func.instruction(&Instruction::I32Const(layout.base + offset as i32));
                             func.instruction(&Instruction::I32Const(0));
                             func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
-                        }
-                        LirSlotKind::BoundaryField { .. } => {
-                            // BoundaryField slots are zero-initialized
-                            // by `struct.new_default` at constructor time
-                            // (DOM-handle / active-tag fields are i32, so
-                            // their default is 0). No explicit init op
-                            // needed.
                         }
                         LirSlotKind::Temp { .. } | LirSlotKind::WasmParam { .. } => {}
                     }
@@ -1227,55 +1227,33 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::End);
             }
 
-            LirOp::GeU { index, len, result } => {
+            LirOp::BinaryOp {
+                op,
+                lhs,
+                rhs,
+                result,
+            } => {
                 func.instruction(&Instruction::LocalGet(slot_local(
                     component, block,
-                    *index,
+                    *lhs,
                     local_offset,
                 )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *len,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::I32GeU);
+                match rhs {
+                    BinOperand::Slot(s) => func.instruction(&Instruction::LocalGet(slot_local(
+                        component, block,
+                        *s,
+                        local_offset,
+                    ))),
+                    BinOperand::Const(c) => func.instruction(&Instruction::I32Const(*c as i32)),
+                };
+                func.instruction(&match op {
+                    ArithOp::Add => Instruction::I32Add,
+                    ArithOp::Sub => Instruction::I32Sub,
+                    ArithOp::Mul => Instruction::I32Mul,
+                });
                 func.instruction(&Instruction::LocalSet(slot_local(
                     component, block,
                     *result,
-                    local_offset,
-                )));
-            }
-
-            LirOp::LtU { a, b, result } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *a,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *b,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::I32LtU);
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *result,
-                    local_offset,
-                )));
-            }
-
-            LirOp::IncrSlot { slot } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *slot,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *slot,
                     local_offset,
                 )));
             }
@@ -1317,80 +1295,34 @@ impl<'a> WasmPackageBuilder<'a> {
                 }
             }
 
-            LirOp::MulConst {
-                slot,
-                constant,
-                result,
+            LirOp::LoadAddr { addr, result, ty } => {
+                func.instruction(&Instruction::LocalGet(slot_local(
+                    component, block,
+                    *addr,
+                    local_offset,
+                )));
+                // Natural alignment: i32/f32 → 4 (align=2), i64/f64 → 8 (align=3).
+                func.instruction(&match ty {
+                    MemoryValueType::I32 => Instruction::I32Load(mem_arg(0, 2)),
+                    MemoryValueType::I64 => Instruction::I64Load(mem_arg(0, 3)),
+                    MemoryValueType::F32 => Instruction::F32Load(mem_arg(0, 2)),
+                    MemoryValueType::F64 => Instruction::F64Load(mem_arg(0, 3)),
+                });
+                func.instruction(&Instruction::LocalSet(slot_local(
+                    component, block,
+                    *result,
+                    local_offset,
+                )));
+            }
+
+            LirOp::StoreAddr {
+                addr,
+                value,
+                ty,
+                width,
             } => {
                 func.instruction(&Instruction::LocalGet(slot_local(
                     component, block,
-                    *slot,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::I32Const(*constant as i32));
-                func.instruction(&Instruction::I32Mul);
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *result,
-                    local_offset,
-                )));
-            }
-
-            LirOp::AddSlots { a, b, result } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *a,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *b,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *result,
-                    local_offset,
-                )));
-            }
-
-            LirOp::SubSlots { a, b, result } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *a,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *b,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::I32Sub);
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *result,
-                    local_offset,
-                )));
-            }
-
-            LirOp::LoadI32Addr { addr, result } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *addr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *result,
-                    local_offset,
-                )));
-            }
-
-            LirOp::StoreI32Addr { addr, value } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
                     *addr,
                     local_offset,
                 )));
@@ -1399,119 +1331,15 @@ impl<'a> WasmPackageBuilder<'a> {
                     *value,
                     local_offset,
                 )));
-                func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
-            }
-
-            LirOp::LoadI64Addr { addr, result } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *addr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::I64Load(mem_arg(0, 3)));
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *result,
-                    local_offset,
-                )));
-            }
-
-            LirOp::StoreI64Addr { addr, value } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *addr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *value,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::I64Store(mem_arg(0, 3)));
-            }
-
-            LirOp::LoadF32Addr { addr, result } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *addr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::F32Load(mem_arg(0, 2)));
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *result,
-                    local_offset,
-                )));
-            }
-
-            LirOp::StoreF32Addr { addr, value } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *addr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *value,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::F32Store(mem_arg(0, 2)));
-            }
-
-            LirOp::LoadF64Addr { addr, result } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *addr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::F64Load(mem_arg(0, 3)));
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *result,
-                    local_offset,
-                )));
-            }
-
-            LirOp::StoreF64Addr { addr, value } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *addr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *value,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::F64Store(mem_arg(0, 3)));
-            }
-
-            LirOp::StoreI32Narrow8Addr { addr, value } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *addr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *value,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
-            }
-
-            LirOp::StoreI32Narrow16Addr { addr, value } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *addr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *value,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::I32Store16(mem_arg(0, 1)));
+                func.instruction(&match (ty, width) {
+                    // Narrow stores are i32-valued; ty is always I32 here.
+                    (_, StoreWidth::Narrow8) => Instruction::I32Store8(mem_arg(0, 0)),
+                    (_, StoreWidth::Narrow16) => Instruction::I32Store16(mem_arg(0, 1)),
+                    (MemoryValueType::I32, StoreWidth::Full) => Instruction::I32Store(mem_arg(0, 2)),
+                    (MemoryValueType::I64, StoreWidth::Full) => Instruction::I64Store(mem_arg(0, 3)),
+                    (MemoryValueType::F32, StoreWidth::Full) => Instruction::F32Store(mem_arg(0, 2)),
+                    (MemoryValueType::F64, StoreWidth::Full) => Instruction::F64Store(mem_arg(0, 3)),
+                });
             }
 
             LirOp::MemConst { addr, result } => {
@@ -1576,50 +1404,6 @@ impl<'a> WasmPackageBuilder<'a> {
                     *result,
                     local_offset,
                 )));
-            }
-
-            LirOp::StructGet {
-                ty_idx,
-                field,
-                rec,
-                result,
-            } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *rec,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: *ty_idx,
-                    field_index: *field,
-                });
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *result,
-                    local_offset,
-                )));
-            }
-
-            LirOp::StructSet {
-                ty_idx,
-                field,
-                rec,
-                value,
-            } => {
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *rec,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *value,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::StructSet {
-                    struct_type_index: *ty_idx,
-                    field_index: *field,
-                });
             }
 
             // Phase 0.2: symbolic-ty GC struct ops. `ty_ref` resolves
@@ -1762,6 +1546,30 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::GlobalSet(idx));
             }
 
+            // Global-field write — the single representation of a
+            // global-property store. Resolves `(block, field)` to the
+            // per-field core wasm global and emits `global.set`.
+            LirOp::GlobalFieldSet {
+                block: block_def,
+                field,
+                value,
+            } => {
+                let &layout_idx =
+                    self.global_block_def_to_idx.get(block_def).ok_or_else(|| {
+                        CodegenError::InvalidIR(format!(
+                            "GlobalFieldSet: no globals layout for block {:?}",
+                            block_def
+                        ))
+                    })?;
+                let g = self.globals_layouts[layout_idx].field_core_globals[*field as usize];
+                func.instruction(&Instruction::LocalGet(slot_local(
+                    component, block,
+                    *value,
+                    local_offset,
+                )));
+                func.instruction(&Instruction::GlobalSet(g));
+            }
+
             // Stage 5a: dead `Array{NewDefault,Get,Set,Copy}` arms
             // removed. The only array-write ops emitted by the
             // lowerer today are the `ChildrenArray*` family
@@ -1805,12 +1613,12 @@ impl<'a> WasmPackageBuilder<'a> {
                 )));
             }
 
-            LirOp::ChildrenArrayNewDefault {
-                anchor_boundary,
+            LirOp::ArrayNewDefault {
+                array_type,
                 len,
                 result,
             } => {
-                let ty_idx = self.gc_layouts[comp_idx].tree_for_arr_type_idx[anchor_boundary];
+                let ty_idx = self.gc_layouts[comp_idx].array_type_base + array_type.0;
                 func.instruction(&Instruction::LocalGet(slot_local(
                     component, block,
                     *len,
@@ -1824,13 +1632,13 @@ impl<'a> WasmPackageBuilder<'a> {
                 )));
             }
 
-            LirOp::ChildrenArrayGet {
-                anchor_boundary,
+            LirOp::ArrayGet {
+                array_type,
                 arr,
                 idx,
                 result,
             } => {
-                let ty_idx = self.gc_layouts[comp_idx].tree_for_arr_type_idx[anchor_boundary];
+                let ty_idx = self.gc_layouts[comp_idx].array_type_base + array_type.0;
                 func.instruction(&Instruction::LocalGet(slot_local(
                     component, block,
                     *arr,
@@ -1849,13 +1657,13 @@ impl<'a> WasmPackageBuilder<'a> {
                 )));
             }
 
-            LirOp::ChildrenArraySet {
-                anchor_boundary,
+            LirOp::ArraySet {
+                array_type,
                 arr,
                 idx,
                 value,
             } => {
-                let ty_idx = self.gc_layouts[comp_idx].tree_for_arr_type_idx[anchor_boundary];
+                let ty_idx = self.gc_layouts[comp_idx].array_type_base + array_type.0;
                 func.instruction(&Instruction::LocalGet(slot_local(
                     component, block,
                     *arr,
@@ -1874,15 +1682,15 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::ArraySet(ty_idx));
             }
 
-            LirOp::ChildrenArrayCopy {
-                anchor_boundary,
+            LirOp::ArrayCopy {
+                array_type,
                 dst,
                 dst_idx,
                 src,
                 src_idx,
                 count,
             } => {
-                let ty_idx = self.gc_layouts[comp_idx].tree_for_arr_type_idx[anchor_boundary];
+                let ty_idx = self.gc_layouts[comp_idx].array_type_base + array_type.0;
                 func.instruction(&Instruction::LocalGet(slot_local(
                     component, block,
                     *dst,
@@ -2021,7 +1829,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 arr,
                 idx,
                 list_ty,
-                result,
+                repr,
             } => {
                 let ty_idx = self
                     .record_gc_types
@@ -2034,168 +1842,68 @@ impl<'a> WasmPackageBuilder<'a> {
                             list_ty
                         ))
                     })?;
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *arr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *idx,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::ArrayGet(ty_idx));
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *result,
-                    local_offset,
-                )));
-            }
-            LirOp::ArrayGetItemFat {
-                arr,
-                idx,
-                list_ty,
-                ptr_result,
-                len_result,
-            } => {
-                // Stage 3 of typed-GC migration: typed read of one
-                // `(ref null $fat_value)` element from a string-element
-                // list, unboxed to the canonical (ptr, len) pair.
-                let ty_idx = self
-                    .record_gc_types
-                    .list_array_type_idx
-                    .get(list_ty)
-                    .copied()
-                    .ok_or_else(|| {
-                        CodegenError::InvalidIR(format!(
-                            "ArrayGetItemFat: no list_array_type_idx for ty {:?}",
-                            list_ty
-                        ))
-                    })?;
-                let fv_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                    CodegenError::InvalidIR(
-                        "ArrayGetItemFat: $fat_value type idx not assigned".into(),
-                    )
-                })?;
-                // ptr = (array.get arr idx).struct.get $fat_value 0
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *arr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *idx,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::ArrayGet(ty_idx));
-                func.instruction(&Instruction::RefAsNonNull);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: fv_idx,
-                    field_index: 0,
-                });
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *ptr_result,
-                    local_offset,
-                )));
-                // len = (array.get arr idx).struct.get $fat_value 1
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *arr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *idx,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::ArrayGet(ty_idx));
-                func.instruction(&Instruction::RefAsNonNull);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: fv_idx,
-                    field_index: 1,
-                });
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *len_result,
-                    local_offset,
-                )));
-            }
-            LirOp::ArrayGetItemFatToMem {
-                arr,
-                idx,
-                list_ty,
-                buf_addr_slot,
-            } => {
-                // Stage 4b of typed-GC migration: write one
-                // string-element's (ptr, len) pair to a memory scratch
-                // buffer at `*buf_addr_slot`. The body reads via
-                // load_fat_ptr from the buf address (legacy memory-
-                // backed item semantics); ArrayGetItem itself produces
-                // a `(ref null $fat_value)` typed ref which we unbox.
-                let ty_idx = self
-                    .record_gc_types
-                    .list_array_type_idx
-                    .get(list_ty)
-                    .copied()
-                    .ok_or_else(|| {
-                        CodegenError::InvalidIR(format!(
-                            "ArrayGetItemFatToMem: no list_array_type_idx for ty {:?}",
-                            list_ty
-                        ))
-                    })?;
-                let fv_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                    CodegenError::InvalidIR(
-                        "ArrayGetItemFatToMem: $fat_value type idx not assigned".into(),
-                    )
-                })?;
-                // mem(buf+0) = struct.get $fat_value 0 (ptr)
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *buf_addr_slot,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *arr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *idx,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::ArrayGet(ty_idx));
-                func.instruction(&Instruction::RefAsNonNull);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: fv_idx,
-                    field_index: 0,
-                });
-                func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
-                // mem(buf+4) = struct.get $fat_value 1 (len)
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *buf_addr_slot,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *arr,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::LocalGet(slot_local(
-                    component, block,
-                    *idx,
-                    local_offset,
-                )));
-                func.instruction(&Instruction::ArrayGet(ty_idx));
-                func.instruction(&Instruction::RefAsNonNull);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: fv_idx,
-                    field_index: 1,
-                });
-                func.instruction(&Instruction::I32Store(mem_arg(4, 2)));
+                let arr_l = slot_local(component, block, *arr, local_offset);
+                let idx_l = slot_local(component, block, *idx, local_offset);
+                // `array.get` of the element ref (or value for scalar lists).
+                let get_elem = |func: &mut wasm_encoder::Function| {
+                    func.instruction(&Instruction::LocalGet(arr_l));
+                    func.instruction(&Instruction::LocalGet(idx_l));
+                    func.instruction(&Instruction::ArrayGet(ty_idx));
+                };
+                match repr {
+                    ArrayItemRepr::Scalar { result } => {
+                        get_elem(func);
+                        func.instruction(&Instruction::LocalSet(slot_local(
+                            component, block,
+                            *result,
+                            local_offset,
+                        )));
+                    }
+                    ArrayItemRepr::Fat {
+                        ptr_result,
+                        len_result,
+                    } => {
+                        // String element: unbox the `(ref null $fat_value)`
+                        // to its (ptr, len) fields into two i32 slots.
+                        let fv_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
+                            CodegenError::InvalidIR(
+                                "ArrayGetItem(Fat): $fat_value type idx not assigned".into(),
+                            )
+                        })?;
+                        for (field_index, dst) in [(0u32, ptr_result), (1u32, len_result)] {
+                            get_elem(func);
+                            func.instruction(&Instruction::RefAsNonNull);
+                            func.instruction(&Instruction::StructGet {
+                                struct_type_index: fv_idx,
+                                field_index,
+                            });
+                            func.instruction(&Instruction::LocalSet(slot_local(
+                                component, block,
+                                *dst,
+                                local_offset,
+                            )));
+                        }
+                    }
+                    ArrayItemRepr::FatToMem { buf_addr } => {
+                        // Write the unboxed (ptr, len) to memory at buf+0/+4.
+                        let fv_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
+                            CodegenError::InvalidIR(
+                                "ArrayGetItem(FatToMem): $fat_value type idx not assigned".into(),
+                            )
+                        })?;
+                        let buf_l = slot_local(component, block, *buf_addr, local_offset);
+                        for (field_index, mem_off) in [(0u32, 0u64), (1u32, 4u64)] {
+                            func.instruction(&Instruction::LocalGet(buf_l));
+                            get_elem(func);
+                            func.instruction(&Instruction::RefAsNonNull);
+                            func.instruction(&Instruction::StructGet {
+                                struct_type_index: fv_idx,
+                                field_index,
+                            });
+                            func.instruction(&Instruction::I32Store(mem_arg(mem_off, 2)));
+                        }
+                    }
+                }
             }
             LirOp::RefCast {
                 from,
@@ -2275,6 +1983,45 @@ impl<'a> WasmPackageBuilder<'a> {
                     def_id.0
                 ))
             })
+    }
+
+    /// Resolve the wasm struct-type-section index for a generic
+    /// `StructGet` / `StructSet` / `StructSetConst` op from its `rec`
+    /// slot's `val_ty`. These ops carry no explicit type — the ref's
+    /// declared val_ty names the struct: `RefNullForBoundary` resolves
+    /// via the tree-struct map, `RefNullForComponent` via the component
+    /// struct, `RefNull` already carries the concrete index. Anything
+    /// else is malformed IR (no silent fallback).
+    fn struct_ty_idx_from_rec(
+        &self,
+        comp_idx: usize,
+        component: &LirResource,
+        block: &LirBlock,
+        rec: LirSlotId,
+    ) -> Result<u32, CodegenError> {
+        match slot_info(rec, block, component).val_ty {
+            LirSlotValType::RefNullForBoundary(b) => self.gc_layouts[comp_idx]
+                .tree_struct_type_idx
+                .get(&b)
+                .copied()
+                .ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "StructGet/Set rec {rec:?}: no tree_struct_type_idx for boundary {b:?}"
+                    ))
+                }),
+            LirSlotValType::RefNullForComponent(def_id) => {
+                let j = self.comp_idx_by_def_id(def_id)?;
+                self.gc_layouts[j].component_struct_type_idx.ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "StructGet/Set rec {rec:?}: component {def_id:?} has no struct type index"
+                    ))
+                })
+            }
+            LirSlotValType::RefNull(ty_idx) => Ok(ty_idx),
+            other => Err(CodegenError::InvalidIR(format!(
+                "StructGet/Set rec {rec:?} has non-struct val_ty {other:?}"
+            ))),
+        }
     }
 
     /// Resolve a [`LirTypeRef`] to the concrete wasm type-section
@@ -2360,16 +2107,6 @@ impl<'a> WasmPackageBuilder<'a> {
                         .into(),
                 )
             }),
-            LirTypeRef::GlobalsStruct(def_id) => {
-                let &idx = self.global_block_def_to_idx.get(&def_id).ok_or_else(|| {
-                    CodegenError::InternalError(format!(
-                        "LirTypeRef::GlobalsStruct({}): no globals layout registered \
-                         (global_block_def_to_idx miss)",
-                        def_id.0
-                    ))
-                })?;
-                Ok(self.globals_layouts[idx].struct_type_idx)
-            }
             LirTypeRef::FlatGcCase(ty, case_idx) => self
                 .record_gc_types
                 .flat_gc_case_idx
@@ -2443,15 +2180,6 @@ impl<'a> WasmPackageBuilder<'a> {
                         def_id.0, j
                     ))
                 })
-            }
-            LirGlobalRef::GlobalBlockSelf(def_id) => {
-                let &idx = self.global_block_def_to_idx.get(&def_id).ok_or_else(|| {
-                    CodegenError::InternalError(format!(
-                        "LirGlobalRef::GlobalBlockSelf({}): no globals layout registered",
-                        def_id.0
-                    ))
-                })?;
-                Ok(self.globals_layouts[idx].self_global_idx)
             }
         }
     }

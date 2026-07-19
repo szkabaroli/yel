@@ -3,7 +3,7 @@
 use crate::ids::DefId;
 use crate::syntax::ast::TyKind as AstTyKind;
 use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::fmt;
 
 /// An interned type reference.
@@ -187,7 +187,7 @@ impl TypeInterner {
     /// Create a new type interner with pre-interned common types.
     pub fn new() -> Self {
         let mut interner = Self {
-            cache: HashMap::new(),
+            cache: HashMap::default(),
             types: Vec::new(),
         };
 

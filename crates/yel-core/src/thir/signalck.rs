@@ -7,17 +7,19 @@
 //! walks (Phase 1.1c-c will consume this in place of legacy
 //! `TriggerEffects` op discovery).
 //!
-//! The analysis is purely additive — it does not mutate any THIR nodes. The
-//! produced [`SignalDependencies`] is attached to [`ThirComponent`] via the
-//! `signal_deps` field by [`check_component`].
+//! The analysis is purely additive — it does not mutate any THIR nodes. Each
+//! `check_*` entry point returns the produced [`SignalDependencies`]; the
+//! typeck driver stores it in the `CompilerContext` side table keyed by the
+//! owning component/global `DefId` (`CompilerContext::set_signal_deps`).
 
 use std::collections::{HashMap, HashSet};
 
 use crate::hir::local_scope::LocalScope;
 use crate::ids::DefId;
 
-use super::expr::{ThirExpr, ThirExprKind, ThirInterpolationPart, ThirStatement};
+use super::expr::{ThirExpr, ThirExprKind, ThirStatement};
 use super::node::{ThirBinding, ThirComponent, ThirGlobal, ThirHandler, ThirNode, ThirNodeKind};
+use super::visit::{walk_expr, walk_stmt, ThirVisitor};
 
 /// Per-component signal dependency analysis.
 ///
@@ -57,22 +59,25 @@ pub enum EffectSource {
     DerivedSignal(DefId),
 }
 
-/// Run signal-dependency analysis on a type-checked component and
-/// attach the result to the component as `signal_deps`.
-pub fn check_component(component: &mut ThirComponent, is_signal: &impl Fn(DefId) -> bool) {
-    let deps = analyze(component, is_signal);
-    component.signal_deps = deps;
+/// Run signal-dependency analysis on a type-checked component and return
+/// the result. The caller stores it in the `CompilerContext` side table.
+pub fn check_component(
+    component: &ThirComponent,
+    is_signal: &impl Fn(DefId) -> bool,
+) -> SignalDependencies {
+    analyze(component, is_signal)
 }
 
 /// Phase 1.1c-k: run signal-dependency analysis on a type-checked global
-/// and attach the result as `signal_deps`. Globals have no body and no
-/// handlers — only derived-signal default expressions contribute to the
-/// dependency graph — so `binding_reads` and `handler_writes` stay empty
-/// and `effects_by_signal` only contains `EffectSource::DerivedSignal`
-/// entries.
-pub fn check_global(global: &mut ThirGlobal, is_signal: &impl Fn(DefId) -> bool) {
-    let deps = analyze_global(global, is_signal);
-    global.signal_deps = deps;
+/// and return the result. Globals have no body and no handlers — only
+/// derived-signal default expressions contribute to the dependency graph —
+/// so `binding_reads` and `handler_writes` stay empty and `effects_by_signal`
+/// only contains `EffectSource::DerivedSignal` entries.
+pub fn check_global(
+    global: &ThirGlobal,
+    is_signal: &impl Fn(DefId) -> bool,
+) -> SignalDependencies {
+    analyze_global(global, is_signal)
 }
 
 /// Pure analysis: walk a `ThirGlobal` and produce a
@@ -102,20 +107,18 @@ pub fn analyze_global(
     }
 
     // Build inverted index `effects_by_signal` (DerivedSignal-only).
-    let derived_snapshot: Vec<(DefId, Vec<DefId>)> = state
-        .deps
-        .derived_signal_reads
-        .iter()
-        .map(|(k, v)| (*k, v.clone()))
-        .collect();
-    for (sig_def, reads) in derived_snapshot {
+    // Disjoint-borrow the source map and the inverted index — no snapshot.
+    let SignalDependencies {
+        derived_signal_reads,
+        effects_by_signal,
+        ..
+    } = &mut state.deps;
+    for (sig_def, reads) in derived_signal_reads.iter() {
         for sig in reads {
-            state
-                .deps
-                .effects_by_signal
-                .entry(sig)
+            effects_by_signal
+                .entry(*sig)
                 .or_default()
-                .push(EffectSource::DerivedSignal(sig_def));
+                .push(EffectSource::DerivedSignal(*sig_def));
         }
     }
 
@@ -148,32 +151,28 @@ pub fn analyze(
         }
     }
 
-    // 3. Build inverted index `effects_by_signal`.
-    let bindings_snapshot = state.deps.binding_reads.clone();
-    for (idx, reads) in bindings_snapshot.iter().enumerate() {
+    // 3. Build inverted index `effects_by_signal`. Disjoint-borrow the read
+    //    maps and the inverted index so neither needs a snapshot clone.
+    let SignalDependencies {
+        binding_reads,
+        derived_signal_reads,
+        effects_by_signal,
+        ..
+    } = &mut state.deps;
+    for (idx, reads) in binding_reads.iter().enumerate() {
         for sig in reads {
-            state
-                .deps
-                .effects_by_signal
+            effects_by_signal
                 .entry(*sig)
                 .or_default()
                 .push(EffectSource::Binding(idx));
         }
     }
-    let derived_snapshot: Vec<(DefId, Vec<DefId>)> = state
-        .deps
-        .derived_signal_reads
-        .iter()
-        .map(|(k, v)| (*k, v.clone()))
-        .collect();
-    for (sig_def, reads) in derived_snapshot {
+    for (sig_def, reads) in derived_signal_reads.iter() {
         for sig in reads {
-            state
-                .deps
-                .effects_by_signal
-                .entry(sig)
+            effects_by_signal
+                .entry(*sig)
                 .or_default()
-                .push(EffectSource::DerivedSignal(sig_def));
+                .push(EffectSource::DerivedSignal(*sig_def));
         }
     }
 
@@ -288,151 +287,140 @@ impl<'a, F: Fn(DefId) -> bool> Analyzer<'a, F> {
     }
 
     fn collect_expr_reads(&self, expr: &ThirExpr, reads: &mut HashSet<DefId>) {
-        match &expr.kind {
-            ThirExprKind::Def(def_id) => {
-                if (self.is_signal)(*def_id) {
-                    reads.insert(*def_id);
-                }
-            }
-            ThirExprKind::Local(local_id) => {
-                if let Some(def_id) = self.locals.get(*local_id).def_id {
-                    if (self.is_signal)(def_id) {
-                        reads.insert(def_id);
-                    }
-                }
-            }
-            ThirExprKind::Binary { lhs, rhs, .. } => {
-                self.collect_expr_reads(lhs, reads);
-                self.collect_expr_reads(rhs, reads);
-            }
-            ThirExprKind::Unary { operand, .. } => {
-                self.collect_expr_reads(operand, reads);
-            }
-            ThirExprKind::Field { base, .. } | ThirExprKind::OptionalField { base, .. } => {
-                self.collect_expr_reads(base, reads);
-            }
-            ThirExprKind::Index { base, index } => {
-                self.collect_expr_reads(base, reads);
-                self.collect_expr_reads(index, reads);
-            }
-            ThirExprKind::Call { args, .. } => {
-                for arg in args {
-                    self.collect_expr_reads(arg, reads);
-                }
-            }
-            ThirExprKind::Range { start, end, .. } => {
-                self.collect_expr_reads(start, reads);
-                self.collect_expr_reads(end, reads);
-            }
-            ThirExprKind::Ternary {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                self.collect_expr_reads(condition, reads);
-                self.collect_expr_reads(then_expr, reads);
-                self.collect_expr_reads(else_expr, reads);
-            }
-            ThirExprKind::Closure { body, .. } => {
-                // A closure body's reads are conservatively included as
-                // dependencies of the surrounding expression context.
-                for s in body {
-                    self.collect_stmt_reads(s, reads);
-                }
-            }
-            ThirExprKind::Interpolation(parts) => {
-                for p in parts {
-                    if let ThirInterpolationPart::Expr(e) = p {
-                        self.collect_expr_reads(e, reads);
-                    }
-                }
-            }
-            ThirExprKind::VariantCtor {
-                payload: Some(p), ..
-            } => {
-                self.collect_expr_reads(p, reads);
-            }
-            ThirExprKind::ListLiteral { elements, .. }
-            | ThirExprKind::TupleLiteral { elements } => {
-                for e in elements {
-                    self.collect_expr_reads(e, reads);
-                }
-            }
-            ThirExprKind::RecordLiteral { fields, .. } => {
-                for f in fields {
-                    self.collect_expr_reads(f, reads);
-                }
-            }
-            ThirExprKind::GlobalCall { args, .. } => {
-                for a in args {
-                    self.collect_expr_reads(a, reads);
-                }
-            }
-            ThirExprKind::Literal(_)
-            | ThirExprKind::EnumCase { .. }
-            | ThirExprKind::VariantCtor { payload: None, .. }
-            | ThirExprKind::GlobalRead { .. }
-            | ThirExprKind::Error => {}
-        }
-    }
-
-    fn collect_stmt_reads(&self, stmt: &ThirStatement, reads: &mut HashSet<DefId>) {
-        match stmt {
-            ThirStatement::Expr(e) => self.collect_expr_reads(e, reads),
-            ThirStatement::Assign { target: _, value } => {
-                // Reading the assignment value (the assigned-to lvalue
-                // is a write, not a read).
-                self.collect_expr_reads(value, reads);
-            }
-            ThirStatement::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                self.collect_expr_reads(condition, reads);
-                for s in then_branch {
-                    self.collect_stmt_reads(s, reads);
-                }
-                if let Some(els) = else_branch {
-                    for s in els {
-                        self.collect_stmt_reads(s, reads);
-                    }
-                }
-            }
-            ThirStatement::Let { value, .. } => self.collect_expr_reads(value, reads),
-        }
+        collect_expr_reads(expr, self.locals, self.is_signal, reads);
     }
 
     fn collect_stmt_writes(&self, stmts: &[ThirStatement], writes: &mut HashSet<DefId>) {
-        for stmt in stmts {
-            match stmt {
-                ThirStatement::Assign { target, .. } => match &target.kind {
-                    ThirExprKind::Def(def_id) => {
-                        if (self.is_signal)(*def_id) {
-                            writes.insert(*def_id);
-                        }
-                    }
-                    ThirExprKind::Local(local_id) => {
-                        if let Some(def_id) = self.locals.get(*local_id).def_id {
-                            if (self.is_signal)(def_id) {
-                                writes.insert(def_id);
-                            }
-                        }
-                    }
-                    _ => {}
-                },
-                ThirStatement::If {
-                    then_branch,
-                    else_branch,
-                    ..
-                } => {
-                    self.collect_stmt_writes(then_branch, writes);
-                    if let Some(els) = else_branch {
-                        self.collect_stmt_writes(els, writes);
+        collect_stmt_writes(stmts, self.locals, self.is_signal, writes);
+    }
+}
+
+// ============================================================================
+// Shared THIR read/write walkers
+// ============================================================================
+//
+// Single source of truth for "which signals does this expression / statement
+// read or write." Both the reactivity analysis above and the
+// setter-overwrites-getter lint in `typeck` call these, so the two can never
+// drift — they used to be hand-copied and the copies had already diverged (the
+// `typeck` copy silently dropped `Closure` / `GlobalCall` reads). `is_signal`
+// decides which `DefId`s count as signals.
+
+/// Visitor that records every signal `DefId` read by an expression / statement.
+/// `is_signal` decides which defs count; locals resolve to their backing def
+/// via `locals`. Drives [`collect_expr_reads`].
+struct ReadCollector<'a> {
+    locals: &'a LocalScope,
+    is_signal: &'a dyn Fn(DefId) -> bool,
+    reads: &'a mut HashSet<DefId>,
+}
+
+impl ThirVisitor for ReadCollector<'_> {
+    fn visit_expr(&mut self, expr: &ThirExpr) {
+        match &expr.kind {
+            ThirExprKind::Def(def_id) => {
+                if (self.is_signal)(*def_id) {
+                    self.reads.insert(*def_id);
+                }
+            }
+            ThirExprKind::Local(local_id) => {
+                if let Some(def_id) = self.locals.get(*local_id).def_id
+                    && (self.is_signal)(def_id)
+                {
+                    self.reads.insert(def_id);
+                }
+            }
+            // Everything else — including closures, whose bodies are
+            // conservatively folded into the surrounding context by the
+            // default `visit_closure` — recurses structurally.
+            _ => walk_expr(self, expr),
+        }
+    }
+
+    fn visit_stmt(&mut self, stmt: &ThirStatement) {
+        // An assignment *reads* its value; the assigned-to lvalue is a write,
+        // not a read, so it is deliberately not visited.
+        if let ThirStatement::Assign { value, .. } = stmt {
+            self.visit_expr(value);
+        } else {
+            walk_stmt(self, stmt);
+        }
+    }
+}
+
+/// Visitor that records every signal `DefId` *written* by a statement list.
+/// A write happens only through an assignment's top-level lvalue, so this
+/// never descends into expression interiors — only `Assign` targets and the
+/// statements nested in `if` branches.
+struct WriteCollector<'a> {
+    locals: &'a LocalScope,
+    is_signal: &'a dyn Fn(DefId) -> bool,
+    writes: &'a mut HashSet<DefId>,
+}
+
+impl ThirVisitor for WriteCollector<'_> {
+    fn visit_stmt(&mut self, stmt: &ThirStatement) {
+        match stmt {
+            ThirStatement::Assign { target, .. } => match &target.kind {
+                ThirExprKind::Def(def_id) => {
+                    if (self.is_signal)(*def_id) {
+                        self.writes.insert(*def_id);
                     }
                 }
-                ThirStatement::Expr(_) | ThirStatement::Let { .. } => {}
+                ThirExprKind::Local(local_id) => {
+                    if let Some(def_id) = self.locals.get(*local_id).def_id
+                        && (self.is_signal)(def_id)
+                    {
+                        self.writes.insert(def_id);
+                    }
+                }
+                _ => {}
+            },
+            ThirStatement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                for s in then_branch {
+                    self.visit_stmt(s);
+                }
+                if let Some(els) = else_branch {
+                    for s in els {
+                        self.visit_stmt(s);
+                    }
+                }
             }
+            ThirStatement::Expr(_) | ThirStatement::Let { .. } => {}
         }
+    }
+}
+
+pub(crate) fn collect_expr_reads(
+    expr: &ThirExpr,
+    locals: &LocalScope,
+    is_signal: &dyn Fn(DefId) -> bool,
+    reads: &mut HashSet<DefId>,
+) {
+    ReadCollector {
+        locals,
+        is_signal,
+        reads,
+    }
+    .visit_expr(expr);
+}
+
+pub(crate) fn collect_stmt_writes(
+    stmts: &[ThirStatement],
+    locals: &LocalScope,
+    is_signal: &dyn Fn(DefId) -> bool,
+    writes: &mut HashSet<DefId>,
+) {
+    let mut collector = WriteCollector {
+        locals,
+        is_signal,
+        writes,
+    };
+    for stmt in stmts {
+        collector.visit_stmt(stmt);
     }
 }

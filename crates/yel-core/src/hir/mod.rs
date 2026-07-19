@@ -13,4 +13,6 @@ pub mod node;
 pub use expr::{HirExpr, HirExprKind, HirLiteral};
 pub use local_scope::{LocalInfo, LocalScope};
 pub use lower::lower_file;
-pub use node::{HirBinding, HirComponent, HirHandler, HirNode, HirNodeKind};
+pub use node::{
+    HirBinding, HirComponent, HirGlobal, HirHandler, HirItem, HirNode, HirNodeKind,
+};

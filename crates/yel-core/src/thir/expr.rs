@@ -82,12 +82,9 @@ pub enum ThirExprKind {
         then_expr: Box<ThirExpr>,
         else_expr: Box<ThirExpr>,
     },
-    /// Closure expression.
-    Closure {
-        params: Vec<(LocalId, Ty)>,
-        body: Vec<ThirStatement>,
-        captures: Vec<LocalId>,
-    },
+    /// Closure expression. Boxed: the three vectors make this the largest
+    /// `ThirExprKind` variant, while closures are comparatively rare.
+    Closure(Box<ThirClosure>),
     /// String interpolation.
     Interpolation(Vec<ThirInterpolationPart>),
     /// Enum case reference (e.g., `Status.case`).
@@ -161,6 +158,21 @@ pub enum ThirExprKind {
     /// Error recovery.
     Error,
 }
+
+/// Payload of [`ThirExprKind::Closure`], boxed to keep `ThirExprKind` small.
+#[derive(Debug, Clone)]
+pub struct ThirClosure {
+    /// Closure parameters (local id + type).
+    pub params: Vec<(LocalId, Ty)>,
+    /// Closure body statements.
+    pub body: Vec<ThirStatement>,
+    /// Captured locals.
+    pub captures: Vec<LocalId>,
+}
+
+// `ThirExprKind` is stored per expression; guard against a variant re-bloating
+// it (the `Closure` payload is boxed for this reason). Bump deliberately.
+const _: () = assert!(std::mem::size_of::<ThirExprKind>() <= 40);
 
 /// THIR statement (in closures/handlers).
 #[derive(Debug, Clone)]

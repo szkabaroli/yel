@@ -4,7 +4,7 @@
 //! - UI operations are explicit instructions (LirOp)
 //! - Branches become separate blocks with mount/unmount operations
 //! - Storage is pre-allocated (SlotId for temps and memory)
-//! - Strings and expressions are interned (StringId, ExprId)
+//! - Strings and expressions are interned (StringId, LirExprId)
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -72,14 +72,6 @@ pub enum LirTypeRef {
     /// `WasmPackageBuilder::shared_handle_arr_type_idx`. Sibling of
     /// [`LirTypeRef::SharedHandleStruct`].
     SharedHandleArray,
-    /// Phase 1.1c-i: a global-block's `$globals_<i>` GC struct, keyed
-    /// by the block's `DefId`. Codegen resolves via
-    /// `global_block_def_to_idx[def] → globals_layouts[idx].struct_type_idx`.
-    /// Lets the unified inline signal-write path emit
-    /// `LirOp::StructSetSym` against global-block property storage
-    /// instead of routing through the legacy `LirOp::SignalWrite[Expr]`
-    /// arms.
-    GlobalsStruct(DefId),
     /// Task #99: a specific case subtype of a FlatGcStruct supertype.
     /// First field is the parent type (option/result/variant); second
     /// is the case index (0 = None / Ok / first variant). Codegen
@@ -119,12 +111,6 @@ pub enum LirGlobalRef {
     /// handle), or `-1`, per-component. Resolves via
     /// `gc_layouts[…].registry_free_head_global`.
     RegistryFreeHead(DefId),
-    /// Phase 1.1c-i: the `(mut (ref null $globals_<i>))` global that
-    /// holds the singleton instance of a global block. Codegen resolves
-    /// via `globals_layouts[global_block_def_to_idx[def]].self_global_idx`.
-    /// Used by the unified signal-write path to materialize the rec for
-    /// `StructSetSym` against [`LirTypeRef::GlobalsStruct`].
-    GlobalBlockSelf(DefId),
 }
 
 /// Slot ID for storage locations.
@@ -186,7 +172,7 @@ pub struct StringId(pub u32);
 ///
 /// References an expression stored in the component's expression table.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct ExprId(pub u32);
+pub struct LirExprId(pub u32);
 
 // A block is a reusable sequence of DOM operations.
 //
@@ -490,6 +476,77 @@ impl super::arena::LirFunctionLike for LirBlock {
 /// - Performs a DOM operation via host import
 /// - Manipulates memory or locals
 /// - Controls execution flow
+/// Scalar value type for a linear-memory load/store ([`LirOp::LoadAddr`]
+/// / [`LirOp::StoreAddr`]). Mirrors the four WASM numeric value types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MemoryValueType {
+    I32,
+    I64,
+    F32,
+    F64,
+}
+
+/// Store width for [`LirOp::StoreAddr`]: a full-width store or a
+/// narrowing `i32.store8` / `i32.store16`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum StoreWidth {
+    Full,
+    Narrow8,
+    Narrow16,
+}
+
+/// Integer comparison for [`LirOp::Compare`] — the wasm `i32` predicate
+/// emitted over `(lhs, rhs)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CompareOp {
+    /// Unsigned `>=` (`i32.ge_u`).
+    GeU,
+    /// Unsigned `<` (`i32.lt_u`).
+    LtU,
+    /// `!=` (`i32.ne`).
+    Ne,
+}
+
+/// Integer arithmetic for [`LirOp::BinaryOp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ArithOp {
+    /// `i32.add`.
+    Add,
+    /// `i32.sub`.
+    Sub,
+    /// `i32.mul`.
+    Mul,
+}
+
+/// Right-hand operand of [`LirOp::BinaryOp`]: either another slot's value
+/// or an immediate constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BinOperand {
+    /// Value read from a slot (`local.get`).
+    Slot(LirSlotId),
+    /// Immediate constant (`i32.const`).
+    Const(u32),
+}
+
+/// How an [`LirOp::ArrayGetItem`] element is delivered — the read
+/// representation. Scalar elements land directly in a slot; string
+/// elements are `(ref null $fat_value)` boxes unboxed to the canonical
+/// `(ptr, len)` pair, either into two slots or written to a memory buffer.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum ArrayItemRepr {
+    /// Element read directly into `result` (`array.get` → `local.set`).
+    Scalar { result: LirSlotId },
+    /// String element unboxed to `(ptr, len)` in two i32 slots.
+    Fat {
+        ptr_result: LirSlotId,
+        len_result: LirSlotId,
+    },
+    /// String element's `(ptr, len)` written to memory at `buf_addr`
+    /// (`+0` = ptr, `+4` = len), preserving the legacy memory-backed
+    /// `load_fat_ptr` item semantics for the for-iter body reader.
+    FatToMem { buf_addr: LirSlotId },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LirOp {
     // === DOM Operations ===
@@ -536,18 +593,13 @@ pub enum LirOp {
     /// Emits `i32.const <len>`. Pairs with `PushStringPtr`.
     PushStringLen { string_id: StringId },
 
-    /// Push the (ptr, len) fat-pointer pair produced by evaluating
-    /// `expr` and stringifying via the codegen-side `emit_expr_as_string`
-    /// helper. Replaces inline `emit_expr_as_string` calls in the
-    /// legacy `CreateTextDynamic` / `SetTextContent` arms.
-    PushExprAsString { expr: ExprId },
-
-    /// Push the 6-field attribute-value variant payload (discrim: i32,
-    /// p0: i32, p1: i32, p2: i64, p3: f32, p4: f64) produced by the
-    /// codegen-side `emit_expr_as_attr_value` helper. Used by
-    /// `SetAttribute`. Sources the `expr`'s value and emits the
-    /// per-variant pack sequence inline.
-    PushExprAsAttrValue { expr: ExprId },
+    /// Push `expr`'s canonical-ABI flat representation onto the stack
+    /// (codegen `emit_expr`). Generic: the value's own type drives the
+    /// flattening — a `VariantCtor` flattens to discriminant + joined
+    /// payload slots, a scalar to its slot, etc. Used to pass a constructed
+    /// value as a host-call argument without a bespoke per-shape push op
+    /// (e.g. `set-attribute`'s `attribute-value`).
+    PushExpr { expr: LirExprId },
 
     /// Push the encoded handler-id (i32) for the `handler` block onto
     /// the stack. Mirrors the legacy `AddEventListener` arm's
@@ -575,9 +627,11 @@ pub enum LirOp {
     /// Load i32 from memory slot to temp slot.
     LoadI32 { slot: LirSlotId, to: LirSlotId },
 
-    /// Compare two i32 Temp slots; write 1 to `result` if `lhs != rhs`,
-    /// else 0. Used by if-update routing to detect a branch change.
-    I32Ne {
+    /// Compare two i32 Temp slots with `op` and write the boolean result
+    /// (1/0) to `result`. Generic over the predicate: `Ne` for if-update
+    /// branch-change detection, `GeU`/`LtU` for for-loop bounds checks.
+    Compare {
+        op: CompareOp,
         lhs: LirSlotId,
         rhs: LirSlotId,
         result: LirSlotId,
@@ -629,7 +683,7 @@ pub enum LirOp {
     /// `BoundaryField` slot accesses on this boundary resolve via
     /// `local.get <slot.local>`. Emits NO WASM instructions.
     ///
-    /// Used by fan-out update walks: after `ChildrenArrayGet` has
+    /// Used by fan-out update walks: after `ArrayGet` has
     /// fetched an ancestor iter-body's typed ref into a Temp slot,
     /// `BindBoundaryLocal` advertises it so reads/writes against that
     /// boundary's fields routed through `BoundaryField` slots work.
@@ -641,7 +695,7 @@ pub enum LirOp {
 
     // === Control Flow ===
     /// Evaluate expression and store result in slot.
-    EvalExpr { expr: ExprId, result: LirSlotId },
+    EvalExpr { expr: LirExprId, result: LirSlotId },
 
     /// Phase 1.1c-f: evaluate `expr` and store its flat-canonical-ABI
     /// result into `dest_first_slot..dest_first_slot + N` consecutive
@@ -655,7 +709,7 @@ pub enum LirOp {
     /// Used to inline SignalWriteExpr / InitSignal at LIR-lowering
     /// source without expanding the LIR with type-driven codegen logic.
     EvalExprToSlots {
-        expr: ExprId,
+        expr: LirExprId,
         dest_first_slot: LirSlotId,
     },
 
@@ -665,19 +719,12 @@ pub enum LirOp {
     /// stored). Unlike `EvalExpr`, no slot is reserved and the exact number
     /// of stack values produced is drained at codegen time using the
     /// expression's flat core valtypes.
-    DropExpr { expr: ExprId },
+    DropExpr { expr: LirExprId },
 
     /// Conditional: if cond is non-zero, execute then_ops, else execute else_ops.
-    If {
-        cond: LirSlotId,
-        then_ops: Vec<LirOp>,
-        else_ops: Vec<LirOp>,
-        /// Optional debug label surfaced in the WASM name section as a
-        /// `label` subsection entry on the emitted `if` instruction.
-        /// `None` means no label entry is emitted for this if (the name
-        /// section is a debug hint, so omitting is valid).
-        name: Option<String>,
-    },
+    /// Boxed: the two op vectors plus the label made this the largest `LirOp`
+    /// variant, and every op in every block pays the max variant size.
+    If(Box<LirIf>),
 
     /// Call a block with explicit args, in the callee's `params`
     /// order. Each arg slot is pushed onto the wasm stack via
@@ -749,7 +796,7 @@ pub enum LirOp {
     /// tuple) whose flat canonical-ABI shape is multi-slot and therefore
     /// cannot fit the single-SlotId `SignalWrite` form. Codegen emits the
     /// expression and stores each flat slot to its offset.
-    SignalWriteExpr { signal: DefId, expr: ExprId },
+    SignalWriteExpr { signal: DefId, expr: LirExprId },
 
     /// Trigger all effects that depend on signal.
     TriggerEffects { signal: DefId },
@@ -757,7 +804,7 @@ pub enum LirOp {
     // === Constructor Operations ===
     /// Initialize signal with expression value.
     /// Used during component construction to set initial values.
-    InitSignal { signal_idx: u32, expr: ExprId },
+    InitSignal { signal_idx: u32, expr: LirExprId },
 
     /// Initialize signal with zero/empty default.
     /// Used when no default value is provided.
@@ -813,24 +860,17 @@ pub enum LirOp {
         name: Option<String>,
     },
 
-    /// Evaluate condition (index >= len) and store in slot.
-    /// Generates: local.get index; local.get len; i32.ge_u
-    GeU {
-        index: LirSlotId,
-        len: LirSlotId,
+
+    /// Integer arithmetic: `result = lhs <op> rhs`, where `lhs` is a slot
+    /// value and `rhs` is a slot value or an immediate. Covers slot+slot,
+    /// slot-slot, slot*const, and in-place increment (`Add` with
+    /// `rhs: Const(1)` and `result == lhs`).
+    BinaryOp {
+        op: ArithOp,
+        lhs: LirSlotId,
+        rhs: BinOperand,
         result: LirSlotId,
     },
-
-    /// Evaluate `a < b` (unsigned) and store in slot.
-    /// Generates: local.get a; local.get b; i32.lt_u
-    LtU {
-        a: LirSlotId,
-        b: LirSlotId,
-        result: LirSlotId,
-    },
-
-    /// Increment slot value by 1.
-    IncrSlot { slot: LirSlotId },
 
     /// Allocate memory: alloc(size, align) -> ptr
     Alloc {
@@ -842,62 +882,27 @@ pub enum LirOp {
     /// Free memory: free(ptr, size)
     Free { ptr: LirSlotId, size: LirSlotId },
 
-    /// Multiply slot by constant: slot * constant -> result
-    MulConst {
-        slot: LirSlotId,
-        constant: u32,
+
+    /// Load a scalar of type `ty` from the linear-memory address in
+    /// `addr` into `result`. Natural alignment per type (i32/f32 → 4,
+    /// i64/f64 → 8).
+    LoadAddr {
+        addr: LirSlotId,
         result: LirSlotId,
+        ty: MemoryValueType,
     },
 
-    /// Add slots: a + b -> result
-    AddSlots {
-        a: LirSlotId,
-        b: LirSlotId,
-        result: LirSlotId,
+    /// Store the scalar in `value` to the linear-memory address in `addr`.
+    /// `width` selects a full store or a narrowing `i32.store8`/`store16`
+    /// (narrow widths apply to `i32` values — narrow-typed signals
+    /// `bool`/`u8`/`s8`/`char` and `u16`/`s16`, and `option<T>`
+    /// discriminant bytes — so the store doesn't clobber adjacent bytes).
+    StoreAddr {
+        addr: LirSlotId,
+        value: LirSlotId,
+        ty: MemoryValueType,
+        width: StoreWidth,
     },
-
-    /// Subtract slots: a - b -> result
-    SubSlots {
-        a: LirSlotId,
-        b: LirSlotId,
-        result: LirSlotId,
-    },
-
-    /// Load i32 from address (not memory slot).
-    LoadI32Addr { addr: LirSlotId, result: LirSlotId },
-
-    /// Store i32 to address (not memory slot).
-    StoreI32Addr { addr: LirSlotId, value: LirSlotId },
-
-    /// Load i64 from address (linear memory). Align = 3 (8 bytes).
-    LoadI64Addr { addr: LirSlotId, result: LirSlotId },
-
-    /// Store i64 to address (linear memory).
-    StoreI64Addr { addr: LirSlotId, value: LirSlotId },
-
-    /// Load f32 from address (linear memory). Align = 2 (4 bytes).
-    LoadF32Addr { addr: LirSlotId, result: LirSlotId },
-
-    /// Store f32 to address (linear memory).
-    StoreF32Addr { addr: LirSlotId, value: LirSlotId },
-
-    /// Load f64 from address (linear memory). Align = 3 (8 bytes).
-    LoadF64Addr { addr: LirSlotId, result: LirSlotId },
-
-    /// Store f64 to address (linear memory).
-    StoreF64Addr { addr: LirSlotId, value: LirSlotId },
-
-    /// Store the low 8 bits of an i32-valued slot to `addr` (linear
-    /// memory). Emits `i32.store8 (offset=0, align=0)`. Used by the
-    /// inline signal-lowering pass for narrow-typed signals
-    /// (`bool`, `u8`, `s8`, `char`) and for the discriminant byte of
-    /// `option<T>` so the narrow store doesn't clobber adjacent bytes.
-    StoreI32Narrow8Addr { addr: LirSlotId, value: LirSlotId },
-
-    /// Store the low 16 bits of an i32-valued slot to `addr` (linear
-    /// memory). Emits `i32.store16 (offset=0, align=1)`. Used by the
-    /// inline signal-lowering pass for `u16` / `s16` signals.
-    StoreI32Narrow16Addr { addr: LirSlotId, value: LirSlotId },
 
     /// Materialize a constant linear-memory address into a slot.
     /// Emits `i32.const <addr>; local.set result`. Used by inline
@@ -929,25 +934,12 @@ pub enum LirOp {
         result: LirSlotId,
     },
 
-    /// Read field `field` of a struct-typed ref in `rec`, store to
-    /// `result`. Emits `local.get rec; struct.get <ty_idx> <field>;
-    /// local.set result`.
-    StructGet {
-        ty_idx: u32,
-        field: u32,
-        rec: LirSlotId,
-        result: LirSlotId,
-    },
-
-    /// Write `value` to field `field` of struct-typed ref in `rec`.
-    /// Emits `local.get rec; local.get value; struct.set <ty_idx>
-    /// <field>`.
-    StructSet {
-        ty_idx: u32,
-        field: u32,
-        rec: LirSlotId,
-        value: LirSlotId,
-    },
+    // Stage 5e-4 (lir-resource-flatten): the dead `StructGet { ty_idx }` /
+    // `StructSet { ty_idx }` ops (defined here, matched in dedupe + codegen,
+    // but never constructed by any lowering path) were deleted. The names
+    // `StructGet` / `StructSet` are now the generic struct-field ops further
+    // down — they resolve the wasm struct-type index from `rec`'s `val_ty`
+    // rather than carrying an explicit `ty_idx`.
 
     /// Phase 0.2: symbolic-ty companion of [`LirOp::StructNew`].
     /// `ty_ref` resolves to a wasm type-section index at codegen
@@ -1042,37 +1034,46 @@ pub enum LirOp {
         value: LirSlotId,
     },
 
-    /// Stage 3 (lir-resource-flatten plan): explicit struct-get on a
-    /// boundary's GC struct. Replaces `LoadHandle` against a
-    /// `BoundaryField` slot. The boundary-ref local is passed in
-    /// `rec` (no codegen-time chain walk); `boundary_id` carries the
-    /// source info needed to resolve the wasm struct-type-section
-    /// index (today via `gc_layout.tree_struct_type_idx`; Stage 4+
-    /// will switch this to the `LirResource::struct_types` registry).
-    BoundaryStructGet {
-        boundary_id: TreeBoundaryId,
-        field_idx: u32,
-        rec: LirSlotId,
-        result: LirSlotId,
-    },
-
-    /// Stage 3 companion to [`BoundaryStructGet`]. Replaces `StoreHandle`
-    /// against a `BoundaryField` slot.
-    BoundaryStructSet {
-        boundary_id: TreeBoundaryId,
-        field_idx: u32,
-        rec: LirSlotId,
+    /// Write slot `value` into storage slot `field` of named `global`
+    /// block `block`. The single representation of a global-property
+    /// write — it carries no self-ref and no struct concept (unlike the
+    /// former `GlobalGet{GlobalBlockSelf} + StructSetSym{GlobalsStruct}`
+    /// pair). Codegen resolves `(block, field)` to its backing storage
+    /// (today the block's GC struct field; later a core wasm global) and
+    /// emits the store. Global *reads* stay expression-position
+    /// `SignalRead`s, resolved in codegen.
+    GlobalFieldSet {
+        block: DefId,
+        field: u32,
         value: LirSlotId,
     },
 
-    /// Stage 5b: literal-i32 store to a `BoundaryField` (e.g. an
-    /// `active_tag` flag). Replaces `StoreI32 { slot: <BoundaryField>,
-    /// value }`. Codegen: `local.get rec; i32.const value;
-    /// struct.set <ty> <field>`.
-    BoundaryStructSetConst {
-        boundary_id: TreeBoundaryId,
-        field_idx: u32,
+    /// Generic `struct.get` on a typed GC struct: read field `field_idx`
+    /// of the struct referenced by `rec` into `result`. Codegen emits
+    /// `local.get rec; ref.as_non_null; struct.get <ty> <field>`, where
+    /// `<ty>` is resolved **from `rec`'s `val_ty`** (a
+    /// `RefNullForBoundary`/`RefNullForComponent`) — the op itself carries
+    /// no frontend/tree concept. Produced by `boundary_rewrite` from the
+    /// pre-rewrite [`StructFieldGet`].
+    StructGet {
         rec: LirSlotId,
+        field_idx: u32,
+        result: LirSlotId,
+    },
+
+    /// Companion to [`StructGet`]: `struct.set` field `field_idx` of the
+    /// struct in `rec` from slot `value`.
+    StructSet {
+        rec: LirSlotId,
+        field_idx: u32,
+        value: LirSlotId,
+    },
+
+    /// Companion to [`StructGet`]: `struct.set` a literal i32 (e.g. an
+    /// active-tag flag) into field `field_idx` of the struct in `rec`.
+    StructSetConst {
+        rec: LirSlotId,
+        field_idx: u32,
         value: i32,
     },
 
@@ -1091,17 +1092,45 @@ pub enum LirOp {
         result: LirSlotId,
     },
 
-    // ── Stage 5a deletion (lir-resource-flatten plan) ────────────────
-    // `ArrayNewDefault`, `ArrayGet`, `ArraySet`, `ArrayCopy` (all
-    // taking a raw `ty_idx: u32`) were defined here but never
-    // constructed by any lowering path. The actual array-mutation
-    // ops emitted by the lowerer are the `ChildrenArray*` family
-    // (keyed by `TreeBoundaryId`); array reads of typed-list
-    // signals go through `ArrayGetItem` / `ArrayGetItemFat` /
-    // `ArrayGetItemFatToMem`. Deleting the dead variants here.
-    // Stage 5e-3 will rename `ChildrenArray*` once lowering can
-    // compute the wasm-type-section index via the resource's
-    // `array_types` registry.
+    /// Pre-rewrite (lir-resource-flatten Stage 5e-4): a symbolic read of
+    /// field `field_idx` of the struct identified by `struct_ty`, into
+    /// `result`. The lowerer emits this directly — `struct_ty` (a
+    /// `TreeBoundaryId`, doubling as the `struct_types` registry index) tells
+    /// the `boundary_rewrite` pass which struct instance to resolve a `rec`
+    /// for via the tree. It lowers this to a generic [`StructGet`]; no
+    /// `StructFieldGet` may survive to codegen.
+    StructFieldGet {
+        struct_ty: TreeBoundaryId,
+        field_idx: u32,
+        result: LirSlotId,
+    },
+
+    /// Pre-rewrite companion to [`StructFieldGet`]: a symbolic write of
+    /// `value` into field `field_idx` of the `struct_ty` struct. Resolved to
+    /// [`StructSet`] by `boundary_rewrite`.
+    StructFieldSet {
+        struct_ty: TreeBoundaryId,
+        field_idx: u32,
+        value: LirSlotId,
+    },
+
+    /// Pre-rewrite companion: a symbolic literal-i32 store into field
+    /// `field_idx` of the `struct_ty` struct. Resolved to [`StructSetConst`]
+    /// by `boundary_rewrite`.
+    StructFieldSetConst {
+        struct_ty: TreeBoundaryId,
+        field_idx: u32,
+        value: i32,
+    },
+
+    // The array-mutation ops (`ArrayNewDefault` / `ArrayGet` / `ArraySet`
+    // / `ArrayCopy`) carry a `LirArrayTypeIdx` registry index — no UI
+    // `TreeBoundaryId`. The lowering computes the index from the for-anchor
+    // via `for_anchor_array_idx` (its ordinal among ForAnchor boundaries),
+    // and codegen resolves the wasm type-section index as
+    // `gc_layouts[comp].array_type_base + LirArrayTypeIdx`. Array *reads*
+    // of typed-list signals still go through `ArrayGetItem` /
+    // `ArrayGetItemFat` / `ArrayGetItemFatToMem`.
     /// Push the length of a GC array onto `result`.
     ArrayLen { arr: LirSlotId, result: LirSlotId },
 
@@ -1113,34 +1142,36 @@ pub enum LirOp {
     /// Push a null ref of a concrete heap type. `ref.null <ty_idx>`.
     RefNull { ty_idx: u32, result: LirSlotId },
 
-    /// Symbolic `array.new_default` of a `ForAnchor`'s children-array
-    /// type. Element type is the per-for `ForIterBody` struct.
-    /// Codegen resolves via `gc_layouts[comp].tree_for_arr_type_idx[anchor_boundary_id]`.
-    ChildrenArrayNewDefault {
-        anchor_boundary: TreeBoundaryId,
+    /// `array.new_default` of a typed GC array, identified by its
+    /// registry index into the resource's `array_types`. Codegen resolves
+    /// the wasm type-section index from that registry index. (Today the
+    /// only array types are for-anchor children arrays, whose element is
+    /// the per-for `ForIterBody` struct.)
+    ArrayNewDefault {
+        array_type: LirArrayTypeIdx,
         len: LirSlotId,
         result: LirSlotId,
     },
 
-    /// Symbolic `array.get` of a `ForAnchor`'s children-array.
-    ChildrenArrayGet {
-        anchor_boundary: TreeBoundaryId,
+    /// `array.get` of the registry array type `array_type`.
+    ArrayGet {
+        array_type: LirArrayTypeIdx,
         arr: LirSlotId,
         idx: LirSlotId,
         result: LirSlotId,
     },
 
-    /// Symbolic `array.set` of a `ForAnchor`'s children-array.
-    ChildrenArraySet {
-        anchor_boundary: TreeBoundaryId,
+    /// `array.set` of the registry array type `array_type`.
+    ArraySet {
+        array_type: LirArrayTypeIdx,
         arr: LirSlotId,
         idx: LirSlotId,
         value: LirSlotId,
     },
 
-    /// Symbolic `array.copy` of a `ForAnchor`'s children-array.
-    ChildrenArrayCopy {
-        anchor_boundary: TreeBoundaryId,
+    /// `array.copy` of the registry array type `array_type`.
+    ArrayCopy {
+        array_type: LirArrayTypeIdx,
         dst: LirSlotId,
         dst_idx: LirSlotId,
         src: LirSlotId,
@@ -1192,7 +1223,7 @@ pub enum LirOp {
     ///
     /// Added in Phase 5b-ii. No emitter produces it yet.
     EvalListExprGc {
-        expr: ExprId,
+        expr: LirExprId,
         ref_result: LirSlotId,
         len_result: LirSlotId,
     },
@@ -1210,42 +1241,16 @@ pub enum LirOp {
     /// Added in Phase 5b-ii alongside `LoadListGc` / `EvalListExprGc`
     /// to replace `ComputeItemPtr` for migrated lists in Phase 5b-iv /
     /// 5b-v. No emitter produces it yet.
+    /// Read element `idx` from the GC array backing list-typed signal
+    /// `list_ty` (`record_gc_types.list_array_type_idx[list_ty]`). The
+    /// `repr` selects how the element is delivered — directly into a slot,
+    /// unboxed to a fat-pointer pair, or stored to memory. See
+    /// [`ArrayItemRepr`].
     ArrayGetItem {
         arr: LirSlotId,
         idx: LirSlotId,
         list_ty: Ty,
-        result: LirSlotId,
-    },
-    /// Phase 7 / typed-GC migration Stage 3: typed read of one
-    /// `(ref null $fat_value)` element from a list whose element type
-    /// is `string`, unboxed into the canonical fat-pointer pair
-    /// `(ptr i32, len i32)`. Emits the array.get and two `struct.get
-    /// $fat_value <0|1>` ops, storing into `ptr_result` (i32) and
-    /// `len_result` (i32). Used by Stage 4's for-iter body migration
-    /// for string-element lists, where downstream body code (legacy
-    /// interpolation, concat, ToString) still expects fat-pointer-shape
-    /// operands.
-    ///
-    /// No emitter produces it yet (Stage 4 flips lower_for).
-    ArrayGetItemFat {
-        arr: LirSlotId,
-        idx: LirSlotId,
-        list_ty: Ty,
-        ptr_result: LirSlotId,
-        len_result: LirSlotId,
-    },
-    /// Phase 7 / typed-GC migration Stage 4b: typed read of one
-    /// `(ref null $fat_value)` element from a string-element list,
-    /// unboxed into the canonical fat-pointer pair `(ptr, len)` and
-    /// stored at `*buf_addr_slot[+0]` / `+4`. Used by for-iter over
-    /// `list<string>` so the body's `Local` reader can keep its
-    /// memory-backed `load_fat_ptr` semantics — `item_ptr` carries the
-    /// buffer address, body reads via legacy fat-pointer load.
-    ArrayGetItemFatToMem {
-        arr: LirSlotId,
-        idx: LirSlotId,
-        list_ty: Ty,
-        buf_addr_slot: LirSlotId,
+        repr: ArrayItemRepr,
     },
 
     /// Phase 1.1c-l: `ref.cast (ref null <ty>)` on a value source. Emits
@@ -1280,6 +1285,28 @@ pub enum LirOp {
         result: LirSlotId,
     },
 }
+
+/// Payload of [`LirOp::If`], boxed to keep `LirOp` small (it is stored in a
+/// `Vec<LirOp>` per block, so the enum's footprint is paid per op).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LirIf {
+    /// Condition slot; the branch is taken when its value is non-zero.
+    pub cond: LirSlotId,
+    /// Ops executed when the condition is non-zero.
+    pub then_ops: Vec<LirOp>,
+    /// Ops executed when the condition is zero.
+    pub else_ops: Vec<LirOp>,
+    /// Optional debug label surfaced in the WASM name section as a
+    /// `label` subsection entry on the emitted `if` instruction.
+    /// `None` means no label entry is emitted for this if (the name
+    /// section is a debug hint, so omitting is valid).
+    pub name: Option<String>,
+}
+
+// `LirOp` is stored in a `Vec<LirOp>` per block, so its size is paid per op.
+// Guard against a variant accidentally re-bloating the enum (see the boxed
+// `If`/`LirIf` split). Bump deliberately if a real new field needs the space.
+const _: () = assert!(std::mem::size_of::<LirOp>() <= 56);
 
 /// Collected dynamic-binding entry — one per dynamic site (attr/text
 /// /structural) emitted during body lowering.
@@ -1423,14 +1450,6 @@ pub enum LirSlotValType {
     /// intermediate value from `struct.get $handle.$inst` before
     /// `ref.cast` narrows it to a typed component ref.
     AnyRef,
-    /// Phase 1.1c-i: nullable ref to a global block's `$globals_<name>`
-    /// GC struct. The contained `DefId` is the global block's DefId,
-    /// keyed in `WasmPackageBuilder::global_block_def_to_idx`. Codegen
-    /// resolves via that map to `globals_layouts[i].struct_type_idx`.
-    /// Used by the unified inline signal-write helper to type the
-    /// scratch slot that holds the global-block instance ref before
-    /// `StructSetSym` per property field.
-    RefNullForGlobalBlock(DefId),
 }
 
 /// Information about a slot's allocation.
@@ -1596,24 +1615,13 @@ pub enum LirSlotKind {
         /// Size in bytes.
         size: u32,
     },
-    /// Persistent state lives at `field_idx` of `boundary_id`'s GC
-    /// struct in the component's concrete-typed mount tree. Read /
-    /// written via `local.get <boundary>; struct.get <ty> <field>` or
-    /// `local.get <boundary>; <value>; struct.set <ty> <field>` —
-    /// where `<boundary>` is the WASM local holding the boundary's
-    /// struct ref, supplied by the emission scope (function param,
-    /// for-iter callback param, if-branch mount param, or the root
-    /// materialized from `$self.tree` at function entry).
-    ///
-    /// No path / walk is stored on the slot — each emission scope is
-    /// responsible for arranging the appropriate boundary ref to be
-    /// in scope (mount/update functions take their boundary as a
-    /// parameter; fan-out wraps the call with the per-iteration
-    /// boundary loaded from a `for`-anchor's children array).
-    BoundaryField {
-        boundary_id: TreeBoundaryId,
-        field_idx: u32,
-    },
+    // Stage 5e-4 (lir-resource-flatten): the `BoundaryField { boundary_id,
+    // field_idx }` slot kind was deleted. Persistent GC-struct fields are now
+    // accessed via the symbolic `LirOp::StructField{Get,Set,SetConst}` ops
+    // (carrying `struct_ty` + `field_idx`), which `boundary_rewrite` resolves
+    // to `StructGet`/`StructSet` against an in-scope ref slot. The slot kind
+    // existed only as the lowerer→rewriter handshake; the ops carry that data
+    // directly now.
     /// Slot lives directly in a wasm function parameter — no local
     /// declaration, no copy from param. `idx` is the wasm-level
     /// parameter index (0..param_count-1). Reads/writes via this slot

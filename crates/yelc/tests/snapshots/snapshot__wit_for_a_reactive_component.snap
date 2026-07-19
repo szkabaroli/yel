@@ -1,0 +1,21 @@
+---
+source: crates/yelc/tests/snapshot.rs
+expression: "compile_to(COUNTER, \"wit\", \"counter-wit\")"
+---
+package yel:counter@0.1.0;
+
+interface counter-component {
+  resource counter {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-count: func() -> s32;
+    set-count: func(value: s32);
+  }
+}
+
+world counter {
+  import yel:ui/dom@0.1.0;
+  export counter-component;
+  export yel:ui/dispatch@0.1.0;
+}

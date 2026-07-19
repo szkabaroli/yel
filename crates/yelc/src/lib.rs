@@ -44,10 +44,12 @@
 // Build info from shadow-rs
 shadow_rs::shadow!(build);
 
+/// Shared compiler front-end driver used by every output path.
+pub mod pipeline;
+
 #[cfg(target_arch = "wasm32")]
 mod wasi_impl {
     use yel_core::Compiler;
-    use yel_core::diagnostic::Severity;
     use yel_wasm_codegen as codegen;
 
     // Generate bindings from WIT
@@ -60,40 +62,19 @@ mod wasi_impl {
         CompileOutcome, CompileResult, Diagnostic, Guest, OutputFormat, VersionInfo,
     };
 
-    use super::build;
+    use super::{build, pipeline};
 
-    /// Convert internal diagnostics to WIT diagnostics.
+    /// Convert the compiler's diagnostics into WIT diagnostics.
     fn convert_diagnostics(compiler: &Compiler) -> Vec<Diagnostic> {
-        let ctx = compiler.context();
-        ctx.diagnostics
-            .iter()
-            .map(|d| {
-                let (line, column, length) = if let Some(span) = d.span {
-                    if let Some(source) = ctx.source_map.get(span.source) {
-                        let (l, c) = source.line_col(span.start);
-                        let len = (span.end - span.start) as u32;
-                        (l as u32, c as u32, len.max(1))
-                    } else {
-                        (0, 0, 1)
-                    }
-                } else {
-                    (0, 0, 1)
-                };
-
-                let severity = match d.severity {
-                    Severity::Error => "error",
-                    Severity::Warning => "warning",
-                    Severity::Note => "info",
-                };
-
-                Diagnostic {
-                    message: d.message.clone(),
-                    rendered: d.render(&ctx.source_map),
-                    line,
-                    column,
-                    length,
-                    severity: severity.to_string(),
-                }
+        pipeline::diagnostics(compiler)
+            .into_iter()
+            .map(|d| Diagnostic {
+                message: d.message,
+                rendered: d.rendered,
+                line: d.line,
+                column: d.column,
+                length: d.length,
+                severity: d.severity.to_string(),
             })
             .collect()
     }
@@ -151,84 +132,35 @@ mod wasi_impl {
         }
     }
 
+    /// An all-empty result. Each format arm fills in only its own field via
+    /// struct-update syntax (`CompileResult { wit_code, ..blank_result() }`),
+    /// so the seven unused fields aren't repeated in every arm.
+    fn blank_result() -> CompileResult {
+        CompileResult {
+            rust_code: String::new(),
+            wit_code: String::new(),
+            wasm_bytes: Vec::new(),
+            wast_code: String::new(),
+            hir_code: String::new(),
+            thir_code: String::new(),
+            lir_code: String::new(),
+            dot_code: String::new(),
+        }
+    }
+
     fn compile_impl(files: Vec<(String, String)>, format: OutputFormat) -> CompileOutcome {
         let mut compiler = Compiler::new();
-        let mut lir_components = Vec::new();
-        let mut all_hir_components = Vec::new();
-        let mut all_thir_components = Vec::new();
-        let mut all_lir_components = Vec::new();
-        let mut package_info: Option<yel_core::syntax::ast::PackageId> = None;
 
-        for (_, source) in &files {
-            // Parse - errors are automatically added to diagnostics
-            let parsed = match compiler.parse(source) {
-                Ok(p) => p,
-                Err(_) => return CompileOutcome::Failure(convert_diagnostics(&compiler)),
-            };
-
-            // Extract package info from first file that has it
-            if package_info.is_none() {
-                package_info = parsed.package.clone();
-            }
-
-            let hir_components_file = compiler.lower_to_hir(&parsed);
-
-            if compiler.has_errors() {
-                return CompileOutcome::Failure(convert_diagnostics(&compiler));
-            }
-
-            // Store HIR for potential serialization
-            all_hir_components.extend(hir_components_file.clone());
-
-            for hir in &hir_components_file {
-                let thir = compiler.type_check(hir);
-
-                if compiler.has_errors() {
-                    return CompileOutcome::Failure(convert_diagnostics(&compiler));
-                }
-
-                // Store THIR for potential serialization
-                all_thir_components.push(thir.clone());
-                let lir = compiler.lower_to_lir(&thir);
-                all_lir_components.push(lir.clone());
-                lir_components.push(lir);
-            }
-        }
-
-        // Type-check and lower global-singleton property defaults once,
-        // after all components. The module start function seeds these slots.
-        let thir_globals = compiler.type_check_globals();
-        if compiler.has_errors() {
-            return CompileOutcome::Failure(convert_diagnostics(&compiler));
-        }
-        let lir_globals = compiler.lower_globals_to_lir(&thir_globals);
-
-        // Assemble the module — one compilation unit holding every component
-        // and module-scope artifact.
-        let module = yel_core::lir::LirModule {
-            components: lir_components.clone(),
-            global_defaults: lir_globals.clone(),
-            package: package_info.clone(),
+        let lowered = match pipeline::lower_all(
+            &mut compiler,
+            files.iter().map(|(_, source)| source.as_str()),
+        ) {
+            Ok(lowered) => lowered,
+            Err(_) => return CompileOutcome::Failure(convert_diagnostics(&compiler)),
         };
 
         let ctx = compiler.context();
-
-        // Build WitOptions from package info
-        let wit_options = if let Some(ref pkg) = package_info {
-            codegen::WitOptions {
-                namespace: pkg.namespace.clone(),
-                name: pkg.name.clone(),
-                version: pkg.version.clone().unwrap_or_else(|| "0.1.0".to_string()),
-                include_dom_interface: true,
-            }
-        } else {
-            codegen::WitOptions {
-                namespace: "yel".to_string(),
-                name: "app".to_string(),
-                version: "0.1.0".to_string(),
-                include_dom_interface: true,
-            }
-        };
+        let wit_options = pipeline::wit_options(lowered.package());
 
         // Generate output based on format
         let compile_result = match format {
@@ -237,20 +169,14 @@ mod wasi_impl {
                 CompileResult {
                     rust_code: "// Rust codegen not available - use WASM output instead\n"
                         .to_string(),
-                    wit_code: String::new(),
-                    wasm_bytes: Vec::new(),
-                    wast_code: String::new(),
-                    hir_code: String::new(),
-                    thir_code: String::new(),
-                    lir_code: String::new(),
-                    dot_code: String::new(),
+                    ..blank_result()
                 }
             }
             OutputFormat::Wit => {
                 // Single WIT document per compilation: library files produce
                 // a valid package + library world; files with exports get
                 // their full world.
-                let wit_code = match codegen::generate_wit(&lir_components, ctx, &wit_options) {
+                let wit_code = match codegen::generate_wit(lowered.components(), lowered.interfaces(), ctx, &wit_options) {
                     Ok(code) => code,
                     Err(e) => {
                         let msg = format!("WIT generation error: {}", e);
@@ -265,14 +191,8 @@ mod wasi_impl {
                     }
                 };
                 CompileResult {
-                    rust_code: String::new(),
                     wit_code,
-                    wasm_bytes: Vec::new(),
-                    wast_code: String::new(),
-                    hir_code: String::new(),
-                    thir_code: String::new(),
-                    lir_code: String::new(),
-                    dot_code: String::new(),
+                    ..blank_result()
                 }
             }
             OutputFormat::Wasm => {
@@ -280,11 +200,12 @@ mod wasi_impl {
                     namespace: wit_options.namespace.clone(),
                     name: wit_options.name.clone(),
                     version: wit_options.version.clone(),
-                    global_defaults: lir_globals.clone(),
+                    global_defaults: lowered.global_defaults().clone(),
+                    global_default_exprs: lowered.global_default_exprs().to_vec(),
                     wasm_opt_args: None,
                 };
-                let wasm_bytes = if !lir_components.is_empty() {
-                    match codegen::generate_wasm_module(&module, ctx, &wasm_options) {
+                let wasm_bytes = if !lowered.components().is_empty() {
+                    match codegen::generate_wasm_module(&lowered.module, ctx, &wasm_options) {
                         Ok(bytes) => bytes,
                         Err(e) => {
                             let msg = format!("WASM generation error: {}", e);
@@ -302,14 +223,8 @@ mod wasi_impl {
                     Vec::new()
                 };
                 CompileResult {
-                    rust_code: String::new(),
-                    wit_code: String::new(),
                     wasm_bytes,
-                    wast_code: String::new(),
-                    hir_code: String::new(),
-                    thir_code: String::new(),
-                    lir_code: String::new(),
-                    dot_code: String::new(),
+                    ..blank_result()
                 }
             }
             OutputFormat::Wast => {
@@ -318,11 +233,12 @@ mod wasi_impl {
                     namespace: wit_options.namespace.clone(),
                     name: wit_options.name.clone(),
                     version: wit_options.version.clone(),
-                    global_defaults: lir_globals.clone(),
+                    global_defaults: lowered.global_defaults().clone(),
+                    global_default_exprs: lowered.global_default_exprs().to_vec(),
                     wasm_opt_args: None,
                 };
-                let wast_code = if !lir_components.is_empty() {
-                    match codegen::generate_wasm_module(&module, ctx, &wasm_options) {
+                let wast_code = if !lowered.components().is_empty() {
+                    match codegen::generate_wasm_module(&lowered.module, ctx, &wasm_options) {
                         Ok(bytes) => wasmprinter::print_bytes(&bytes)
                             .unwrap_or_else(|e| format!(";; WAST conversion error: {}", e)),
                         Err(e) => format!(";; WASM generation error: {}", e),
@@ -331,64 +247,40 @@ mod wasi_impl {
                     ";; No components to compile".to_string()
                 };
                 CompileResult {
-                    rust_code: String::new(),
-                    wit_code: String::new(),
-                    wasm_bytes: Vec::new(),
                     wast_code,
-                    hir_code: String::new(),
-                    thir_code: String::new(),
-                    lir_code: String::new(),
-                    dot_code: String::new(),
+                    ..blank_result()
                 }
             }
             OutputFormat::Hir => {
-                let hir_code = match serde_json::to_string_pretty(&all_hir_components) {
+                let hir_code = match serde_json::to_string_pretty(&lowered.hir) {
                     Ok(json) => json,
                     Err(e) => format!("// HIR serialization error: {}", e),
                 };
                 CompileResult {
-                    rust_code: String::new(),
-                    wit_code: String::new(),
-                    wasm_bytes: Vec::new(),
-                    wast_code: String::new(),
                     hir_code,
-                    thir_code: String::new(),
-                    lir_code: String::new(),
-                    dot_code: String::new(),
+                    ..blank_result()
                 }
             }
             OutputFormat::Thir => {
                 // THIR serialization would require implementing Serialize on THIR types
                 CompileResult {
-                    rust_code: String::new(),
-                    wit_code: String::new(),
-                    wasm_bytes: Vec::new(),
-                    wast_code: String::new(),
-                    hir_code: String::new(),
                     thir_code: "{ \"thir_code\": \"not yet implemented\" }".to_string(),
-                    lir_code: String::new(),
-                    dot_code: String::new(),
+                    ..blank_result()
                 }
             }
             OutputFormat::Lir => {
-                let lir_code = match serde_json::to_string_pretty(&all_lir_components) {
+                let lir_code = match serde_json::to_string_pretty(lowered.components()) {
                     Ok(json) => json,
-                    Err(e) => format!("// HIR serialization error: {}", e),
+                    Err(e) => format!("// LIR serialization error: {}", e),
                 };
                 CompileResult {
-                    rust_code: String::new(),
-                    wit_code: String::new(),
-                    wasm_bytes: Vec::new(),
-                    wast_code: String::new(),
-                    hir_code: String::new(),
                     lir_code,
-                    thir_code: String::new(),
-                    dot_code: String::new(),
+                    ..blank_result()
                 }
             }
             OutputFormat::Dot => {
-                let dot_code = if !lir_components.is_empty() {
-                    match codegen::generate_dot(&lir_components, ctx, &codegen::DotOptions::new()) {
+                let dot_code = if !lowered.components().is_empty() {
+                    match codegen::generate_dot(lowered.components(), ctx, &codegen::DotOptions::new()) {
                         Ok(code) => code,
                         Err(e) => format!("// DOT generation error: {}", e),
                     }
@@ -396,14 +288,8 @@ mod wasi_impl {
                     "// No components to render".to_string()
                 };
                 CompileResult {
-                    rust_code: String::new(),
-                    wit_code: String::new(),
-                    wasm_bytes: Vec::new(),
-                    wast_code: String::new(),
-                    hir_code: String::new(),
-                    thir_code: String::new(),
-                    lir_code: String::new(),
                     dot_code,
+                    ..blank_result()
                 }
             }
         };
@@ -417,8 +303,8 @@ mod wasi_impl {
 // Re-export types for non-WASM targets (for testing)
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native {
+    use super::pipeline;
     use yel_core::Compiler;
-    use yel_core::diagnostic::Severity;
     use yel_wasm_codegen as codegen;
 
     /// Output format for compilation.
@@ -458,38 +344,17 @@ pub mod native {
         Failure(Vec<Diagnostic>),
     }
 
-    /// Convert internal diagnostics to native diagnostics.
+    /// Convert the compiler's diagnostics into native diagnostics.
     fn convert_diagnostics(compiler: &Compiler) -> Vec<Diagnostic> {
-        let ctx = compiler.context();
-        ctx.diagnostics
-            .iter()
-            .map(|d| {
-                let (line, column, length) = if let Some(span) = d.span {
-                    if let Some(source) = ctx.source_map.get(span.source) {
-                        let (l, c) = source.line_col(span.start);
-                        let len = (span.end - span.start) as u32;
-                        (l as u32, c as u32, len.max(1))
-                    } else {
-                        (0, 0, 1)
-                    }
-                } else {
-                    (0, 0, 1)
-                };
-
-                let severity = match d.severity {
-                    Severity::Error => "error",
-                    Severity::Warning => "warning",
-                    Severity::Note => "info",
-                };
-
-                Diagnostic {
-                    message: d.message.clone(),
-                    rendered: d.render(&ctx.source_map),
-                    line,
-                    column,
-                    length,
-                    severity: severity.to_string(),
-                }
+        pipeline::diagnostics(compiler)
+            .into_iter()
+            .map(|d| Diagnostic {
+                message: d.message,
+                rendered: d.rendered,
+                line: d.line,
+                column: d.column,
+                length: d.length,
+                severity: d.severity.to_string(),
             })
             .collect()
     }
@@ -502,73 +367,17 @@ pub mod native {
     /// Compile multiple yel source files.
     pub fn compile_multi(files: &[(String, String)], format: OutputFormat) -> CompileOutcome {
         let mut compiler = Compiler::new();
-        let mut lir_components = Vec::new();
-        let mut package_info: Option<yel_core::syntax::ast::PackageId> = None;
 
-        for (_, source) in files {
-            // Parse - errors are automatically added to diagnostics
-            let parsed = match compiler.parse(source) {
-                Ok(p) => p,
-                Err(_) => return CompileOutcome::Failure(convert_diagnostics(&compiler)),
-            };
-
-            // Extract package info from first file that has it
-            if package_info.is_none() {
-                package_info = parsed.package.clone();
-            }
-
-            let hir_components_file = compiler.lower_to_hir(&parsed);
-
-            if compiler.has_errors() {
-                return CompileOutcome::Failure(convert_diagnostics(&compiler));
-            }
-
-            for hir in &hir_components_file {
-                let thir = compiler.type_check(hir);
-
-                if compiler.has_errors() {
-                    return CompileOutcome::Failure(convert_diagnostics(&compiler));
-                }
-
-                let lir = compiler.lower_to_lir(&thir);
-                lir_components.push(lir);
-            }
-        }
-
-        // Type-check and lower global-singleton property defaults once,
-        // after all components. The module start function seeds these slots.
-        let thir_globals = compiler.type_check_globals();
-        if compiler.has_errors() {
-            return CompileOutcome::Failure(convert_diagnostics(&compiler));
-        }
-        let lir_globals = compiler.lower_globals_to_lir(&thir_globals);
-
-        // Assemble the module — one compilation unit holding every component
-        // and module-scope artifact.
-        let module = yel_core::lir::LirModule {
-            components: lir_components.clone(),
-            global_defaults: lir_globals.clone(),
-            package: package_info.clone(),
+        let lowered = match pipeline::lower_all(
+            &mut compiler,
+            files.iter().map(|(_, source)| source.as_str()),
+        ) {
+            Ok(lowered) => lowered,
+            Err(_) => return CompileOutcome::Failure(convert_diagnostics(&compiler)),
         };
 
         let ctx = compiler.context();
-
-        // Build WitOptions from package info
-        let wit_options = if let Some(ref pkg) = package_info {
-            codegen::WitOptions {
-                namespace: pkg.namespace.clone(),
-                name: pkg.name.clone(),
-                version: pkg.version.clone().unwrap_or_else(|| "0.1.0".to_string()),
-                include_dom_interface: true,
-            }
-        } else {
-            codegen::WitOptions {
-                namespace: "yel".to_string(),
-                name: "app".to_string(),
-                version: "0.1.0".to_string(),
-                include_dom_interface: true,
-            }
-        };
+        let wit_options = pipeline::wit_options(lowered.package());
 
         let compile_result = match format {
             OutputFormat::Rust => {
@@ -584,7 +393,7 @@ pub mod native {
                 // Single WIT document per compilation: the builder handles
                 // any number of components plus globals, and still emits
                 // valid output (library world) when there are no exports.
-                let wit_code = match codegen::generate_wit(&lir_components, ctx, &wit_options) {
+                let wit_code = match codegen::generate_wit(lowered.components(), lowered.interfaces(), ctx, &wit_options) {
                     Ok(code) => code,
                     Err(e) => {
                         let msg = format!("WIT generation error: {}", e);
@@ -609,12 +418,13 @@ pub mod native {
                     namespace: wit_options.namespace.clone(),
                     name: wit_options.name.clone(),
                     version: wit_options.version.clone(),
-                    global_defaults: lir_globals.clone(),
+                    global_defaults: lowered.global_defaults().clone(),
+                    global_default_exprs: lowered.global_default_exprs().to_vec(),
                     wasm_opt_args: None,
                 };
-                let wasm_bytes = if !lir_components.is_empty() {
+                let wasm_bytes = if !lowered.components().is_empty() {
                     // Pass the assembled module to codegen with package options
-                    match codegen::generate_wasm_module(&module, ctx, &wasm_options) {
+                    match codegen::generate_wasm_module(&lowered.module, ctx, &wasm_options) {
                         Ok(bytes) => bytes,
                         Err(e) => {
                             let msg = format!("WASM generation error: {}", e);

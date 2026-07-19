@@ -109,10 +109,9 @@ impl LocalScope {
 mod tests {
     use super::*;
     use crate::interner::Interner;
-    use crate::source::SourceId;
 
     fn dummy_span() -> Span {
-        Span::new(SourceId(0), 0, 0)
+        Span::default()
     }
 
     #[test]

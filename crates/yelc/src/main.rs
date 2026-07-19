@@ -4,8 +4,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
 use std::path::PathBuf;
-use yel_core::{Compiler, syntax::ast::PackageId};
+use yel_core::Compiler;
 use yel_wasm_codegen as codegen;
+use yelc::pipeline;
 
 // Build info from shadow-rs
 shadow_rs::shadow!(build);
@@ -140,6 +141,22 @@ fn main() -> Result<()> {
     }
 }
 
+/// Read every input file to a string, preserving order.
+///
+/// # Errors
+///
+/// Returns an error (with the offending path in its context) if any file
+/// cannot be read.
+fn read_sources(files: &[PathBuf]) -> Result<Vec<String>> {
+    files
+        .iter()
+        .map(|file| {
+            fs::read_to_string(file)
+                .with_context(|| format!("failed to read file: {}", file.display()))
+        })
+        .collect()
+}
+
 /// Validated wasm-opt incantation for `--release`. Each arg sent
 /// individually so wasm-opt sees them as discrete tokens. Pass order
 /// matters: type-ssa specializes, type-merging dedupes, gufa
@@ -210,81 +227,20 @@ fn compile(
     release: bool,
     wasm_opt_args: Vec<String>,
 ) -> Result<()> {
+    let sources = read_sources(&files)?;
+
     let mut compiler = Compiler::new();
-
-    // Collect all LIR components and package info
-    let mut lir_components = Vec::new();
-    let mut package_info: Option<PackageId> = None;
-
-    for file in &files {
-        let source = fs::read_to_string(file)
-            .with_context(|| format!("Failed to read file: {}", file.display()))?;
-
-        let parsed = compiler
-            .parse(&source)
-            .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
-
-        // Extract package info from first file that has it
-        if package_info.is_none() {
-            package_info = parsed.package.clone();
-        }
-
-        let hir_components = compiler.lower_to_hir(&parsed);
-
-        if compiler.has_errors() {
+    let lowered = match pipeline::lower_all(&mut compiler, sources.iter().map(String::as_str)) {
+        Ok(lowered) => lowered,
+        Err(_) => {
             eprintln!("{}", compiler.render_diagnostics());
-            return Err(anyhow::anyhow!("Compilation failed"));
+            return Err(anyhow::anyhow!("compilation failed"));
         }
-
-        for hir in &hir_components {
-            let thir = compiler.type_check(hir);
-
-            if compiler.has_errors() {
-                eprintln!("{}", compiler.render_diagnostics());
-                return Err(anyhow::anyhow!("Type checking failed"));
-            }
-
-            let lir = compiler.lower_to_lir(&thir);
-            lir_components.push(lir);
-        }
-    }
-
-    // Type-check and lower global-singleton property defaults once, after all
-    // components. The module start function seeds these slots at load time.
-    let thir_globals = compiler.type_check_globals();
-    if compiler.has_errors() {
-        eprintln!("{}", compiler.render_diagnostics());
-        return Err(anyhow::anyhow!("Type checking failed"));
-    }
-    let lir_globals = compiler.lower_globals_to_lir(&thir_globals);
-
-    // Assemble the module — one compilation unit holding every component and
-    // module-scope artifact (global defaults, package header).
-    let module = yel_core::lir::LirModule {
-        components: lir_components.clone(),
-        global_defaults: lir_globals.clone(),
-        package: package_info.clone(),
     };
 
     // Generate output for each component
     let ctx = compiler.context();
-
-    // Build WitOptions from package info
-    let wit_options = if let Some(ref pkg) = package_info {
-        codegen::WitOptions {
-            namespace: pkg.namespace.clone(),
-            name: pkg.name.clone(),
-            version: pkg.version.clone().unwrap_or_else(|| "0.1.0".to_string()),
-            include_dom_interface: true,
-        }
-    } else {
-        codegen::WitOptions {
-            namespace: "yel".to_string(),
-            name: "app".to_string(),
-            version: "0.1.0".to_string(),
-            include_dom_interface: true,
-        }
-    };
+    let wit_options = pipeline::wit_options(lowered.package());
 
     match output {
         OutputFormat::Rust => {
@@ -294,8 +250,8 @@ fn compile(
         OutputFormat::Wit => {
             // Unified path: library files (no exports) get a well-formed
             // package + library world from the same builder.
-            let wit_code = codegen::generate_wit(&lir_components, ctx, &wit_options)
-                .map_err(|e| anyhow::anyhow!("WIT generation error: {}", e))?;
+            let wit_code = codegen::generate_wit(lowered.components(), lowered.interfaces(), ctx, &wit_options)
+                .map_err(|e| anyhow::anyhow!("wit generation error: {}", e))?;
             println!("{}", wit_code);
         }
         OutputFormat::Wasm => {
@@ -312,11 +268,12 @@ fn compile(
                 namespace: wit_options.namespace.clone(),
                 name: wit_options.name.clone(),
                 version: wit_options.version.clone(),
-                global_defaults: lir_globals.clone(),
+                global_defaults: lowered.global_defaults().clone(),
+                global_default_exprs: lowered.global_default_exprs().to_vec(),
                 wasm_opt_args: effective_opt_args,
             };
-            let wasm_bytes = codegen::generate_wasm_module(&module, ctx, &wasm_options)
-                .map_err(|e| anyhow::anyhow!("WASM generation error: {}", e))?;
+            let wasm_bytes = codegen::generate_wasm_module(&lowered.module, ctx, &wasm_options)
+                .map_err(|e| anyhow::anyhow!("wasm generation error: {}", e))?;
 
             let final_bytes = if release {
                 strip_custom_sections(&wasm_bytes)?
@@ -326,11 +283,11 @@ fn compile(
 
             std::io::stdout()
                 .write_all(&final_bytes)
-                .context("Failed to write WASM output")?;
+                .context("failed to write wasm output")?;
         }
         OutputFormat::Dot => {
-            let dot = codegen::generate_dot(&lir_components, ctx, &codegen::DotOptions::new())
-                .map_err(|e| anyhow::anyhow!("DOT generation error: {}", e))?;
+            let dot = codegen::generate_dot(lowered.components(), ctx, &codegen::DotOptions::new())
+                .map_err(|e| anyhow::anyhow!("dot generation error: {}", e))?;
             print!("{}", dot);
         }
     }
@@ -340,23 +297,23 @@ fn compile(
 
 fn dump_ast(file: PathBuf, pretty: bool, json: bool) -> Result<()> {
     let source = fs::read_to_string(&file)
-        .with_context(|| format!("Failed to read file: {}", file.display()))?;
+        .with_context(|| format!("failed to read file: {}", file.display()))?;
 
     let ast = yel_core::parse(&source).map_err(|e| {
-        eprintln!("Parse error: {}", e);
-        anyhow::anyhow!("Failed to parse")
+        eprintln!("parse error: {}", e);
+        anyhow::anyhow!("failed to parse")
     })?;
 
     if json {
         if pretty {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&ast).context("Failed to serialize AST to JSON")?
+                serde_json::to_string_pretty(&ast).context("failed to serialize AST to JSON")?
             );
         } else {
             println!(
                 "{}",
-                serde_json::to_string(&ast).context("Failed to serialize AST to JSON")?
+                serde_json::to_string(&ast).context("failed to serialize AST to JSON")?
             );
         }
     } else if pretty {
@@ -373,52 +330,33 @@ fn dump_lir(file: PathBuf, pretty: bool, json: bool) -> Result<()> {
         .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
     let mut compiler = Compiler::new();
-
-    let parsed = compiler.parse(&source).map_err(|e| {
-        eprintln!("Parse error: {}", e);
-        anyhow::anyhow!("Failed to parse")
-    })?;
-
-    let hir_components = compiler.lower_to_hir(&parsed);
-
-    if compiler.has_errors() {
-        eprintln!("{}", compiler.render_diagnostics());
-        return Err(anyhow::anyhow!("HIR lowering failed"));
-    }
-
-    // Collect all LIR components first
-    let mut lir_components = Vec::new();
-    for hir in &hir_components {
-        let thir = compiler.type_check(hir);
-
-        if compiler.has_errors() {
+    let lowered = match pipeline::lower_all(&mut compiler, std::iter::once(source.as_str())) {
+        Ok(lowered) => lowered,
+        Err(_) => {
             eprintln!("{}", compiler.render_diagnostics());
-            return Err(anyhow::anyhow!("Type checking failed"));
+            return Err(anyhow::anyhow!("lowering failed"));
         }
-
-        let lir = compiler.lower_to_lir(&thir);
-        lir_components.push(lir);
-    }
+    };
 
     if json {
         if pretty {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&lir_components)
-                    .context("Failed to serialize LIR to JSON")?
+                serde_json::to_string_pretty(lowered.components())
+                    .context("failed to serialize LIR to JSON")?
             );
         } else {
             println!(
                 "{}",
-                serde_json::to_string(&lir_components)
-                    .context("Failed to serialize LIR to JSON")?
+                serde_json::to_string(lowered.components())
+                    .context("failed to serialize LIR to JSON")?
             );
         }
     } else {
         // Now we can borrow context for printing
         let ctx = compiler.context();
 
-        for lir in &lir_components {
+        for lir in lowered.components() {
             // Print LIR summary
             let name = ctx.str(lir.name);
             println!("=== Component: {} ===\n", name);
@@ -466,13 +404,13 @@ fn check(files: Vec<PathBuf>) -> Result<()> {
 
     for file in &files {
         let source = fs::read_to_string(file)
-            .with_context(|| format!("Failed to read file: {}", file.display()))?;
+            .with_context(|| format!("failed to read file: {}", file.display()))?;
 
         let parsed = match compiler.parse(&source) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("Parse error in {}: {}", file.display(), e);
-                return Err(anyhow::anyhow!("Check failed"));
+                eprintln!("parse error in {}: {}", file.display(), e);
+                return Err(anyhow::anyhow!("check failed"));
             }
         };
 
@@ -480,17 +418,21 @@ fn check(files: Vec<PathBuf>) -> Result<()> {
 
         if compiler.has_errors() {
             eprintln!("{}", compiler.render_diagnostics());
-            return Err(anyhow::anyhow!("Check failed"));
+            return Err(anyhow::anyhow!("check failed"));
         }
 
-        for hir in &hir_components {
-            let _thir = compiler.type_check(hir);
-            total_components += 1;
+        for item in &hir_components {
+            // Type-checks components and globals alike (diagnostics
+            // accumulate); the count tracks components only.
+            let _ = compiler.type_check(item);
+            if item.as_component().is_some() {
+                total_components += 1;
+            }
         }
 
         if compiler.has_errors() {
             eprintln!("{}", compiler.render_diagnostics());
-            return Err(anyhow::anyhow!("Check failed with type errors"));
+            return Err(anyhow::anyhow!("check failed with type errors"));
         }
     }
 

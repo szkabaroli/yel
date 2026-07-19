@@ -11,6 +11,27 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SourceId(pub u32);
 
+impl SourceId {
+    /// Sentinel for "no real source file". Used by [`Span::default`] and any
+    /// synthetic span with no origin. `SourceMap::add_file`/`add_inline` hand
+    /// out ids counting up from 0, so this can never collide with a real file
+    /// — unlike the old `SourceId(0)` default, which silently aliased the
+    /// first file added.
+    pub const INVALID: SourceId = SourceId(u32::MAX);
+
+    pub fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    pub fn is_valid(self) -> bool {
+        self.0 != u32::MAX
+    }
+}
+
 impl std::fmt::Display for SourceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "source#{}", self.0)
@@ -137,9 +158,15 @@ impl SourceMap {
         self.path_to_id.get(path).copied()
     }
 
-    /// Get all source IDs.
+    /// Get all source IDs, in ascending id order.
+    ///
+    /// The backing store is a `HashMap`, whose key-iteration order is
+    /// nondeterministic; sorting here keeps any output derived from this
+    /// public iterator byte-stable across runs.
     pub fn source_ids(&self) -> impl Iterator<Item = SourceId> + '_ {
-        self.sources.keys().copied()
+        let mut ids: Vec<SourceId> = self.sources.keys().copied().collect();
+        ids.sort_unstable_by_key(|id| id.0);
+        ids.into_iter()
     }
 }
 
@@ -182,7 +209,7 @@ impl Span {
 impl Default for Span {
     fn default() -> Self {
         Self {
-            source: SourceId(0),
+            source: SourceId::INVALID,
             start: 0,
             end: 0,
         }

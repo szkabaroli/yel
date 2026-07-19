@@ -43,8 +43,8 @@ pub mod tree_shape;
 
 // Block-based types
 pub use block::{
-    ExprId, LirBindingMode, LirBlock, LirBlockEffect, LirGlobalRef, LirOp, LirSlotId, LirSlotInfo,
-    LirSlotKind, LirSlotValType, LirTypeRef, StringId,
+    LirExprId, LirBindingMode, LirBlock, LirBlockEffect, LirGlobalRef, LirOp, LirSlotId, LirSlotInfo,
+    ArithOp, ArrayItemRepr, BinOperand, CompareOp, LirSlotKind, LirSlotValType, LirTypeRef, MemoryValueType, StoreWidth, StringId,
 };
 
 // Arena traits — abstract over expr/string/slot ownership and the
@@ -78,7 +78,7 @@ pub use layout::{
 pub use crate::lower_to_lir::{lower_component, lower_globals};
 
 // Module-scoped compilation unit
-pub use module::LirModule;
+pub use module::{InterfaceDirection, LirIfaceFn, LirInterface, LirModule};
 
 // Component and node types
 pub use node::{

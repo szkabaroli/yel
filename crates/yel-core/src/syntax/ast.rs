@@ -563,16 +563,23 @@ pub enum Node {
     Element(ElementNode),
     /// Bare text content.
     Text(TextNode),
-    /// Conditional rendering.
-    If(IfNode),
+    /// Conditional rendering. Boxed: `IfNode`/`ForNode` are large (they embed
+    /// `Spanned<Expr>` and several node vectors), and conditionals/loops are
+    /// far rarer than `Element`/`Text`, so keeping them inline would bloat
+    /// every `Node` slot.
+    If(Box<IfNode>),
     /// List rendering.
-    For(ForNode),
+    For(Box<ForNode>),
     /// Slot marker (`@children`) — when the enclosing component is used at
     /// a call site, the caller's child nodes splice in at this position.
     /// Exactly one `@children` per component body; zero means the component
     /// rejects caller-supplied children at type-check time.
     Children,
 }
+
+// `Node` is stored in `Vec<Spanned<Node>>` throughout the AST; the large
+// `If`/`For` payloads are boxed to keep it small. Guard against regressions.
+const _: () = assert!(std::mem::size_of::<Node>() <= 120);
 
 /// An element or component node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

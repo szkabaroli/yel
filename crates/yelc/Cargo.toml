@@ -2,6 +2,8 @@
 name = "yelc"
 version.workspace = true
 edition = "2024"
+# Edition 2024 needs 1.85; the `if let … && let …` chains in this crate need 1.88.
+rust-version = "1.88"
 description = "CLI for the Yel DSL compiler"
 license.workspace = true
 build = "build.rs"
@@ -31,5 +33,19 @@ shadow-rs.workspace = true
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wit-bindgen.workspace = true
 
+[dev-dependencies]
+pretty_assertions.workspace = true
+wasmparser.workspace = true
+insta.workspace = true
+
 [features]
 default = []
+
+# Crate-scoped lints (not `[workspace.lints]`: a sibling crate still has many
+# outstanding warnings, so a workspace-wide gate would break its build).
+# `unsafe_code` is left alone because the WASI bindings generate unsafe code.
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }

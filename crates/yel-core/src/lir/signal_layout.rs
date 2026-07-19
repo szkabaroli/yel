@@ -215,7 +215,7 @@ pub fn compute_signal_layout(
 impl SignalLayout {
     /// True iff signal `sig_idx` has a backing GC-struct slot.
     pub fn signal_in_struct(&self, sig_idx: usize) -> bool {
-        self.signals.get(sig_idx).map_or(false, |s| s.gc.is_some())
+        self.signals.get(sig_idx).is_some_and(|s| s.gc.is_some())
     }
 
     /// GC struct field indices (in ABI order) for signal `sig_idx`.

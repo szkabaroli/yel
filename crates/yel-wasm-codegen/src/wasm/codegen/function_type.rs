@@ -142,17 +142,6 @@ impl<'a> WasmPackageBuilder<'a> {
                     })?;
                 mk_ref(ty_idx)
             }
-            LirSlotValType::RefNullForGlobalBlock(def_id) => {
-                let &idx = self.global_block_def_to_idx.get(&def_id).ok_or_else(|| {
-                    CodegenError::InvalidIR(format!(
-                        "slot wasm val type: no globals layout registered for \
-                         RefNullForGlobalBlock({:?})",
-                        def_id
-                    ))
-                })?;
-                let ty_idx = self.globals_layouts[idx].struct_type_idx;
-                mk_ref(ty_idx)
-            }
             LirSlotValType::RefNullForSharedHandleArray => {
                 let ty_idx = self.shared_handle_arr_type_idx.ok_or_else(|| {
                     CodegenError::InvalidIR(
@@ -282,7 +271,7 @@ impl<'a> WasmPackageBuilder<'a> {
     }
 
     /// Register a wasm function type derived from a calling convention
-    /// + user param slots, appending it to `types` and returning the
+    /// and user param slots, appending it to `types` and returning the
     /// type index (`cursor`).
     pub(crate) fn register_wasm_function_type(
         &self,

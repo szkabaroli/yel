@@ -3,18 +3,18 @@ digraph yel_signal_graph {
   compound=true;
   node [fontname="Helvetica", fontsize=10];
   edge [fontname="Helvetica", fontsize=9];
-  subgraph cluster_global_402 {
+  subgraph cluster_global_452 {
     label="global CounterStore";
     style="rounded,dashed";
     color="#b56576";
-    "global_sig_403" [shape=ellipse, style="filled,dashed", fillcolor="#fce4ec", label="count\n: s32", class="yel-signal-global"];
-    "global_sig_404" [shape=ellipse, style="filled,dashed", fillcolor="#fce4ec", label="label\n: string", class="yel-signal-global"];
+    "global_sig_453" [shape=ellipse, style="filled,dashed", fillcolor="#fce4ec", label="count\n: s32", class="yel-signal-global"];
+    "global_sig_454" [shape=ellipse, style="filled,dashed", fillcolor="#fce4ec", label="label\n: string", class="yel-signal-global"];
   }
-  subgraph cluster_global_405 {
+  subgraph cluster_global_455 {
     label="global Theme";
     style="rounded,dashed";
     color="#b56576";
-    "global_sig_406" [shape=ellipse, style="filled,dashed", fillcolor="#fce4ec", label="dark-mode\n: bool", class="yel-signal-global"];
+    "global_sig_456" [shape=ellipse, style="filled,dashed", fillcolor="#fce4ec", label="dark-mode\n: bool", class="yel-signal-global"];
   }
   subgraph cluster_c0 {
     label="component Controls";
@@ -34,12 +34,12 @@ digraph yel_signal_graph {
     label="component Readout";
     style=rounded;
     color="#888";
-    "c1_eff_0" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 0\nupdate-b0-s403 #9", class="yel-effect"];
-    "global_sig_403" -> "c1_eff_0" [label="reads", color="#3366cc", class="yel-reads"];
+    "c1_eff_0" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 0\nupdate-b0-s453 #9", class="yel-effect"];
+    "global_sig_453" -> "c1_eff_0" [label="reads", color="#3366cc", class="yel-reads"];
     "c1_blk9_dom0" [shape=oval, style=filled, fillcolor="#e8f5e9", label="set text", class="yel-domsink"];
     "c1_eff_0" -> "c1_blk9_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
-    "c1_eff_1" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 1\nupdate-b0-s403 #9", class="yel-effect"];
-    "global_sig_404" -> "c1_eff_1" [label="reads", color="#3366cc", class="yel-reads"];
+    "c1_eff_1" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 1\nupdate-b0-s453 #9", class="yel-effect"];
+    "global_sig_454" -> "c1_eff_1" [label="reads", color="#3366cc", class="yel-reads"];
     "c1_blk9_dom0" [shape=oval, style=filled, fillcolor="#e8f5e9", label="set text", class="yel-domsink"];
     "c1_eff_1" -> "c1_blk9_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
   }
@@ -47,8 +47,8 @@ digraph yel_signal_graph {
     label="component App (export)";
     style=rounded;
     color="#888";
-    "c2_eff_0" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 0\nupdate-b0-s403 #21", class="yel-effect"];
-    "global_sig_403" -> "c2_eff_0" [label="reads", color="#3366cc", class="yel-reads"];
+    "c2_eff_0" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 0\nupdate-b0-s453 #21", class="yel-effect"];
+    "global_sig_453" -> "c2_eff_0" [label="reads", color="#3366cc", class="yel-reads"];
     "c2_fn_20" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="if-update-b0 #20\nb0:root", class="yel-fn"];
     "c2_eff_0" -> "c2_fn_20" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c2_fn_19" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="if-branch-unmount-b2 #19\nb2:if-branch, remove dom", class="yel-fn"];
@@ -61,8 +61,8 @@ digraph yel_signal_graph {
     "c2_fn_18" -> "c2_blk18_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
     "c2_blk18_dom1" [shape=oval, style=filled, fillcolor="#e8f5e9", label="create text", class="yel-domsink"];
     "c2_fn_18" -> "c2_blk18_dom1" [label="updates", color="#2e7d32", class="yel-updates"];
-    "c2_eff_1" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 1\nupdate-b0-s406 #22", class="yel-effect"];
-    "global_sig_406" -> "c2_eff_1" [label="reads", color="#3366cc", class="yel-reads"];
+    "c2_eff_1" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 1\nupdate-b0-s456 #22", class="yel-effect"];
+    "global_sig_456" -> "c2_eff_1" [label="reads", color="#3366cc", class="yel-reads"];
     "c2_blk22_dom0" [shape=oval, style=filled, fillcolor="#e8f5e9", label="set text", class="yel-domsink"];
     "c2_eff_1" -> "c2_blk22_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
     "c2_elem_4" [shape=box, style="filled", fillcolor="#e0f7fa", label="Button #4", class="yel-element"];

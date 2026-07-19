@@ -318,8 +318,8 @@ impl<'a> WasmPackageBuilder<'a> {
             // Stage 4 of lir-resource-flatten: copy each boundary
             // param's WASM local into its parallel LIR slot
             // (`block.boundary_param_slots[i]`). This is what makes
-            // BoundaryStructGet / Set ops emitted by the Stage 3
-            // rewriter resolve to the same boundary ref the legacy
+            // StructGet / StructSet ops emitted by the boundary_rewrite
+            // pass resolve to the same boundary ref the legacy
             // chain walk would have used. Costs one extra
             // `local.get; local.set` per boundary param at function
             // entry — wasm-opt's `--remove-unused-locals` /

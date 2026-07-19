@@ -14,7 +14,7 @@
 //! look up via `LirResource::get_block`, which performs a linear scan
 //! fallback.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::hash::{Hash, Hasher};
 
 use crate::context::CompilerContext;
@@ -64,7 +64,8 @@ pub fn dedupe_update_blocks(ctx: &CompilerContext, component: &mut LirResource) 
     // mixing in callees' hashes. Bounded to a generous cap to guard
     // against pathological non-termination in the face of bugs.
     for _ in 0..64 {
-        let mut next: HashMap<BlockId, u64> = HashMap::with_capacity(candidates.len());
+        let mut next: HashMap<BlockId, u64> =
+            HashMap::with_capacity_and_hasher(candidates.len(), Default::default());
         for cid in &candidates {
             let block = block_by_id[cid];
             let h = hash_block(block, &candidate_set, &hash);
@@ -78,15 +79,15 @@ pub fn dedupe_update_blocks(ctx: &CompilerContext, component: &mut LirResource) 
     }
 
     // Group candidates by their final hash.
-    let mut groups: HashMap<u64, Vec<BlockId>> = HashMap::new();
+    let mut groups: HashMap<u64, Vec<BlockId>> = HashMap::default();
     for cid in &candidates {
         groups.entry(hash[cid]).or_default().push(*cid);
     }
 
     // Build remap: non-canonical → canonical (smallest id wins for
     // determinism). Skip groups of size 1 — nothing to merge.
-    let mut remap: HashMap<BlockId, BlockId> = HashMap::new();
-    let mut to_remove: HashSet<BlockId> = HashSet::new();
+    let mut remap: HashMap<BlockId, BlockId> = HashMap::default();
+    let mut to_remove: HashSet<BlockId> = HashSet::default();
     for group in groups.values() {
         if group.len() < 2 {
             continue;
@@ -97,11 +98,7 @@ pub fn dedupe_update_blocks(ctx: &CompilerContext, component: &mut LirResource) 
         for &dup in &sorted[1..] {
             // Final structural equality check — guards against
             // hypothetical hash collisions.
-            if blocks_structurally_equal(
-                block_by_id[&canonical],
-                block_by_id[&dup],
-                &remap_seed(&remap, canonical, dup),
-            ) {
+            if blocks_structurally_equal(block_by_id[&canonical], block_by_id[&dup], &remap) {
                 remap.insert(dup, canonical);
                 to_remove.insert(dup);
             }
@@ -129,16 +126,6 @@ pub fn dedupe_update_blocks(ctx: &CompilerContext, component: &mut LirResource) 
     component.blocks.retain(|b| !to_remove.contains(&b.id));
 }
 
-/// Tiny helper: produce a remap that includes the candidate->canonical
-/// pairing being verified, used by the final structural-equality check.
-fn remap_seed(
-    base: &HashMap<BlockId, BlockId>,
-    _canonical: BlockId,
-    _dup: BlockId,
-) -> HashMap<BlockId, BlockId> {
-    base.clone()
-}
-
 /// Rewrite `CallBlock` / `CallBlock2` / `PushHandlerId` references
 /// recursively through `If` / `Loop` bodies.
 fn rewrite_ops(ops: &mut [LirOp], remap: &HashMap<BlockId, BlockId>) {
@@ -154,11 +141,9 @@ fn rewrite_ops(ops: &mut [LirOp], remap: &HashMap<BlockId, BlockId>) {
                     *handler = *c;
                 }
             }
-            LirOp::If {
-                then_ops, else_ops, ..
-            } => {
-                rewrite_ops(then_ops, remap);
-                rewrite_ops(else_ops, remap);
+            LirOp::If(if_op) => {
+                rewrite_ops(&mut if_op.then_ops, remap);
+                rewrite_ops(&mut if_op.else_ops, remap);
             }
             LirOp::Loop { body_ops, .. } => {
                 rewrite_ops(body_ops, remap);
@@ -241,7 +226,7 @@ fn hash_op<H: Hasher>(
         PushStringPtr { string_id } | PushStringLen { string_id } => {
             string_id.0.hash(h);
         }
-        PushExprAsString { expr } | PushExprAsAttrValue { expr } => {
+        PushExpr { expr } => {
             expr.0.hash(h);
         }
         PushHandlerId { handler } => {
@@ -267,7 +252,13 @@ fn hash_op<H: Hasher>(
             sn.norm(*slot).hash(h);
             sn.norm(*to).hash(h);
         }
-        I32Ne { lhs, rhs, result } => {
+        Compare {
+            op,
+            lhs,
+            rhs,
+            result,
+        } => {
+            op.hash(h);
             sn.norm(*lhs).hash(h);
             sn.norm(*rhs).hash(h);
             sn.norm(*result).hash(h);
@@ -307,15 +298,10 @@ fn hash_op<H: Hasher>(
             sn.norm(*dest_first_slot).hash(h);
         }
         DropExpr { expr } => expr.0.hash(h),
-        If {
-            cond,
-            then_ops,
-            else_ops,
-            name: _,
-        } => {
-            sn.norm(*cond).hash(h);
-            hash_ops(then_ops, h, sn, candidates, hash_map);
-            hash_ops(else_ops, h, sn, candidates, hash_map);
+        If(if_op) => {
+            sn.norm(if_op.cond).hash(h);
+            hash_ops(&if_op.then_ops, h, sn, candidates, hash_map);
+            hash_ops(&if_op.else_ops, h, sn, candidates, hash_map);
         }
         CallBlock {
             block,
@@ -396,17 +382,26 @@ fn hash_op<H: Hasher>(
             }
             result.map(|s| sn.norm(s)).hash(h);
         }
-        GeU { index, len, result } => {
-            sn.norm(*index).hash(h);
-            sn.norm(*len).hash(h);
+        BinaryOp {
+            op,
+            lhs,
+            rhs,
+            result,
+        } => {
+            op.hash(h);
+            sn.norm(*lhs).hash(h);
+            match rhs {
+                crate::lir::block::BinOperand::Slot(s) => {
+                    0u8.hash(h);
+                    sn.norm(*s).hash(h);
+                }
+                crate::lir::block::BinOperand::Const(c) => {
+                    1u8.hash(h);
+                    c.hash(h);
+                }
+            }
             sn.norm(*result).hash(h);
         }
-        LtU { a, b, result } => {
-            sn.norm(*a).hash(h);
-            sn.norm(*b).hash(h);
-            sn.norm(*result).hash(h);
-        }
-        IncrSlot { slot } => sn.norm(*slot).hash(h),
         Alloc {
             size,
             align,
@@ -420,46 +415,21 @@ fn hash_op<H: Hasher>(
             sn.norm(*ptr).hash(h);
             sn.norm(*size).hash(h);
         }
-        MulConst {
-            slot,
-            constant,
-            result,
+        LoadAddr { addr, result, ty } => {
+            sn.norm(*addr).hash(h);
+            sn.norm(*result).hash(h);
+            ty.hash(h);
+        }
+        StoreAddr {
+            addr,
+            value,
+            ty,
+            width,
         } => {
-            sn.norm(*slot).hash(h);
-            constant.hash(h);
-            sn.norm(*result).hash(h);
-        }
-        AddSlots { a, b, result } => {
-            sn.norm(*a).hash(h);
-            sn.norm(*b).hash(h);
-            sn.norm(*result).hash(h);
-        }
-        SubSlots { a, b, result } => {
-            sn.norm(*a).hash(h);
-            sn.norm(*b).hash(h);
-            sn.norm(*result).hash(h);
-        }
-        LoadI32Addr { addr, result } => {
-            sn.norm(*addr).hash(h);
-            sn.norm(*result).hash(h);
-        }
-        StoreI32Addr { addr, value } => {
             sn.norm(*addr).hash(h);
             sn.norm(*value).hash(h);
-        }
-        LoadI64Addr { addr, result }
-        | LoadF32Addr { addr, result }
-        | LoadF64Addr { addr, result } => {
-            sn.norm(*addr).hash(h);
-            sn.norm(*result).hash(h);
-        }
-        StoreI64Addr { addr, value }
-        | StoreF32Addr { addr, value }
-        | StoreF64Addr { addr, value }
-        | StoreI32Narrow8Addr { addr, value }
-        | StoreI32Narrow16Addr { addr, value } => {
-            sn.norm(*addr).hash(h);
-            sn.norm(*value).hash(h);
+            ty.hash(h);
+            width.hash(h);
         }
         MemConst { addr, result } => {
             addr.hash(h);
@@ -483,26 +453,31 @@ fn hash_op<H: Hasher>(
             sn.norm(*result).hash(h);
         }
         StructGet {
-            ty_idx,
-            field,
             rec,
+            field_idx,
             result,
         } => {
-            ty_idx.hash(h);
-            field.hash(h);
             sn.norm(*rec).hash(h);
+            field_idx.hash(h);
             sn.norm(*result).hash(h);
         }
         StructSet {
-            ty_idx,
-            field,
             rec,
+            field_idx,
             value,
         } => {
-            ty_idx.hash(h);
-            field.hash(h);
             sn.norm(*rec).hash(h);
+            field_idx.hash(h);
             sn.norm(*value).hash(h);
+        }
+        StructSetConst {
+            rec,
+            field_idx,
+            value,
+        } => {
+            sn.norm(*rec).hash(h);
+            field_idx.hash(h);
+            value.hash(h);
         }
         GlobalGet { gref, result } => {
             gref.hash(h);
@@ -510,6 +485,15 @@ fn hash_op<H: Hasher>(
         }
         GlobalSet { gref, value } => {
             gref.hash(h);
+            sn.norm(*value).hash(h);
+        }
+        GlobalFieldSet {
+            block,
+            field,
+            value,
+        } => {
+            block.hash(h);
+            field.hash(h);
             sn.norm(*value).hash(h);
         }
         StructNewSym {
@@ -568,45 +552,39 @@ fn hash_op<H: Hasher>(
             value.hash(h);
             sn.norm(*result).hash(h);
         }
-        BoundaryStructGet {
-            boundary_id,
-            field_idx,
-            rec,
-            result,
-        } => {
-            boundary_id.0.hash(h);
-            field_idx.hash(h);
-            sn.norm(*rec).hash(h);
-            sn.norm(*result).hash(h);
-        }
-        BoundaryStructSet {
-            boundary_id,
-            field_idx,
-            rec,
-            value,
-        } => {
-            boundary_id.0.hash(h);
-            field_idx.hash(h);
-            sn.norm(*rec).hash(h);
-            sn.norm(*value).hash(h);
-        }
-        BoundaryStructSetConst {
-            boundary_id,
-            field_idx,
-            rec,
-            value,
-        } => {
-            boundary_id.0.hash(h);
-            field_idx.hash(h);
-            sn.norm(*rec).hash(h);
-            value.hash(h);
-        }
         BoundaryRefFromSelf {
             boundary_id,
             result,
         } => {
             boundary_id.0.hash(h);
             sn.norm(*result).hash(h);
+        }
+        StructFieldGet {
+            struct_ty,
+            field_idx,
+            result,
+        } => {
+            struct_ty.0.hash(h);
+            field_idx.hash(h);
+            sn.norm(*result).hash(h);
+        }
+        StructFieldSet {
+            struct_ty,
+            field_idx,
+            value,
+        } => {
+            struct_ty.0.hash(h);
+            field_idx.hash(h);
+            sn.norm(*value).hash(h);
+        }
+        StructFieldSetConst {
+            struct_ty,
+            field_idx,
+            value,
+        } => {
+            struct_ty.0.hash(h);
+            field_idx.hash(h);
+            value.hash(h);
         }
         // Stage 5a: Array{NewDefault,Get,Set,Copy} arms removed —
         // those op variants are deleted from the IR.
@@ -619,46 +597,46 @@ fn hash_op<H: Hasher>(
             ty_idx.hash(h);
             sn.norm(*result).hash(h);
         }
-        ChildrenArrayNewDefault {
-            anchor_boundary,
+        ArrayNewDefault {
+            array_type,
             len,
             result,
         } => {
-            anchor_boundary.0.hash(h);
+            array_type.0.hash(h);
             sn.norm(*len).hash(h);
             sn.norm(*result).hash(h);
         }
-        ChildrenArrayGet {
-            anchor_boundary,
+        ArrayGet {
+            array_type,
             arr,
             idx,
             result,
         } => {
-            anchor_boundary.0.hash(h);
+            array_type.0.hash(h);
             sn.norm(*arr).hash(h);
             sn.norm(*idx).hash(h);
             sn.norm(*result).hash(h);
         }
-        ChildrenArraySet {
-            anchor_boundary,
+        ArraySet {
+            array_type,
             arr,
             idx,
             value,
         } => {
-            anchor_boundary.0.hash(h);
+            array_type.0.hash(h);
             sn.norm(*arr).hash(h);
             sn.norm(*idx).hash(h);
             sn.norm(*value).hash(h);
         }
-        ChildrenArrayCopy {
-            anchor_boundary,
+        ArrayCopy {
+            array_type,
             dst,
             dst_idx,
             src,
             src_idx,
             count,
         } => {
-            anchor_boundary.0.hash(h);
+            array_type.0.hash(h);
             sn.norm(*dst).hash(h);
             sn.norm(*dst_idx).hash(h);
             sn.norm(*src).hash(h);
@@ -699,36 +677,29 @@ fn hash_op<H: Hasher>(
             arr,
             idx,
             list_ty,
-            result,
+            repr,
         } => {
             sn.norm(*arr).hash(h);
             sn.norm(*idx).hash(h);
             list_ty.hash(h);
-            sn.norm(*result).hash(h);
-        }
-        ArrayGetItemFat {
-            arr,
-            idx,
-            list_ty,
-            ptr_result,
-            len_result,
-        } => {
-            sn.norm(*arr).hash(h);
-            sn.norm(*idx).hash(h);
-            list_ty.hash(h);
-            sn.norm(*ptr_result).hash(h);
-            sn.norm(*len_result).hash(h);
-        }
-        ArrayGetItemFatToMem {
-            arr,
-            idx,
-            list_ty,
-            buf_addr_slot,
-        } => {
-            sn.norm(*arr).hash(h);
-            sn.norm(*idx).hash(h);
-            list_ty.hash(h);
-            sn.norm(*buf_addr_slot).hash(h);
+            match repr {
+                crate::lir::block::ArrayItemRepr::Scalar { result } => {
+                    0u8.hash(h);
+                    sn.norm(*result).hash(h);
+                }
+                crate::lir::block::ArrayItemRepr::Fat {
+                    ptr_result,
+                    len_result,
+                } => {
+                    1u8.hash(h);
+                    sn.norm(*ptr_result).hash(h);
+                    sn.norm(*len_result).hash(h);
+                }
+                crate::lir::block::ArrayItemRepr::FatToMem { buf_addr } => {
+                    2u8.hash(h);
+                    sn.norm(*buf_addr).hash(h);
+                }
+            }
         }
         RefCast { from, ty_ref, result } => {
             sn.norm(*from).hash(h);
@@ -776,7 +747,7 @@ struct SlotNormalizer {
 impl SlotNormalizer {
     fn new() -> Self {
         Self {
-            map: HashMap::new(),
+            map: HashMap::default(),
             next: 0,
         }
     }
@@ -845,23 +816,10 @@ fn op_eq(
     use LirOp::*;
     let resolve = |b: BlockId| *remap.get(&b).unwrap_or(&b);
     match (x, y) {
-        (
-            If {
-                cond: c1,
-                then_ops: t1,
-                else_ops: e1,
-                ..
-            },
-            If {
-                cond: c2,
-                then_ops: t2,
-                else_ops: e2,
-                ..
-            },
-        ) => {
-            sn_a.norm(*c1) == sn_b.norm(*c2)
-                && ops_eq(t1, t2, sn_a, sn_b, remap)
-                && ops_eq(e1, e2, sn_a, sn_b, remap)
+        (If(a), If(b)) => {
+            sn_a.norm(a.cond) == sn_b.norm(b.cond)
+                && ops_eq(&a.then_ops, &b.then_ops, sn_a, sn_b, remap)
+                && ops_eq(&a.else_ops, &b.else_ops, sn_a, sn_b, remap)
         }
         (
             Loop {
@@ -926,8 +884,8 @@ fn op_eq(
         _ => {
             let mut ha = std::collections::hash_map::DefaultHasher::new();
             let mut hb = std::collections::hash_map::DefaultHasher::new();
-            let empty: HashSet<BlockId> = HashSet::new();
-            let no_hashes: HashMap<BlockId, u64> = HashMap::new();
+            let empty: HashSet<BlockId> = HashSet::default();
+            let no_hashes: HashMap<BlockId, u64> = HashMap::default();
             hash_op(x, &mut ha, sn_a, &empty, &no_hashes);
             hash_op(y, &mut hb, sn_b, &empty, &no_hashes);
             ha.finish() == hb.finish()

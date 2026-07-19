@@ -76,6 +76,26 @@ impl fmt::Display for VariantIdx {
     }
 }
 
+/// Index of a parameter within its owning function's parameter list.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+pub struct ParamIdx(pub u32);
+
+impl ParamIdx {
+    pub fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl fmt::Display for ParamIdx {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "param#{}", self.0)
+    }
+}
+
 /// Local variable identifier within a body.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub struct LocalId(pub u32);
@@ -221,6 +241,30 @@ impl TreeBoundaryId {
 impl fmt::Display for TreeBoundaryId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "tree_boundary#{}", self.0)
+    }
+}
+
+/// Identifier for a WIT interface declared in a module's world — a named
+/// group of imported/exported functions, types, or a resource. Indexes
+/// into `LirModule::interfaces`. World items (resources, imported
+/// functions) reference their interface by this id; an import with no
+/// interface id is a *freeform* world-level function.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize)]
+pub struct InterfaceId(pub u32);
+
+impl InterfaceId {
+    pub fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl fmt::Display for InterfaceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "interface#{}", self.0)
     }
 }
 

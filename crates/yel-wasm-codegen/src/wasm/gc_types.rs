@@ -14,7 +14,7 @@ use wasm_encoder::{
 };
 use yel_core::ids::TreeBoundaryId;
 use yel_core::lir::LirResource;
-use yel_core::lir::block::{LirSlotValType, TreeBoundaryKind, TreeFieldDecl};
+use yel_core::lir::block::{LirSlotValType, TreeBoundaryKind};
 use yel_core::{CompilerContext, DefId, DefKind, InternedTyKind, Ty};
 
 /// Type-index assignments for one component's GC types.
@@ -89,6 +89,10 @@ pub struct GcTypeLayout {
     /// `(array (mut (ref null <iter_body_struct>)))` used as the
     /// children-array element. Keyed by the *anchor* boundary id.
     pub tree_for_arr_type_idx: HashMap<TreeBoundaryId, u32>,
+    /// Wasm type-section index of `array_types[0]` — the base the
+    /// registry-indexed `Array*` ops resolve against
+    /// (`wasm_idx = array_type_base + LirArrayTypeIdx`).
+    pub array_type_base: u32,
     /// Convenience: type index of the component's root tree boundary
     /// (also discoverable via `tree_struct_type_idx[shape.root_idx]`).
     pub tree_root_type_idx: Option<u32>,
@@ -389,6 +393,9 @@ pub fn emit_component_tree_types(
     }
     let n = struct_types.len() as u32;
     let n_arrays = array_types.len() as u32;
+    // Arrays are emitted right after the structs, so registry array index
+    // `k` lands at `base_type_idx + n + k`.
+    layout.array_type_base = base_type_idx + n;
 
     // Pass 1: assign struct + array type indices.
     for i in 0..n {
@@ -561,97 +568,6 @@ fn build_struct_from_decls(
     }
 }
 
-/// Build the struct type for one tree-boundary by translating each
-/// `TreeFieldDecl` into a `FieldType`. `layout` must already contain
-/// the struct/array indices for every boundary referenced from the
-/// fields (populated in pass 1 above).
-fn build_tree_boundary_struct(
-    fields: &[TreeFieldDecl],
-    layout: &GcTypeLayout,
-    ctx: &yel_core::context::CompilerContext,
-    record_gc_types: &RecordGcTypes,
-) -> StructType {
-    let wasm_fields: Vec<FieldType> = fields
-        .iter()
-        .map(|f| match f {
-            TreeFieldDecl::DomHandle { .. } => FieldType {
-                element_type: StorageType::Val(ValType::I32),
-                mutable: true,
-            },
-            TreeFieldDecl::ActiveTag { .. } => FieldType {
-                element_type: StorageType::Val(ValType::I32),
-                mutable: true,
-            },
-            TreeFieldDecl::LoopVar { val_ty, .. } => FieldType {
-                element_type: StorageType::Val(slot_val_ty_to_val_ty(val_ty, ctx, record_gc_types)),
-                mutable: true,
-            },
-            TreeFieldDecl::SubBoundary { target_idx, .. } => {
-                let target_struct_idx = layout.tree_struct_type_idx[&TreeBoundaryId(*target_idx)];
-                FieldType {
-                    element_type: StorageType::Val(ValType::Ref(RefType {
-                        nullable: true,
-                        heap_type: HeapType::Concrete(target_struct_idx),
-                    })),
-                    mutable: true,
-                }
-            }
-            TreeFieldDecl::ChildrenArray { arr_target_idx, .. } => {
-                // ChildrenArray fields only appear on ForAnchor
-                // boundaries. `arr_target_idx` is the iter-body
-                // boundary id; the array's type idx is the for-anchor's
-                // companion-array index. The synthesizer's invariant
-                // (iter-body allocated immediately before anchor) lets
-                // us recover the anchor id from the iter-body id.
-                let arr_idx =
-                    find_anchor_array_idx_for_iter_body(layout, TreeBoundaryId(*arr_target_idx));
-                FieldType {
-                    element_type: StorageType::Val(ValType::Ref(RefType {
-                        nullable: true,
-                        heap_type: HeapType::Concrete(arr_idx),
-                    })),
-                    mutable: true,
-                }
-            }
-        })
-        .collect();
-    StructType {
-        fields: wasm_fields.into_boxed_slice(),
-    }
-}
-
-/// Look up the array type index for the for-anchor whose iter-body is
-/// `iter_body_id`. Slow path used by `build_tree_boundary_struct` when
-/// translating a `ChildrenArray` field. Relies on a side channel: the
-/// synthesizer pairs each anchor with its iter-body, and the array
-/// index is keyed in `layout.tree_for_arr_type_idx` by the anchor's
-/// id. Since the anchor↔iter-body mapping isn't directly stored on
-/// `GcTypeLayout`, we encode it implicitly via the anchor ordering:
-/// anchor is always declared immediately *before* its iter-body in
-/// `shape.boundaries`. This function is only correct when called from
-/// `build_tree_boundary_struct`, where the same `shape` was used to
-/// pre-compute indices.
-///
-/// To make this robust without threading `shape` through, we store
-/// the inverse mapping during pass 1 of `emit_component_tree_types`.
-/// See the call site for the population.
-fn find_anchor_array_idx_for_iter_body(layout: &GcTypeLayout, iter_body_id: TreeBoundaryId) -> u32 {
-    // Layout invariant: the iter-body's struct idx is one less than
-    // the for-anchor's struct idx (synthesizer allocates iter-body
-    // first, anchor second — see `tree_shape::synthesize`). So the
-    // anchor's id is `iter_body_id - 1` in struct-index space, but
-    // boundary ids are small ints stored in `tree_struct_type_idx`
-    // — we can scan the for-arr map for whose key has struct idx ==
-    // iter_body_id's idx + 1.
-    let iter_body_struct_idx = layout.tree_struct_type_idx[&iter_body_id];
-    layout
-        .tree_for_arr_type_idx
-        .iter()
-        .find(|(anchor_id, _)| layout.tree_struct_type_idx[anchor_id] == iter_body_struct_idx + 1)
-        .map(|(_, &arr_idx)| arr_idx)
-        .expect("anchor↔iter-body invariant: anchor declared right after iter-body")
-}
-
 /// Map a `SlotValType` to the corresponding `wasm_encoder::ValType`
 /// for boundary struct field emission.
 fn slot_val_ty_to_val_ty(
@@ -716,9 +632,6 @@ fn slot_val_ty_to_val_ty(
         LirSlotValType::AnyRef => {
             unreachable!("anyref not expected as a tree loop-var field type")
         }
-        LirSlotValType::RefNullForGlobalBlock(_) => {
-            unreachable!("global-block instance ref not expected as a tree loop-var field type")
-        }
     }
 }
 
@@ -736,56 +649,51 @@ fn slot_val_ty_to_val_ty(
 /// `GcTypeLayout.signal_field_paths`.
 #[derive(Debug, Clone)]
 pub struct GlobalsBlockLayout {
-    /// DefId of the owning `global Foo { ... }` block. Read by Step 2
-    /// helpers that resolve blocks by their owning global property.
+    /// DefId of the owning `global Foo { ... }` block. Read by helpers
+    /// that resolve blocks by their owning global property.
     pub block_def_id: DefId,
-    pub struct_type_idx: u32,
-    pub self_global_idx: u32,
-    /// Per-property field-index path inside the block's GC struct,
+    /// Per-property field-index path into the block's storage slots,
     /// indexed by property position in `GlobalDef.properties`. Empty
-    /// vec marks pointer-typed properties that stay on the legacy
-    /// memory path. Read by Step 2 read/write helpers.
+    /// vec marks pointer-typed properties that stay on the linear-memory
+    /// path. `field_core_globals[property_field_paths[p][s]]` is the core
+    /// global backing property `p`'s storage slot `s`.
     pub property_field_paths: Vec<Vec<u32>>,
+    /// Wasm valtype of each storage field, in field-index order
+    /// (`field_valtypes[f]` is the valtype of slot `f`). Used to declare
+    /// the per-field core wasm globals that back the block's state.
+    pub field_valtypes: Vec<ValType>,
+    /// Per-field core wasm global index (`field_core_globals[f]` is the
+    /// mutable global holding field `f`'s value). Populated by the global
+    /// section. This is the singleton's live storage.
+    pub field_core_globals: Vec<u32>,
 }
 
-/// Emit one `(struct $globals_<block> ...)` GC type for a named global
-/// block. Layout mirrors the per-component struct: one mutable field
-/// per ABI slot of each property, in property-declaration order.
-/// Pointer-typed properties (records/tuples) contribute zero fields
-/// and get an empty `property_field_paths` entry.
-///
-/// Reserves exactly **1** type index. The caller is responsible for
-/// bumping its cursor by 1 after the call.
-pub fn emit_globals_struct_type(
+/// Compute a named global block's storage layout: one slot per ABI slot
+/// of each property, in property-declaration order. Pointer-typed
+/// properties (records/tuples) contribute zero slots and get an empty
+/// `property_field_paths` entry (they stay on the linear-memory path).
+/// Each slot is backed by a core wasm global, assigned by the global
+/// section into `field_core_globals`.
+pub fn compute_globals_block_layout(
     block_def_id: DefId,
     prop_slot_valtypes: &[Vec<ValType>],
-    types: &mut TypeSection,
-    base_type_idx: u32,
 ) -> GlobalsBlockLayout {
-    let mut fields: Vec<FieldType> = Vec::new();
+    let mut field_valtypes: Vec<ValType> = Vec::new();
     let mut property_field_paths: Vec<Vec<u32>> = Vec::with_capacity(prop_slot_valtypes.len());
     for slots in prop_slot_valtypes {
         let mut path: Vec<u32> = Vec::with_capacity(slots.len());
         for vt in slots {
-            let idx = fields.len() as u32;
-            fields.push(FieldType {
-                element_type: StorageType::Val(*vt),
-                mutable: true,
-            });
-            path.push(idx);
+            path.push(field_valtypes.len() as u32);
+            field_valtypes.push(*vt);
         }
         property_field_paths.push(path);
     }
-    let struct_ty = StructType {
-        fields: fields.into_boxed_slice(),
-    };
-    types.ty().struct_(struct_ty.fields.iter().copied());
 
     GlobalsBlockLayout {
         block_def_id,
-        struct_type_idx: base_type_idx,
-        self_global_idx: 0, // populated when the global section emits the self-global
         property_field_paths,
+        field_valtypes,
+        field_core_globals: Vec::new(), // populated by the global section
     }
 }
 
@@ -1205,13 +1113,7 @@ fn collect_list_and_tuple_tys(
                     list_order.push(ty);
                 }
                 walk(
-                    ctx,
-                    *inner,
-                    list_seen,
-                    tuple_seen,
-                    flat_gc_seen,
-                    list_order,
-                    tuple_order,
+                    ctx, *inner, list_seen, tuple_seen, flat_gc_seen, list_order, tuple_order,
                     flat_gc_order,
                 );
             }
@@ -1222,13 +1124,7 @@ fn collect_list_and_tuple_tys(
                 let els = els.clone();
                 for e in els {
                     walk(
-                        ctx,
-                        e,
-                        list_seen,
-                        tuple_seen,
-                        flat_gc_seen,
-                        list_order,
-                        tuple_order,
+                        ctx, e, list_seen, tuple_seen, flat_gc_seen, list_order, tuple_order,
                         flat_gc_order,
                     );
                 }
@@ -1240,13 +1136,7 @@ fn collect_list_and_tuple_tys(
                     flat_gc_order.push(ty);
                 }
                 walk(
-                    ctx,
-                    *inner,
-                    list_seen,
-                    tuple_seen,
-                    flat_gc_seen,
-                    list_order,
-                    tuple_order,
+                    ctx, *inner, list_seen, tuple_seen, flat_gc_seen, list_order, tuple_order,
                     flat_gc_order,
                 );
             }
@@ -1256,41 +1146,30 @@ fn collect_list_and_tuple_tys(
                 }
                 if let Some(t) = ok {
                     walk(
-                        ctx,
-                        *t,
-                        list_seen,
-                        tuple_seen,
-                        flat_gc_seen,
-                        list_order,
-                        tuple_order,
+                        ctx, *t, list_seen, tuple_seen, flat_gc_seen, list_order, tuple_order,
                         flat_gc_order,
                     );
                 }
                 if let Some(t) = err {
                     walk(
-                        ctx,
-                        *t,
-                        list_seen,
-                        tuple_seen,
-                        flat_gc_seen,
-                        list_order,
-                        tuple_order,
+                        ctx, *t, list_seen, tuple_seen, flat_gc_seen, list_order, tuple_order,
                         flat_gc_order,
                     );
                 }
             }
-            InternedTyKind::Adt(d) => {
+            InternedTyKind::Adt(d)
                 // User variants register as FlatGcStruct parents.
                 // Records and enums do NOT — records have their own GC
                 // struct path; enums lower to plain i32.
-                if matches!(ctx.defs.kind(*d), DefKind::Variant(_)) && flat_gc_seen.insert(ty) {
-                    flat_gc_order.push(ty);
-                }
-                // Records' fields and variants' payloads are walked
-                // separately (over `defs.records()` / `defs.variants()`),
-                // so we don't recurse into them here — that would
-                // revisit each parent's inner Tys N times.
+                if matches!(ctx.defs.kind(*d), DefKind::Variant(_))
+                    && flat_gc_seen.insert(ty) =>
+            {
+                flat_gc_order.push(ty);
             }
+            // Records' fields and variants' payloads are walked
+            // separately (over `defs.records()` / `defs.variants()`),
+            // so we don't recurse into them here — that would
+            // revisit each parent's inner Tys N times.
             _ => {}
         }
     }
@@ -1339,8 +1218,8 @@ fn collect_list_and_tuple_tys(
         if let DefKind::Variant(v) = ctx.defs.kind(def_id) {
             let case_ids = v.cases.clone();
             for case_def_id in case_ids {
-                if let DefKind::VariantCase(c) = ctx.defs.kind(case_def_id) {
-                    if let Some(payload_ty) = c.payload {
+                if let DefKind::VariantCase(c) = ctx.defs.kind(case_def_id)
+                    && let Some(payload_ty) = c.payload {
                         walk(
                             ctx,
                             payload_ty,
@@ -1352,7 +1231,6 @@ fn collect_list_and_tuple_tys(
                             &mut flat_gc_order,
                         );
                     }
-                }
             }
         }
     }
@@ -1641,13 +1519,12 @@ fn is_flat_gc_migrated_recursive(
             if is_gc_eligible_list_ty(ctx, inner) {
                 return false;
             }
-            if let InternedTyKind::Adt(d) = ctx.ty_kind(inner) {
-                if matches!(ctx.defs.kind(*d), DefKind::Record(_))
+            if let InternedTyKind::Adt(d) = ctx.ty_kind(inner)
+                && matches!(ctx.defs.kind(*d), DefKind::Record(_))
                     && is_dtr_record_for_collapse(ctx, *d)
                 {
                     return false;
                 }
-            }
             is_flat_gc_payload_admissible(ctx, inner, registry, visiting)
         }
         InternedTyKind::Result { ok, err } => {
@@ -1872,12 +1749,11 @@ fn topo_sort_flat_gc_tys(ctx: &CompilerContext, tys: &[Ty]) -> Vec<Ty> {
             None => continue,
         };
         for i in 0..case_count {
-            if let Some(p_ty) = case_payload_ty(ctx, parent, i) {
-                if ty_set.contains(&p_ty) && p_ty != parent {
+            if let Some(p_ty) = case_payload_ty(ctx, parent, i)
+                && ty_set.contains(&p_ty) && p_ty != parent {
                     deps.entry(p_ty).or_default().push(parent);
                     *in_degree.entry(parent).or_insert(0) += 1;
                 }
-            }
         }
     }
     // Start with all zero-in-degree nodes, in original insertion order.
@@ -1933,25 +1809,23 @@ fn list_element_storage_type(
     // GC array (list<scalar>, list<DTR-record>, list<list<...>>),
     // store a concrete `(ref null $<inner_arr>)` so callers can
     // `array.get` directly without going through $fat_value.
-    if let InternedTyKind::List(_) = ctx.ty_kind(elem_ty) {
-        if let Some(&inner_arr_idx) = registry.list_array_type_idx.get(&elem_ty) {
+    if let InternedTyKind::List(_) = ctx.ty_kind(elem_ty)
+        && let Some(&inner_arr_idx) = registry.list_array_type_idx.get(&elem_ty) {
             return ValType::Ref(RefType {
                 nullable: true,
                 heap_type: HeapType::Concrete(inner_arr_idx),
             });
         }
-    }
     // Phase 5e.3: tuples — store a concrete `(ref null $tuple_<n>)`
     // typed struct ref. The tuple struct type was emitted alongside
     // record types in this rec group.
-    if let InternedTyKind::Tuple(_) = ctx.ty_kind(elem_ty) {
-        if let Some(&tup_idx) = registry.tuple_struct_type_idx.get(&elem_ty) {
+    if let InternedTyKind::Tuple(_) = ctx.ty_kind(elem_ty)
+        && let Some(&tup_idx) = registry.tuple_struct_type_idx.get(&elem_ty) {
             return ValType::Ref(RefType {
                 nullable: true,
                 heap_type: HeapType::Concrete(tup_idx),
             });
         }
-    }
     // Phase 5e.5 Stage 8a: FlatGcStruct elements (option/result/user
     // variant) — store the concrete supertype ref so consumers can
     // `array.get` directly to a typed ref and ref.test / ref.cast
@@ -2061,8 +1935,8 @@ fn is_gc_eligible_list_ty(ctx: &CompilerContext, ty: Ty) -> bool {
             return true;
         }
     }
-    if let InternedTyKind::Adt(d) = ctx.ty_kind(elem) {
-        if matches!(ctx.defs.kind(*d), DefKind::Record(_)) {
+    if let InternedTyKind::Adt(d) = ctx.ty_kind(elem)
+        && matches!(ctx.defs.kind(*d), DefKind::Record(_)) {
             // Records: assume eligible if all DTR fields are. The full
             // DTR check would require recursive seen-tracking; mirror
             // the simple case (single-level record with primitive
@@ -2070,7 +1944,6 @@ fn is_gc_eligible_list_ty(ctx: &CompilerContext, ty: Ty) -> bool {
             // non-eligible records, which is safe.
             return true;
         }
-    }
     false
 }
 
@@ -2111,14 +1984,13 @@ fn record_field_storage_type(ctx: &CompilerContext, ty: Ty, registry: &RecordGcT
             // (any GC-eligible list — scalar, string, nested list, DTR
             // record, tuple, …), use the concrete `(ref null $<elem>_list)`
             // type instead of the legacy `$fat_value` (ptr, len) box.
-            if is_gc_eligible_list_ty(ctx, ty) {
-                if let Some(&arr_idx) = registry.list_array_type_idx.get(&ty) {
+            if is_gc_eligible_list_ty(ctx, ty)
+                && let Some(&arr_idx) = registry.list_array_type_idx.get(&ty) {
                     return ValType::Ref(RefType {
                         nullable: true,
                         heap_type: HeapType::Concrete(arr_idx),
                     });
                 }
-            }
             let fat_value_idx = registry
                 .fat_value_type_idx
                 .expect("fat_value type idx must be assigned before record fields are typed");
@@ -2144,14 +2016,13 @@ fn record_field_storage_type(ctx: &CompilerContext, ty: Ty, registry: &RecordGcT
         // is a typed ref but `RecordConstruct` pushes flat-canonical
         // slots (or vice versa).
         InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
-            if is_flat_gc_migrated(ctx, ty, registry) {
-                if let Some(&super_idx) = registry.flat_gc_super_idx.get(&ty) {
+            if is_flat_gc_migrated(ctx, ty, registry)
+                && let Some(&super_idx) = registry.flat_gc_super_idx.get(&ty) {
                     return ValType::Ref(RefType {
                         nullable: true,
                         heap_type: HeapType::Concrete(super_idx),
                     });
                 }
-            }
             ValType::Ref(RefType {
                 nullable: true,
                 heap_type: HeapType::Abstract {
@@ -2201,14 +2072,13 @@ fn record_field_storage_type(ctx: &CompilerContext, ty: Ty, registry: &RecordGcT
             DefKind::Enum(_) => ValType::I32,
             // User variants: typed supertype ref when migrated.
             DefKind::Variant(_) => {
-                if is_flat_gc_migrated(ctx, ty, registry) {
-                    if let Some(&super_idx) = registry.flat_gc_super_idx.get(&ty) {
+                if is_flat_gc_migrated(ctx, ty, registry)
+                    && let Some(&super_idx) = registry.flat_gc_super_idx.get(&ty) {
                         return ValType::Ref(RefType {
                             nullable: true,
                             heap_type: HeapType::Concrete(super_idx),
                         });
                     }
-                }
                 ValType::Ref(RefType {
                     nullable: true,
                     heap_type: HeapType::Abstract {

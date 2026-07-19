@@ -72,8 +72,7 @@ impl<'a> WasmPackageBuilder<'a> {
         let handle_local: u32 = 4;
         let mut owner_self_local: HashMap<usize, u32> = HashMap::new();
         let mut local_decls: Vec<(u32, ValType)> = vec![(1, ValType::I32)];
-        let mut next_local: u32 = 5;
-        for &ci in &owner_comps {
+        for (next_local, &ci) in (5_u32..).zip(owner_comps.iter()) {
             let struct_ty = self.gc_layouts[ci]
                 .component_struct_type_idx
                 .ok_or_else(|| {
@@ -91,7 +90,6 @@ impl<'a> WasmPackageBuilder<'a> {
                 }),
             ));
             owner_self_local.insert(ci, next_local);
-            next_local += 1;
         }
 
         let mut func = Function::new(local_decls);
@@ -275,13 +273,9 @@ impl<'a> WasmPackageBuilder<'a> {
                                 ))
                             })?;
                         let field_idx = gl.property_field_paths[prop_pos][0];
-                        func.instruction(&Instruction::GlobalGet(gl.self_global_idx));
-                        func.instruction(&Instruction::RefAsNonNull);
+                        let core_global = gl.field_core_globals[field_idx as usize];
                         self.emit_coerce_f64_to_value(&mut func, target_ty, PARAM_SLOT0_I64)?;
-                        func.instruction(&Instruction::StructSet {
-                            struct_type_index: gl.struct_type_idx,
-                            field_index: field_idx,
-                        });
+                        func.instruction(&Instruction::GlobalSet(core_global));
                     } else {
                         self.emit_coerce_f64_and_store(
                             &mut func,
