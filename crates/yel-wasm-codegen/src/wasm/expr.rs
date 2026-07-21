@@ -2280,7 +2280,6 @@ impl WasmPackageBuilder<'_> {
         payload: Option<&LirExpr>,
         component: &LirResource,
     ) -> Result<(), CodegenError> {
-        use super::repr::InternalRepr;
         let case_sub_idx = *self
             .record_gc_types
             .flat_gc_case_idx
@@ -2300,23 +2299,12 @@ impl WasmPackageBuilder<'_> {
             }
             Some(p) => {
                 self.emit_expr(func, p, component)?;
-                // Phase 5e.5: when the case payload's `internal_repr`
-                // pushes more values than the case subtype's field
-                // expects, box appropriately. The case subtype's
-                // payload field uses `record_field_storage_type`
-                // rules — strings and non-typed-array lists become
-                // `(ref null $fat_value)`. So when emit_expr pushed
-                // (ptr, len) for a string/list payload, wrap them in
-                // a `$fat_value` struct first.
-                let payload_repr = self.internal_repr(p.ty);
-                if matches!(payload_repr, InternalRepr::FatPointer) {
-                    let fat_value_idx = self.record_gc_types.fat_value_type_idx
-                        .ok_or_else(|| CodegenError::InvalidIR(
-                            "emit_variant_ctor_gc: $fat_value type idx missing — \
-                             cannot box string/list payload".into(),
-                        ))?;
-                    func.instruction(&Instruction::StructNew(fat_value_idx));
-                }
+                // (A string / list payload used to be a 2-slot fat pointer
+                // that got boxed into `$fat_value` here; strings and lists
+                // are now single GC refs, so the payload pushes exactly one
+                // value that matches the case subtype's field — no boxing.
+                // The `FatPointer` repr is gone; this branch was confirmed
+                // dead by coverage and removed.)
                 // For Pointer (memory-backed records/tuples): payload
                 // is a single i32 ptr. The subtype field would be
                 // `anyref` (since record_field_storage_type defaults

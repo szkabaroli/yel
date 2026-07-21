@@ -40,8 +40,7 @@ use super::WasmPackageBuilder;
 /// Rule of thumb:
 ///   - primitive scalar → its matching `ValType` (1 slot)
 ///   - `string` → `(ref $str_bytes)` GC byte array (1 slot)
-///   - non-typed-array `list<T>` → fat pointer (`i32`, `i32`) — 2 slots
-///   - record / tuple / typed-array list → single typed GC ref (1 slot)
+///   - `list<T>` / record / tuple → single typed GC ref (1 slot)
 ///   - option / result / variant → typed FlatGcStruct ref (1 slot) when
 ///     migrated, otherwise canonical-flat
 ///   - unit → zero slots
@@ -52,8 +51,6 @@ pub(super) enum InternalRepr {
     Zero,
     /// Exactly one stack slot of the given valtype.
     Scalar(wasm_encoder::ValType),
-    /// `(i32, i32)` fat pointer — used for non-typed-array lists.
-    FatPointer,
     /// A record stored as a `(ref null $<rec>_record)` GC ref (1 stack
     /// slot). Contained `u32` is the record's GC struct type index.
     GcRef(u32),
@@ -143,11 +140,17 @@ impl WasmPackageBuilder<'_> {
             InternedTyKind::F32 => InternalRepr::Scalar(ValType::F32),
             InternedTyKind::F64 => InternalRepr::Scalar(ValType::F64),
             InternedTyKind::S64 | InternedTyKind::U64 => InternalRepr::Scalar(ValType::I64),
-            // `String` is handled above (always `GcArrayRef`). Only a
-            // non-typed-array `list<T>` (one whose element makes
-            // `is_scalar_list_ty` false) still falls through to the
-            // fat-pointer fallback.
-            InternedTyKind::List(_) => InternalRepr::FatPointer,
+            // `String` and every `list<T>` are GC refs (handled above:
+            // `is_scalar_list_ty` → `GcArrayRef`). Reaching this arm would
+            // mean a list whose element is not single-slot — only `unit` /
+            // `func`, which are not valid list-element types — so it is
+            // unreachable. (Confirmed dead by coverage across tests + fuzz.)
+            InternedTyKind::List(_) => unreachable!(
+                "internal_repr: list<T> hit the removed fat-pointer fallback — \
+                 every list is a typed GC array; a non-single-slot element \
+                 (unit/func) is not a valid list element (ty={:?})",
+                ty
+            ),
             // Tuple / Adt::Record cases are handled at the top of this
             // function via `tuple_struct_type_idx` / `por_record_type_idx`
             // returning the typed `GcRef`. Reaching this match arm means
@@ -195,7 +198,6 @@ impl WasmPackageBuilder<'_> {
     ///   narrow ints widened to i32 — fields are full-width, the
     ///   narrow-store/load dance is no longer needed since each field
     ///   has its own slot).
-    /// - FatPointer → `[I32, I32]` for non-typed-array lists.
     /// - GcRef / GcArrayRef / FlatGcStruct → 1 typed ref slot.
     /// - Flat → canonical-ABI flattening for non-migrated option/result/variant/enum.
     /// - Zero → `[]` (no value).
@@ -203,7 +205,6 @@ impl WasmPackageBuilder<'_> {
         match self.internal_repr(ty) {
             InternalRepr::Zero => Vec::new(),
             InternalRepr::Scalar(vt) => vec![vt],
-            InternalRepr::FatPointer => vec![ValType::I32, ValType::I32],
             InternalRepr::GcRef(type_idx) => vec![ValType::Ref(RefType {
                 nullable: true,
                 heap_type: HeapType::Concrete(type_idx),
@@ -515,7 +516,6 @@ impl WasmPackageBuilder<'_> {
         match self.internal_repr(ty) {
             InternalRepr::Zero => 0,
             InternalRepr::Scalar(_) => 1,
-            InternalRepr::FatPointer => 2,
             InternalRepr::GcRef(_) => 1,
             InternalRepr::GcArrayRef(_) => 1,
             InternalRepr::FlatGcStruct(_) => 1,
@@ -560,20 +560,6 @@ impl WasmPackageBuilder<'_> {
                     nullable: true,
                     heap_type: wasm_encoder::HeapType::Concrete(super_idx),
                 })))
-            }
-            InternalRepr::FatPointer => {
-                // 2-slot (i32, i32) — look up the registered
-                // `() -> (i32, i32)` function type.
-                let shape = vec![ValType::I32, ValType::I32];
-                match self.ternary_block_types.get(&shape) {
-                    Some(&idx) => Ok(BlockType::FunctionType(idx)),
-                    None => Err(CodegenError::InvalidIR(format!(
-                        "repr::block_ty_for: no pre-registered `() -> (i32, i32)` \
-                         function type for fat-pointer ternary (ty={:?}). Ensure \
-                         `collect_ternary_block_shapes` runs before code emission.",
-                        ty,
-                    ))),
-                }
             }
         }
     }
