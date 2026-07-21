@@ -627,6 +627,26 @@ pub(super) fn collect_ternary_block_shapes(
             return;
         }
 
+        // Phase 5e.5 Stage 7d: a `result<T,E>` field whose canonical
+        // materialization has a multi-slot joined payload emits a
+        // multi-result `if` over that payload (see
+        // `emit_flat_gc_result_field_materialize`). Register the joined
+        // payload shape (canonical flattening minus the leading
+        // discriminant) so the Type section interns a matching
+        // `() -> (joined…)` function type for the block. Mirrors the
+        // Ternary registration above.
+        if let LirExprKind::Field { .. } = &e.kind
+            && matches!(builder.ctx.ty_kind(e.ty), InternedTyKind::Result { .. })
+        {
+            let full = builder.flatten_core_valtypes(e.ty);
+            if full.len() >= 2 {
+                let joined = full[1..].to_vec();
+                if joined.len() >= 2 {
+                    into.insert(joined, ());
+                }
+            }
+        }
+
         // Recurse into subexpressions. New expression kinds must be
         // added here, but forgetting to doesn't produce a silent bug —
         // a missed ternary would instead trigger `block_ty_for`'s

@@ -1990,25 +1990,26 @@ impl WasmPackageBuilder<'_> {
 
         let ok_flat = ok.map(|t| self.flatten_core_valtypes(t)).unwrap_or_default();
         let err_flat = err.map(|t| self.flatten_core_valtypes(t)).unwrap_or_default();
-        if ok_flat.len() > 1 || err_flat.len() > 1 {
-            return Err(CodegenError::InvalidIR(format!(
-                "result field materialize: multi-slot payload not yet \
-                 supported — ok={} err={} for {:?}",
-                ok_flat.len(),
-                err_flat.len(),
-                field_ty
-            )));
-        }
+
+        // Canonical layout: [disc, joined_payload…]. The joined payload
+        // (the per-position width-join of the two arms) is what both
+        // arms of the `if` below must produce.
+        let full_flat = self.flatten_core_valtypes(field_ty);
+        let payload_joined: Vec<ValType> = full_flat.get(1..).unwrap_or(&[]).to_vec();
+
         // Width-promotion / mixed-valtype joined payload not yet
-        // supported.
-        if let (Some(o), Some(e)) = (ok_flat.first(), err_flat.first())
-            && o != e {
-                return Err(CodegenError::InvalidIR(format!(
-                    "result field materialize: mixed payload valtypes \
-                     {:?}/{:?} (width promotion) not yet supported for {:?}",
-                    o, e, field_ty
-                )));
-            }
+        // supported: wherever both arms occupy the same position the
+        // valtypes must match (a real join would otherwise promote).
+        for i in 0..payload_joined.len() {
+            if let (Some(o), Some(e)) = (ok_flat.get(i), err_flat.get(i))
+                && o != e {
+                    return Err(CodegenError::InvalidIR(format!(
+                        "result field materialize: mixed payload valtypes \
+                         {:?}/{:?} (width promotion) not yet supported for {:?}",
+                        o, e, field_ty
+                    )));
+                }
+        }
 
         // Slot 0: discriminant. Ok=0, Err=1.
         // Cascade: ref.test $res_ok ? 0 : 1.
@@ -2022,9 +2023,94 @@ impl WasmPackageBuilder<'_> {
         ));
         func.instruction(&Instruction::I32Eqz);
 
-        // Joined payload slot, if any.
-        let joined_valtype = ok_flat.first().copied().or_else(|| err_flat.first().copied());
-        if let Some(payload_vt) = joined_valtype {
+        if payload_joined.len() <= 1 {
+            // ---- single-slot payload (byte-identical to the original) ----
+            let joined_valtype = payload_joined.first().copied();
+            if let Some(payload_vt) = joined_valtype {
+                self.emit_expr(func, base, component)?;
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: parent_type_idx,
+                    field_index: gc_field_idx,
+                });
+                func.instruction(&Instruction::RefTestNonNull(
+                    wasm_encoder::HeapType::Concrete(case_ok_idx),
+                ));
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(payload_vt)));
+                // Ok arm.
+                if let Some(ok_ty) = ok {
+                    self.emit_expr(func, base, component)?;
+                    func.instruction(&Instruction::StructGet {
+                        struct_type_index: parent_type_idx,
+                        field_index: gc_field_idx,
+                    });
+                    func.instruction(&Instruction::RefCastNonNull(
+                        wasm_encoder::HeapType::Concrete(case_ok_idx),
+                    ));
+                    let getter = super::gc_types::struct_get_op_for_payload(self.ctx, ok_ty);
+                    match getter {
+                        StructGetVariant::Plain => func.instruction(&Instruction::StructGet {
+                            struct_type_index: case_ok_idx,
+                            field_index: 0,
+                        }),
+                        StructGetVariant::Signed => func.instruction(&Instruction::StructGetS {
+                            struct_type_index: case_ok_idx,
+                            field_index: 0,
+                        }),
+                        StructGetVariant::Unsigned => func.instruction(&Instruction::StructGetU {
+                            struct_type_index: case_ok_idx,
+                            field_index: 0,
+                        }),
+                    };
+                } else {
+                    emit_zero_default(func, payload_vt)?;
+                }
+                func.instruction(&Instruction::Else);
+                // Err arm.
+                if let Some(err_ty) = err {
+                    self.emit_expr(func, base, component)?;
+                    func.instruction(&Instruction::StructGet {
+                        struct_type_index: parent_type_idx,
+                        field_index: gc_field_idx,
+                    });
+                    func.instruction(&Instruction::RefCastNonNull(
+                        wasm_encoder::HeapType::Concrete(case_err_idx),
+                    ));
+                    let getter = super::gc_types::struct_get_op_for_payload(self.ctx, err_ty);
+                    match getter {
+                        StructGetVariant::Plain => func.instruction(&Instruction::StructGet {
+                            struct_type_index: case_err_idx,
+                            field_index: 0,
+                        }),
+                        StructGetVariant::Signed => func.instruction(&Instruction::StructGetS {
+                            struct_type_index: case_err_idx,
+                            field_index: 0,
+                        }),
+                        StructGetVariant::Unsigned => func.instruction(&Instruction::StructGetU {
+                            struct_type_index: case_err_idx,
+                            field_index: 0,
+                        }),
+                    };
+                } else {
+                    emit_zero_default(func, payload_vt)?;
+                }
+                func.instruction(&Instruction::End);
+                // Suppress unused warning when err missing.
+                let _ = ValType::I32;
+            }
+        } else {
+            // ---- multi-slot payload: one typed if/else producing the
+            // full joined payload width. Both arms convert their case's
+            // internal repr to canonical slots then zero-pad the trailing
+            // positions so each arm yields exactly `payload_joined.len()`
+            // values.
+            let joined_type_idx = *self.ternary_block_types.get(&payload_joined).ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "result field materialize: no pre-registered block type \
+                     for joined payload shape {:?} (field {:?}) — \
+                     collect_ternary_block_shapes must register it",
+                    payload_joined, field_ty
+                ))
+            })?;
             self.emit_expr(func, base, component)?;
             func.instruction(&Instruction::StructGet {
                 struct_type_index: parent_type_idx,
@@ -2033,70 +2119,132 @@ impl WasmPackageBuilder<'_> {
             func.instruction(&Instruction::RefTestNonNull(
                 wasm_encoder::HeapType::Concrete(case_ok_idx),
             ));
-            func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(payload_vt)));
+            func.instruction(&Instruction::If(wasm_encoder::BlockType::FunctionType(
+                joined_type_idx,
+            )));
             // Ok arm.
-            if let Some(ok_ty) = ok {
-                self.emit_expr(func, base, component)?;
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: parent_type_idx,
-                    field_index: gc_field_idx,
-                });
-                func.instruction(&Instruction::RefCastNonNull(
-                    wasm_encoder::HeapType::Concrete(case_ok_idx),
-                ));
-                let getter = super::gc_types::struct_get_op_for_payload(self.ctx, ok_ty);
-                match getter {
-                    StructGetVariant::Plain => func.instruction(&Instruction::StructGet {
-                        struct_type_index: case_ok_idx,
-                        field_index: 0,
-                    }),
-                    StructGetVariant::Signed => func.instruction(&Instruction::StructGetS {
-                        struct_type_index: case_ok_idx,
-                        field_index: 0,
-                    }),
-                    StructGetVariant::Unsigned => func.instruction(&Instruction::StructGetU {
-                        struct_type_index: case_ok_idx,
-                        field_index: 0,
-                    }),
-                };
-            } else {
-                emit_zero_default(func, payload_vt)?;
-            }
+            self.emit_flat_gc_result_field_arm(
+                func,
+                base,
+                parent_type_idx,
+                gc_field_idx,
+                case_ok_idx,
+                ok,
+                &payload_joined,
+                component,
+            )?;
             func.instruction(&Instruction::Else);
             // Err arm.
-            if let Some(err_ty) = err {
+            self.emit_flat_gc_result_field_arm(
+                func,
+                base,
+                parent_type_idx,
+                gc_field_idx,
+                case_err_idx,
+                err,
+                &payload_joined,
+                component,
+            )?;
+            func.instruction(&Instruction::End);
+        }
+
+        Ok(full_flat.len())
+    }
+
+    /// Emit one arm (Ok or Err) of a multi-slot `result<T,E>` field
+    /// materialization: extract the case payload's internal repr, convert
+    /// it to canonical slots, then zero-pad the trailing joined positions
+    /// so the arm produces exactly `payload_joined.len()` values.
+    ///
+    /// Supports missing payload (all-zeros), single-slot scalar payloads
+    /// and `string` (`$str_bytes` ref → `(ptr,len)`). Record / list /
+    /// nested flat-gc payloads still bail — out of scope for Stage 7d.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_flat_gc_result_field_arm(
+        &mut self,
+        func: &mut Function,
+        base: &LirExpr,
+        parent_type_idx: u32,
+        gc_field_idx: u32,
+        case_idx: u32,
+        arm_ty: Option<Ty>,
+        payload_joined: &[wasm_encoder::ValType],
+        component: &LirResource,
+    ) -> Result<(), CodegenError> {
+        use super::gc_types::StructGetVariant;
+
+        let Some(arm_ty) = arm_ty else {
+            // No payload for this case: the arm produces all-zeros.
+            for &vt in payload_joined {
+                emit_zero_default(func, vt)?;
+            }
+            return Ok(());
+        };
+
+        // Re-emit `base` + struct.get + ref.cast to reach the case
+        // subtype (SLR bases are side-effect-free, so re-emission is
+        // fine — matches the single-slot path's idiom).
+        let produced = match self.ctx.ty_kind(arm_ty) {
+            InternedTyKind::String => {
+                // Field 0 holds the `$str_bytes` ref; materialize it to
+                // canonical `(ptr, len)` (2 i32 slots).
                 self.emit_expr(func, base, component)?;
                 func.instruction(&Instruction::StructGet {
                     struct_type_index: parent_type_idx,
                     field_index: gc_field_idx,
                 });
                 func.instruction(&Instruction::RefCastNonNull(
-                    wasm_encoder::HeapType::Concrete(case_err_idx),
+                    wasm_encoder::HeapType::Concrete(case_idx),
                 ));
-                let getter = super::gc_types::struct_get_op_for_payload(self.ctx, err_ty);
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: case_idx,
+                    field_index: 0,
+                });
+                self.emit_str_bytes_materialize(func)?;
+                2
+            }
+            _ => {
+                let arm_flat = self.flatten_core_valtypes(arm_ty);
+                if arm_flat.len() != 1 {
+                    return Err(CodegenError::InvalidIR(format!(
+                        "result field materialize: payload type {:?} \
+                         ({}-slot, non-string) not yet supported",
+                        arm_ty,
+                        arm_flat.len()
+                    )));
+                }
+                self.emit_expr(func, base, component)?;
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: parent_type_idx,
+                    field_index: gc_field_idx,
+                });
+                func.instruction(&Instruction::RefCastNonNull(
+                    wasm_encoder::HeapType::Concrete(case_idx),
+                ));
+                let getter = super::gc_types::struct_get_op_for_payload(self.ctx, arm_ty);
                 match getter {
                     StructGetVariant::Plain => func.instruction(&Instruction::StructGet {
-                        struct_type_index: case_err_idx,
+                        struct_type_index: case_idx,
                         field_index: 0,
                     }),
                     StructGetVariant::Signed => func.instruction(&Instruction::StructGetS {
-                        struct_type_index: case_err_idx,
+                        struct_type_index: case_idx,
                         field_index: 0,
                     }),
                     StructGetVariant::Unsigned => func.instruction(&Instruction::StructGetU {
-                        struct_type_index: case_err_idx,
+                        struct_type_index: case_idx,
                         field_index: 0,
                     }),
                 };
-            } else {
-                emit_zero_default(func, payload_vt)?;
+                1
             }
-            func.instruction(&Instruction::End);
-            // Suppress unused warning when err missing.
-            let _ = ValType::I32;
-        }
+        };
 
-        Ok(self.flatten_core_valtypes(field_ty).len())
+        // Zero-pad the trailing joined positions this arm didn't fill.
+        for &vt in &payload_joined[produced..] {
+            emit_zero_default(func, vt)?;
+        }
+        Ok(())
     }
 
     pub(super) fn emit_variant_ctor_gc(
