@@ -1,0 +1,13 @@
+package yel:listopttup@0.1.0;
+
+// Exercises `list<option<tuple<s32, s32>>>` — element is an option that
+// collapses to a GC tuple ref. Covers the collapsed-option tuple lift/pack
+// in the list (un)materializer.
+export component App {
+    items: list<option<tuple<s32, s32>>> = [some((1, 2)), none];
+    VStack {
+        for it in items {
+            Text { "t" }
+        }
+    }
+}

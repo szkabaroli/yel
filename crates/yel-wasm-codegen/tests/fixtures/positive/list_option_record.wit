@@ -1,0 +1,25 @@
+package yel:listoptrec@0.1.0;
+
+interface shared-types {
+  record point {
+    x: s32,
+    y: s32,
+  }
+}
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-items: func() -> list<option<point>>;
+    set-items: func(value: list<option<point>>);
+  }
+}
+
+world listoptrec {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

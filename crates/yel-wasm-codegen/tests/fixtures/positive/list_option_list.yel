@@ -1,0 +1,13 @@
+package yel:listoptlist@0.1.0;
+
+// Exercises `list<option<list<s32>>>` — element is an option that collapses
+// to an inner GC array ref. Covers the collapsed-option nested-list
+// materialize/unmaterialize in the list boundary path.
+export component App {
+    items: list<option<list<s32>>> = [some([1, 2]), none];
+    VStack {
+        for it in items {
+            Text { "l" }
+        }
+    }
+}

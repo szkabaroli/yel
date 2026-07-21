@@ -1,0 +1,15 @@
+package yel:listoptrec@0.1.0;
+
+// Exercises `list<option<Point>>` — a list whose element is an option that
+// collapses to a single GC record ref (none = null, some = the record ref).
+// Regression guard for the for-loop `debug_assert!(is_gc_list)` panic and
+// the collapsed-option (un)materializer boundary path.
+record Point { x: s32, y: s32 }
+export component App {
+    items: list<option<Point>> = [some({ x: 1, y: 2 }), none];
+    VStack {
+        for it in items {
+            Text { "p" }
+        }
+    }
+}

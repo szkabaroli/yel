@@ -66,15 +66,16 @@ pub fn ty_to_slot_val_type(
     if is_scalar_list_ty_struct(ctx, ty, &mut seen) {
         return LirSlotValType::RefNullForListGc(ty);
     }
-    // Phase 5b-v.3 / 5d preview: option<list<scalar>> collapses to a
-    // single nullable ref of the inner list's array type. Storage-wise
-    // this is the same as `list<scalar>` itself — none == null, some
-    // == arr.
-    if let InternedTyKind::Option(inner_ty) = ctx.ty_kind(ty) {
-        let mut seen2 = HashSet::new();
-        if is_scalar_list_ty_struct(ctx, *inner_ty, &mut seen2) {
-            return LirSlotValType::RefNullForListGc(*inner_ty);
-        }
+    // Option-of-ref collapse: `option<record | tuple | scalar-list |
+    // collapsing-option>` collapses to a single nullable ref of the inner's
+    // GC type (none == null, some(v) == v), mirroring codegen's
+    // `internal_repr`. `option<string>` does NOT collapse (see
+    // `internal_repr`). MUST precede the FlatGcStruct / record / tuple
+    // arms below so the collapsed shape wins.
+    if let InternedTyKind::Option(inner_ty) = ctx.ty_kind(ty)
+        && let Some(vt) = collapsed_ref_slot_val_ty(ctx, *inner_ty)
+    {
+        return vt;
     }
     // Phase 5e.1: DTR records have a single GC ref internal repr.
     if let InternedTyKind::Adt(d) = ctx.ty_kind(ty)
@@ -100,6 +101,35 @@ pub fn ty_to_slot_val_type(
         InternedTyKind::F64 => LirSlotValType::F64,
         InternedTyKind::S64 | InternedTyKind::U64 => LirSlotValType::I64,
         _ => LirSlotValType::I32,
+    }
+}
+
+/// If a value of type `inner` collapses an enclosing `option<inner>` to a
+/// single nullable GC ref (mirroring codegen's `internal_repr` option-of-ref
+/// collapse), return the matching `LirSlotValType`. `inner` collapses when it
+/// is a record, a tuple, a scalar list, or itself a collapsing option;
+/// `String` does NOT collapse.
+fn collapsed_ref_slot_val_ty(
+    ctx: &crate::context::CompilerContext,
+    inner: crate::types::Ty,
+) -> Option<crate::lir::block::LirSlotValType> {
+    use crate::lir::block::LirSlotValType;
+    match ctx.ty_kind(inner) {
+        InternedTyKind::String => None,
+        InternedTyKind::Adt(d) if matches!(ctx.defs.kind(*d), DefKind::Record(_)) => {
+            Some(LirSlotValType::RefNullForRecord(inner))
+        }
+        InternedTyKind::Tuple(_) => Some(LirSlotValType::RefNullForTuple(inner)),
+        InternedTyKind::List(_) => {
+            let mut seen = HashSet::new();
+            if is_scalar_list_ty_struct(ctx, inner, &mut seen) {
+                Some(LirSlotValType::RefNullForListGc(inner))
+            } else {
+                None
+            }
+        }
+        InternedTyKind::Option(next) => collapsed_ref_slot_val_ty(ctx, *next),
+        _ => None,
     }
 }
 
@@ -288,7 +318,19 @@ fn is_flat_gc_payload_ty_struct(
     }
 }
 
-pub(crate) fn is_scalar_list_ty_struct(
+/// A `list<T>` becomes a typed GC array `(array (mut <elem>))` iff its
+/// element `T` occupies a SINGLE wasm slot — the frontend-neutral mirror of
+/// codegen's `WasmPackageBuilder::is_scalar_list_ty` (which reads
+/// `internal_repr`). Both sides MUST agree per-Ty; a mismatch re-introduces
+/// the `debug_assert!(is_gc_list)` panic in the for-loop update path.
+///
+/// Every element is single-slot EXCEPT the ones that lower to `Zero`
+/// (unit / error / unknown), a callback (`Func`), or a `FatPointer` — the
+/// only remaining fat-pointer element is a *non-scalar nested list* (which
+/// recurses). Everything else — primitives, enums, strings, records,
+/// tuples, `option`/`result`/`variant` (flat-gc **or** option-of-ref
+/// collapse), and nested scalar lists — is a single ref/scalar.
+pub fn is_scalar_list_ty_struct(
     ctx: &crate::context::CompilerContext,
     ty: crate::types::Ty,
     seen: &mut HashSet<crate::DefId>,
@@ -297,47 +339,31 @@ pub(crate) fn is_scalar_list_ty_struct(
         InternedTyKind::List(e) => *e,
         _ => return false,
     };
-    if matches!(
-        ctx.ty_kind(elem),
-        InternedTyKind::Bool
-            | InternedTyKind::S8
-            | InternedTyKind::S16
-            | InternedTyKind::S32
-            | InternedTyKind::U8
-            | InternedTyKind::U16
-            | InternedTyKind::U32
-            | InternedTyKind::S64
-            | InternedTyKind::U64
-            | InternedTyKind::F32
-            | InternedTyKind::F64
-            | InternedTyKind::Char
-    ) || matches!(ctx.ty_kind(elem), InternedTyKind::Adt(d) if matches!(ctx.defs.kind(*d), DefKind::Enum(_)))
-    {
-        return true;
+    is_single_slot_elem_struct(ctx, elem, seen)
+}
+
+/// True iff a value of type `elem` occupies a single wasm slot (see
+/// `is_scalar_list_ty_struct`). Frontend-neutral mirror of
+/// `internal_repr(elem) != FatPointer | Zero`.
+fn is_single_slot_elem_struct(
+    ctx: &crate::context::CompilerContext,
+    elem: crate::types::Ty,
+    seen: &mut HashSet<crate::DefId>,
+) -> bool {
+    match ctx.ty_kind(elem) {
+        // Unit / error / unknown lower to zero slots; callbacks are not
+        // data values. None of these can be a GC-array element.
+        InternedTyKind::Unit | InternedTyKind::Error | InternedTyKind::Unknown
+        | InternedTyKind::Func { .. } => false,
+        // A nested list is single-slot iff it is itself a scalar list
+        // (its element is single-slot). A non-scalar nested list stays a
+        // fat pointer.
+        InternedTyKind::List(_) => is_scalar_list_ty_struct(ctx, elem, seen),
+        // Everything else is a single ref / scalar: primitives, UI units,
+        // strings, tuples, option/result (collapse or flat-gc), and every
+        // Adt (record → GcRef, enum → i32, variant → FlatGcStruct).
+        _ => true,
     }
-    if matches!(ctx.ty_kind(elem), InternedTyKind::List(_))
-        && is_scalar_list_ty_struct(ctx, elem, seen)
-    {
-        return true;
-    }
-    if matches!(ctx.ty_kind(elem), InternedTyKind::String) {
-        return true;
-    }
-    // Phase 5e.5 Stage 8a: list<FlatGcStruct> elements (option /
-    // result / user variant) — element is a typed supertype ref.
-    if is_flat_gc_migrated_ty_struct(ctx, elem) {
-        return true;
-    }
-    if let InternedTyKind::Adt(d) = ctx.ty_kind(elem)
-        && matches!(ctx.defs.kind(*d), DefKind::Record(_)) {
-            return is_dtr_record_struct_inner(ctx, *d, seen);
-        }
-    // Phase 5e.7: list<tuple<…>> — element is a typed `(ref null
-    // $tuple_<n>)`.
-    if matches!(ctx.ty_kind(elem), InternedTyKind::Tuple(_)) {
-        return true;
-    }
-    false
 }
 
 /// Classification of a for-loop iterable expression.
@@ -1832,37 +1858,19 @@ impl<'a> BlockLowering<'a> {
                     // primitive. For memory/range iterables it stays an
                     // I32 ptr.
                     match iter_src {
+                        // A `list<string>` element uses the `FatToMem` item
+                        // repr — the LoopVar field holds an i32 memory-buffer
+                        // ADDRESS (the body reads via `load_fat_ptr`), not the
+                        // `$str_bytes` ref. Every other GC-array element stores
+                        // its VALUE in its natural single-slot shape via
+                        // `ty_to_slot_val_type` (records / tuples / flat-gc /
+                        // option-of-ref collapse / scalars), so the field type
+                        // and the item slot type agree.
                         IterSource::ListGc => {
-                            // Phase 5e.5 Stage 7e: FlatGcStruct
-                            // elements (option / result / user variant)
-                            // store a typed supertype ref.
-                            if is_flat_gc_migrated_ty_struct(ctx, ty) {
-                                LirSlotValType::RefNullForFlatGc(ty)
+                            if matches!(ctx.ty_kind(ty), InternedTyKind::String) {
+                                LirSlotValType::I32
                             } else {
-                                match ctx.ty_kind(ty) {
-                                    InternedTyKind::F32 => LirSlotValType::F32,
-                                    InternedTyKind::F64 => LirSlotValType::F64,
-                                    InternedTyKind::S64 | InternedTyKind::U64 => {
-                                        LirSlotValType::I64
-                                    }
-                                    InternedTyKind::Adt(d) => {
-                                        if matches!(ctx.defs.kind(*d), DefKind::Record(_)) {
-                                            LirSlotValType::RefNullForRecord(ty)
-                                        } else {
-                                            LirSlotValType::I32
-                                        }
-                                    }
-                                    InternedTyKind::List(_)
-                                        if is_scalar_list_ty_struct(
-                                            ctx,
-                                            ty,
-                                            &mut HashSet::new(),
-                                        ) =>
-                                    {
-                                        LirSlotValType::RefNullForListGc(ty)
-                                    }
-                                    _ => LirSlotValType::I32,
-                                }
+                                ty_to_slot_val_type(ctx, ty)
                             }
                         }
                         IterSource::ListMemory | IterSource::Range => LirSlotValType::I32,
@@ -1881,44 +1889,18 @@ impl<'a> BlockLowering<'a> {
                         _ => true, // Non-signal exprs: allow GC if eligible
                     };
 
-                    let elem_is_scalar = matches!(
-                        ctx.ty_kind(iterable_expr.ty),
-                        InternedTyKind::List(e) if matches!(
-                            ctx.ty_kind(*e),
-                            InternedTyKind::Bool
-                            | InternedTyKind::S8 | InternedTyKind::S16 | InternedTyKind::S32
-                            | InternedTyKind::U8 | InternedTyKind::U16 | InternedTyKind::U32
-                            | InternedTyKind::S64 | InternedTyKind::U64
-                            | InternedTyKind::F32 | InternedTyKind::F64
-                            | InternedTyKind::Char
-                        )
+                    // A signal-backed list is GC-iterated iff its element is
+                    // single-slot — the same `is_scalar_list_ty_struct`
+                    // predicate codegen keys on (scalars, records, tuples,
+                    // strings, flat-gc, and option-of-ref collapse). Keeping
+                    // this in lockstep is what avoids the for-loop update
+                    // `debug_assert!(is_gc_list)` panic.
+                    let elem_is_gc = is_scalar_list_ty_struct(
+                        ctx,
+                        iterable_expr.ty,
+                        &mut HashSet::new(),
                     );
-                    // Phase 5e.1: DTR records — recognise structurally,
-                    // mirroring is_scalar_list_ty's record branch.
-                    let elem_is_dtr_record =
-                        if let InternedTyKind::List(e) = ctx.ty_kind(iterable_expr.ty) {
-                            let elem_ty = *e;
-                            if let InternedTyKind::Adt(d) = ctx.ty_kind(elem_ty) {
-                                matches!(ctx.defs.kind(*d), DefKind::Record(_))
-                                    && is_dtr_record_struct(ctx, *d)
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        };
-
-                    // Phase 5e.5 Stage 7e: FlatGcStruct (option /
-                    // result / user variant) elements — typed GC array.
-                    let elem_is_flat_gc =
-                        if let InternedTyKind::List(e) = ctx.ty_kind(iterable_expr.ty) {
-                            is_flat_gc_migrated_ty_struct(ctx, *e)
-                        } else {
-                            false
-                        };
-                    if is_component_signal
-                        && (elem_is_scalar || elem_is_dtr_record || elem_is_flat_gc)
-                    {
+                    if is_component_signal && elem_is_gc {
                         IterSource::ListGc
                     } else {
                         IterSource::ListMemory
@@ -3867,245 +3849,14 @@ impl<'a> BlockLowering<'a> {
         }
     }
 
-    /// Phase 5b-v.3 / 5e.1: true iff `ty` is a `list<T>` where T migrates
-    /// to a typed GC `(array (mut <elem>))`. Includes primitive scalars
-    /// and DTR records.
-    /// Phase 5e.5: structural mirror of
-    /// `WasmPackageBuilder::flat_gc_migrated` (in `wasm/repr.rs`). Both
-    /// sides MUST return the same value for any given Ty so that LIR
-    /// slot allocation and WASM codegen agree on whether an
-    /// option/result/variant is a single GC ref slot or a multi-slot
-    /// flat shape.
-    ///
-    /// Currently admits:
-    /// - **6a `option<T>`** for non-i32-fit primitives (s64/u64/f32/f64).
-    /// - **6b `option<string>`** — payload is a `(ref null $fat_value)`
-    ///   field on the some-case subtype.
-    /// - **6e `result<T,E>`** — same predicate applied to both arms.
-    /// - **6f user variants** — all case payloads are migrate-friendly.
-    ///
-    /// "Migrate-friendly" payload Ty: None, primitive scalar, string,
-    /// DTR record, scalar list, or recursively migrated option / result
-    /// / variant. Bounded recursion (YEL has no recursive variants).
-    fn is_flat_gc_migrated_ty(&self, ty: Ty) -> bool {
-        let mut visiting = HashSet::new();
-        self.is_flat_gc_migrated_ty_inner(ty, &mut visiting)
-    }
-
-    fn is_flat_gc_migrated_ty_inner(&self, ty: Ty, visiting: &mut HashSet<DefId>) -> bool {
-        match self.ctx.ty_kind(ty) {
-            InternedTyKind::Option(inner) => {
-                let inner = *inner;
-                // Mirror of `WasmPackageBuilder::flat_gc_migrated`: reject
-                // option<inner> when inner already has a single-GC-ref
-                // internal repr (scalar list, tuple, record). Those
-                // ref-collapse via `option_collapses_to_ref` on the
-                // wasm side — registering FlatGcStruct would be unused.
-                if self.is_scalar_list_ty(inner) {
-                    return false;
-                }
-                match self.ctx.ty_kind(inner) {
-                    InternedTyKind::Tuple(_) => return false,
-                    InternedTyKind::Adt(d)
-                        if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) =>
-                    {
-                        return false;
-                    }
-                    _ => {}
-                }
-                self.is_flat_gc_payload_ty(inner, visiting)
-            }
-            InternedTyKind::Result { ok, err } => {
-                let ok_ok = match ok {
-                    Some(t) => self.is_flat_gc_payload_ty(*t, visiting),
-                    None => true,
-                };
-                let err_ok = match err {
-                    Some(t) => self.is_flat_gc_payload_ty(*t, visiting),
-                    None => true,
-                };
-                ok_ok && err_ok
-            }
-            InternedTyKind::Adt(def_id) => {
-                let def_id = *def_id;
-                let cases = match self.ctx.defs.as_variant(def_id) {
-                    Some(v) => v.cases.clone(),
-                    None => return false,
-                };
-                if !visiting.insert(def_id) {
-                    return true; // recursive — optimistically accept
-                }
-                let result = cases.iter().all(|&c| {
-                    if let DefKind::VariantCase(case) = self.ctx.defs.kind(c) {
-                        match case.payload {
-                            None => true,
-                            Some(p) => self.is_flat_gc_payload_ty(p, visiting),
-                        }
-                    } else {
-                        false
-                    }
-                });
-                visiting.remove(&def_id);
-                result
-            }
-            _ => false,
-        }
-    }
-
-    /// Phase 5e.5: full admission. Every payload shape that codegen
-    /// can express as one struct field flows through the typed GC
-    /// path — primitives (any width), strings, scalar lists, DTR
-    /// records, enums, recursively migrated option/result/variant.
-    /// Linear memory is reserved for WIT lift/lower boundaries; all
-    /// internal value flow uses GC.
-    fn is_flat_gc_payload_ty(&self, ty: Ty, visiting: &mut HashSet<DefId>) -> bool {
-        match self.ctx.ty_kind(ty) {
-            InternedTyKind::Bool
-            | InternedTyKind::S8
-            | InternedTyKind::S16
-            | InternedTyKind::S32
-            | InternedTyKind::S64
-            | InternedTyKind::U8
-            | InternedTyKind::U16
-            | InternedTyKind::U32
-            | InternedTyKind::U64
-            | InternedTyKind::F32
-            | InternedTyKind::F64
-            | InternedTyKind::Char
-            | InternedTyKind::String => true,
-            InternedTyKind::List(_) => self.is_scalar_list_ty(ty),
-            InternedTyKind::Adt(d) => match self.ctx.defs.kind(*d) {
-                DefKind::Enum(_) => true,
-                DefKind::Record(_) => {
-                    let mut seen = HashSet::new();
-                    self.is_dtr_record_ty(ty, &mut seen)
-                }
-                DefKind::Variant(_) => self.is_flat_gc_migrated_ty_inner(ty, visiting),
-                _ => false,
-            },
-            InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
-                self.is_flat_gc_migrated_ty_inner(ty, visiting)
-            }
-            _ => false,
-        }
-    }
-
     fn is_scalar_list_ty(&self, ty: Ty) -> bool {
-        let elem = match self.ctx.ty_kind(ty) {
-            InternedTyKind::List(e) => *e,
-            _ => return false,
-        };
-        if matches!(
-            self.ctx.ty_kind(elem),
-            InternedTyKind::Bool
-                | InternedTyKind::S8
-                | InternedTyKind::S16
-                | InternedTyKind::S32
-                | InternedTyKind::U8
-                | InternedTyKind::U16
-                | InternedTyKind::U32
-                | InternedTyKind::S64
-                | InternedTyKind::U64
-                | InternedTyKind::F32
-                | InternedTyKind::F64
-                | InternedTyKind::Char
-        ) || matches!(self.ctx.ty_kind(elem), InternedTyKind::Adt(d) if matches!(self.ctx.defs.kind(*d), DefKind::Enum(_)))
-        {
-            return true;
-        }
-        // Phase 5e.2: nested lists — list<list<...>> where inner is
-        // itself GC-eligible recursively.
-        if matches!(self.ctx.ty_kind(elem), InternedTyKind::List(_)) && self.is_scalar_list_ty(elem)
-        {
-            return true;
-        }
-        // Phase 5e.4: strings — element type is the shared $fat_value.
-        if matches!(self.ctx.ty_kind(elem), InternedTyKind::String) {
-            return true;
-        }
-        // Phase 5e.5 Stage 8a: list<FlatGcStruct> — element is a typed
-        // supertype ref.
-        if self.is_flat_gc_migrated_ty(elem) {
-            return true;
-        }
+        // Delegate to the free-function predicate so the mount-path
+        // `is_gc_list` decision and the codegen classification stay in
+        // exact lockstep (a divergence panics the for-loop update path).
         let mut seen = HashSet::new();
-        self.is_dtr_record_ty(elem, &mut seen)
+        is_scalar_list_ty_struct(self.ctx, ty, &mut seen)
     }
 
-    fn is_dtr_record_ty(&self, ty: Ty, seen: &mut HashSet<DefId>) -> bool {
-        let def_id = match self.ctx.ty_kind(ty) {
-            InternedTyKind::Adt(d) => *d,
-            _ => return false,
-        };
-        let record = match self.ctx.defs.kind(def_id) {
-            DefKind::Record(r) => r.clone(),
-            _ => return false,
-        };
-        if !seen.insert(def_id) {
-            return true;
-        }
-        let result = (|| {
-            for &field_def_id in &record.fields {
-                let field_ty = match self.ctx.defs.kind(field_def_id) {
-                    DefKind::Field(f) => f.ty,
-                    _ => return false,
-                };
-                if !self.is_dtr_field_ty(field_ty, seen) {
-                    return false;
-                }
-            }
-            true
-        })();
-        seen.remove(&def_id);
-        result
-    }
-
-    fn is_dtr_field_ty(&self, ty: Ty, seen: &mut HashSet<DefId>) -> bool {
-        if matches!(
-            self.ctx.ty_kind(ty),
-            InternedTyKind::Bool
-                | InternedTyKind::S8
-                | InternedTyKind::S16
-                | InternedTyKind::S32
-                | InternedTyKind::U8
-                | InternedTyKind::U16
-                | InternedTyKind::U32
-                | InternedTyKind::S64
-                | InternedTyKind::U64
-                | InternedTyKind::F32
-                | InternedTyKind::F64
-                | InternedTyKind::Char
-        ) || matches!(self.ctx.ty_kind(ty), InternedTyKind::Adt(d) if matches!(self.ctx.defs.kind(*d), DefKind::Enum(_)))
-        {
-            return true;
-        }
-        match self.ctx.ty_kind(ty) {
-            InternedTyKind::String => true,
-            // Phase 5e.6: extend DTR to any GC-array-eligible list, so
-            // records with `list<string>`, `list<record>`, nested lists,
-            // etc. can use a typed `(ref null $<rec>)` field on the
-            // component struct instead of two i32 slots.
-            InternedTyKind::List(_) => self.is_scalar_list_ty(ty),
-            InternedTyKind::Adt(d) => match self.ctx.defs.kind(*d) {
-                DefKind::Record(_) => self.is_dtr_record_ty(ty, seen),
-                // Phase 5e.5: a migrated user variant occupies 1
-                // nullable supertype-ref slot — admissible as a DTR
-                // field. Non-migrated variants stay multi-slot and
-                // disqualify the parent record.
-                DefKind::Variant(_) => self.is_flat_gc_migrated_ty(ty),
-                _ => false,
-            },
-            // Phase 5e.5: migrated `option<T>` / `result<T,E>` are
-            // single-ref-slot like records. Allow them as DTR fields
-            // so records containing migrated options take the GC
-            // struct path (`struct.new $<rec>_record`) instead of the
-            // legacy `record_ctor` memory path.
-            InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
-                self.is_flat_gc_migrated_ty(ty)
-            }
-            _ => false,
-        }
-    }
 
     /// Compute the size of an element type in bytes.
     fn compute_element_size(&self, ty: Ty) -> u32 {

@@ -590,8 +590,17 @@ fn slot_val_ty_to_val_ty(
         LirSlotValType::RefNullForComponent(_) => {
             unreachable!("tree-boundary loop-var field cannot hold a component instance ref")
         }
-        LirSlotValType::RefNullForListGc(_) => {
-            unreachable!("GC list array ref not expected as a tree loop-var field type")
+        LirSlotValType::RefNullForListGc(list_ty) => {
+            // A `list<scalar-list>` / `list<option<scalar-list>>` iter-body
+            // loop-var field holds the inner list's typed array ref.
+            let &idx = record_gc_types
+                .list_array_type_idx
+                .get(list_ty)
+                .expect("RefNullForListGc: missing list_array_type_idx");
+            ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(idx),
+            })
         }
         LirSlotValType::RefNullForStringBytes => {
             // strings-to-GC: a `list<string>` iter-body loop-var field holds
@@ -619,8 +628,17 @@ fn slot_val_ty_to_val_ty(
                 heap_type: HeapType::Concrete(type_idx),
             })
         }
-        LirSlotValType::RefNullForTuple(_) => {
-            unreachable!("tuple ref not expected as a tree loop-var field type")
+        LirSlotValType::RefNullForTuple(tuple_ty) => {
+            // A `list<tuple>` / `list<option<tuple>>` iter-body loop-var
+            // field holds the tuple's GC struct ref.
+            let &idx = record_gc_types
+                .tuple_struct_type_idx
+                .get(tuple_ty)
+                .expect("RefNullForTuple: missing tuple_struct_type_idx");
+            ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(idx),
+            })
         }
         LirSlotValType::RefNullForFlatGc(ty) => {
             // list<FlatGcStruct> iter-body LoopVar field stores the
@@ -1865,6 +1883,14 @@ fn list_element_storage_type(
                 heap_type: HeapType::Concrete(tup_idx),
             });
         }
+    // Option-of-ref collapse — MUST precede the FlatGcStruct check.
+    // `internal_repr(option<record|tuple|scalar-list|collapsing-option>)`
+    // collapses to the inner's nullable ref (none = null, some(v) = v), so
+    // the array element must be that same concrete ref, NOT the `$opt_*`
+    // supertype (which is emitted but unused for the collapse case).
+    if let Some(vt) = option_collapse_elem_valtype(ctx, elem_ty, registry) {
+        return vt;
+    }
     // Phase 5e.5 Stage 8a: FlatGcStruct elements (option/result/user
     // variant) — store the concrete supertype ref so consumers can
     // `array.get` directly to a typed ref and ref.test / ref.cast
@@ -1876,9 +1902,48 @@ fn list_element_storage_type(
         });
     }
     // Otherwise reuse record-field rules: scalars unboxed, strings as
-    // $fat_value, records as concrete refs, tuples as concrete refs,
-    // option/result/variant as anyref.
+    // $str_bytes, records as concrete refs, tuples as concrete refs,
+    // non-typed-array list as $fat_value.
     record_field_storage_type(ctx, elem_ty, registry)
+}
+
+/// If `ty` is an `option<inner>` that collapses to a single nullable ref
+/// (mirroring `internal_repr`'s option-of-ref collapse), return that
+/// concrete `(ref null $inner)` ValType. `option<string>` does NOT collapse
+/// (a null `$str_bytes` is a valid empty string, ambiguous with `none`) —
+/// it stays a FlatGcStruct. Recurses through nested collapsing options.
+fn option_collapse_elem_valtype(
+    ctx: &CompilerContext,
+    ty: Ty,
+    registry: &RecordGcTypes,
+) -> Option<ValType> {
+    let inner = match ctx.ty_kind(ty) {
+        InternedTyKind::Option(i) => *i,
+        _ => return None,
+    };
+    let mk = |idx: u32| {
+        Some(ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(idx),
+        }))
+    };
+    match ctx.ty_kind(inner) {
+        // option<string> stays FlatGcStruct — no collapse.
+        InternedTyKind::String => None,
+        // option<record> → the record's GC struct ref.
+        InternedTyKind::Adt(d) if matches!(ctx.defs.kind(*d), DefKind::Record(_)) => {
+            registry.record_type_idx.get(d).copied().and_then(mk)
+        }
+        // option<tuple> → the tuple's GC struct ref.
+        InternedTyKind::Tuple(_) => registry.tuple_struct_type_idx.get(&inner).copied().and_then(mk),
+        // option<scalar-list> → the inner list's typed array ref.
+        InternedTyKind::List(_) if is_gc_eligible_list_ty(ctx, inner) => {
+            registry.list_array_type_idx.get(&inner).copied().and_then(mk)
+        }
+        // option<collapsing-option> → recurse.
+        InternedTyKind::Option(_) => option_collapse_elem_valtype(ctx, inner, registry),
+        _ => None,
+    }
 }
 
 /// Short, lowercased name fragment used in the emitted `<elem>_list`
@@ -1919,71 +1984,14 @@ fn list_elem_short_name(ctx: &CompilerContext, elem_ty: Ty) -> String {
 /// the module so the WAT-inspection test can find them; no consumer
 /// reads from these fields yet, so a coarse-but-future-proof shape
 /// keeps the emission deterministic and side-effect-free.
-/// Phase 5e.6: gate for whether a list type can be stored as a typed
-/// `(ref null $<elem>_list)` GC array on a record/tuple field. Mirrors
-/// `repr.rs::is_scalar_list_ty` — kept here to avoid the cyclic
-/// dependency between `gc_types` and `WasmPackageBuilder` methods.
+/// Gate for whether a `list<T>` can be stored as a typed
+/// `(ref null $<elem>_list)` GC array (single-slot element) vs the
+/// fat-pointer fallback. Delegates to the yel-core structural predicate so
+/// the registration side stays in EXACT lockstep with the LIR mount-path
+/// `is_gc_list` decision and codegen's `is_scalar_list_ty`.
 fn is_gc_eligible_list_ty(ctx: &CompilerContext, ty: Ty) -> bool {
-    let elem = match ctx.ty_kind(ty) {
-        InternedTyKind::List(e) => *e,
-        _ => return false,
-    };
-    if matches!(
-        ctx.ty_kind(elem),
-        InternedTyKind::Bool
-            | InternedTyKind::S8
-            | InternedTyKind::S16
-            | InternedTyKind::S32
-            | InternedTyKind::U8
-            | InternedTyKind::U16
-            | InternedTyKind::U32
-            | InternedTyKind::S64
-            | InternedTyKind::U64
-            | InternedTyKind::F32
-            | InternedTyKind::F64
-            | InternedTyKind::Char
-    ) || matches!(
-        ctx.ty_kind(elem),
-        InternedTyKind::Adt(d) if matches!(ctx.defs.kind(*d), DefKind::Enum(_))
-    ) {
-        return true;
-    }
-    if matches!(ctx.ty_kind(elem), InternedTyKind::List(_)) && is_gc_eligible_list_ty(ctx, elem) {
-        return true;
-    }
-    if matches!(ctx.ty_kind(elem), InternedTyKind::String) {
-        return true;
-    }
-    if let InternedTyKind::Option(inner) = ctx.ty_kind(elem) {
-        let inner_fits = matches!(
-            ctx.ty_kind(*inner),
-            InternedTyKind::Bool
-                | InternedTyKind::S8
-                | InternedTyKind::S16
-                | InternedTyKind::S32
-                | InternedTyKind::U8
-                | InternedTyKind::U16
-                | InternedTyKind::U32
-                | InternedTyKind::F32
-                | InternedTyKind::Char
-        ) || matches!(
-            ctx.ty_kind(*inner),
-            InternedTyKind::Adt(d) if matches!(ctx.defs.kind(*d), DefKind::Enum(_))
-        );
-        if inner_fits {
-            return true;
-        }
-    }
-    if let InternedTyKind::Adt(d) = ctx.ty_kind(elem)
-        && matches!(ctx.defs.kind(*d), DefKind::Record(_)) {
-            // Records: assume eligible if all DTR fields are. The full
-            // DTR check would require recursive seen-tracking; mirror
-            // the simple case (single-level record with primitive
-            // fields) — the codegen path falls back to fat_value for
-            // non-eligible records, which is safe.
-            return true;
-        }
-    false
+    let mut seen = std::collections::HashSet::new();
+    yel_core::lower_to_lir::is_scalar_list_ty_struct(ctx, ty, &mut seen)
 }
 
 fn record_field_storage_type(ctx: &CompilerContext, ty: Ty, registry: &RecordGcTypes) -> ValType {

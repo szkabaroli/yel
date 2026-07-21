@@ -423,40 +423,24 @@ impl WasmPackageBuilder<'_> {
             _ => return false,
         };
 
-        if self.is_primitive_field_ty(elem) {
-            return true;
-        }
-
-        if self.is_single_level_record(elem) {
-            return true;
-        }
-
-        // Nested lists: element is `(ref null $<inner_arr>)`.
-        if matches!(self.ctx.ty_kind(elem), InternedTyKind::List(_)) && self.is_scalar_list_ty(elem)
-        {
-            return true;
-        }
-
-        // Strings: element is `(ref null $str_bytes)`.
-        if matches!(self.ctx.ty_kind(elem), InternedTyKind::String) {
-            return true;
-        }
-
-        // list<FlatGcStruct>: element is the supertype ref.
-        if self.flat_gc_migrated(elem) {
-            return true;
-        }
-
-        // list<tuple<…>>: element is `(ref null $tuple_<n>)`.
-        if matches!(self.ctx.ty_kind(elem), InternedTyKind::Tuple(_))
-            && self
-                .record_gc_types
-                .tuple_struct_type_idx
-                .contains_key(&elem)
-        {
-            return true;
-        }
-        false
+        // A `list<T>` becomes a typed GC array `(array (mut <elem>))` iff its
+        // element occupies a SINGLE wasm slot — i.e. `internal_repr(elem)` is
+        // `Scalar` / `GcRef` / `GcArrayRef` / `FlatGcStruct`. This subsumes
+        // every single-ref shape at once: primitives, enums, strings,
+        // records, tuples, option-of-ref collapse (`option<record>` etc.),
+        // flat-gc (option/result/variant), and nested scalar lists.
+        //
+        // The only elements that are NOT single-slot are `FatPointer` (a
+        // non-scalar nested list — the recursion terminates when its own
+        // element is not single-slot) and `Zero` (a unit element). Those keep
+        // the list on the fat-pointer fallback path.
+        matches!(
+            self.internal_repr(elem),
+            InternalRepr::Scalar(_)
+                | InternalRepr::GcRef(_)
+                | InternalRepr::GcArrayRef(_)
+                | InternalRepr::FlatGcStruct(_)
+        )
     }
 
     /// True iff `ty` is a record whose every declared field type is a

@@ -483,8 +483,11 @@ impl<'a> WasmPackageBuilder<'a> {
                 // ref — delegate to the shared materializer (which handles the
                 // inner byte-array → (ptr, len) copy) exactly like flat-gc,
                 // rather than the legacy inline `$fat_value` unbox below.
+                // A collapsed-option element (`list<option<record|tuple|list>>`)
+                // likewise needs the dedicated per-element lift.
                 let delegate_to_materializer = elem_is_flat_gc
-                    || matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::String);
+                    || matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::String)
+                    || self.elem_option_collapses(elem_ty).is_some();
                 if delegate_to_materializer {
                     let local_decls: Vec<(u32, ValType)> = vec![
                         (
@@ -1355,7 +1358,8 @@ impl<'a> WasmPackageBuilder<'a> {
                 // shared un-materializer (canonical (ptr,len) → array of
                 // $str_bytes refs) just like flat-gc, not the inline copy.
                 let delegate_to_unmaterializer = elem_is_flat_gc
-                    || matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::String);
+                    || matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::String)
+                    || self.elem_option_collapses(elem_ty).is_some();
                 if delegate_to_unmaterializer {
                     let unmat_fn = *self
                         .gc_list_unmaterializer_fn_indices
@@ -3185,6 +3189,24 @@ impl<'a> WasmPackageBuilder<'a> {
         func.instruction(&wasm_encoder::Instruction::ArrayNewDefault(arr_type_idx));
         func.instruction(&wasm_encoder::Instruction::LocalSet(arr_local));
 
+        // Option-of-ref collapse element: rebuild the collapsed inner ref
+        // from canonical `(disc, payload)`. `none` elements stay the
+        // default null ref; `some` builds the inner (record / tuple /
+        // scalar-list) and `array.set`s it.
+        if let Some(inner_ty) = self.elem_option_collapses(elem_ty) {
+            return self.finish_gc_list_collapsed_option_unmaterializer(
+                func,
+                arr_type_idx,
+                elem_ty,
+                inner_ty,
+                ptr_local,
+                len_local,
+                arr_local,
+                idx_local,
+                elem_addr_local,
+            );
+        }
+
         // Phase 5e.5 Stage 8a: FlatGcStruct element — for each
         // canonical (disc, payload) record at ptr + idx * elem_size,
         // build a supertype ref via per-case dispatch and store into
@@ -3688,6 +3710,408 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(func)
     }
 
+    /// If `elem_ty` is an `option<inner>` that collapses to a single nullable
+    /// ref (mirroring `internal_repr`'s option-of-ref collapse), return the
+    /// collapsed `inner` Ty; else `None`. `option<string>` does NOT collapse.
+    pub(super) fn elem_option_collapses(&self, elem_ty: Ty) -> Option<Ty> {
+        let inner = match self.ctx.ty_kind(elem_ty) {
+            InternedTyKind::Option(i) => *i,
+            _ => return None,
+        };
+        if matches!(self.ctx.ty_kind(inner), InternedTyKind::String) {
+            return None;
+        }
+        match self.internal_repr(inner) {
+            super::super::repr::InternalRepr::GcRef(_)
+            | super::super::repr::InternalRepr::GcArrayRef(_) => Some(inner),
+            _ => None,
+        }
+    }
+
+    /// Materializer for a `list<option<inner>>` whose element is the collapsed
+    /// inner ref (none = null, some = the ref). Per element writes the
+    /// canonical `(disc, payload)` bytes: `disc = ref.is_null` (0 = some,
+    /// 1 = none); when some, the inner (record / tuple / scalar-list) is
+    /// lifted to the payload region.
+    pub(super) fn generate_gc_list_collapsed_option_materializer(
+        &mut self,
+        arr_type_idx: u32,
+        elem_ty: Ty,
+        inner_ty: Ty,
+    ) -> Result<Function, CodegenError> {
+        use wasm_encoder::HeapType;
+        let cabi_realloc = self
+            .alloc_funcs
+            .as_ref()
+            .ok_or_else(|| {
+                CodegenError::InvalidIR("collapsed-option materializer requires cabi_realloc".into())
+            })?
+            .cabi_realloc;
+        let (elem_size, elem_align) =
+            gc_list_elem_canonical_info(self.ctx, &mut self.layout_ctx, elem_ty);
+        let canonical_slots = self.flatten_core_slots(elem_ty);
+        let disc_off = canonical_slots
+            .first()
+            .map(|s| s.offset)
+            .ok_or_else(|| CodegenError::InvalidIR("collapsed-option mat: no disc slot".into()))?;
+        let payload_off = canonical_slots
+            .get(1)
+            .map(|s| s.offset)
+            .ok_or_else(|| CodegenError::InvalidIR("collapsed-option mat: no payload slot".into()))?;
+        let mut func = Function::new([
+            (1, ValType::I32),                        // 1 = len
+            (1, ValType::I32),                        // 2 = data_ptr
+            (1, ValType::I32),                        // 3 = idx
+            (1, ValType::I32),                        // 4 = elem_addr
+            (1, ValType::Ref(wasm_encoder::RefType {  // 5 = elem_ref (anyref)
+                nullable: true,
+                heap_type: HeapType::Abstract { shared: false, ty: wasm_encoder::AbstractHeapType::Any },
+            })),
+            (1, ValType::I32), // 6 = mat_ptr
+            (1, ValType::I32), // 7 = mat_len
+        ]);
+        let arr_local: u32 = 0;
+        let len_local: u32 = 1;
+        let data_ptr_local: u32 = 2;
+        let idx_local: u32 = 3;
+        let elem_addr_local: u32 = 4;
+        let elem_ref_local: u32 = 5;
+        let mat_ptr_local: u32 = 6;
+        let mat_len_local: u32 = 7;
+        // len = array.len(arr)
+        func.instruction(&Instruction::LocalGet(arr_local));
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::LocalSet(len_local));
+        // data_ptr = cabi_realloc(0, 0, align, len * elem_size)
+        super::scratch::emit_cabi_realloc_array(&mut func, len_local, elem_size, elem_align, cabi_realloc);
+        func.instruction(&Instruction::LocalSet(data_ptr_local));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(idx_local));
+        func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+        func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(idx_local));
+        func.instruction(&Instruction::LocalGet(len_local));
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::BrIf(1));
+        // elem_addr = data_ptr + idx * elem_size
+        func.instruction(&Instruction::LocalGet(data_ptr_local));
+        func.instruction(&Instruction::LocalGet(idx_local));
+        func.instruction(&Instruction::I32Const(elem_size as i32));
+        func.instruction(&Instruction::I32Mul);
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(elem_addr_local));
+        // elem_ref = arr[idx]
+        func.instruction(&Instruction::LocalGet(arr_local));
+        func.instruction(&Instruction::LocalGet(idx_local));
+        func.instruction(&Instruction::ArrayGet(arr_type_idx));
+        func.instruction(&Instruction::LocalSet(elem_ref_local));
+        // disc = ref.is_null(elem_ref)  (0 = some, 1 = none)
+        func.instruction(&Instruction::LocalGet(elem_addr_local));
+        if disc_off != 0 {
+            func.instruction(&Instruction::I32Const(disc_off as i32));
+            func.instruction(&Instruction::I32Add);
+        }
+        func.instruction(&Instruction::LocalGet(elem_ref_local));
+        func.instruction(&Instruction::RefIsNull);
+        func.instruction(&Instruction::I32Store8(super::scratch::mem_arg(0, 0)));
+        // if some (ref not null), lift the inner payload.
+        func.instruction(&Instruction::LocalGet(elem_ref_local));
+        func.instruction(&Instruction::RefIsNull);
+        func.instruction(&Instruction::I32Eqz);
+        func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        self.emit_collapsed_inner_lift(
+            &mut func,
+            inner_ty,
+            elem_ref_local,
+            elem_addr_local,
+            payload_off,
+            &canonical_slots,
+            mat_ptr_local,
+            mat_len_local,
+        )?;
+        func.instruction(&Instruction::End); // if
+        // idx++
+        func.instruction(&Instruction::LocalGet(idx_local));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(idx_local));
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End); // loop
+        func.instruction(&Instruction::End); // block
+        func.instruction(&Instruction::LocalGet(data_ptr_local));
+        func.instruction(&Instruction::LocalGet(len_local));
+        func.instruction(&Instruction::End);
+        Ok(func)
+    }
+
+    /// Lift a collapsed-option inner value (record / tuple / scalar-list),
+    /// whose non-null ref is held in `inner_ref_local` (anyref), into the
+    /// canonical payload region at `base_addr_local + payload_off`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_collapsed_inner_lift(
+        &mut self,
+        func: &mut Function,
+        inner_ty: Ty,
+        inner_ref_local: u32,
+        base_addr_local: u32,
+        payload_off: u32,
+        canonical_slots: &[crate::wasm::FlatSlot],
+        mat_ptr_local: u32,
+        mat_len_local: u32,
+    ) -> Result<(), CodegenError> {
+        use wasm_encoder::HeapType;
+        match self.ctx.ty_kind(inner_ty) {
+            InternedTyKind::Adt(d) if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) => {
+                let record_def_id = *d;
+                self.emit_inline_record_lift_from_anyref(
+                    func,
+                    record_def_id,
+                    inner_ref_local,
+                    base_addr_local,
+                    payload_off,
+                    mat_ptr_local,
+                    mat_len_local,
+                )
+            }
+            InternedTyKind::Tuple(tuple_elems) => {
+                let elems: Vec<Ty> = tuple_elems.to_vec();
+                let tup_idx = self
+                    .record_gc_types
+                    .tuple_struct_type_idx
+                    .get(&inner_ty)
+                    .copied()
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR("collapsed-option tuple lift: missing tuple idx".into())
+                    })?;
+                let mut offset: u32 = 0;
+                for (i, &e_ty) in elems.iter().enumerate() {
+                    let el = self.layout_ctx.layout_of(e_ty);
+                    offset = (offset + el.align - 1) & !(el.align - 1);
+                    func.instruction(&Instruction::LocalGet(base_addr_local));
+                    let abs = payload_off + offset;
+                    if abs != 0 {
+                        func.instruction(&Instruction::I32Const(abs as i32));
+                        func.instruction(&Instruction::I32Add);
+                    }
+                    func.instruction(&Instruction::LocalGet(inner_ref_local));
+                    func.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(tup_idx)));
+                    func.instruction(&Instruction::StructGet {
+                        struct_type_index: tup_idx,
+                        field_index: i as u32,
+                    });
+                    self.emit_typed_field_store(func, e_ty);
+                    offset += el.size;
+                }
+                Ok(())
+            }
+            InternedTyKind::List(_) => {
+                // scalar-list inner: materialize the inner array to (ptr,len).
+                let arr_idx = *self
+                    .record_gc_types
+                    .list_array_type_idx
+                    .get(&inner_ty)
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR("collapsed-option list lift: missing inner arr".into())
+                    })?;
+                let mat_fn = *self
+                    .gc_list_materializer_fn_indices
+                    .get(&arr_idx)
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR("collapsed-option list lift: missing inner mat".into())
+                    })?;
+                let ptr_slot = *canonical_slots.get(1).ok_or_else(|| {
+                    CodegenError::InvalidIR("collapsed-option list lift: no ptr slot".into())
+                })?;
+                let len_slot = *canonical_slots.get(2).ok_or_else(|| {
+                    CodegenError::InvalidIR("collapsed-option list lift: no len slot".into())
+                })?;
+                func.instruction(&Instruction::LocalGet(inner_ref_local));
+                func.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(arr_idx)));
+                func.instruction(&Instruction::Call(mat_fn));
+                func.instruction(&Instruction::LocalSet(mat_len_local));
+                func.instruction(&Instruction::LocalSet(mat_ptr_local));
+                func.instruction(&Instruction::LocalGet(base_addr_local));
+                if ptr_slot.offset != 0 {
+                    func.instruction(&Instruction::I32Const(ptr_slot.offset as i32));
+                    func.instruction(&Instruction::I32Add);
+                }
+                func.instruction(&Instruction::LocalGet(mat_ptr_local));
+                func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+                func.instruction(&Instruction::LocalGet(base_addr_local));
+                if len_slot.offset != 0 {
+                    func.instruction(&Instruction::I32Const(len_slot.offset as i32));
+                    func.instruction(&Instruction::I32Add);
+                }
+                func.instruction(&Instruction::LocalGet(mat_len_local));
+                func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+                Ok(())
+            }
+            other => Err(CodegenError::InvalidIR(format!(
+                "collapsed-option inner lift: unsupported inner ty {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Finish the un-materializer for a `list<option<inner>>` collapsed-ref
+    /// element: for each canonical `(disc, payload)`, a `some` (disc == 0)
+    /// rebuilds the inner ref and `array.set`s it; a `none` leaves the
+    /// default null ref.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_gc_list_collapsed_option_unmaterializer(
+        &mut self,
+        mut func: Function,
+        arr_type_idx: u32,
+        elem_ty: Ty,
+        inner_ty: Ty,
+        ptr_local: u32,
+        len_local: u32,
+        arr_local: u32,
+        idx_local: u32,
+        elem_addr_local: u32,
+    ) -> Result<Function, CodegenError> {
+        let elem_size = self.layout_ctx.layout_of(elem_ty).size;
+        let canonical_slots = self.flatten_core_slots(elem_ty);
+        let disc_off = canonical_slots
+            .first()
+            .map(|s| s.offset)
+            .ok_or_else(|| CodegenError::InvalidIR("collapsed-option unmat: no disc slot".into()))?;
+        let payload_off = canonical_slots
+            .get(1)
+            .map(|s| s.offset)
+            .ok_or_else(|| CodegenError::InvalidIR("collapsed-option unmat: no payload slot".into()))?;
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(idx_local));
+        func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+        func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(idx_local));
+        func.instruction(&Instruction::LocalGet(len_local));
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::BrIf(1));
+        // elem_addr = ptr + idx * elem_size
+        func.instruction(&Instruction::LocalGet(ptr_local));
+        func.instruction(&Instruction::LocalGet(idx_local));
+        func.instruction(&Instruction::I32Const(elem_size as i32));
+        func.instruction(&Instruction::I32Mul);
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(elem_addr_local));
+        // disc = mem8[elem_addr + disc_off]; if disc == 0 (some) build inner.
+        func.instruction(&Instruction::LocalGet(elem_addr_local));
+        if disc_off != 0 {
+            func.instruction(&Instruction::I32Const(disc_off as i32));
+            func.instruction(&Instruction::I32Add);
+        }
+        func.instruction(&Instruction::I32Load8U(super::scratch::mem_arg(0, 0)));
+        func.instruction(&Instruction::I32Eqz);
+        func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(arr_local));
+        func.instruction(&Instruction::LocalGet(idx_local));
+        self.emit_collapsed_inner_pack(
+            &mut func,
+            inner_ty,
+            elem_addr_local,
+            payload_off,
+            &canonical_slots,
+        )?;
+        func.instruction(&Instruction::ArraySet(arr_type_idx));
+        func.instruction(&Instruction::End); // if
+        // idx++
+        func.instruction(&Instruction::LocalGet(idx_local));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(idx_local));
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End); // loop
+        func.instruction(&Instruction::End); // block
+        func.instruction(&Instruction::LocalGet(arr_local));
+        func.instruction(&Instruction::End);
+        Ok(func)
+    }
+
+    /// Build a collapsed-option inner ref (record / tuple / scalar-list) from
+    /// its canonical payload bytes at `base_addr_local + payload_off`,
+    /// leaving the inner ref on the stack.
+    fn emit_collapsed_inner_pack(
+        &mut self,
+        func: &mut Function,
+        inner_ty: Ty,
+        base_addr_local: u32,
+        payload_off: u32,
+        canonical_slots: &[crate::wasm::FlatSlot],
+    ) -> Result<(), CodegenError> {
+        match self.ctx.ty_kind(inner_ty) {
+            InternedTyKind::Adt(d) if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) => {
+                let record_def_id = *d;
+                self.emit_record_pack_from_memory(func, record_def_id, base_addr_local, payload_off)
+            }
+            InternedTyKind::Tuple(tuple_elems) => {
+                let elems: Vec<Ty> = tuple_elems.to_vec();
+                let tup_idx = self
+                    .record_gc_types
+                    .tuple_struct_type_idx
+                    .get(&inner_ty)
+                    .copied()
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR("collapsed-option tuple pack: missing tuple idx".into())
+                    })?;
+                let mut offset: u32 = 0;
+                for &e_ty in &elems {
+                    let el = self.layout_ctx.layout_of(e_ty);
+                    offset = (offset + el.align - 1) & !(el.align - 1);
+                    func.instruction(&Instruction::LocalGet(base_addr_local));
+                    let abs = payload_off + offset;
+                    if abs != 0 {
+                        func.instruction(&Instruction::I32Const(abs as i32));
+                        func.instruction(&Instruction::I32Add);
+                    }
+                    self.emit_typed_field_load(func, e_ty);
+                    offset += el.size;
+                }
+                func.instruction(&Instruction::StructNew(tup_idx));
+                Ok(())
+            }
+            InternedTyKind::List(_) => {
+                let arr_idx = *self
+                    .record_gc_types
+                    .list_array_type_idx
+                    .get(&inner_ty)
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR("collapsed-option list pack: missing inner arr".into())
+                    })?;
+                let unmat_fn = *self
+                    .gc_list_unmaterializer_fn_indices
+                    .get(&arr_idx)
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR("collapsed-option list pack: missing inner unmat".into())
+                    })?;
+                let ptr_slot = *canonical_slots.get(1).ok_or_else(|| {
+                    CodegenError::InvalidIR("collapsed-option list pack: no ptr slot".into())
+                })?;
+                let len_slot = *canonical_slots.get(2).ok_or_else(|| {
+                    CodegenError::InvalidIR("collapsed-option list pack: no len slot".into())
+                })?;
+                func.instruction(&Instruction::LocalGet(base_addr_local));
+                if ptr_slot.offset != 0 {
+                    func.instruction(&Instruction::I32Const(ptr_slot.offset as i32));
+                    func.instruction(&Instruction::I32Add);
+                }
+                func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
+                func.instruction(&Instruction::LocalGet(base_addr_local));
+                if len_slot.offset != 0 {
+                    func.instruction(&Instruction::I32Const(len_slot.offset as i32));
+                    func.instruction(&Instruction::I32Add);
+                }
+                func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
+                func.instruction(&Instruction::Call(unmat_fn));
+                Ok(())
+            }
+            other => Err(CodegenError::InvalidIR(format!(
+                "collapsed-option inner pack: unsupported inner ty {:?}",
+                other
+            ))),
+        }
+    }
+
     /// non-for-loop expression context (e.g. `.filter()` source, method call).
     pub(super) fn generate_gc_list_materializer(
         &mut self,
@@ -3930,6 +4354,17 @@ impl<'a> WasmPackageBuilder<'a> {
         // ref to canonical bytes via a per-case `ref.test` cascade.
         if elem_is_flat_gc {
             return self.generate_gc_list_materializer_flat_gc(arr_type_idx, elem_ty);
+        }
+        // Option-of-ref collapse element (`option<record|tuple|scalar-list|
+        // collapsing-option>`): the array stores the collapsed inner ref
+        // (none = null, some(v) = v). Materialize each to canonical
+        // `(disc, payload)`.
+        if let Some(inner_ty) = self.elem_option_collapses(elem_ty) {
+            return self.generate_gc_list_collapsed_option_materializer(
+                arr_type_idx,
+                elem_ty,
+                inner_ty,
+            );
         }
         let elem_record_def: Option<DefId> = match self.ctx.ty_kind(elem_ty) {
             InternedTyKind::Adt(d) if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) => {
