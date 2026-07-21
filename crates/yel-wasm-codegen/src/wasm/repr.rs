@@ -128,9 +128,16 @@ impl WasmPackageBuilder<'_> {
         // array `(ref $str_bytes)`. `$str_bytes` is always emitted, so the
         // index is present for every program that reaches here.
         if matches!(self.ctx.ty_kind(ty), InternedTyKind::String) {
-            let idx = self.record_gc_types.str_bytes_array_idx.expect(
-                "internal_repr: String reached but $str_bytes array type not registered",
-            );
+            // A String's repr KIND is always `GcArrayRef($str_bytes)`. During
+            // the early type-computation phase (e.g. list-constructor param
+            // typing in `build_core_module`, before `emit_program_record_types`
+            // populates the registry) `str_bytes_array_idx` is not yet set;
+            // structural callers (`is_scalar_list_ty`) only read the kind, and
+            // idx-consuming callers guard on `list_array_type_idx` (empty in
+            // that same phase) so this sentinel is never emitted. `u32::MAX`
+            // would fail wasm validation loudly if ever wrongly used — not a
+            // silent fallback.
+            let idx = self.record_gc_types.str_bytes_array_idx.unwrap_or(u32::MAX);
             return InternalRepr::GcArrayRef(idx);
         }
         match self.ctx.ty_kind(ty) {
