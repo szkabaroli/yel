@@ -1,23 +1,25 @@
 //! Per-signal storage layout for `LirResource`.
 //!
-//! Phase 1.1a (LIR-flattening refactor): moves the GC-struct-vs-memory
-//! decision and per-signal field/offset bookkeeping out of WasmCodegen
-//! and into LIR. `compute_signal_layout` walks a finalized
-//! `LirResource` once at the end of THIR→LIR lowering and produces the
-//! same data the codegen previously rederived itself in
-//! `GcTypeLayout::signal_field_paths` + `MemoryLayout::signal_offsets`.
+//! Phase 1.1a (LIR-flattening refactor): moves the GC-struct field
+//! bookkeeping out of WasmCodegen and into LIR. `compute_signal_layout`
+//! walks a finalized `LirResource` once at the end of THIR→LIR lowering
+//! and produces the same data the codegen previously rederived itself in
+//! `GcTypeLayout::signal_field_paths`.
 //!
 //! Storage model:
 //! - **InStruct**: signal occupies `field_count` consecutive fields on
 //!   the component's `$Comp_<i>` GC struct starting at `field_start`.
 //!   Most signals are single-slot (`field_count = 1`); strings and
 //!   non-typed-array lists are fat pointers (`field_count = 2`).
-//! - **InMemory**: signal lives in linear memory (records / tuples in
-//!   the legacy memory path) at `base + offset`, `size` bytes wide.
 //! - **Zero**: unit-typed signal — no storage allocated.
 //!
-//! Field counts mirror `WasmPackageBuilder::signal_storage_valtypes`
-//! exactly; in-memory predicate matches `LirLayoutContext::is_pointer_repr`.
+//! Every non-unit signal is GC-struct-resident. Records/tuples used to
+//! *also* reserve a per-instance linear-memory cell (dual storage); that
+//! backing is gone — they now live solely on the struct, and boundary
+//! getters/setters lift/lower through a `cabi_realloc` scratch. Per-signal
+//! linear memory no longer exists.
+//!
+//! Field counts mirror `WasmPackageBuilder::signal_storage_valtypes` exactly.
 
 use std::collections::HashSet;
 
@@ -28,36 +30,24 @@ use super::block::LirSlotValType;
 use super::layout::LirLayoutContext;
 use super::node::LirResource;
 
-/// Per-signal layout: where each signal is stored and how many GC
-/// struct fields (or memory bytes) it occupies.
+/// Per-signal layout: which GC struct fields each signal occupies.
 ///
-/// Note: GC-struct presence and linear-memory presence are **not**
-/// mutually exclusive in today's codegen — records/tuples currently
-/// have BOTH a `GcRef` field on `$Comp_<i>` AND a linear-memory cell
-/// reserved by `is_pointer_repr`. The two pieces of data are tracked
-/// independently here so the codegen can keep producing byte-identical
-/// output during Phase 1.1a.
+/// Every non-unit signal is GC-struct-resident. Per-signal linear memory
+/// no longer exists.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SignalLayout {
     /// One entry per signal (parallel to `LirResource.signals`).
     pub signals: Vec<SignalStorage>,
-    /// Total bytes reserved in linear memory for signals that have an
-    /// `InMemory` half. Codegen seeds `MemoryLayout::size` with this.
-    pub memory_size: u32,
 }
 
-/// Where a single signal's value lives. The GC-struct half and the
-/// linear-memory half are independent: a signal may have one, both, or
-/// neither.
+/// Where a single signal's value lives — always the `$Comp_<i>` GC
+/// struct. `gc` is `Some` for every non-unit signal, `None` only for
+/// zero-slot (unit-typed) signals.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SignalStorage {
     /// GC struct fields holding this signal on `$Comp_<i>`. `None` for
     /// signals whose ABI slot count is zero (today only unit-typed).
     pub gc: Option<GcSlot>,
-    /// Linear-memory cell reserved for this signal. `None` for signals
-    /// that don't reserve memory (Scalar / FatPointer signals — the
-    /// `is_pointer_repr == false` arm in `MemoryLayout::new`).
-    pub mem: Option<MemSlot>,
 }
 
 /// Consecutive GC struct fields a signal occupies.
@@ -70,15 +60,6 @@ pub struct GcSlot {
     /// GcArrayRef / FlatGcStruct, 2 for FatPointer (string / non-
     /// typed-array list).
     pub field_count: u32,
-}
-
-/// Linear-memory cell a signal reserves.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct MemSlot {
-    /// Offset from the component's memory base.
-    pub offset: u32,
-    /// Size in bytes.
-    pub size: u32,
 }
 
 /// Number of ABI slots (GC struct fields) a signal of type `ty` occupies.
@@ -176,7 +157,6 @@ pub fn compute_signal_layout(
 ) -> SignalLayout {
     let mut signals = Vec::with_capacity(component.signals.len());
     let mut next_struct_field: u32 = 0;
-    let mut memory_offset: u32 = 0;
 
     for signal in &component.signals {
         let ty = signal.ty;
@@ -192,24 +172,10 @@ pub fn compute_signal_layout(
         } else {
             None
         };
-        // Linear-memory half: pointer-repr signals (records / tuples)
-        // also reserve a per-instance memory cell. Mirrors the legacy
-        // `MemoryLayout::new` allocation loop.
-        let mem = if layout_ctx.is_pointer_repr(ty) {
-            let size = layout_ctx.size_of(ty);
-            let offset = memory_offset;
-            memory_offset += size;
-            Some(MemSlot { offset, size })
-        } else {
-            None
-        };
-        signals.push(SignalStorage { gc, mem });
+        signals.push(SignalStorage { gc });
     }
 
-    SignalLayout {
-        signals,
-        memory_size: memory_offset,
-    }
+    SignalLayout { signals }
 }
 
 impl SignalLayout {
@@ -227,10 +193,5 @@ impl SignalLayout {
             }
             None => Vec::new(),
         }
-    }
-
-    /// Per-component linear-memory offset of signal `sig_idx`, if any.
-    pub fn signal_memory_offset(&self, sig_idx: usize) -> Option<u32> {
-        self.signals.get(sig_idx).and_then(|s| s.mem).map(|m| m.offset)
     }
 }

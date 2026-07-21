@@ -6,7 +6,6 @@
 //! `WasmPackageBuilder<'a>` via an additional impl block.
 
 use wasm_encoder::{BlockType, Function, Instruction};
-use wasm_encoder::{Ieee32, Ieee64};
 use yel_core::{DefId, Ty};
 use yel_core::lir::{
     ArithOp, ArrayItemRepr, BinOperand, CompareOp, LirExprKind, LirGlobalRef, LirOp, LirSlotKind, LirSlotValType, LirTypeRef,
@@ -41,18 +40,13 @@ impl<'a> WasmPackageBuilder<'a> {
     ) -> Result<(), CodegenError> {
         let component = &self.components[comp_idx];
         let layout = self.layouts.get(comp_idx).cloned().unwrap_or_else(|| {
-            let signal_offsets: Vec<i32> = component
-                .signals
-                .iter()
-                .enumerate()
-                .map(|(i, _)| (i as i32) * 4)
-                .collect();
-            let tail = signal_offsets.last().map(|o| o + 4).unwrap_or(0);
-            let aligned_tail = (tail + 3) & !3;
+            // Fallback layout for a component missing from `self.layouts`.
+            // Per-signal linear memory was removed (every non-unit signal is
+            // GC-struct-resident), so there is no signal-sized region to
+            // reserve here.
             MemoryLayout {
                 base: 324,
-                signal_offsets,
-                size: aligned_tail,
+                size: 0,
             }
         });
 
@@ -232,7 +226,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     return Ok(());
                 }
 
-                self.emit_expr(func, lir_expr, component, &layout)?;
+                self.emit_expr(func, lir_expr, component)?;
 
                 // Skip storing result if expression returns void (unit type)
                 // This happens with callback calls that return nothing
@@ -320,7 +314,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     return Ok(());
                 }
 
-                self.emit_expr(func, lir_expr, component, &layout)?;
+                self.emit_expr(func, lir_expr, component)?;
 
                 if lir_expr.ty == Ty::UNIT {
                     return Ok(());
@@ -352,7 +346,7 @@ impl<'a> WasmPackageBuilder<'a> {
             }
             LirOp::DropExpr { expr } => {
                 let lir_expr = component.get_expr(*expr);
-                self.emit_expr(func, lir_expr, component, &layout)?;
+                self.emit_expr(func, lir_expr, component)?;
                 // Drop exactly the number of values the expression pushed.
                 // Unit-typed expressions (e.g. callbacks returning nothing)
                 // push zero values on the stack, so no drops are emitted in
@@ -453,10 +447,9 @@ impl<'a> WasmPackageBuilder<'a> {
                         *case_idx,
                         payload_expr.as_deref(),
                         component,
-                        &layout,
                     )?;
                 } else {
-                    self.emit_expr(func, lir_expr, component, &layout)?;
+                    self.emit_expr(func, lir_expr, component)?;
                 }
             }
             LirOp::PushHandlerId { handler } => {
@@ -710,16 +703,13 @@ impl<'a> WasmPackageBuilder<'a> {
                         sig_idx,
                         default_expr,
                         component,
-                        &layout,
                         scratch,
                     )?;
                 } else {
-                    // Pointer-typed signals (records, tuples) still
-                    // live in linear memory until a later phase
-                    // bridges their canonical-ABI flat layout into
-                    // GC struct fields.
-                    let addr = layout.signal_addr(sig_idx);
-                    self.emit_signal_store(func, addr, default_expr, component, &layout, scratch)?;
+                    unreachable!(
+                        "InitSignal: non-struct signal is unreachable — \
+                         every non-unit signal is GC-struct-resident"
+                    )
                 }
             }
 
@@ -729,19 +719,21 @@ impl<'a> WasmPackageBuilder<'a> {
                 if let Some(sig_idx) = self.signal_index_in(component, *signal) {
                     if self.signal_in_struct(comp_idx, sig_idx) {
                         self.emit_signal_struct_store_from_expr(
-                            func, comp_idx, sig_idx, lir_expr, component, &layout, scratch,
+                            func, comp_idx, sig_idx, lir_expr, component, scratch,
                         )?;
                     } else {
-                        let addr = layout.signal_addr(sig_idx);
-                        self.emit_signal_store(func, addr, lir_expr, component, &layout, scratch)?;
+                        unreachable!(
+                            "SignalWriteExpr: non-struct signal is unreachable — \
+                             every non-unit signal is GC-struct-resident"
+                        )
                     }
                 } else if self.ctx.defs.owning_global_block(*signal).is_some() {
                     if self.global_in_struct(*signal) {
                         self.emit_global_struct_store_from_expr(
-                            func, *signal, lir_expr, component, &layout, scratch,
+                            func, *signal, lir_expr, component, scratch,
                         )?;
                     } else if let Some(&addr) = self.global_property_addrs.get(signal) {
-                        self.emit_signal_store(func, addr, lir_expr, component, &layout, scratch)?;
+                        self.emit_signal_store(func, addr, lir_expr, component, scratch)?;
                     } else {
                         return Err(CodegenError::InvalidIR(format!(
                             "SignalWriteExpr: pointer-typed global property {:?} has no \
@@ -796,33 +788,10 @@ impl<'a> WasmPackageBuilder<'a> {
                     // tuples, etc.): null default from `struct.new_default
                     // $Comp` is already correct.
                 } else {
-                    // Pointer-typed signals still live in linear
-                    // memory — zero-init at signal_addr so subsequent
-                    // reads see deterministic state.
-                    let signal = &component.signals[sig_idx];
-                    let addr = layout.signal_addr(sig_idx);
-                    match self.ctx.ty_kind(signal.ty) {
-                        InternedTyKind::F32 => {
-                            func.instruction(&Instruction::I32Const(addr));
-                            func.instruction(&Instruction::F32Const(Ieee32::from(0.0)));
-                            func.instruction(&Instruction::F32Store(mem_arg(0, 2)));
-                        }
-                        InternedTyKind::F64 => {
-                            func.instruction(&Instruction::I32Const(addr));
-                            func.instruction(&Instruction::F64Const(Ieee64::from(0.0)));
-                            func.instruction(&Instruction::F64Store(mem_arg(0, 3)));
-                        }
-                        InternedTyKind::S64 | InternedTyKind::U64 => {
-                            func.instruction(&Instruction::I32Const(addr));
-                            func.instruction(&Instruction::I64Const(0));
-                            func.instruction(&Instruction::I64Store(mem_arg(0, 3)));
-                        }
-                        _ => {
-                            func.instruction(&Instruction::I32Const(addr));
-                            func.instruction(&Instruction::I32Const(0));
-                            func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
-                        }
-                    }
+                    unreachable!(
+                        "InitSignalDefault: non-struct signal is unreachable — \
+                         every non-unit signal is GC-struct-resident"
+                    )
                 }
             }
 
@@ -1056,8 +1025,11 @@ impl<'a> WasmPackageBuilder<'a> {
                 // Global property or non-migrated signal — keep
                 // linear-memory write.
                 let (addr, signal_ty) =
-                    if let Some(sig_idx) = self.signal_index_in(component, *signal) {
-                        (layout.signal_addr(sig_idx), component.signals[sig_idx].ty)
+                    if let Some(_sig_idx) = self.signal_index_in(component, *signal) {
+                        unreachable!(
+                            "SignalWrite: memory path is globals-only; \
+                             signals are GC-struct-resident"
+                        )
                     } else if let Some(&a) = self.global_property_addrs.get(signal) {
                         let ty = self
                             .ctx
@@ -1811,7 +1783,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 // ...`). Tee into ref_result; derive len via
                 // `array.len`.
                 let list_expr = component.get_expr(*expr);
-                self.emit_expr(func, list_expr, component, &layout)?;
+                self.emit_expr(func, list_expr, component)?;
                 func.instruction(&Instruction::LocalTee(slot_local(
                     component, block,
                     *ref_result,

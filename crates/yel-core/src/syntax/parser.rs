@@ -1131,21 +1131,31 @@ fn parse_element_node(ctx: &mut ParserContext, pair: Pair<Rule>) -> Result<Node,
                         let span = ctx.span(&content_item);
                         let binding = parse_binding(ctx, content_item)?;
 
-                        // If it's a value binding (no modifier) with a closure (no params), treat as handler
-                        // Set bindings are kept as bindings (for setter handlers)
+                        // A closure-valued binding (no modifier) with at most
+                        // one parameter is an event handler. Zero params →
+                        // plain `event: { … }`; one param → payload-binding
+                        // `event: (p) { … }` (e.g. `drop: (payload) { … }`).
+                        // `set` bindings stay bindings (setter handlers).
                         if binding.modifier == PropModifier::None
-                            && matches!(&binding.value.node, Expr::Closure { params, .. } if params.is_empty())
+                            && matches!(&binding.value.node, Expr::Closure { params, .. } if params.len() <= 1)
                         {
-                            // Param-less closure → event handler. The owned
-                            // `binding` is discarded here, so move its body out
-                            // instead of cloning the statement vector.
-                            let Expr::Closure { body, .. } = binding.value.node else {
+                            // The owned `binding` is discarded here, so move
+                            // its closure fields out instead of cloning.
+                            let value_span = binding.value.span;
+                            let Expr::Closure { params, body } = binding.value.node else {
                                 unreachable!("guarded by the matches! above")
                             };
+                            // Bind the single param's name; its declared type
+                            // is ignored (the event fixes the payload type).
+                            let param = params
+                                .into_iter()
+                                .next()
+                                .map(|(name, _ty)| Spanned::new(name, value_span));
                             handlers.push(Spanned::new(
                                 Handler {
                                     name: binding.name,
                                     name_span: binding.name_span,
+                                    param,
                                     body,
                                 },
                                 span,

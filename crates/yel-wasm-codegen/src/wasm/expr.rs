@@ -13,7 +13,7 @@ use yel_core::lir::{LirBindingMode, LirResource, LirExpr, LirExprKind, LirLitera
 use yel_core::types::InternedTyKind;
 
 use super::codegen::{mem_arg, slot_local_resource_only};
-use super::{MemoryLayout, WasmPackageBuilder};
+use super::WasmPackageBuilder;
 
 fn emit_zero_default(func: &mut Function, vt: wasm_encoder::ValType) -> Result<(), CodegenError> {
     use wasm_encoder::ValType;
@@ -46,7 +46,6 @@ impl WasmPackageBuilder<'_> {
         func: &mut Function,
         expr: &LirExpr,
         component: &LirResource,
-        layout: &MemoryLayout,
     ) -> Result<usize, CodegenError> {
         match &expr.kind {
             LirExprKind::Literal(lit) => {
@@ -230,50 +229,12 @@ impl WasmPackageBuilder<'_> {
                     self.emit_signal_struct_read(func, ci, sig_idx)?;
                     return Ok(self.signal_storage_valtypes(expr.ty).len());
                 }
-                // Pointer-typed signal still in linear memory.
-                let addr = layout.signal_addr(sig_idx);
-                func.instruction(&Instruction::I32Const(addr));
-                let n = match self.ctx.ty_kind(expr.ty) {
-                    InternedTyKind::String | InternedTyKind::List(_) => {
-                        func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                        func.instruction(&Instruction::I32Const(addr + 4));
-                        func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                        2
-                    }
-                    InternedTyKind::F32 => {
-                        func.instruction(&Instruction::F32Load(mem_arg(0, 2)));
-                        1
-                    }
-                    InternedTyKind::F64 => {
-                        func.instruction(&Instruction::F64Load(mem_arg(0, 3)));
-                        1
-                    }
-                    InternedTyKind::S64 | InternedTyKind::U64 => {
-                        func.instruction(&Instruction::I64Load(mem_arg(0, 3)));
-                        1
-                    }
-                    InternedTyKind::Bool | InternedTyKind::U8 | InternedTyKind::Char => {
-                        func.instruction(&Instruction::I32Load8U(mem_arg(0, 0)));
-                        1
-                    }
-                    InternedTyKind::S8 => {
-                        func.instruction(&Instruction::I32Load8S(mem_arg(0, 0)));
-                        1
-                    }
-                    InternedTyKind::U16 => {
-                        func.instruction(&Instruction::I32Load16U(mem_arg(0, 1)));
-                        1
-                    }
-                    InternedTyKind::S16 => {
-                        func.instruction(&Instruction::I32Load16S(mem_arg(0, 1)));
-                        1
-                    }
-                    _ => {
-                        func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                        1
-                    }
-                };
-                Ok(n)
+                // Pointer-typed signal in linear memory is unreachable —
+                // every non-unit signal is GC-struct-resident.
+                unreachable!(
+                    "Def: pointer-typed signal in linear memory is unreachable — \
+                     every non-unit signal is GC-struct-resident"
+                )
             }
 
             LirExprKind::SignalRead(def_id) => {
@@ -312,8 +273,11 @@ impl WasmPackageBuilder<'_> {
                 }
                 // Global property OR Pointer-typed (record/tuple)
                 // local signal — keep linear-memory load path.
-                let addr = if let Some(sig_idx) = self.signal_index_in(component, *def_id) {
-                    layout.signal_addr(sig_idx)
+                let addr = if let Some(_sig_idx) = self.signal_index_in(component, *def_id) {
+                    unreachable!(
+                        "SignalRead: memory path is globals-only; \
+                         signals are GC-struct-resident"
+                    )
                 } else if let Some(&a) = self.global_property_addrs.get(def_id) {
                     a
                 } else {
@@ -405,15 +369,15 @@ impl WasmPackageBuilder<'_> {
             LirExprKind::Binary { op, lhs, rhs } => {
                 let lhs = component.get_expr(*lhs);
                 let rhs = component.get_expr(*rhs);
-                self.emit_expr(func, lhs, component, layout)?;
-                self.emit_expr(func, rhs, component, layout)?;
+                self.emit_expr(func, lhs, component)?;
+                self.emit_expr(func, rhs, component)?;
                 self.emit_binary_op(func, op, lhs.ty);
                 Ok(1)
             }
 
             LirExprKind::Unary { op, operand } => {
                 let operand = component.get_expr(*operand);
-                self.emit_expr(func, operand, component, layout)?;
+                self.emit_expr(func, operand, component)?;
                 self.emit_unary_op(func, op, operand.ty);
                 Ok(1)
             }
@@ -426,7 +390,7 @@ impl WasmPackageBuilder<'_> {
                 let condition = component.get_expr(*condition);
                 let then_expr = component.get_expr(*then_expr);
                 let else_expr = component.get_expr(*else_expr);
-                self.emit_expr(func, condition, component, layout)?;
+                self.emit_expr(func, condition, component)?;
                 // Single source of truth for the block type — covers
                 // primitives (`Result(valtype)`), multi-slot composites
                 // (`FunctionType(idx)` from the pre-registered
@@ -434,9 +398,9 @@ impl WasmPackageBuilder<'_> {
                 // `super::repr::block_ty_for`.
                 let block_ty = self.block_ty_for(expr.ty)?;
                 func.instruction(&Instruction::If(block_ty));
-                self.emit_expr(func, then_expr, component, layout)?;
+                self.emit_expr(func, then_expr, component)?;
                 func.instruction(&Instruction::Else);
-                self.emit_expr(func, else_expr, component, layout)?;
+                self.emit_expr(func, else_expr, component)?;
                 func.instruction(&Instruction::End);
                 Ok(self.flatten_core_valtypes(expr.ty).len())
             }
@@ -452,7 +416,7 @@ impl WasmPackageBuilder<'_> {
                     "s32-to-string" => {
                         // Call s32_to_string runtime function
                         if let Some(arg) = args.first() {
-                            self.emit_expr(func, component.get_expr(*arg), component, layout)?;
+                            self.emit_expr(func, component.get_expr(*arg), component)?;
                         } else {
                             todo!("s32-to-string requires 1 arg: {:?}", expr.kind)
                         }
@@ -464,7 +428,7 @@ impl WasmPackageBuilder<'_> {
                     "bool-to-string" => {
                         // Call bool_to_string runtime function
                         if let Some(arg) = args.first() {
-                            self.emit_expr(func, component.get_expr(*arg), component, layout)?;
+                            self.emit_expr(func, component.get_expr(*arg), component)?;
                         } else {
                             todo!("bool-to-string requires 1 arg: {:?}", expr.kind)
                         }
@@ -476,7 +440,7 @@ impl WasmPackageBuilder<'_> {
                     "u32-to-string" => {
                         // u32 can be converted using s32_to_string (values fit in positive i32 range)
                         if let Some(arg) = args.first() {
-                            self.emit_expr(func, component.get_expr(*arg), component, layout)?;
+                            self.emit_expr(func, component.get_expr(*arg), component)?;
                         } else {
                             todo!("u32-to-string requires 1 arg: {:?}", expr.kind)
                         }
@@ -492,7 +456,7 @@ impl WasmPackageBuilder<'_> {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR(format!("{} requires 1 arg", func_name))
                         })?;
-                        self.emit_expr(func, component.get_expr(*arg), component, layout)?;
+                        self.emit_expr(func, component.get_expr(*arg), component)?;
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
@@ -502,7 +466,7 @@ impl WasmPackageBuilder<'_> {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR("f32-to-string requires 1 arg".to_string())
                         })?;
-                        self.emit_expr(func, component.get_expr(*arg), component, layout)?;
+                        self.emit_expr(func, component.get_expr(*arg), component)?;
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
@@ -512,7 +476,7 @@ impl WasmPackageBuilder<'_> {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR("f64-to-string requires 1 arg".to_string())
                         })?;
-                        self.emit_expr(func, component.get_expr(*arg), component, layout)?;
+                        self.emit_expr(func, component.get_expr(*arg), component)?;
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
@@ -532,7 +496,7 @@ impl WasmPackageBuilder<'_> {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR("char-to-string requires 1 arg".to_string())
                         })?;
-                        self.emit_expr(func, component.get_expr(*arg), component, layout)?;
+                        self.emit_expr(func, component.get_expr(*arg), component)?;
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
@@ -541,7 +505,7 @@ impl WasmPackageBuilder<'_> {
                     "object-to-string" => {
                         // Return "[object]" string
                         if let Some(arg) = args.first() {
-                            let count = self.emit_expr(func, component.get_expr(*arg), component, layout)?;
+                            let count = self.emit_expr(func, component.get_expr(*arg), component)?;
                             for _ in 0..count {
                                 func.instruction(&Instruction::Drop);
                             }
@@ -560,11 +524,11 @@ impl WasmPackageBuilder<'_> {
                             func.instruction(&Instruction::I32Const(len as i32));
                         } else if arity == 1 {
                             // Single arg - just emit it directly
-                            self.emit_expr(func, component.get_expr(args[0]), component, layout)?;
+                            self.emit_expr(func, component.get_expr(args[0]), component)?;
                         } else {
                             // Emit all args (each produces ptr, len)
                             for arg in args {
-                                self.emit_expr(func, component.get_expr(*arg), component, layout)?;
+                                self.emit_expr(func, component.get_expr(*arg), component)?;
                             }
                             // Call concat<n>
                             if let Some(ref runtime_funcs) = self.runtime_funcs
@@ -589,7 +553,7 @@ impl WasmPackageBuilder<'_> {
                             // GcArrayRef path: array.len instruction.
                             use super::repr::InternalRepr;
                             if let InternalRepr::GcArrayRef(_) = self.internal_repr(component.get_expr(*arg).ty) {
-                                self.emit_expr(func, component.get_expr(*arg), component, layout)?;
+                                self.emit_expr(func, component.get_expr(*arg), component)?;
                                 func.instruction(&Instruction::ArrayLen);
                                 handled_via_emit = true;
                             }
@@ -621,20 +585,14 @@ impl WasmPackageBuilder<'_> {
                                             .as_ref()
                                             .map(|s| s.i32_base)
                                             .unwrap_or(2);
-                                        self.emit_expr(func, component.get_expr(*arg), component, layout)?;
+                                        self.emit_expr(func, component.get_expr(*arg), component)?;
                                         func.instruction(&Instruction::LocalSet(scratch));
                                         func.instruction(&Instruction::Drop);
                                         func.instruction(&Instruction::LocalGet(scratch));
                                         handled_via_emit = true;
                                     } else {
-                                        let maybe_addr = component
-                                            .signals
-                                            .iter()
-                                            .position(|s| s.def_id == *def_id)
-                                            .map(|sig_idx| layout.signal_addr(sig_idx))
-                                            .or_else(|| {
-                                                self.global_property_addrs.get(def_id).copied()
-                                            });
+                                        let maybe_addr =
+                                            self.global_property_addrs.get(def_id).copied();
                                         if let Some(addr) = maybe_addr {
                                             func.instruction(&Instruction::I32Const(addr + 4));
                                             func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
@@ -650,7 +608,7 @@ impl WasmPackageBuilder<'_> {
                                         .as_ref()
                                         .map(|s| s.i32_base)
                                         .unwrap_or(2);
-                                    self.emit_expr(func, component.get_expr(*arg), component, layout)?;
+                                    self.emit_expr(func, component.get_expr(*arg), component)?;
                                     func.instruction(&Instruction::LocalSet(scratch));
                                     func.instruction(&Instruction::Drop);
                                     func.instruction(&Instruction::LocalGet(scratch));
@@ -680,11 +638,11 @@ impl WasmPackageBuilder<'_> {
                         }
 
                         // First arg is the string (produces ptr, len on stack)
-                        self.emit_expr(func, component.get_expr(args[0]), component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[0]), component)?;
                         // Stack: [str_ptr, str_len]
 
                         // Second arg is the prefix (produces ptr, len on stack)
-                        self.emit_expr(func, component.get_expr(args[1]), component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[1]), component)?;
                         // Stack: [str_ptr, str_len, prefix_ptr, prefix_len]
 
                         // Call starts_with(str_ptr, str_len, prefix_ptr, prefix_len) -> bool
@@ -701,8 +659,8 @@ impl WasmPackageBuilder<'_> {
                             return Err(CodegenError::InvalidIR("min requires 2 args".to_string()));
                         }
                         // Emit both args
-                        self.emit_expr(func, component.get_expr(args[0]), component, layout)?;
-                        self.emit_expr(func, component.get_expr(args[1]), component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[0]), component)?;
+                        self.emit_expr(func, component.get_expr(args[1]), component)?;
                         // Stack: [a, b]
                         // Duplicate for comparison: [a, b, a, b]
                         let s_a = self
@@ -727,8 +685,8 @@ impl WasmPackageBuilder<'_> {
                             return Err(CodegenError::InvalidIR("max requires 2 args".to_string()));
                         }
                         // Emit both args
-                        self.emit_expr(func, component.get_expr(args[0]), component, layout)?;
-                        self.emit_expr(func, component.get_expr(args[1]), component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[0]), component)?;
+                        self.emit_expr(func, component.get_expr(args[1]), component)?;
                         // Stack: [a, b]
                         let s_a = self
                             .current_flat_scratch
@@ -758,8 +716,8 @@ impl WasmPackageBuilder<'_> {
                         }
                         let list_ty = component.get_expr(args[0]).ty;
                         // Push src list (ref null $arr) and the new element.
-                        self.emit_expr(func, component.get_expr(args[0]), component, layout)?;
-                        self.emit_expr(func, component.get_expr(args[1]), component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[0]), component)?;
+                        self.emit_expr(func, component.get_expr(args[1]), component)?;
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
@@ -803,12 +761,12 @@ impl WasmPackageBuilder<'_> {
                         // repr must be GcArrayRef post Stage 6 — the
                         // LIR builder only registers filter calls when
                         // args[0] has typed list type.
-                        self.emit_expr(func, component.get_expr(args[0]), component, layout)?;
+                        self.emit_expr(func, component.get_expr(args[0]), component)?;
 
                         // Push each captured signal in its natural
                         // storage shape (typed list = 1 ref, string =
                         // 2 i32, scalar = 1 slot).
-                        for (def_id, ty) in &captured_signals {
+                        for (def_id, _ty) in &captured_signals {
                             let Some(sig_idx) =
                                 component.signals.iter().position(|s| s.def_id == *def_id)
                             else {
@@ -824,20 +782,12 @@ impl WasmPackageBuilder<'_> {
                                 self.emit_signal_struct_read(func, ci, sig_idx)?;
                                 continue;
                             }
-                            // Legacy memory fallback for the rare Zero/
-                            // unit-typed or test-bypass case.
-                            let addr = layout.signal_addr(sig_idx);
-                            func.instruction(&Instruction::I32Const(addr));
-                            match self.ctx.ty_kind(*ty) {
-                                InternedTyKind::String | InternedTyKind::List(_) => {
-                                    func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                                    func.instruction(&Instruction::I32Const(addr + 4));
-                                    func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                                }
-                                _ => {
-                                    func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                                }
-                            }
+                            // Non-struct signal is unreachable — every
+                            // non-unit signal is GC-struct-resident.
+                            unreachable!(
+                                "captured signal read: non-struct signal is unreachable — \
+                                 every non-unit signal is GC-struct-resident"
+                            )
                         }
 
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
@@ -877,7 +827,7 @@ impl WasmPackageBuilder<'_> {
                                     self.emit_self_handle_load(func, component)?;
                                 }
                                 for arg in args {
-                                    self.emit_expr(func, component.get_expr(*arg), component, layout)?;
+                                    self.emit_expr(func, component.get_expr(*arg), component)?;
                                 }
 
                                 if uses_indirect_return {
@@ -922,7 +872,7 @@ impl WasmPackageBuilder<'_> {
                     && let super::repr::InternalRepr::GcRef(tup_idx) =
                         self.internal_repr(base.ty)
                     {
-                        self.emit_expr(func, base, component, layout)?;
+                        self.emit_expr(func, base, component)?;
                         func.instruction(&Instruction::RefAsNonNull);
                         func.instruction(&Instruction::StructGet {
                             struct_type_index: tup_idx,
@@ -1005,7 +955,7 @@ impl WasmPackageBuilder<'_> {
                                 record_def_id, field_idx.0
                             ))
                         })?;
-                    self.emit_expr(func, base, component, layout)?;
+                    self.emit_expr(func, base, component)?;
                     // Stack: [(ref null $rec_record)]
                     func.instruction(&Instruction::StructGet {
                         struct_type_index: type_idx,
@@ -1046,7 +996,6 @@ impl WasmPackageBuilder<'_> {
                             gc_field_idx,
                             field_ty,
                             component,
-                            layout,
                         );
                     }
                     // For string / list<scalar> fields, the struct slot
@@ -1077,7 +1026,7 @@ impl WasmPackageBuilder<'_> {
                         func.instruction(&Instruction::Drop);
                         // Re-emit base + struct.get to load the box again,
                         // then unbox $ptr.
-                        self.emit_expr(func, base, component, layout)?;
+                        self.emit_expr(func, base, component)?;
                         func.instruction(&Instruction::StructGet {
                             struct_type_index: type_idx,
                             field_index: gc_field_idx,
@@ -1089,7 +1038,7 @@ impl WasmPackageBuilder<'_> {
                         });
                         // Re-emit base + struct.get to load the box again,
                         // then unbox $len.
-                        self.emit_expr(func, base, component, layout)?;
+                        self.emit_expr(func, base, component)?;
                         func.instruction(&Instruction::StructGet {
                             struct_type_index: type_idx,
                             field_index: gc_field_idx,
@@ -1104,7 +1053,7 @@ impl WasmPackageBuilder<'_> {
                 }
                 // Field access on a record
                 // First, emit the base expression which should leave a record pointer on stack
-                self.emit_expr(func, base, component, layout)?;
+                self.emit_expr(func, base, component)?;
 
                 // Get the record type from base expression
                 if let InternedTyKind::Adt(record_def_id) = self.ctx.ty_kind(base.ty) {
@@ -1350,8 +1299,8 @@ impl WasmPackageBuilder<'_> {
                             ))?;
                         // base, idx, array.get → ref fat_value (twice
                         // — once for ptr unbox, once for len unbox).
-                        self.emit_expr(func, base, component, layout)?;
-                        self.emit_expr(func, index, component, layout)?;
+                        self.emit_expr(func, base, component)?;
+                        self.emit_expr(func, index, component)?;
                         func.instruction(&Instruction::ArrayGet(arr_ty_idx));
                         func.instruction(&Instruction::RefAsNonNull);
                         func.instruction(&Instruction::StructGet {
@@ -1359,8 +1308,8 @@ impl WasmPackageBuilder<'_> {
                             field_index: 0,
                         });
                         // Re-emit base+idx to load len.
-                        self.emit_expr(func, base, component, layout)?;
-                        self.emit_expr(func, index, component, layout)?;
+                        self.emit_expr(func, base, component)?;
+                        self.emit_expr(func, index, component)?;
                         func.instruction(&Instruction::ArrayGet(arr_ty_idx));
                         func.instruction(&Instruction::RefAsNonNull);
                         func.instruction(&Instruction::StructGet {
@@ -1369,8 +1318,8 @@ impl WasmPackageBuilder<'_> {
                         });
                         return Ok(2);
                     }
-                    self.emit_expr(func, base, component, layout)?;
-                    self.emit_expr(func, index, component, layout)?;
+                    self.emit_expr(func, base, component)?;
+                    self.emit_expr(func, index, component)?;
                     func.instruction(&Instruction::ArrayGet(arr_ty_idx));
                     return Ok(1);
                 }
@@ -1414,7 +1363,6 @@ impl WasmPackageBuilder<'_> {
                         *case_idx,
                         payload,
                         component,
-                        layout,
                     )?;
                     return Ok(1);
                 }
@@ -1424,7 +1372,6 @@ impl WasmPackageBuilder<'_> {
                     *case_idx,
                     payload.as_deref(),
                     component,
-                    layout,
                 )?;
                 Ok(self.flatten_core_valtypes(expr.ty).len())
             }
@@ -1548,7 +1495,7 @@ impl WasmPackageBuilder<'_> {
                             .map(|e| matches!(self.ctx.ty_kind(component.get_expr(*e).ty), InternedTyKind::String))
                             .unwrap_or(false);
                         for elem in elements {
-                            self.emit_expr(func, component.get_expr(*elem), component, layout)?;
+                            self.emit_expr(func, component.get_expr(*elem), component)?;
                             if elem_is_string {
                                 let fv = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
                                     CodegenError::InvalidIR(
@@ -1581,7 +1528,7 @@ impl WasmPackageBuilder<'_> {
                         // This is because list_ctor stores fields inline
                         if let LirExprKind::RecordConstruct { fields, .. } = &component.get_expr(*elem).kind {
                             for field in fields {
-                                self.emit_expr(func, component.get_expr(*field), component, layout)?;
+                                self.emit_expr(func, component.get_expr(*field), component)?;
                                 // Phase 5e.4: legacy list_ctor expects
                                 // canonical-flat slots per record
                                 // field. If the field's emit pushed a
@@ -1602,7 +1549,7 @@ impl WasmPackageBuilder<'_> {
                             }
                         } else {
                             // Other elements: emit normally
-                            self.emit_expr(func, component.get_expr(*elem), component, layout)?;
+                            self.emit_expr(func, component.get_expr(*elem), component)?;
                         }
                     }
 
@@ -1700,7 +1647,7 @@ impl WasmPackageBuilder<'_> {
                                 .record_gc_types
                                 .list_array_type_idx
                                 .contains_key(&field_ty);
-                            self.emit_expr(func, component.get_expr(*field_expr), component, layout)?;
+                            self.emit_expr(func, component.get_expr(*field_expr), component)?;
                             if field_stored_as_typed_array {
                                 // emit_expr on a list<elem> with
                                 // GcArrayRef repr already pushes a
@@ -1737,7 +1684,7 @@ impl WasmPackageBuilder<'_> {
                 // Use record constructor helper - no local conflicts!
                 // Emit all field values onto the stack, then call $ctor_X
                 for field in fields {
-                    self.emit_expr(func, component.get_expr(*field), component, layout)?;
+                    self.emit_expr(func, component.get_expr(*field), component)?;
                 }
 
                 // Call the record constructor helper
@@ -1765,7 +1712,7 @@ impl WasmPackageBuilder<'_> {
                 use super::repr::InternalRepr;
                 if let InternalRepr::GcRef(tup_idx) = self.internal_repr(expr.ty) {
                     for elem in elements {
-                        self.emit_expr(func, component.get_expr(*elem), component, layout)?;
+                        self.emit_expr(func, component.get_expr(*elem), component)?;
                     }
                     func.instruction(&Instruction::StructNew(tup_idx));
                     return Ok(1);
@@ -1800,7 +1747,7 @@ impl WasmPackageBuilder<'_> {
                         func.instruction(&Instruction::I32Const(offset as i32));
                         func.instruction(&Instruction::I32Add);
                     }
-                    self.emit_expr(func, component.get_expr(*elem), component, layout)?;
+                    self.emit_expr(func, component.get_expr(*elem), component)?;
                     func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
                     offset += 4;
                 }
@@ -1856,7 +1803,7 @@ impl WasmPackageBuilder<'_> {
                         )));
                     }
                 };
-                self.emit_expr(func, base, component, layout)?;
+                self.emit_expr(func, base, component)?;
                 // Use `ref.test (ref $sub)` — the non-null variant. A
                 // null base ref returns 0 for every case, matching the
                 // legacy "no case is active" semantics for an
@@ -1922,7 +1869,7 @@ impl WasmPackageBuilder<'_> {
                             base.ty, case_idx, field_idx
                         ))
                     })?;
-                self.emit_expr(func, base, component, layout)?;
+                self.emit_expr(func, base, component)?;
                 func.instruction(&Instruction::RefCastNonNull(
                     wasm_encoder::HeapType::Concrete(case_sub_idx),
                 ));
@@ -1996,7 +1943,6 @@ impl WasmPackageBuilder<'_> {
         gc_field_idx: u32,
         field_ty: Ty,
         component: &LirResource,
-        layout: &MemoryLayout,
     ) -> Result<usize, CodegenError> {
         use super::gc_types::StructGetVariant;
         use yel_core::types::InternedTyKind;
@@ -2015,7 +1961,6 @@ impl WasmPackageBuilder<'_> {
                     ok,
                     err,
                     component,
-                    layout,
                 );
             }
             InternedTyKind::Option(_) => {}
@@ -2057,7 +2002,7 @@ impl WasmPackageBuilder<'_> {
 
         // Slot 0: discriminant. Some=0, None=1 per YEL convention; null
         // ref → ref.test_non_null returns 0 → eqz returns 1 → None.
-        self.emit_expr(func, base, component, layout)?;
+        self.emit_expr(func, base, component)?;
         func.instruction(&Instruction::StructGet {
             struct_type_index: parent_type_idx,
             field_index: gc_field_idx,
@@ -2082,7 +2027,7 @@ impl WasmPackageBuilder<'_> {
                 )
             })?;
             for fat_field in 0u32..2u32 {
-                self.emit_expr(func, base, component, layout)?;
+                self.emit_expr(func, base, component)?;
                 func.instruction(&Instruction::StructGet {
                     struct_type_index: parent_type_idx,
                     field_index: gc_field_idx,
@@ -2093,7 +2038,7 @@ impl WasmPackageBuilder<'_> {
                 func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
                     wasm_encoder::ValType::I32,
                 )));
-                self.emit_expr(func, base, component, layout)?;
+                self.emit_expr(func, base, component)?;
                 func.instruction(&Instruction::StructGet {
                     struct_type_index: parent_type_idx,
                     field_index: gc_field_idx,
@@ -2123,7 +2068,7 @@ impl WasmPackageBuilder<'_> {
                 "flat_gc field materialize: empty inner canonical layout".into(),
             )
         })?;
-        self.emit_expr(func, base, component, layout)?;
+        self.emit_expr(func, base, component)?;
         func.instruction(&Instruction::StructGet {
             struct_type_index: parent_type_idx,
             field_index: gc_field_idx,
@@ -2132,7 +2077,7 @@ impl WasmPackageBuilder<'_> {
             wasm_encoder::HeapType::Concrete(case_some_idx),
         ));
         func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(payload_valtype)));
-        self.emit_expr(func, base, component, layout)?;
+        self.emit_expr(func, base, component)?;
         func.instruction(&Instruction::StructGet {
             struct_type_index: parent_type_idx,
             field_index: gc_field_idx,
@@ -2204,7 +2149,6 @@ impl WasmPackageBuilder<'_> {
         ok: Option<Ty>,
         err: Option<Ty>,
         component: &LirResource,
-        layout: &MemoryLayout,
     ) -> Result<usize, CodegenError> {
         use super::gc_types::StructGetVariant;
         use wasm_encoder::ValType;
@@ -2254,7 +2198,7 @@ impl WasmPackageBuilder<'_> {
 
         // Slot 0: discriminant. Ok=0, Err=1.
         // Cascade: ref.test $res_ok ? 0 : 1.
-        self.emit_expr(func, base, component, layout)?;
+        self.emit_expr(func, base, component)?;
         func.instruction(&Instruction::StructGet {
             struct_type_index: parent_type_idx,
             field_index: gc_field_idx,
@@ -2267,7 +2211,7 @@ impl WasmPackageBuilder<'_> {
         // Joined payload slot, if any.
         let joined_valtype = ok_flat.first().copied().or_else(|| err_flat.first().copied());
         if let Some(payload_vt) = joined_valtype {
-            self.emit_expr(func, base, component, layout)?;
+            self.emit_expr(func, base, component)?;
             func.instruction(&Instruction::StructGet {
                 struct_type_index: parent_type_idx,
                 field_index: gc_field_idx,
@@ -2278,7 +2222,7 @@ impl WasmPackageBuilder<'_> {
             func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(payload_vt)));
             // Ok arm.
             if let Some(ok_ty) = ok {
-                self.emit_expr(func, base, component, layout)?;
+                self.emit_expr(func, base, component)?;
                 func.instruction(&Instruction::StructGet {
                     struct_type_index: parent_type_idx,
                     field_index: gc_field_idx,
@@ -2307,7 +2251,7 @@ impl WasmPackageBuilder<'_> {
             func.instruction(&Instruction::Else);
             // Err arm.
             if let Some(err_ty) = err {
-                self.emit_expr(func, base, component, layout)?;
+                self.emit_expr(func, base, component)?;
                 func.instruction(&Instruction::StructGet {
                     struct_type_index: parent_type_idx,
                     field_index: gc_field_idx,
@@ -2348,7 +2292,6 @@ impl WasmPackageBuilder<'_> {
         case_idx: u32,
         payload: Option<&LirExpr>,
         component: &LirResource,
-        layout: &MemoryLayout,
     ) -> Result<(), CodegenError> {
         use super::repr::InternalRepr;
         let case_sub_idx = *self
@@ -2369,7 +2312,7 @@ impl WasmPackageBuilder<'_> {
                 func.instruction(&Instruction::StructNewDefault(case_sub_idx));
             }
             Some(p) => {
-                self.emit_expr(func, p, component, layout)?;
+                self.emit_expr(func, p, component)?;
                 // Phase 5e.5: when the case payload's `internal_repr`
                 // pushes more values than the case subtype's field
                 // expects, box appropriately. The case subtype's
@@ -2422,7 +2365,6 @@ impl WasmPackageBuilder<'_> {
         case_idx: u32,
         payload: Option<&LirExpr>,
         component: &LirResource,
-        layout: &MemoryLayout,
     ) -> Result<(), CodegenError> {
         use wasm_encoder::{HeapType, ValType};
 
@@ -2437,7 +2379,7 @@ impl WasmPackageBuilder<'_> {
                     let p = payload.ok_or_else(|| {
                         CodegenError::InvalidIR("option-collapse some(): payload missing".into())
                     })?;
-                    self.emit_expr(func, p, component, layout)?;
+                    self.emit_expr(func, p, component)?;
                 }
                 _ => {
                     // none → typed null ref
@@ -2465,7 +2407,7 @@ impl WasmPackageBuilder<'_> {
         // lift once a non-color case appears.)
         if let Some(p) = payload {
             if self.is_color_ty(p.ty) {
-                return self.emit_attr_value_color_arm(func, p, component, layout);
+                return self.emit_attr_value_color_arm(func, p, component);
             }
         }
 
@@ -2489,7 +2431,7 @@ impl WasmPackageBuilder<'_> {
             if matches!(self.ctx.ty_kind(p.ty), InternedTyKind::String)
                 && joined_payload_slots.first() == Some(&ValType::I64)
             {
-                self.emit_expr(func, p, component, layout)?; // ptr, len
+                self.emit_expr(func, p, component)?; // ptr, len
                 let helper = self
                     .runtime_funcs
                     .as_ref()
@@ -2585,7 +2527,7 @@ impl WasmPackageBuilder<'_> {
             // unfold path can no longer fire. The payload is always
             // pushed in its `internal_repr` shape (typed GC ref or
             // scalar slots) — no materializer call needed.
-            self.emit_expr(func, p, component, layout)?;
+            self.emit_expr(func, p, component)?;
 
             if let Some(&i) = mismatches.last() {
                 let pv = payload_flat[i];
@@ -2947,7 +2889,6 @@ impl WasmPackageBuilder<'_> {
         func: &mut Function,
         expr: &LirExpr,
         component: &LirResource,
-        layout: &MemoryLayout,
     ) -> Result<(), CodegenError> {
         let helper = self
             .pack_color_helper_fn_idx
@@ -2960,7 +2901,7 @@ impl WasmPackageBuilder<'_> {
         func.instruction(&Instruction::I32Const(13));
         // Push the color ref; the helper consumes it and produces
         // (i64 inner_disc, i32 r, i32 g, i32 b, i32 a).
-        self.emit_expr(func, expr, component, layout)?;
+        self.emit_expr(func, expr, component)?;
         func.instruction(&Instruction::Call(helper));
         Ok(())
     }

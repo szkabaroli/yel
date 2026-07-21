@@ -612,11 +612,22 @@ impl<'ctx> TypeChecker<'ctx> {
     }
 
     fn check_handler(&mut self, handler: &HirHandler) -> ThirHandler {
+        // Mirror HIR's payload-param define (same order → LocalId parity, so
+        // `Local` references lowered in HIR resolve against this arena). The
+        // event fixes the type to `string`.
+        let param = handler.param.map(|(name, span)| {
+            self.locals.push_scope();
+            self.locals.define(name, Ty::STRING, span)
+        });
         let thir_body = handler.body.iter().map(|s| self.check_stmt(s)).collect();
+        if param.is_some() {
+            self.locals.pop_scope();
+        }
 
         ThirHandler {
             name: handler.name.clone(),
             name_span: handler.name_span,
+            param,
             body: thir_body,
         }
     }

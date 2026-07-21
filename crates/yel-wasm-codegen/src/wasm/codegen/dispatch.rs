@@ -40,6 +40,7 @@ impl<'a> WasmPackageBuilder<'a> {
         const PARAM_HANDLER_ID: u32 = 0;
         const PARAM_EVENT_DISC: u32 = 1;
         const PARAM_SLOT0_I64: u32 = 2;
+        const PARAM_SLOT1_LEN: u32 = 3;
 
         // Clone handlers up-front: the body emission below mutates
         // `self.current_self_local` around each branch so emit_self_ref
@@ -138,14 +139,20 @@ impl<'a> WasmPackageBuilder<'a> {
             // input-f64, etc.) so the body still runs if the host
             // misroutes a handler — but no signal mutation leaks.
             if let Some(target_def_id) = input_binding_target {
-                let layout = &layouts[*owner_comp_idx];
+                let _layout = &layouts[*owner_comp_idx];
                 // For migrated global targets, the (target_addr, target_ty)
                 // pair below is unused — we go through the per-block GC
                 // struct setter directly. We still need `target_ty` to
                 // pick the right f64-coercion narrowing.
                 let (target_addr, target_ty) =
                     if let Some(sig_idx) = self.signal_index_in(component, target_def_id) {
-                        (layout.signal_addr(sig_idx), component.signals[sig_idx].ty)
+                        // Every non-unit signal is GC-struct-resident, so
+                        // the `target_in_comp_struct` branch below routes
+                        // via struct.set and never emits `target_addr`. Only
+                        // `target_ty` is live here (f64-coercion narrowing);
+                        // reuse the same `-1` poison sentinel the global arm
+                        // uses — a wild store if ever emitted.
+                        (-1, component.signals[sig_idx].ty)
                     } else if self.ctx.defs.owning_global_block(target_def_id).is_some() {
                         let ty = self
                             .ctx
@@ -290,6 +297,34 @@ impl<'a> WasmPackageBuilder<'a> {
 
                     func.instruction(&Instruction::End); // end disc==2 guard
                 }
+            }
+
+            // Payload-binding handler: write the fired event's string
+            // payload `(ptr, len)` into the block's scratch buffer so the
+            // body's `Ptr`-mode param local reads it back via
+            // `load_fat_ptr`. Generic over the event — every
+            // string-carrying `event-value` variant (`input-text`, `drop`,
+            // `drag-enter`, …) flattens to the same params: PARAM_SLOT0_I64
+            // holds the ptr (zero-extended), PARAM_SLOT1_LEN the byte len.
+            // No discriminant gate: reaching this arm means the host fired
+            // the event that owns this handler, so its payload is present.
+            if let Some(&offset) = component.payload_binding_handlers.get(block_id) {
+                let store_fat_ptr_idx = self
+                    .runtime_funcs
+                    .as_ref()
+                    .and_then(|r| r.store_fat_ptr)
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR(
+                            "dispatch: payload-binding handler needs store_fat_ptr but the \
+                             runtime helper was not emitted (runtime_needs scan missed it?)"
+                                .to_string(),
+                        )
+                    })?;
+                func.instruction(&Instruction::I32Const(offset));
+                func.instruction(&Instruction::LocalGet(PARAM_SLOT0_I64));
+                func.instruction(&Instruction::I32WrapI64);
+                func.instruction(&Instruction::LocalGet(PARAM_SLOT1_LEN));
+                func.instruction(&Instruction::Call(store_fat_ptr_idx));
             }
 
             // Run the user-authored body. Pass the registry-resolved

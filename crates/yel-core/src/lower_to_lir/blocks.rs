@@ -420,6 +420,13 @@ pub(crate) struct BlockLowering<'a> {
     // written into before the user body runs.
     input_binding_handlers: HashMap<BlockId, DefId>,
 
+    // Map of payload-binding handler blocks (`drop: (payload) { … }`) to the
+    // memory offset of the 8-byte scratch buffer their bound param reads
+    // from (as a fat pointer). Dispatch writes the event payload's
+    // `(ptr, len)` there via `store_fat_ptr` before running the body; the
+    // body reads it via the `Ptr`-mode local bound in `lower_handler`.
+    payload_binding_handlers: HashMap<BlockId, i32>,
+
     // Enclosing-for context tracked while lowering the body.
     // Populated by `lower_for` (push on entry, pop on exit). Read by
     // helpers that need to know the innermost for at emission time
@@ -608,6 +615,12 @@ struct DeferredHandlerBody {
     /// `Some(target)` for input-binding-synthesized handlers; recorded
     /// into `input_binding_handlers` keyed by `block_id`.
     input_binding_target: Option<DefId>,
+    /// For a payload-binding handler (`drop: (payload) { … }`): the scratch
+    /// buffer memory slot and the slot that holds its address. At deferred
+    /// emit the block materializes the buffer address into `payload_addr`
+    /// (`GetSlotAddress`), which the `Ptr`-mode local reads through.
+    payload_buf: Option<LirSlotId>,
+    payload_addr: Option<LirSlotId>,
     /// Env snapshot: `local_bindings` entries live at structural-walk
     /// time. Restored (additively) during deferred emission so for-loop
     /// loop-vars resolve identically.
@@ -709,6 +722,7 @@ impl<'a> BlockLowering<'a> {
             block_locals_stack: Vec::new(),
             children_root_slot: None,
             input_binding_handlers: HashMap::new(),
+            payload_binding_handlers: HashMap::new(),
             for_stack: Vec::new(),
             for_iter_body_stack: Vec::new(),
             for_item_iter_body: HashMap::new(),
@@ -1730,57 +1744,6 @@ impl<'a> BlockLowering<'a> {
         ty_to_slot_val_type(self.ctx, ty)
     }
 
-    /// Phase 1.2 routing helper: returns `Some(MemSlot)` iff the given
-    /// signal index has **only** linear-memory backing in
-    /// `self.signal_layout_early` — no GC-struct slot. Dual-backed
-    /// (`gc + mem`) and struct-only signals return `None` and the caller
-    /// continues to emit `LirOp::Signal*` (struct-backed lowering lands
-    /// in Phase 1.1c — see task #62; dual-backed routing follows
-    /// `project_signal_storage_dual.md` once flavor identification is in
-    /// place). See `signals_inline::signal_mem_slot`.
-    fn signal_mem_only_slot(&self, sig_idx: usize) -> Option<crate::lir::signal_layout::MemSlot> {
-        let storage = self.signal_layout_early.signals.get(sig_idx)?;
-        if storage.gc.is_some() {
-            // Dual-backed or struct-only — Phase 1.2 conservative skip.
-            return None;
-        }
-        storage.mem
-    }
-
-    /// Phase 1.2 routing helper for `InitSignalDefault`. Returns
-    /// `Some(ops)` only when:
-    ///   - the signal is memory-only (no GC backing), AND
-    ///   - `lower_init_signal_default_to_memory` actually expands the
-    ///     type (today: i32-zero path; F32/F64/I64 zero-init paths bail
-    ///     because no const-materialize LirOp exists yet — Phase 1.1c).
-    ///
-    /// `None` means the caller keeps emitting `LirOp::InitSignalDefault`.
-    fn try_lower_init_signal_default_inline(
-        &mut self,
-        sig_idx: usize,
-        signal_ty: Ty,
-    ) -> Option<Vec<LirOp>> {
-        let mem = self.signal_mem_only_slot(sig_idx)?;
-        let next_slot = &mut self.next_slot;
-        let next_local_idx = &mut self.next_local_idx;
-        let slots = &mut self.slots;
-        let mut alloc = |val_ty: LirSlotValType| -> LirSlotId {
-            let id = LirSlotId::resource(*next_slot);
-            *next_slot += 1;
-            let local_idx = *next_local_idx;
-            *next_local_idx += 1;
-            slots.push(LirSlotInfo {
-                id,
-                kind: LirSlotKind::Temp { local_idx },
-                val_ty,
-                name: None,
-            });
-            id
-        };
-        crate::lower_to_lir::signals_inline::lower_init_signal_default_to_memory(
-            self.ctx, signal_ty, mem, /* base_addr */ 0, &mut alloc,
-        )
-    }
 
     pub(crate) fn lower_component(&mut self, tree: &TreeLirResource) -> LirResource {
         // Phase 0.3p: allocate the resource-wide self-ref slot UP-FRONT
@@ -1832,6 +1795,7 @@ impl<'a> BlockLowering<'a> {
                 signals: tree.signals.clone(),
                 children_root_slot: None,
                 input_binding_handlers: HashMap::new(),
+            payload_binding_handlers: HashMap::new(),
                 for_contexts: Vec::new(),
                 effects_by_signal: HashMap::new(),
                 body_tree: Vec::new(),
@@ -2105,6 +2069,7 @@ impl<'a> BlockLowering<'a> {
             signals: tree.signals.clone(),
             children_root_slot: self.children_root_slot,
             input_binding_handlers: std::mem::take(&mut self.input_binding_handlers),
+            payload_binding_handlers: std::mem::take(&mut self.payload_binding_handlers),
             for_contexts: {
                 // Sort by ForId so the component has a stable, id-ordered
                 // list — simpler for codegen to walk / assert against.
@@ -2350,17 +2315,11 @@ impl<'a> BlockLowering<'a> {
                     None,
                 );
                 if matches!(unified_inlined, InlineResult::NotHandled) {
-                    if let Some(inlined) =
-                        self.try_lower_init_signal_default_inline(i, signal.ty)
-                    {
-                        for op in inlined {
-                            self.emit(op);
-                        }
-                    } else {
-                        self.emit(LirOp::InitSignalDefault {
-                            signal_idx: i as u32,
-                        });
-                    }
+                    // No signal is memory-resident anymore, so default-init
+                    // has no inline memory path — emit the legacy op.
+                    self.emit(LirOp::InitSignalDefault {
+                        signal_idx: i as u32,
+                    });
                 }
             }
         }
@@ -5165,11 +5124,37 @@ impl<'a> BlockLowering<'a> {
         if let Some(target) = handler.input_binding_target {
             self.input_binding_handlers.insert(block_id, target);
         }
+        // Payload-binding handler (`<event>: (payload) { … }`): reserve an
+        // 8-byte scratch buffer for the payload fat pointer, bind the param
+        // as a `Ptr`-mode `string` local reading from it, and record the
+        // buffer offset so dispatch writes the event's string payload there
+        // before the body runs. Generic over the event — the param binds
+        // whatever string the fired `event-value` carries. The binding goes
+        // into `local_bindings` BEFORE the snapshot below so the deferred
+        // body sees it.
+        let (payload_buf, payload_addr) = if let Some(param) = handler.param {
+            let buf = self.alloc_memory_slot(8);
+            let offset = match self.slots.last().map(|s| &s.kind) {
+                Some(LirSlotKind::Memory { offset, .. }) => *offset,
+                _ => unreachable!("alloc_memory_slot just pushed a Memory slot"),
+            };
+            let addr = self.alloc_temp_slot_named("payload_binding_address");
+            self.local_bindings.insert(
+                param,
+                (addr, crate::types::Ty::STRING, LirBindingMode::Ptr),
+            );
+            self.payload_binding_handlers.insert(block_id, offset as i32);
+            (Some(buf), Some(addr))
+        } else {
+            (None, None)
+        };
         self.deferred_handler_bodies.push(DeferredHandlerBody {
             block_id,
             debug_name,
             body: handler.body.clone(),
             input_binding_target: handler.input_binding_target,
+            payload_buf,
+            payload_addr,
             local_bindings: self.local_bindings.clone(),
             outer_item_field_slots: self.outer_item_field_slots.clone(),
             for_stack: self.for_stack.clone(),
@@ -5595,6 +5580,15 @@ impl<'a> BlockLowering<'a> {
 
         self.pending_block_id_override = Some(d.block_id);
         self.start_block();
+        // Payload-binding handler: materialize the scratch buffer's address
+        // into `payload_addr` so the `Ptr`-mode `payload` local reads the
+        // fat pointer dispatch wrote there.
+        if let (Some(buf), Some(addr)) = (d.payload_buf, d.payload_addr) {
+            self.emit(LirOp::GetSlotAddress {
+                mem_slot: buf,
+                result: addr,
+            });
+        }
         for stmt in &d.body {
             self.lower_statement(stmt);
         }
@@ -5865,7 +5859,6 @@ impl<'a> BlockLowering<'a> {
                             // `unwrap()` below is correlated through it (not flagged).
                             if (is_scalar_i32 || is_scalar_f64 || is_scalar_f32 || is_scalar_i64)
                                 && single_slot_gc
-                                && storage.mem.is_none()
                             {
                                 let gc = storage.gc.unwrap();
                                 let (scratch_ty, scratch_name) = if is_scalar_f64 {
@@ -5910,7 +5903,6 @@ impl<'a> BlockLowering<'a> {
                                 .unwrap_or(false);
                             if (is_string || is_list)
                                 && multi_slot_gc
-                                && storage.mem.is_none()
                             {
                                 let gc = storage.gc.unwrap();
                                 let count = gc.field_count;
@@ -6050,19 +6042,11 @@ impl<'a> BlockLowering<'a> {
             // StructNewDefaultSym + StructSetSym. For other gc-only
             // shapes (scalars, fat-pointer string/list), the parent
             // `struct.new_default $Comp` already zeroed every field
-            // — default-init is a no-op. Dual-backed (gc + mem) signals
-            // still need a memory zero-init pass that this branch does
-            // not emit; bail so the legacy `InitSignalDefault` op runs.
+            // — default-init is a no-op.
             if value.is_none() {
-                if storage.mem.is_some() {
-                    // Dual-backed: legacy op also zeroes the mem half.
-                    // Keep it for now to preserve semantics.
-                    return InlineResult::NotHandled;
-                }
                 let Some(gc) = storage.gc else {
-                    // gc-less mem-only signal (no fields here). The
-                    // legacy `InitSignalDefault` arm handles those via
-                    // its memory branch — bail.
+                    // gc-less signal (unit — no fields here). The legacy
+                    // `InitSignalDefault` arm handles those — bail.
                     return InlineResult::NotHandled;
                 };
                 // FlatGcStruct shape = option<T>/result<T,E>/variant<…>
@@ -6145,43 +6129,6 @@ impl<'a> BlockLowering<'a> {
                 }
                 wrote_any = true;
             }
-            if let Some(mem) = storage.mem {
-                let value_slots: Vec<LirSlotId> = (0..field_count)
-                    .map(|i| LirSlotId::resource(dest_first.legacy_u32() + i))
-                    .collect();
-                let next_slot = &mut self.next_slot;
-                let next_local_idx = &mut self.next_local_idx;
-                let slots = &mut self.slots;
-                let mut alloc = |val_ty: LirSlotValType| -> LirSlotId {
-                    let id = LirSlotId::resource(*next_slot);
-                    *next_slot += 1;
-                    let local_idx = *next_local_idx;
-                    *next_local_idx += 1;
-                    slots.push(LirSlotInfo {
-                        id,
-                        kind: LirSlotKind::Temp { local_idx },
-                        val_ty,
-                        name: None,
-                    });
-                    id
-                };
-                let mem_ops = crate::lower_to_lir::signals_inline::lower_signal_write_to_memory(
-                    self.ctx,
-                    signal_ty,
-                    mem,
-                    /* base_addr */ 0,
-                    &value_slots,
-                    &mut alloc,
-                );
-                if let Some(ops) = mem_ops {
-                    for op in ops {
-                        self.emit(op);
-                    }
-                    wrote_any = true;
-                } else if !wrote_any {
-                    return InlineResult::NotHandled;
-                }
-            }
             return if wrote_any {
                 InlineResult::Handled
             } else {
@@ -6231,7 +6178,7 @@ impl<'a> BlockLowering<'a> {
             // `global_in_struct` consults `property_field_paths`. We
             // approximate by checking `is_pointer_repr` — same gate
             // SignalLayout uses for the mem half.
-            let mut layout_ctx = LirLayoutContext::new(self.ctx);
+            let layout_ctx = LirLayoutContext::new(self.ctx);
             if layout_ctx.is_pointer_repr(signal_ty) {
                 // Phase 1.1c-101: inline the linear-memory write via
                 // `MemConstGlobalProp` + typed-store, then emit the
@@ -6249,7 +6196,6 @@ impl<'a> BlockLowering<'a> {
                     Some(e) => e,
                     None => return InlineResult::NotHandled,
                 };
-                let prop_size = layout_ctx.size_of(signal_ty);
                 let dest = self.alloc_temp_slot_typed(LirSlotValType::I32);
                 self.emit(LirOp::EvalExprToSlots {
                     expr: expr_id,
@@ -6276,7 +6222,6 @@ impl<'a> BlockLowering<'a> {
                     self.ctx,
                     signal_ty,
                     signal_def,
-                    prop_size,
                     &value_slots,
                     &mut alloc,
                 );

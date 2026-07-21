@@ -479,6 +479,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                 event: h.name.clone(),
                 body: h.body.iter().map(|s| self.lower_statement(s)).collect(),
                 input_binding_target: None,
+                param: h.param,
             })
             .collect();
 
@@ -536,6 +537,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                 event: "input".to_string(),
                 body,
                 input_binding_target: Some(target),
+                param: None,
             });
         }
 

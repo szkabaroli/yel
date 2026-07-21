@@ -17,7 +17,6 @@
 
 use crate::context::CompilerContext;
 use crate::lir::block::{LirOp, LirSlotId, LirSlotValType, MemoryValueType, StoreWidth};
-use crate::lir::signal_layout::MemSlot;
 use crate::types::{InternedTyKind, Ty};
 
 /// Slot-allocator callback used by every helper. Phase 1.2 wires this
@@ -33,8 +32,10 @@ pub type SlotAlloc<'a> = &'a mut dyn FnMut(LirSlotValType) -> LirSlotId;
 pub type LoweredOps = Option<Vec<LirOp>>;
 
 /// Lower a memory-backed `SignalWrite` to a `MemConst` + typed-store
-/// sequence. Returns `None` when the signal has no memory backing
-/// (struct-backed-only signals fall through to Phase 1.1c).
+/// sequence. The only remaining caller is the memory-resident *global*
+/// property path ([`lower_signal_write_to_global_memory`]); per-signal
+/// linear memory is gone. `mem_offset` is the intra-cell byte offset
+/// (0 for globals, whose absolute base is resolved at codegen).
 ///
 /// `value_slots` is the list of source slots that hold the canonical
 /// flat ABI representation of the signal's value. For single-slot
@@ -48,12 +49,12 @@ pub type LoweredOps = Option<Vec<LirOp>>;
 pub fn lower_signal_write_to_memory(
     ctx: &CompilerContext,
     signal_ty: Ty,
-    mem: MemSlot,
+    mem_offset: u32,
     base_addr: u32,
     value_slots: &[LirSlotId],
     alloc: SlotAlloc<'_>,
 ) -> LoweredOps {
-    let addr = base_addr + mem.offset;
+    let addr = base_addr + mem_offset;
     let mut ops = Vec::new();
 
     // Emit `MemConst <addr> -> a; StoreAddr a <- value` for `value` at the
@@ -130,18 +131,16 @@ pub fn lower_signal_write_to_global_memory(
     ctx: &CompilerContext,
     signal_ty: Ty,
     signal_def: crate::ids::DefId,
-    size: u32,
     value_slots: &[LirSlotId],
     alloc: SlotAlloc<'_>,
 ) -> LoweredOps {
-    // Reuse the memory-write helper with a synthetic MemSlot { offset: 0 }
-    // and base_addr: 0 — every emitted `MemConst { addr }` then carries
-    // the *intra-property* byte offset (0, 4, ...). Rewrite each
-    // `MemConst` to `MemConstGlobalProp { signal_def, offset: addr }` so
-    // codegen resolves the absolute base from `global_property_addrs`.
-    let synthetic = MemSlot { offset: 0, size };
+    // Reuse the memory-write helper with mem_offset: 0 and base_addr: 0 —
+    // every emitted `MemConst { addr }` then carries the *intra-property*
+    // byte offset (0, 4, ...). Rewrite each `MemConst` to
+    // `MemConstGlobalProp { signal_def, offset: addr }` so codegen
+    // resolves the absolute base from `global_property_addrs`.
     let raw =
-        lower_signal_write_to_memory(ctx, signal_ty, synthetic, 0, value_slots, alloc)?;
+        lower_signal_write_to_memory(ctx, signal_ty, 0, 0, value_slots, alloc)?;
     let rewritten = raw
         .into_iter()
         .map(|op| match op {
@@ -154,59 +153,6 @@ pub fn lower_signal_write_to_global_memory(
         })
         .collect();
     Some(rewritten)
-}
-
-/// Lower `InitSignalDefault` for a memory-backed signal — zero the
-/// reserved memory cell with a typed store of the right width. Mirrors
-/// the `LirOp::InitSignalDefault` non-struct arm in `op_emit.rs:771-799`.
-///
-/// Returns `None` when the signal has no memory backing OR the type
-/// kind isn't handled by the legacy path (today's codegen falls back
-/// to a full-width i32 store for "everything else").
-pub fn lower_init_signal_default_to_memory(
-    ctx: &CompilerContext,
-    signal_ty: Ty,
-    mem: MemSlot,
-    base_addr: u32,
-    alloc: SlotAlloc<'_>,
-) -> LoweredOps {
-    let addr = base_addr + mem.offset;
-    let mut ops = Vec::new();
-    let a = alloc(LirSlotValType::I32);
-    ops.push(LirOp::MemConst { addr, result: a });
-
-    match ctx.ty_kind(signal_ty) {
-        InternedTyKind::F32 => {
-            // Today's codegen emits `F32Const(0.0); F32Store`. We don't
-            // yet have an `F32Const` LirOp; defer to Phase 1.1c when
-            // the const-materialize ops land. Bail.
-            return None;
-        }
-        InternedTyKind::F64 => {
-            return None;
-        }
-        InternedTyKind::S64 | InternedTyKind::U64 => {
-            // Need `I64Const(0)` materialize → store. Bail until the
-            // const-materialize ops are available.
-            return None;
-        }
-        _ => {
-            // i32 path. Allocate a zero-valued slot and store it.
-            let zero = alloc(LirSlotValType::I32);
-            ops.push(LirOp::SetSlot {
-                slot: zero,
-                value: 0,
-            });
-            ops.push(LirOp::StoreAddr {
-                addr: a,
-                value: zero,
-                ty: MemoryValueType::I32,
-                width: StoreWidth::Full,
-            });
-        }
-    }
-
-    Some(ops)
 }
 
 fn expect_one_slot(slots: &[LirSlotId], _what: &str) -> Option<LirSlotId> {

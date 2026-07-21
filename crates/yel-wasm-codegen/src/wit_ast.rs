@@ -983,6 +983,30 @@ impl<'a> WitAstBuilder<'a> {
                         docs: Docs::default(),
                         span: Default::default(),
                     },
+                    // Cold drag/drop lifecycle. Appended after the input
+                    // arms so their discriminants stay stable. `drop`
+                    // carries the payload string, `drag-enter` the media
+                    // type, `drag-leave` nothing. The host constructs
+                    // these from a brokered DropEvent and calls
+                    // `dispatch(handler-id, event-value::drop(payload))`.
+                    Case {
+                        name: "drop".to_string(),
+                        ty: Some(Type::String),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "drag-enter".to_string(),
+                        ty: Some(Type::String),
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
+                    Case {
+                        name: "drag-leave".to_string(),
+                        ty: None,
+                        docs: Docs::default(),
+                        span: Default::default(),
+                    },
                 ],
             }),
             owner: TypeOwner::Interface(interface_id),

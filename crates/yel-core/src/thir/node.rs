@@ -170,6 +170,9 @@ pub struct ThirHandler {
     pub name: String,
     /// Handler name span.
     pub name_span: Span,
+    /// Optional bound payload parameter (`drop: (payload) { … }`) — the
+    /// body-scoped `LocalId` the dispatched event payload is written into.
+    pub param: Option<crate::ids::LocalId>,
     /// Handler body statements.
     pub body: Vec<ThirStatement>,
 }

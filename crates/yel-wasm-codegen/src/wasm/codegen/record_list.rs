@@ -9,7 +9,7 @@ use yel_core::ids::LocalId;
 use yel_core::{DefId, DefKind, Ty};
 
 use super::super::CodegenError;
-use super::super::{MemoryLayout, WasmPackageBuilder};
+use super::super::WasmPackageBuilder;
 use super::scratch::mem_arg;
 
 impl<'a> WasmPackageBuilder<'a> {
@@ -326,7 +326,6 @@ impl<'a> WasmPackageBuilder<'a> {
         predicate: LirExpr,
         _alloc_idx: u32,
         component: &LirResource,
-        layout: &MemoryLayout,
     ) -> Result<Function, CodegenError> {
         // Stage 6 of typed-GC migration: filter operates entirely in
         // typed-GC space. Param 0 is `(ref null $list_arr)` (was
@@ -460,7 +459,7 @@ impl<'a> WasmPackageBuilder<'a> {
         self.current_filter_captured_signals = Some(captured_signal_map);
 
         // Emit predicate (result on stack: i32 0 or 1).
-        self.emit_expr(&mut func, &predicate, component, layout)?;
+        self.emit_expr(&mut func, &predicate, component)?;
 
         self.current_block_captured_locals = old_captured;
         self.current_block_local_modes = old_modes;

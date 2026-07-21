@@ -9,90 +9,7 @@ use yel_core::types::InternedTyKind;
 use yel_core::{DefId, DefKind, Ty};
 
 use super::super::CodegenError;
-use super::super::{MemoryLayout, WasmPackageBuilder};
-use super::scratch::mem_arg;
-
-/// Phase 0.3k-pre: per-branch scratch-local declaration.
-///
-/// Each accessor branch declares the locals it needs via a
-/// `LocalsBudget`; the caller aggregates this into the
-/// `Function::new(local_decls)` call and resolves concrete wasm-local
-/// indices into a `ScratchBases`, which the branch then uses to emit
-/// `LocalGet`/`LocalSet` instructions against the supplied
-/// `&mut Function`.
-///
-/// Today only the scalar-fallthrough getter branch (no scratch
-/// locals) is wired through this two-phase pattern; remaining branches
-/// continue to construct their own `Function` inline. The shape is
-/// chosen to support both primitive and typed-ref reservations so that
-/// later branches can migrate without redesigning the API.
-#[derive(Default)]
-pub(super) struct LocalsBudget {
-    pub i32_count: u32,
-    pub i64_count: u32,
-    pub f32_count: u32,
-    pub f64_count: u32,
-    /// Typed ref locals — each entry: `(ValType, count)`. Codegen
-    /// materializes the `ValType` from the appropriate GC layout /
-    /// record_gc_types lookup at budget time.
-    pub typed_refs: Vec<(ValType, u32)>,
-}
-
-impl LocalsBudget {
-    /// Convert the budget into the `(count, ValType)` declaration list
-    /// expected by `Function::new`. Primitive groups come first (i32,
-    /// i64, f32, f64), then typed refs in declaration order — the same
-    /// order `ScratchBases::resolve` uses to assign base indices.
-    pub(super) fn to_local_decls(&self) -> Vec<(u32, ValType)> {
-        let mut decls = Vec::new();
-        if self.i32_count > 0 {
-            decls.push((self.i32_count, ValType::I32));
-        }
-        if self.i64_count > 0 {
-            decls.push((self.i64_count, ValType::I64));
-        }
-        if self.f32_count > 0 {
-            decls.push((self.f32_count, ValType::F32));
-        }
-        if self.f64_count > 0 {
-            decls.push((self.f64_count, ValType::F64));
-        }
-        for (vt, count) in &self.typed_refs {
-            if *count > 0 {
-                decls.push((*count, *vt));
-            }
-        }
-        decls
-    }
-
-    /// Resolve concrete wasm-local indices given the wasm param count
-    /// for the function being emitted. Locals are laid out
-    /// contiguously after the params, in the order produced by
-    /// `to_local_decls`.
-    pub(super) fn resolve_bases(&self, param_count: u32) -> ScratchBases {
-        let mut next = param_count;
-        let _i32_base = next;
-        next += self.i32_count;
-        let _i64_base = next;
-        next += self.i64_count;
-        let _f32_base = next;
-        next += self.f32_count;
-        let _f64_base = next;
-        next += self.f64_count;
-        let mut typed_ref_bases = Vec::with_capacity(self.typed_refs.len());
-        for (_vt, count) in &self.typed_refs {
-            typed_ref_bases.push(next);
-            next += count;
-        }
-        ScratchBases {}
-    }
-}
-
-/// Resolved wasm-local-index bases for the locals declared in a
-/// matching `LocalsBudget`. Each `*_base` is the first local-index of
-/// that valtype's reserved region; the Nth local of that type is at
-/// `base + N`.
-pub(super) struct ScratchBases {}
+use super::super::WasmPackageBuilder;
 
 /// Phase 5e.5 Stage 7d: when canonical-ABI joined-flat slot type
 /// `vt_joined` differs from a case payload's actual valtype
@@ -469,16 +386,15 @@ impl<'a> WasmPackageBuilder<'a> {
     pub(super) fn generate_getter_for_with_struct(
         &mut self,
         signal_ty: Ty,
-        layout: &MemoryLayout,
         sig_idx: usize,
         comp_idx: Option<usize>,
     ) -> Result<Function, CodegenError> {
-        let addr = layout.signal_addr(sig_idx);
-
         // GC-struct-migrated signal — return value is computed from
         // struct.get instead of memory.load. Single-slot canonical-ABI
-        // returns push the value directly; multi-slot returns refresh
-        // the lift scratch at `addr` and return the scratch pointer.
+        // returns push the value directly; multi-slot returns lift into a
+        // `cabi_realloc` scratch and return the scratch pointer. The
+        // scalar/memory fallthrough at the tail computes its own `addr`
+        // lazily (only reachable for non-struct signals).
         if let Some(ci) = comp_idx
             && self.signal_in_struct(ci, sig_idx)
         {
@@ -1335,135 +1251,15 @@ impl<'a> WasmPackageBuilder<'a> {
         // budget is empty (no scratch locals); the caller builds
         // `Function::new(&[])` and the body emitter writes against
         // it. Wasm output is byte-identical to the prior inline form.
-        let budget = self.scalar_getter_locals_budget();
-        let mut func = Function::new(budget.to_local_decls());
-        let _scratch = budget.resolve_bases(/* param_count = */ 1);
-        self.emit_scalar_getter_body(&mut func, signal_ty, addr)?;
-        func.instruction(&Instruction::End);
-        Ok(func)
-    }
-
-    /// Phase 0.3k-pre: scratch budget for the scalar-fallthrough
-    /// getter branch. No locals needed — the body is pure
-    /// load-from-memory plus address constants.
-    fn scalar_getter_locals_budget(&self) -> LocalsBudget {
-        LocalsBudget::default()
-    }
-
-    /// Phase 0.3k-pre: emit the scalar-fallthrough getter body into a
-    /// caller-supplied `&mut Function`. Mirror-image of the original
-    /// inline `match` on `ty_kind(signal_ty)`. Does not emit
-    /// `Instruction::End` — the caller owns the function frame.
-    fn emit_scalar_getter_body(
-        &mut self,
-        func: &mut Function,
-        signal_ty: Ty,
-        addr: i32,
-    ) -> Result<(), CodegenError> {
-        match self.ctx.ty_kind(signal_ty) {
-            InternedTyKind::F32 => {
-                func.instruction(&Instruction::I32Const(addr));
-                func.instruction(&Instruction::F32Load(mem_arg(0, 2)));
-            }
-            InternedTyKind::F64 => {
-                func.instruction(&Instruction::I32Const(addr));
-                func.instruction(&Instruction::F64Load(mem_arg(0, 3)));
-            }
-            InternedTyKind::S64 | InternedTyKind::U64 => {
-                func.instruction(&Instruction::I32Const(addr));
-                func.instruction(&Instruction::I64Load(mem_arg(0, 3)));
-            }
-            InternedTyKind::String | InternedTyKind::List(_) => {
-                // String/List: MAX_FLAT_RESULTS=1 means complex returns use pointer-to-tuple
-                // Signature: (self: i32) -> i32 (pointer to (ptr, len) tuple)
-                // The signal already stores (ptr, len) at addr, so return addr
-                func.instruction(&Instruction::I32Const(addr));
-            }
-            InternedTyKind::Option(_) => {
-                // Option type: MAX_FLAT_RESULTS=1 means we return pointer to (discriminant, value)
-                // Memory layout: 1-byte discriminant at addr, value at addr+4 (aligned)
-                // Return the address directly - signal already stores (discriminant, value) in memory
-                func.instruction(&Instruction::I32Const(addr));
-            }
-            InternedTyKind::Result { .. } => {
-                // Result type: MAX_FLAT_RESULTS=1 means we return pointer to (discriminant, payload)
-                // Memory layout: 1-byte discriminant at addr, payload at aligned offset
-                // Return the address directly - signal already stores result in memory
-                func.instruction(&Instruction::I32Const(addr));
-            }
-            InternedTyKind::Adt(def_id) => {
-                let def_id = *def_id;
-                if self.ctx.defs.as_variant(def_id).is_some() {
-                    // Variant: return pointer to inline memory. The canonical
-                    // ABI lifts composite return values from an out-pointer
-                    // into the real shape. Variants always carry a
-                    // discriminant + joined payload, so flat arity is >= 1
-                    // and only degenerates to 1 slot when there's no payload
-                    // (enum-shape) — in that case the single slot is i32 and
-                    // pointer-vs-value aliases on i32, so this path stays
-                    // correct.
-                    func.instruction(&Instruction::I32Const(addr));
-                } else if self.ctx.defs.as_record(def_id).is_some() {
-                    // Record: if the record flattens to exactly one slot
-                    // (MAX_FLAT_RESULTS=1), the canonical ABI says return
-                    // the value directly instead of through a pointer. Load
-                    // that slot from inline memory with its typed load.
-                    // Otherwise use the pointer convention.
-                    if self.canonical_flat_valtypes(signal_ty).len() == 1 {
-                        self.emit_flat_slot_signal_read(func, addr, signal_ty)?;
-                    } else {
-                        func.instruction(&Instruction::I32Const(addr));
-                    }
-                } else {
-                    // Enum (no payloads): load discriminant as i32
-                    func.instruction(&Instruction::I32Const(addr));
-                    func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                }
-            }
-            InternedTyKind::Tuple(_) => {
-                // Tuple: same canonical-ABI rule as records. A single-field
-                // tuple whose element flattens to one slot returns that slot
-                // directly; multi-slot tuples use the pointer convention.
-                if self.canonical_flat_valtypes(signal_ty).len() == 1 {
-                    self.emit_flat_slot_signal_read(func, addr, signal_ty)?;
-                } else {
-                    func.instruction(&Instruction::I32Const(addr));
-                }
-            }
-            // Narrow integer + bool types are stored 1 byte wide and packed
-            // next to neighbouring signals — load the correct width so we
-            // don't bleed bytes from the next slot (an i32.load on a bool
-            // at offset 0 would read into the adjacent string pointer and
-            // fail jco's bool discriminant check with `invalid variant
-            // discriminant for bool`).
-            InternedTyKind::Bool | InternedTyKind::U8 | InternedTyKind::Char => {
-                func.instruction(&Instruction::I32Const(addr));
-                func.instruction(&Instruction::I32Load8U(mem_arg(0, 0)));
-            }
-            InternedTyKind::S8 => {
-                func.instruction(&Instruction::I32Const(addr));
-                func.instruction(&Instruction::I32Load8S(mem_arg(0, 0)));
-            }
-            InternedTyKind::U16 => {
-                func.instruction(&Instruction::I32Const(addr));
-                func.instruction(&Instruction::I32Load16U(mem_arg(0, 1)));
-            }
-            InternedTyKind::S16 => {
-                func.instruction(&Instruction::I32Const(addr));
-                func.instruction(&Instruction::I32Load16S(mem_arg(0, 1)));
-            }
-            _ => {
-                func.instruction(&Instruction::I32Const(addr));
-                func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-            }
-        }
-        Ok(())
+        unreachable!(
+            "getter: non-struct signal fallthrough is unreachable — \
+             every non-unit signal is GC-struct-resident"
+        )
     }
 
     pub(super) fn generate_setter_for(
         &mut self,
         comp_idx: usize,
-        layout: &MemoryLayout,
         sig_idx: usize,
         _import_realloc: u32,
     ) -> Result<Function, CodegenError> {
@@ -1471,7 +1267,6 @@ impl<'a> WasmPackageBuilder<'a> {
         let signal = &component.signals[sig_idx];
         let signal_def_id = signal.def_id;
 
-        let addr = layout.signal_addr(sig_idx);
         let ty = signal.ty;
 
         // GC-struct-migrated signals: write each canonical-ABI flat
@@ -2206,178 +2001,13 @@ impl<'a> WasmPackageBuilder<'a> {
             func.instruction(&Instruction::End);
             return Ok(func);
         }
-        // Variants need special handling because the flat param list for a
-        // variant joins payloads slot-wise. For a variant signal the setter
-        // params are (self, discriminant, joined_payload_slots...) and we
-        // store them raw at (addr, addr + payload_offset, ...): the host
-        // will have serialized the active case's payload into the joined
-        // slots, so we just copy them into backing memory verbatim.
-        let is_variant = matches!(
-            self.ctx.ty_kind(ty),
-            InternedTyKind::Adt(def_id) if self.ctx.defs.as_variant(*def_id).is_some()
-        );
-        let is_enum = matches!(
-            self.ctx.ty_kind(ty),
-            InternedTyKind::Adt(def_id)
-                if self.ctx.defs.as_enum(*def_id).is_some()
-        );
-
-        // Legacy memory-resident signal (Pointer-typed: records, tuples,
-        // options) — store path uses memory addresses, but the trailing
-        // `emit_trigger_effects` still routes through (ref Comp, parent)
-        // effect blocks, so we must resolve a typed self ref via the
-        // registry and stash it in `current_self_local` for
-        // `emit_self_ref` to pick up.
-        let gc = &self.gc_layouts[comp_idx];
-        let comp_struct_ty = gc.component_struct_type_idx.ok_or_else(|| {
-            CodegenError::InternalError(format!(
-                "setter (memory path): component {} missing component_struct_type_idx",
-                comp_idx
-            ))
-        })?;
-        // Variant setters take (rep, disc, joined_payload_slots...). For
-        // non-variant signals it's (rep, ...flat). Compute the WASM
-        // local index for the typed self ref accordingly: it sits right
-        // after every declared param.
-        let setter_param_count: u32 = if is_variant {
-            // 1 (rep) + 1 (disc) + max joined slots — too dynamic to
-            // precompute here without re-doing the variant join
-            // walk. Use a generous upper bound: we need the local to
-            // come AFTER all params, but Function::new declares locals
-            // by count from the end of params. So we just need the
-            // count of params; let the variant arm count below.
-            //
-            // For simplicity, count params via walking the variant
-            // joined slots once.
-            let mut joined: Vec<ValType> = Vec::new();
-            if let InternedTyKind::Adt(def_id) = self.ctx.ty_kind(ty)
-                && let Some(v) = self.ctx.defs.as_variant(*def_id)
-            {
-                let cases = v.cases.clone();
-                let mut case_flats: Vec<Vec<ValType>> = Vec::new();
-                for &c in &cases {
-                    let payload = match self.ctx.defs.kind(c) {
-                        yel_core::definitions::DefKind::VariantCase(case) => case.payload,
-                        _ => None,
-                    };
-                    case_flats.push(
-                        payload
-                            .map(|t| self.canonical_flat_valtypes(t))
-                            .unwrap_or_default(),
-                    );
-                }
-                for f in &case_flats {
-                    joined = super::super::join_flat_valtypes(&joined, f);
-                }
-            }
-            // (rep) + (disc) + joined slots
-            2 + joined.len() as u32
-        } else {
-            1 + self.canonical_flat_valtypes(ty).len() as u32
-        };
-        let self_ref_local_legacy: u32 = setter_param_count;
-        let mut func = Function::new([(
-            1,
-            ValType::Ref(wasm_encoder::RefType {
-                nullable: true,
-                heap_type: wasm_encoder::HeapType::Concrete(comp_struct_ty),
-            }),
-        )]);
-        // Registry lookup: rep (param 0) → typed ref → self_ref_local_legacy.
-        self.emit_registry_lookup(&mut func, comp_idx, 0, self_ref_local_legacy)?;
-        self.current_self_local = Some(self_ref_local_legacy);
-        self.current_self_comp_idx = Some(comp_idx);
-
-        if is_variant {
-            // Discriminant at offset 0 (1 byte).
-            func.instruction(&Instruction::I32Const(addr));
-            func.instruction(&Instruction::LocalGet(1));
-            func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
-            // Joined payload slots start at the variant's payload_offset.
-            if let InternedTyKind::Adt(def_id) = self.ctx.ty_kind(ty)
-                && let Some(var_def) = self.ctx.defs.as_variant(*def_id)
-            {
-                let var_layout = {
-                    let vd = var_def.clone();
-                    self.layout_ctx.compute_variant_layout_from_def_public(&vd)
-                };
-                let payload_offset = var_layout.payload_offset;
-                let joined = {
-                    // Recompute joined flat valtypes for the variant payloads.
-                    use wasm_encoder::ValType;
-                    let mut case_flats: Vec<Vec<ValType>> = Vec::new();
-                    for &case_def_id in &var_def.cases {
-                        let payload = match self.ctx.defs.kind(case_def_id) {
-                            yel_core::definitions::DefKind::VariantCase(c) => c.payload,
-                            _ => None,
-                        };
-                        case_flats.push(
-                            payload
-                                .map(|t| self.canonical_flat_valtypes(t))
-                                .unwrap_or_default(),
-                        );
-                    }
-                    let mut joined: Vec<ValType> = Vec::new();
-                    for f in &case_flats {
-                        joined = super::super::join_flat_valtypes(&joined, f);
-                    }
-                    joined
-                };
-                // Write each joined slot at payload_offset + sequential bumps.
-                // For the raw storage path we lay out slots back-to-back at
-                // their natural sizes starting from payload_offset.
-                let mut slot_off = payload_offset;
-                for (i, vt) in joined.iter().enumerate() {
-                    use wasm_encoder::ValType;
-                    func.instruction(&Instruction::I32Const(addr + slot_off as i32));
-                    func.instruction(&Instruction::LocalGet((i + 2) as u32));
-                    match vt {
-                        ValType::I32 => {
-                            func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
-                            slot_off += 4;
-                        }
-                        ValType::I64 => {
-                            func.instruction(&Instruction::I64Store(mem_arg(0, 3)));
-                            slot_off += 8;
-                        }
-                        ValType::F32 => {
-                            func.instruction(&Instruction::F32Store(mem_arg(0, 2)));
-                            slot_off += 4;
-                        }
-                        ValType::F64 => {
-                            func.instruction(&Instruction::F64Store(mem_arg(0, 3)));
-                            slot_off += 8;
-                        }
-                        _ => {
-                            return Err(CodegenError::InvalidIR(format!(
-                                "Unsupported variant payload slot type {:?}",
-                                vt
-                            )));
-                        }
-                    }
-                }
-            }
-        } else if is_enum {
-            // Enum (no payloads): just store discriminant as i32.
-            func.instruction(&Instruction::I32Const(addr));
-            func.instruction(&Instruction::LocalGet(1));
-            func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
-        } else {
-            // Use the generic flat-slot table. Record/Option/primitives etc.
-            let slots = self.flatten_core_slots(ty);
-            for (i, slot) in slots.iter().enumerate() {
-                func.instruction(&Instruction::I32Const(addr + slot.offset as i32));
-                func.instruction(&Instruction::LocalGet((i + 1) as u32));
-                slot.store.emit_store(&mut func);
-            }
-        }
-
-        self.emit_trigger_effects(&mut func, signal_def_id, comp_idx)?;
-        self.current_self_local = None;
-        self.current_self_comp_idx = None;
-
-        func.instruction(&Instruction::End);
-        Ok(func)
+        // Non-struct / variant-in-memory signal path: unreachable — every
+        // non-unit signal is GC-struct-resident, so the struct path above
+        // always returns before reaching here.
+        unreachable!(
+            "setter: non-struct/variant-in-memory signal path is unreachable — \
+             every non-unit signal is GC-struct-resident"
+        )
     }
 
     /// Phase 5b-v.3: emit a standalone `$gc_list_unbox_<arr_type_idx>`

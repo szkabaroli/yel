@@ -663,6 +663,12 @@ pub struct Handler {
     pub name: String,
     /// Span of the name.
     pub name_span: Span,
+    /// Optional single bound parameter — the value the event delivers into
+    /// the body (e.g. `drop: (payload) { … }` binds `payload` to the
+    /// dropped payload string). `None` for a plain `event: { … }` handler.
+    /// The parameter's type is fixed by the event, not the source, so any
+    /// annotation the author writes is ignored.
+    pub param: Option<Spanned<String>>,
     /// Handler body statements.
     pub body: Vec<Spanned<Statement>>,
 }

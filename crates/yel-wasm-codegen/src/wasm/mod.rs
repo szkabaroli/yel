@@ -667,29 +667,16 @@ fn join_flat_valtypes(
 pub(crate) struct MemoryLayout {
     /// Base offset in memory for this component
     pub base: i32,
-    /// Offset for each signal (relative to base)
-    pub signal_offsets: Vec<i32>,
     /// Total size used
     pub size: i32,
 }
 
 impl MemoryLayout {
     pub fn new(component: &LirResource, base: i32, _layout_ctx: &mut LirLayoutContext) -> Self {
-        // Phase 1.1a: per-signal offsets sourced from
-        // `component.signal_layout` (computed at LIR-lowering time).
-        // GC-struct-migrated signals keep their `signal_offsets[i] == -1`
-        // sentinel so the legacy `signal_addr` API stays valid; callers
-        // gate on `signal_in_struct` before dereferencing.
-        let signal_offsets: Vec<i32> = component
-            .signal_layout
-            .signals
-            .iter()
-            .map(|storage| match storage.mem {
-                Some(m) => m.offset as i32,
-                None => -1,
-            })
-            .collect();
-        let mut offset = component.signal_layout.memory_size as i32;
+        // Per-signal linear memory was removed; every non-unit signal is
+        // GC-struct-resident. Linear-memory size comes solely from the
+        // component's Memory slots (string data / scratch buffers).
+        let mut offset: i32 = 0;
 
         // Memory slots are pre-computed in component.slots
         // Find max offset to get total size
@@ -708,28 +695,7 @@ impl MemoryLayout {
 
         MemoryLayout {
             base,
-            signal_offsets,
             size: offset,
-        }
-    }
-
-    pub fn signal_addr(&self, idx: usize) -> i32 {
-        self.base + self.signal_offsets[idx]
-    }
-
-    /// An empty layout for module-scope emission (no component signals).
-    ///
-    /// Paired with [`LirResource`] containing `signals: []`, it routes every
-    /// signal lookup through the module-level `global_property_addrs` path
-    /// rather than the component-local one. Any expression that does try to
-    /// resolve a component-local signal will hit an out-of-bounds
-    /// `signal_addr` and fail loudly — which is the desired behaviour for
-    /// module scope (global defaults must not reference component state).
-    pub fn empty_for_module() -> Self {
-        MemoryLayout {
-            base: 0,
-            signal_offsets: Vec::new(),
-            size: 0,
         }
     }
 }
@@ -1413,6 +1379,16 @@ impl<'a> WasmPackageBuilder<'a> {
             // type-driven need, independent of any expression).
             for signal in &component.signals {
                 self.note_signal_runtime_needs(signal.ty);
+            }
+
+            // Payload-binding handlers write the event's string payload
+            // into a scratch buffer via `store_fat_ptr` (in dispatch) and
+            // read it back via `load_fat_ptr` (the body's `Ptr`-mode
+            // param local). Flag both so the helpers stay alive even when
+            // no signal on the component is string-typed.
+            if !component.payload_binding_handlers.is_empty() {
+                self.runtime_needs.store_fat_ptr = true;
+                self.runtime_needs.load_fat_ptr = true;
             }
 
             // The flat expression arena holds every subexpression — signal
@@ -2137,9 +2113,9 @@ impl<'a> WasmPackageBuilder<'a> {
 
     /// Position of `component` in `self.components` — the index used
     /// to look up `self.gc_layouts[i]` and other per-component data.
-    /// Returns `None` only for the empty `MemoryLayout::empty_for_module`
-    /// carrier used during global-defaults emission, where no component
-    /// owns the expressions being lowered.
+    /// Returns `None` for the empty module-scope carrier used during
+    /// global-defaults emission, where no component owns the expressions
+    /// being lowered.
     pub fn comp_idx_of(&self, component: &LirResource) -> Option<usize> {
         self.components
             .iter()
@@ -2344,20 +2320,4 @@ mod tests {
         );
     }
 
-    /// `MemoryLayout::empty_for_module` is used when emitting module-scope
-    /// expressions that don't belong to any component (e.g. global
-    /// defaults in the start function). It must produce a valid layout
-    /// with no signal slots — any `signal_addr(_)` call on it would
-    /// panic, which is the desired behaviour (module scope has no
-    /// component-local signals). The self-handle slot moved off the
-    /// `MemoryLayout` to a `(mut i32)` field on `$Comp_<Name>`; the
-    /// invariant tested by the older self-handle test is now structural
-    /// (nothing in linear memory to overlap with).
-    #[test]
-    fn empty_module_layout_has_zero_state() {
-        let layout = MemoryLayout::empty_for_module();
-        assert_eq!(layout.base, 0);
-        assert_eq!(layout.size, 0);
-        assert!(layout.signal_offsets.is_empty());
-    }
 }

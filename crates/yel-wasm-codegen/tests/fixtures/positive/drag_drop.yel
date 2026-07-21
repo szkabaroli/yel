@@ -1,0 +1,42 @@
+package yel:dragdrop@0.1.0;
+
+// Drag-and-drop authoring, end to end.
+//
+// Draggable sources: each list item renders a node that streams plain DOM
+// attributes — `draggable`/`drag-payload`/`drag-type` — via the generic
+// `set-attribute(node, name, attribute-value::<T>)` path. No new op, no
+// whitelist; the host reads these to start a native drag. `drag-payload`
+// carries the per-item string.
+//
+// Drop target: the `drop: { payload -> … }` handler makes the node a drop
+// target (verbatim `add-event-listener(node, "drop", id)`) AND binds the
+// dispatched string payload to `payload`. That param exercises the generic
+// payload-binding mechanism: dispatch writes the event's `(ptr, len)` into
+// a scratch buffer via `store_fat_ptr`, and the body reads it back through
+// a `Ptr`-mode `string` local (`load_fat_ptr`). The host delivers the
+// payload through the new `drop(string)` arm of the `event-value` variant.
+//
+// The drop body records the last dropped payload in a `string` signal.
+// (Accumulating into the `items` list — `items.append(payload)` — is the
+// more natural surface but is blocked by a pre-existing typed-GC gap:
+// `list<string>.append` doesn't box its element into `$fat_value`. See
+// docs/TECH_DEBT.md §4.)
+export component App {
+    items: list<string> = ["a", "b", "c"];
+    last: string = "";
+
+    VStack {
+        for item in items key(item) {
+            Text {
+                "{item}"
+                draggable: true
+                drag-payload: item
+                drag-type: "application/x-yel-item"
+            }
+        }
+        VStack {
+            "dropped: {last}"
+            drop: { payload -> last = payload; }
+        }
+    }
+}

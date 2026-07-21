@@ -10,7 +10,7 @@ use yel_core::lir::{LirExpr, LirExprKind, LirResource};
 use yel_core::types::InternedTyKind;
 
 use super::super::CodegenError;
-use super::super::{MemoryLayout, WasmPackageBuilder};
+use super::super::WasmPackageBuilder;
 use super::scratch::{compute_slot_locals, mem_arg, slot_local};
 
 impl<'a> WasmPackageBuilder<'a> {
@@ -20,7 +20,6 @@ impl<'a> WasmPackageBuilder<'a> {
         addr: i32,
         expr: &LirExpr,
         component: &LirResource,
-        layout: &MemoryLayout,
         scratch: crate::wasm::FlatScratchBases,
     ) -> Result<(), CodegenError> {
         let temp_local_start = scratch.i32_base;
@@ -28,7 +27,7 @@ impl<'a> WasmPackageBuilder<'a> {
             InternedTyKind::String | InternedTyKind::List(_) => {
                 // String and List signals store (ptr, len) at addr and addr+4
                 // Emit expression - pushes (ptr, len) onto stack
-                self.emit_expr(func, expr, component, layout)?;
+                self.emit_expr(func, expr, component)?;
                 // Stack: [ptr, len] with len on top
                 func.instruction(&Instruction::LocalSet(temp_local_start + 1)); // save len
                 func.instruction(&Instruction::LocalSet(temp_local_start)); // save ptr
@@ -43,30 +42,30 @@ impl<'a> WasmPackageBuilder<'a> {
             }
             InternedTyKind::F32 => {
                 func.instruction(&Instruction::I32Const(addr));
-                self.emit_expr(func, expr, component, layout)?;
+                self.emit_expr(func, expr, component)?;
                 func.instruction(&Instruction::F32Store(mem_arg(0, 2)));
             }
             InternedTyKind::F64 => {
                 func.instruction(&Instruction::I32Const(addr));
-                self.emit_expr(func, expr, component, layout)?;
+                self.emit_expr(func, expr, component)?;
                 func.instruction(&Instruction::F64Store(mem_arg(0, 3)));
             }
             InternedTyKind::S64 | InternedTyKind::U64 => {
                 func.instruction(&Instruction::I32Const(addr));
-                self.emit_expr(func, expr, component, layout)?;
+                self.emit_expr(func, expr, component)?;
                 func.instruction(&Instruction::I64Store(mem_arg(0, 3)));
             }
             InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
-                self.emit_flat_slot_store(func, addr, expr, component, layout, scratch)?;
+                self.emit_flat_slot_store(func, addr, expr, component, scratch)?;
             }
             InternedTyKind::Adt(def_id) => {
                 if self.ctx.defs.as_variant(*def_id).is_some() {
-                    self.emit_flat_slot_store(func, addr, expr, component, layout, scratch)?;
+                    self.emit_flat_slot_store(func, addr, expr, component, scratch)?;
                 } else {
                     // Enum (no payloads) or Record: just store discriminant
                     // as i32 (enum) or store the returned pointer (record).
                     func.instruction(&Instruction::I32Const(addr));
-                    self.emit_expr(func, expr, component, layout)?;
+                    self.emit_expr(func, expr, component)?;
                     func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
                 }
             }
@@ -77,17 +76,17 @@ impl<'a> WasmPackageBuilder<'a> {
             | InternedTyKind::S8
             | InternedTyKind::Char => {
                 func.instruction(&Instruction::I32Const(addr));
-                self.emit_expr(func, expr, component, layout)?;
+                self.emit_expr(func, expr, component)?;
                 func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
             }
             InternedTyKind::U16 | InternedTyKind::S16 => {
                 func.instruction(&Instruction::I32Const(addr));
-                self.emit_expr(func, expr, component, layout)?;
+                self.emit_expr(func, expr, component)?;
                 func.instruction(&Instruction::I32Store16(mem_arg(0, 1)));
             }
             _ => {
                 func.instruction(&Instruction::I32Const(addr));
-                self.emit_expr(func, expr, component, layout)?;
+                self.emit_expr(func, expr, component)?;
                 func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
             }
         }
@@ -116,7 +115,6 @@ impl<'a> WasmPackageBuilder<'a> {
         addr: i32,
         expr: &LirExpr,
         component: &LirResource,
-        layout: &MemoryLayout,
         scratch: crate::wasm::FlatScratchBases,
     ) -> Result<(), CodegenError> {
         // Shortcut: a `none` or payload-less user-variant constructor only
@@ -151,7 +149,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Emit the expression: pushes `flat.len()` values onto the stack in
         // declaration order (slot 0 first, last on top).
-        self.emit_expr(func, expr, component, layout)?;
+        self.emit_expr(func, expr, component)?;
 
         // Pop each slot into its typed scratch local, in reverse order
         // (top-of-stack is the last slot).
@@ -620,7 +618,6 @@ impl<'a> WasmPackageBuilder<'a> {
         signal_idx: usize,
         expr: &LirExpr,
         component: &LirResource,
-        layout: &MemoryLayout,
         scratch: crate::wasm::FlatScratchBases,
     ) -> Result<(), CodegenError> {
         let gc_layout = &self.gc_layouts[comp_idx];
@@ -650,7 +647,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // effects and discard its zero stack values. Currently no
         // signal has Unit type, but be defensive.
         if slot_valtypes.is_empty() {
-            self.emit_expr(func, expr, component, layout)?;
+            self.emit_expr(func, expr, component)?;
             return Ok(());
         }
 
@@ -660,7 +657,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // materializer call is needed here.
         if slot_valtypes.len() == 1 {
             self.emit_self_ref(func, comp_idx)?;
-            self.emit_expr(func, expr, component, layout)?;
+            self.emit_expr(func, expr, component)?;
             func.instruction(&Instruction::StructSet {
                 struct_type_index: struct_ty,
                 field_index: field_path[0],
@@ -671,7 +668,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // Multi-slot: emit pushes N values (slot 0 first, slot N-1 on
         // top). Pop in reverse into typed scratch locals, then set
         // each field in ascending order.
-        self.emit_expr(func, expr, component, layout)?;
+        self.emit_expr(func, expr, component)?;
         let locals = Self::signal_struct_slot_locals(&slot_valtypes, &scratch)?;
         for i in (0..slot_valtypes.len()).rev() {
             func.instruction(&Instruction::LocalSet(locals[i]));
@@ -894,7 +891,6 @@ impl<'a> WasmPackageBuilder<'a> {
         prop_def_id: DefId,
         expr: &LirExpr,
         component: &LirResource,
-        layout: &MemoryLayout,
         scratch: crate::wasm::FlatScratchBases,
     ) -> Result<(), CodegenError> {
         let _ = scratch;
@@ -910,13 +906,13 @@ impl<'a> WasmPackageBuilder<'a> {
         }
         if slot_valtypes.is_empty() {
             // Defensive: nothing to write. emit expr for side effects.
-            self.emit_expr(func, expr, component, layout)?;
+            self.emit_expr(func, expr, component)?;
             return Ok(());
         }
         // Emit the value expr (pushes N slots, slot 0 deepest / slot N-1
         // on top), then `global.set` each slot in reverse so the top of
         // stack lands in the last field — no scratch spill needed.
-        self.emit_expr(func, expr, component, layout)?;
+        self.emit_expr(func, expr, component)?;
         for i in (0..core_globals.len()).rev() {
             func.instruction(&Instruction::GlobalSet(core_globals[i]));
         }

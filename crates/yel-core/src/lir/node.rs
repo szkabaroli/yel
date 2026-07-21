@@ -168,6 +168,17 @@ pub struct LirResource {
     /// handlers and need no preamble.
     pub input_binding_handlers: HashMap<BlockId, DefId>,
 
+    /// Handler blocks that bind the dispatched event's string payload to a
+    /// body-scoped param (`<event>: (payload) { … }`), keyed by `BlockId`,
+    /// mapped to the memory offset of the 8-byte scratch buffer the param
+    /// reads as a fat pointer. This is generic over the event: every
+    /// string-carrying `event-value` variant (`input-text`, `drop`,
+    /// `drag-enter`, …) flattens to the same `(ptr, len)` dispatch params,
+    /// so dispatch unconditionally writes them here via `store_fat_ptr`
+    /// before running a block in this map — no per-event discriminant gate.
+    /// Empty for handlers with no bound payload.
+    pub payload_binding_handlers: HashMap<BlockId, i32>,
+
     /// One entry per `for` loop, keyed by `ForId`. Carries the for's
     /// DOM parent/anchor memory slots, optional range-item scratch buf,
     /// and the set of effect / nested-for ids whose state is hoisted
@@ -324,6 +335,7 @@ impl LirResource {
             signals: Vec::new(),
             children_root_slot: None,
             input_binding_handlers: HashMap::new(),
+            payload_binding_handlers: HashMap::new(),
             for_contexts: Vec::new(),
             effects_by_signal: HashMap::new(),
             body_tree: Vec::new(),
@@ -432,4 +444,9 @@ pub struct LirHandler {
     /// sources that don't participate in input-binding auto-sync
     /// (`clicked`, `hovered`, freestanding `input` handlers etc.).
     pub input_binding_target: Option<DefId>,
+    /// For a payload-binding handler (`drop: (payload) { … }`), the
+    /// body-scoped `LocalId` the event payload string binds to. Block
+    /// lowering allocates a scratch buffer for it and marks the block so
+    /// dispatch writes the payload there before the body runs.
+    pub param: Option<crate::ids::LocalId>,
 }

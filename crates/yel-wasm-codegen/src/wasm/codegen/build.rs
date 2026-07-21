@@ -2024,13 +2024,12 @@ impl<'a> WasmPackageBuilder<'a> {
         let filter_calls_clone = self.filter_calls.clone();
         let module_carrier_name = self.ctx.intern("<module>");
         let module_carrier = LirResource::empty_module_carrier(module_carrier_name);
-        let module_layout = MemoryLayout::empty_for_module();
         for (filter_id, (comp_idx, elem_ty, elem_size, param, predicate)) in
             filter_calls_clone.iter().enumerate()
         {
-            let (component, layout) = match comp_idx {
-                Some(idx) => (&self.components[*idx], &layouts[*idx]),
-                None => (&module_carrier, &module_layout),
+            let component = match comp_idx {
+                Some(idx) => &self.components[*idx],
+                None => &module_carrier,
             };
             code.function(&self.generate_filter_function(
                 filter_id,
@@ -2040,7 +2039,6 @@ impl<'a> WasmPackageBuilder<'a> {
                 predicate.clone(),
                 alloc_funcs.alloc,
                 component,
-                layout,
             )?);
         }
 
@@ -2081,8 +2079,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // Release the borrow on exported_components before mutable operations
         drop(exported_components);
 
-        for (comp_idx, layout_ref) in layouts.iter().enumerate() {
-            let layout = layout_ref.clone();
+        for (comp_idx, _) in layouts.iter().enumerate() {
             let component = &self.components[comp_idx];
 
             // For exported components, get the [resource-new] import index.
@@ -2128,13 +2125,11 @@ impl<'a> WasmPackageBuilder<'a> {
                 let signal_ty = self.components[comp_idx].signals[sig_idx].ty;
                 code.function(&self.generate_getter_for_with_struct(
                     signal_ty,
-                    &layout,
                     sig_idx,
                     Some(comp_idx),
                 )?);
                 code.function(&self.generate_setter_for(
                     comp_idx,
-                    &layout,
                     sig_idx,
                     alloc_funcs.cabi_realloc,
                 )?);
@@ -2300,7 +2295,6 @@ impl<'a> WasmPackageBuilder<'a> {
             // carrier's `exprs`.
             let mut carrier = LirResource::empty_module_carrier(carrier_name);
             carrier.exprs = self.global_default_exprs.clone();
-            let layout = MemoryLayout::empty_for_module();
             self.current_init_scratch_start = Some(0);
             self.current_flat_scratch = Some(globals_scratch);
             for (prop_id, expr) in inits {
@@ -2310,7 +2304,6 @@ impl<'a> WasmPackageBuilder<'a> {
                         prop_id,
                         &expr,
                         &carrier,
-                        &layout,
                         globals_scratch,
                     )?;
                 } else if let Some(&addr) = self.global_property_addrs.get(&prop_id) {
@@ -2319,7 +2312,6 @@ impl<'a> WasmPackageBuilder<'a> {
                         addr,
                         &expr,
                         &carrier,
-                        &layout,
                         globals_scratch,
                     )?;
                 } else {

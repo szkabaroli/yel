@@ -976,20 +976,38 @@ impl<'ctx> HirLowering<'ctx> {
             })
             .collect();
 
-        let handlers: Vec<HirHandler> = elem
-            .handlers
-            .iter()
-            .map(|h| HirHandler {
+        let mut handlers: Vec<HirHandler> = Vec::with_capacity(elem.handlers.len());
+        for h in &elem.handlers {
+            // A bound payload parameter (`drop: { payload -> … }`) is a
+            // body-scoped local of type `string`, defined before the body
+            // is lowered so its references resolve. The event fixes the
+            // type (drop payload / dragenter media-type are both strings).
+            // We store only (name, span); typeck re-defines the local to
+            // produce the THIR `LocalId` with matching arena parity.
+            let param = h.node.param.as_ref().map(|p| {
+                let name = self.ctx.interner.intern(&p.node);
+                (name, p.span)
+            });
+            if let Some((name, span)) = param {
+                self.locals.push_scope();
+                self.locals.define(name, crate::types::Ty::STRING, span);
+            }
+            let body: Vec<HirStatement> = h
+                .node
+                .body
+                .iter()
+                .map(|s| self.lower_statement(&s.node, s.span))
+                .collect();
+            if param.is_some() {
+                self.locals.pop_scope();
+            }
+            handlers.push(HirHandler {
                 name: h.node.name.clone(),
                 name_span: h.node.name_span,
-                body: h
-                    .node
-                    .body
-                    .iter()
-                    .map(|s| self.lower_statement(&s.node, s.span))
-                    .collect(),
-            })
-            .collect();
+                param,
+                body,
+            });
+        }
 
         let children: Vec<HirNode> = elem
             .children

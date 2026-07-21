@@ -143,6 +143,12 @@ pub struct HirHandler {
     pub name: String,
     /// Handler name span.
     pub name_span: Span,
+    /// Optional bound payload parameter (`drop: { payload -> … }`) — the
+    /// interned param name and its span. HIR lowering defines a body-scoped
+    /// `string` local under this name so references resolve; typeck
+    /// re-defines it in its own scope (mirroring the for-loop `item`
+    /// pattern) to produce the THIR `LocalId` with matching arena parity.
+    pub param: Option<(Name, Span)>,
     /// Handler body statements.
     pub body: Vec<HirStatement>,
 }

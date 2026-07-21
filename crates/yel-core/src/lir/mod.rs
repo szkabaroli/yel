@@ -90,4 +90,4 @@ pub use signal::{LirEffect, LirSignal};
 
 // Per-signal storage layout (Phase 1.1a: where each signal lives —
 // in the component's $Comp_<i> GC struct or in linear memory).
-pub use signal_layout::{compute_signal_layout, GcSlot, MemSlot, SignalLayout, SignalStorage};
+pub use signal_layout::{compute_signal_layout, GcSlot, SignalLayout, SignalStorage};
