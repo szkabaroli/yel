@@ -1029,57 +1029,11 @@ impl WasmPackageBuilder<'_> {
                             component,
                         );
                     }
-                    // For string / list<scalar> fields, the struct slot
-                    // is `(ref null $fat_value)` — unbox to (ptr, len).
-                    if matches!(
-                        self.ctx.ty_kind(field_ty),
-                        InternedTyKind::String | InternedTyKind::List(_)
-                    ) {
-                        let fat_value_idx =
-                            self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                                CodegenError::InvalidIR(
-                                    "Field (SLR): fat_value type idx not assigned".into(),
-                                )
-                            })?;
-                        // Stack: [(ref null $fat_value)]
-                        // Need to push (ptr, len) — two i32s — by
-                        // unboxing the same box twice. Reserving a
-                        // typed `(ref null $fat_value)` scratch local
-                        // would require declaring it up front in every
-                        // function that contains an SLR string/list
-                        // field read; instead we re-emit `base` to
-                        // produce a fresh box ref. This is cheap (a
-                        // few GC ref ops, no allocations) and safe
-                        // because every SLR base — Local of an SLR
-                        // record signal, SignalRead, or chained Field
-                        // on another SLR record — is side-effect-free
-                        // and idempotent under repeated emission.
-                        func.instruction(&Instruction::Drop);
-                        // Re-emit base + struct.get to load the box again,
-                        // then unbox $ptr.
-                        self.emit_expr(func, base, component)?;
-                        func.instruction(&Instruction::StructGet {
-                            struct_type_index: type_idx,
-                            field_index: gc_field_idx,
-                        });
-                        func.instruction(&Instruction::RefAsNonNull);
-                        func.instruction(&Instruction::StructGet {
-                            struct_type_index: fat_value_idx,
-                            field_index: 0,
-                        });
-                        // Re-emit base + struct.get to load the box again,
-                        // then unbox $len.
-                        self.emit_expr(func, base, component)?;
-                        func.instruction(&Instruction::StructGet {
-                            struct_type_index: type_idx,
-                            field_index: gc_field_idx,
-                        });
-                        func.instruction(&Instruction::RefAsNonNull);
-                        func.instruction(&Instruction::StructGet {
-                            struct_type_index: fat_value_idx,
-                            field_index: 1,
-                        });
-                    }
+                    // Every remaining SLR field shape (scalar) has been
+                    // read directly by the struct.get above. String
+                    // ($str_bytes ref), typed-array list, and FlatGcStruct
+                    // fields returned earlier; nothing boxes into a
+                    // fat-pointer here anymore.
                     return Ok(self.flatten_core_valtypes(expr.ty).len());
                 }
                 // Field access on a record
@@ -1580,90 +1534,13 @@ impl WasmPackageBuilder<'_> {
                         .get(record_def)
                         .copied()
                     {
-                        // Resolve per-field source types so we know
-                        // which need fat_value boxing.
-                        let record = match self.ctx.defs.kind(*record_def) {
-                            yel_core::definitions::DefKind::Record(r) => r.clone(),
-                            _ => {
-                                return Err(CodegenError::InvalidIR(format!(
-                                    "RecordConstruct (SLR): {:?} is not a record def",
-                                    record_def
-                                )));
-                            }
-                        };
-                        let fat_value_idx = self.record_gc_types.fat_value_type_idx;
-                        for (i, field_expr) in fields.iter().enumerate() {
-                            let field_def_id = record.fields.get(i).copied().ok_or_else(|| {
-                                CodegenError::InvalidIR(format!(
-                                    "RecordConstruct (SLR): field index {} out of range",
-                                    i
-                                ))
-                            })?;
-                            let field_ty = match self.ctx.defs.kind(field_def_id) {
-                                yel_core::definitions::DefKind::Field(f) => f.ty,
-                                _ => {
-                                    return Err(CodegenError::InvalidIR(format!(
-                                        "RecordConstruct (SLR): {:?} is not a field def",
-                                        field_def_id
-                                    )));
-                                }
-                            };
-                            // Phase 5e.4: gate before emit_expr — when
-                            // a list-typed field will get GC ref repr,
-                            // emit it as canonical (ptr, len) by
-                            // saving/restoring the elements path.
-                            // Simplest: detect GC-list field ahead of
-                            // time and handle separately. For
-                            // strings (always canonical), or non-GC
-                            // lists (also canonical), normal emit_expr
-                            // pushes 2 i32s.
-                            let needs_gc_materialize = self.is_scalar_list_ty(field_ty)
-                                && matches!(
-                                    self.internal_repr(field_ty),
-                                    super::repr::InternalRepr::GcArrayRef(_)
-                                );
-                            // Phase 5e.6: if the record field is stored
-                            // as a typed `(ref null $arr)` (DTR-eligible
-                            // list field), keep the typed array on the
-                            // stack — no materialize, no $fat_value box.
-                            let field_stored_as_typed_array = matches!(
-                                self.ctx.ty_kind(field_ty),
-                                InternedTyKind::List(_)
-                            ) && self
-                                .record_gc_types
-                                .list_array_type_idx
-                                .contains_key(&field_ty);
+                        for field_expr in fields.iter() {
+                            // Every SLR field pushes exactly the value the
+                            // parent struct.new consumes: scalars unboxed,
+                            // a string as its `$str_bytes` ref, a list as
+                            // its typed `(ref null $arr)`. Nothing needs a
+                            // fat-pointer box anymore.
                             self.emit_expr(func, component.get_expr(*field_expr), component)?;
-                            if field_stored_as_typed_array {
-                                // emit_expr on a list<elem> with
-                                // GcArrayRef repr already pushes a
-                                // typed array — nothing to do.
-                            } else if matches!(self.ctx.ty_kind(field_ty), InternedTyKind::String) {
-                                // strings-to-GC: the string field is a
-                                // $str_bytes ref already on the stack — no
-                                // $fat_value box.
-                            } else if matches!(self.ctx.ty_kind(field_ty), InternedTyKind::List(_)) {
-                                let fv_idx = fat_value_idx.ok_or_else(|| {
-                                    CodegenError::InvalidIR(
-                                        "RecordConstruct (SLR): fat_value type idx not assigned"
-                                            .into(),
-                                    )
-                                })?;
-                                if needs_gc_materialize
-                                    && let super::repr::InternalRepr::GcArrayRef(arr_idx) =
-                                        self.internal_repr(field_ty)
-                                    {
-                                        let mat_fn = *self
-                                            .gc_list_materializer_fn_indices
-                                            .get(&arr_idx)
-                                            .ok_or_else(|| CodegenError::InvalidIR(
-                                                "RecordConstruct (SLR): missing materializer for GC list field".into(),
-                                            ))?;
-                                        func.instruction(&Instruction::Call(mat_fn));
-                                    }
-                                // Stack now has (ptr, len) — pack into $fat_value.
-                                func.instruction(&Instruction::StructNew(fv_idx));
-                            }
                         }
                         func.instruction(&Instruction::StructNew(type_idx));
                         return Ok(1);
@@ -1998,56 +1875,6 @@ impl WasmPackageBuilder<'_> {
             wasm_encoder::HeapType::Concrete(case_some_idx),
         ));
         func.instruction(&Instruction::I32Eqz);
-
-        // Detect fat-box payload: case-subtype payload field is
-        // `(ref null $fat_value)` for string / non-typed-array list.
-        let is_fat_box = matches!(self.ctx.ty_kind(inner), InternedTyKind::String)
-            || (matches!(self.ctx.ty_kind(inner), InternedTyKind::List(_))
-                && !self.record_gc_types.list_array_type_idx.contains_key(&inner));
-
-        if is_fat_box {
-            // Canonical: 2 i32 slots (ptr, len). Some-arm unboxes
-            // $fat_value's two fields; None-arm pushes (0, 0).
-            let fat_value_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                CodegenError::InvalidIR(
-                    "flat_gc field materialize: $fat_value type idx missing".into(),
-                )
-            })?;
-            for fat_field in 0u32..2u32 {
-                self.emit_expr(func, base, component)?;
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: parent_type_idx,
-                    field_index: gc_field_idx,
-                });
-                func.instruction(&Instruction::RefTestNonNull(
-                    wasm_encoder::HeapType::Concrete(case_some_idx),
-                ));
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
-                    wasm_encoder::ValType::I32,
-                )));
-                self.emit_expr(func, base, component)?;
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: parent_type_idx,
-                    field_index: gc_field_idx,
-                });
-                func.instruction(&Instruction::RefCastNonNull(
-                    wasm_encoder::HeapType::Concrete(case_some_idx),
-                ));
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: case_some_idx,
-                    field_index: 0,
-                });
-                func.instruction(&Instruction::RefAsNonNull);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: fat_value_idx,
-                    field_index: fat_field,
-                });
-                func.instruction(&Instruction::Else);
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::End);
-            }
-            return Ok(self.flatten_core_valtypes(field_ty).len());
-        }
 
         // Single-slot scalar / typed payload: canonical len == 1.
         let payload_valtype = inner_canonical.into_iter().next().ok_or_else(|| {
@@ -3194,29 +3021,18 @@ impl WasmPackageBuilder<'_> {
         use yel_core::types::InternedTyKind;
 
         let payload_canonical = self.flatten_core_valtypes(payload_ty);
-        let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-            || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                && !self
-                    .record_gc_types
-                    .list_array_type_idx
-                    .contains_key(&payload_ty));
 
-        if is_fat_box {
+        // strings-to-GC: a string payload comes back as canonical
+        // (ptr, len) in memory and rebuilds a `$str_bytes` GC ref. Every
+        // valid list is a typed GC array handled below, so String is the
+        // only fat-pointer-shaped payload here.
+        if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String) {
             // ptr at payload_base, len at payload_base + 4
             func.instruction(&Instruction::I32Const(ret_addr + payload_base as i32));
             func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
             func.instruction(&Instruction::I32Const(ret_addr + payload_base as i32 + 4));
             func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-            // strings-to-GC: a string payload builds a $str_bytes ref from
-            // (ptr, len); a non-typed-array list still boxes into $fat_value.
-            if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String) {
-                self.emit_str_bytes_unmaterialize(func)?;
-            } else {
-                let fat_value_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                    CodegenError::InvalidIR("cb flat-gc return: $fat_value type idx missing".into())
-                })?;
-                func.instruction(&Instruction::StructNew(fat_value_idx));
-            }
+            self.emit_str_bytes_unmaterialize(func)?;
             return Ok(());
         }
 

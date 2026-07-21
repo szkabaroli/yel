@@ -751,16 +751,6 @@ pub struct RecordGcTypes {
     /// so the name-section pass can emit them without a second pass over
     /// `Definitions`.
     pub type_names: Vec<(u32, String)>,
-    /// Shared `$fat_value` GC struct type
-    /// `(struct (field $ptr (mut i32)) (field $len (mut i32)))`.
-    /// Used to box string and `list<scalar>` values when they appear as
-    /// fields of a single-level record (SLR) — a record whose every
-    /// field is primitive, string, or `list<scalar>`. The record's GC
-    /// struct stores `(ref null $fat_value)` for string/list fields;
-    /// readers `struct.get` the box ref, then `struct.get` `ptr` / `len`
-    /// to recover the (ptr, len) fat-pointer pair on stack.
-    /// `None` if no records were emitted (no rec group built).
-    pub fat_value_type_idx: Option<u32>,
     /// Shared `$str_bytes = (array (mut i8))` GC type backing every
     /// `String` (strings-to-GC migration, `plans/strings-to-gc.md`). One
     /// packed-byte-array type per program, always emitted; the
@@ -858,56 +848,19 @@ pub fn emit_program_record_types(
     // Emission order — each block is its own rec group so cross-block
     // references resolve via indices already declared:
     //
-    //   [base+0]                           $fat_value (singleton rec group)
+    //   [base+0]                           $str_bytes (singleton rec group)
     //   [base+1 .. base+1+Σ(1+cases)]      flat-gc rec groups, topo-sorted
     //   [records_base .. tuple_end]        records / lists / tuples
     //                                      (single rec group)
     //
-    // Flat-gc rec groups need $fat_value's index for string / scalar-
-    // list payload fields, so $fat_value comes first. Records / lists /
-    // tuples need flat-gc supertype indices for nested option / variant
-    // fields, so they come last.
-
-    // Emit $fat_value first as its own singleton rec group.
-    let fat_value_idx = base_type_idx;
-    registry.fat_value_type_idx = Some(fat_value_idx);
-    {
-        // Stage 8: $fat_value's (ptr, len) are written exactly once at
-        // struct.new and never mutated — strings are immutable values.
-        // Marking the fields immutable lets the wasm-GC engine optimize
-        // loads (no aliasing concerns).
-        let fat_value_struct = StructType {
-            fields: Box::from([
-                FieldType {
-                    element_type: StorageType::Val(ValType::I32),
-                    mutable: false,
-                },
-                FieldType {
-                    element_type: StorageType::Val(ValType::I32),
-                    mutable: false,
-                },
-            ]),
-        };
-        types.ty().rec(vec![SubType {
-            is_final: true,
-            supertype_idx: None,
-            composite_type: CompositeType {
-                shared: false,
-                inner: CompositeInnerType::Struct(fat_value_struct),
-                descriptor: None,
-                describes: None,
-            },
-        }]);
-    }
-    registry
-        .type_names
-        .push((fat_value_idx, "fat_value".to_string()));
+    // Records / lists / tuples need flat-gc supertype indices for nested
+    // option / variant fields, so they come last.
 
     // strings-to-GC: emit the shared `$str_bytes = (array (mut i8))` as its
-    // own singleton rec group right after `$fat_value`. Packed i8 = one byte
-    // per element (UTF-8). Always emitted — a `String` is a GC byte array.
+    // own singleton rec group first. Packed i8 = one byte per element
+    // (UTF-8). Always emitted — a `String` is a GC byte array.
     let after_singletons = {
-        let sb_idx = fat_value_idx + 1;
+        let sb_idx = base_type_idx;
         types.ty().rec(vec![SubType {
             is_final: true,
             supertype_idx: None,
@@ -925,7 +878,7 @@ pub fn emit_program_record_types(
         registry
             .type_names
             .push((sb_idx, "str_bytes".to_string()));
-        fat_value_idx + 2
+        sb_idx + 1
     };
 
     // Merge flat-gc parents, records, list arrays, and tuple structs
@@ -945,10 +898,6 @@ pub fn emit_program_record_types(
     //   [records_base .. list_arrays_base)        records
     //   [list_arrays_base .. tuple_structs_base)  list arrays
     //   [tuple_structs_base .. tuple_end)         tuple structs
-    //
-    // ($fat_value stays as its own singleton rec group above — it's
-    //  referenced *from* the merged group but doesn't reference back,
-    //  so the boundary is acyclic.)
     let mut cursor = after_singletons;
     for &parent_ty in &flat_gc_tys {
         let consumed = assign_flat_gc_indices(ctx, parent_ty, cursor, &mut registry);
@@ -1120,12 +1069,11 @@ pub fn emit_program_record_types(
     }
     let _ = HashMap::<DefId, u32>::new(); // silence import lint when empty
     // Total reserved indices:
-    //   1 ($fat_value)
+    //   1 ($str_bytes, always emitted)
     //   + Σ (1 + case_count) over flat-gc parents
     //   + N (records) + L (lists) + T (tuples).
     // (`flat_gc_total` is computed above for the SubType capacity hint.)
-    let total = 1
-        + 1 // $str_bytes (always emitted)
+    let total = 1 // $str_bytes (always emitted)
         + flat_gc_total
         + record_def_ids.len() as u32
         + list_tys.len() as u32
@@ -2021,29 +1969,20 @@ fn record_field_storage_type(ctx: &CompilerContext, ty: Ty, registry: &RecordGcT
         | InternedTyKind::Brush
         | InternedTyKind::Image
         | InternedTyKind::Easing => ValType::I32,
-        // Phase 3: strings and `list<scalar>` are stored as a concrete
-        // `(ref null $fat_value)` — a 2-i32 box (ptr, len). Resolution
-        // of the original "anyref + cast" plan: a concrete typed ref
-        // is uniformly better since both strings and scalar-element
-        // lists share the same fat-pointer shape.
+        // Phase 5e.6: every valid `list<T>` is a typed GC array, stored
+        // as a concrete `(ref null $<elem>_list)` ref. A list whose
+        // element is not a single-slot value (unit/func) is not a valid
+        // list element, so no `list_array_type_idx` entry means the type
+        // is structurally impossible here.
         InternedTyKind::List(_) => {
-            // Phase 5e.6: if the list type has a typed GC array registered
-            // (any GC-eligible list — scalar, string, nested list, DTR
-            // record, tuple, …), use the concrete `(ref null $<elem>_list)`
-            // type instead of the legacy `$fat_value` (ptr, len) box.
-            if is_gc_eligible_list_ty(ctx, ty)
-                && let Some(&arr_idx) = registry.list_array_type_idx.get(&ty) {
-                    return ValType::Ref(RefType {
-                        nullable: true,
-                        heap_type: HeapType::Concrete(arr_idx),
-                    });
-                }
-            let fat_value_idx = registry
-                .fat_value_type_idx
-                .expect("fat_value type idx must be assigned before record fields are typed");
+            let arr_idx = registry.list_array_type_idx.get(&ty).copied().expect(
+                "record_field_storage_type: list<T> with no GC array type — every valid \
+                 list is a typed GC array; a non-single-slot element (unit/func) is not a \
+                 valid list element",
+            );
             ValType::Ref(RefType {
                 nullable: true,
-                heap_type: HeapType::Concrete(fat_value_idx),
+                heap_type: HeapType::Concrete(arr_idx),
             })
         }
         InternedTyKind::String => {

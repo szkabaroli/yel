@@ -680,42 +680,13 @@ impl<'a> WasmPackageBuilder<'a> {
                         Some((mat_ptr_local, mat_len_local)),
                     )?;
                 } else if elem_is_string {
-                    let fv = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "list<string> getter: $fat_value type idx missing".into(),
-                        )
-                    })?;
-                    // elem_addr = data_ptr + idx * 8
-                    func.instruction(&Instruction::LocalGet(data_ptr_local));
-                    func.instruction(&Instruction::LocalGet(idx_local));
-                    func.instruction(&Instruction::I32Const(8));
-                    func.instruction(&Instruction::I32Mul);
-                    func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::LocalSet(elem_addr_local));
-                    // store ptr at elem_addr+0
-                    func.instruction(&Instruction::LocalGet(elem_addr_local));
-                    func.instruction(&Instruction::LocalGet(arr_ref_local));
-                    func.instruction(&Instruction::LocalGet(idx_local));
-                    func.instruction(&Instruction::ArrayGet(arr_type_idx));
-                    func.instruction(&Instruction::RefAsNonNull);
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: fv,
-                        field_index: 0,
-                    });
-                    func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
-                    // store len at elem_addr+4
-                    func.instruction(&Instruction::LocalGet(elem_addr_local));
-                    func.instruction(&Instruction::I32Const(4));
-                    func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::LocalGet(arr_ref_local));
-                    func.instruction(&Instruction::LocalGet(idx_local));
-                    func.instruction(&Instruction::ArrayGet(arr_type_idx));
-                    func.instruction(&Instruction::RefAsNonNull);
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: fv,
-                        field_index: 1,
-                    });
-                    func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+                    // A `list<string>` element is a `$str_bytes` GC ref, not
+                    // a `$fat_value` box; its boundary materialization is
+                    // handled by the str_bytes-aware path, never here.
+                    unreachable!(
+                        "list<string> getter: string element boxed into $fat_value — \
+                         strings are $str_bytes GC refs, materialized elsewhere"
+                    );
                 } else if elem_is_nested_list {
                     let inner_arr_idx = self.record_gc_types.list_array_type_idx[&elem_ty];
                     let inner_mat_fn = *self
@@ -1014,7 +985,6 @@ impl<'a> WasmPackageBuilder<'a> {
                             ));
                         }
                     };
-                    let fat_value_idx = self.record_gc_types.fat_value_type_idx;
                     let layout_info = self.layout_ctx.layout_of(signal_ty);
                     let cabi_realloc = self
                         .alloc_funcs
@@ -1042,7 +1012,6 @@ impl<'a> WasmPackageBuilder<'a> {
                         record_def_id,
                         0,
                         scratch_ptr_local,
-                        fat_value_idx,
                         &prefix,
                     )?;
                     func.instruction(&Instruction::LocalGet(scratch_ptr_local));
@@ -1474,35 +1443,13 @@ impl<'a> WasmPackageBuilder<'a> {
                     // arr.set(idx, record_ref)
                     func.instruction(&Instruction::ArraySet(arr_type_idx));
                 } else if elem_is_string {
-                    // Phase 5e.4: string element — load (ptr, len) at
-                    // canonical offset, struct.new $fat_value, array.set.
-                    let fv = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "list<string> setter: $fat_value type idx missing".into(),
-                        )
-                    })?;
-                    // elem_addr = ptr + idx * 8
-                    func.instruction(&Instruction::LocalGet(1));
-                    func.instruction(&Instruction::LocalGet(idx_local));
-                    func.instruction(&Instruction::I32Const(8));
-                    func.instruction(&Instruction::I32Mul);
-                    func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::LocalSet(elem_addr_local));
-                    // arr_ref, idx for the array.set.
-                    func.instruction(&Instruction::LocalGet(arr_ref_local));
-                    func.instruction(&Instruction::LocalGet(idx_local));
-                    // load ptr at +0
-                    func.instruction(&Instruction::LocalGet(elem_addr_local));
-                    func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
-                    // load len at +4
-                    func.instruction(&Instruction::LocalGet(elem_addr_local));
-                    func.instruction(&Instruction::I32Const(4));
-                    func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
-                    // box into $fat_value
-                    func.instruction(&Instruction::StructNew(fv));
-                    // array.set
-                    func.instruction(&Instruction::ArraySet(arr_type_idx));
+                    // A `list<string>` element is a `$str_bytes` GC ref, not
+                    // a `$fat_value` box; its setter path is handled by the
+                    // str_bytes-aware un-materializer, never here.
+                    unreachable!(
+                        "list<string> setter: string element boxed into $fat_value — \
+                         strings are $str_bytes GC refs, un-materialized elsewhere"
+                    );
                 } else if matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::List(_))
                     && self
                         .record_gc_types
@@ -1765,12 +1712,10 @@ impl<'a> WasmPackageBuilder<'a> {
                         ) =>
                     {
                         let record_def_id = *d;
-                        let fat_value_idx = self.record_gc_types.fat_value_type_idx;
                         let mut next_param: u32 = 2;
                         self.emit_setter_pack_dtr_record(
                             &mut func,
                             record_def_id,
-                            fat_value_idx,
                             &mut next_param,
                         )?;
                     }
@@ -1984,42 +1929,29 @@ impl<'a> WasmPackageBuilder<'a> {
                                         parent_canonical.get(1 + i).copied().unwrap_or(*vt_payload);
                                     emit_canonical_reinterpret(&mut func, vt_joined, *vt_payload)?;
                                 }
-                                let is_fat_box =
-                                    matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-                                        || (matches!(
-                                            self.ctx.ty_kind(payload_ty),
-                                            InternedTyKind::List(_)
-                                        ) && !self
-                                            .record_gc_types
-                                            .list_array_type_idx
-                                            .contains_key(&payload_ty));
-                                if is_fat_box {
-                                    // strings-to-GC: string payload → $str_bytes
-                                    // ref from (ptr, len), not a $fat_value box.
-                                    let str_bytes_unmat = if matches!(
-                                            self.ctx.ty_kind(payload_ty),
-                                            InternedTyKind::String
-                                        ) {
-                                        self.record_gc_types.str_bytes_array_idx.and_then(|idx| {
-                                            self.gc_list_unmaterializer_fn_indices.get(&idx).copied()
-                                        })
-                                    } else {
-                                        None
-                                    };
-                                    if let Some(unmat_fn) = str_bytes_unmat {
-                                        func.instruction(&Instruction::Call(unmat_fn));
-                                    } else {
-                                        let fat_value_idx = self
-                                            .record_gc_types
-                                            .fat_value_type_idx
-                                            .ok_or_else(|| {
-                                                CodegenError::InvalidIR(
-                                                    "FlatGcStruct setter: $fat_value type idx missing"
-                                                        .into(),
-                                                )
-                                            })?;
-                                        func.instruction(&Instruction::StructNew(fat_value_idx));
-                                    }
+                                // strings-to-GC: a string payload builds a
+                                // `$str_bytes` ref from canonical (ptr, len).
+                                // Every valid list is a typed array handled
+                                // above, so String is the only ref-built
+                                // payload here — nothing boxes into $fat_value.
+                                if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String) {
+                                    let str_bytes_idx =
+                                        self.record_gc_types.str_bytes_array_idx.ok_or_else(|| {
+                                            CodegenError::InvalidIR(
+                                                "FlatGcStruct setter: $str_bytes missing".into(),
+                                            )
+                                        })?;
+                                    let unmat_fn = *self
+                                        .gc_list_unmaterializer_fn_indices
+                                        .get(&str_bytes_idx)
+                                        .ok_or_else(|| {
+                                            CodegenError::InvalidIR(
+                                                "FlatGcStruct setter: missing $str_bytes \
+                                                 un-materializer"
+                                                    .into(),
+                                            )
+                                        })?;
+                                    func.instruction(&Instruction::Call(unmat_fn));
                                 }
                                 func.instruction(&Instruction::StructNew(case_sub_idx));
                             }
@@ -2046,7 +1978,6 @@ impl<'a> WasmPackageBuilder<'a> {
                 let record_type_idx = self.por_record_type_idx(ty).ok_or_else(|| {
                     CodegenError::InvalidIR("SLR setter: missing record type idx".into())
                 })?;
-                let fat_value_idx = self.record_gc_types.fat_value_type_idx;
                 let record_def_id = match self.ctx.ty_kind(ty) {
                     InternedTyKind::Adt(d) => *d,
                     _ => {
@@ -2072,7 +2003,6 @@ impl<'a> WasmPackageBuilder<'a> {
                 self.emit_setter_pack_dtr_record(
                     &mut func,
                     record_def_id,
-                    fat_value_idx,
                     &mut next_param,
                 )?;
                 debug_assert_eq!(next_param - 1, actual_flat_count);
@@ -2503,7 +2433,6 @@ impl<'a> WasmPackageBuilder<'a> {
                 CodegenError::InvalidIR("inline_record_lift: missing record layout".into())
             })?
             .clone();
-        let fat_value_idx = self.record_gc_types.fat_value_type_idx;
 
         for (i, &field_def_id) in record_def.fields.iter().enumerate() {
             let field_ty = match self.ctx.defs.kind(field_def_id) {
@@ -2530,39 +2459,13 @@ impl<'a> WasmPackageBuilder<'a> {
 
             match self.ctx.ty_kind(field_ty) {
                 InternedTyKind::String => {
-                    // String field: stored as `(ref null $fat_value)`. Unbox
-                    // to (ptr, len) and write at abs_off, abs_off+4.
-                    let fv = fat_value_idx.ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "inline_record_lift: $fat_value type idx missing".into(),
-                        )
-                    })?;
-                    // ptr
-                    func.instruction(&Instruction::LocalGet(base_addr_local));
-                    if abs_off != 0 {
-                        func.instruction(&Instruction::I32Const(abs_off as i32));
-                        func.instruction(&Instruction::I32Add);
-                    }
-                    load_field(func);
-                    func.instruction(&Instruction::RefAsNonNull);
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: fv,
-                        field_index: 0,
-                    });
-                    func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
-                    // len
-                    func.instruction(&Instruction::LocalGet(base_addr_local));
-                    if abs_off + 4 != 0 {
-                        func.instruction(&Instruction::I32Const((abs_off + 4) as i32));
-                        func.instruction(&Instruction::I32Add);
-                    }
-                    load_field(func);
-                    func.instruction(&Instruction::RefAsNonNull);
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: fv,
-                        field_index: 1,
-                    });
-                    func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
+                    // A string field is a `$str_bytes` GC ref, not a
+                    // `$fat_value` box; its inline lift is handled by the
+                    // str_bytes-aware path, never here.
+                    unreachable!(
+                        "inline_record_lift: string field boxed into $fat_value — \
+                         strings are $str_bytes GC refs, materialized elsewhere"
+                    );
                 }
                 InternedTyKind::List(_)
                     if self
@@ -2654,13 +2557,6 @@ impl<'a> WasmPackageBuilder<'a> {
         // Identify whether the case-subtype's payload field is a
         // `$fat_value` ref (string / non-typed-array list) — needs
         // unboxing — or a direct value (primitive scalar / typed ref).
-        let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-            || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                && !self
-                    .record_gc_types
-                    .list_array_type_idx
-                    .contains_key(&payload_ty));
-
         // Typed list payload (in list_array_type_idx): the case-subtype
         // field is a `(ref null $list_arr)`. Canonical-ABI lowering
         // expects (ptr, len) at canonical_slots[1..3], so call the per-
@@ -2779,69 +2675,6 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::I32Add);
             }
             func.instruction(&Instruction::LocalGet(mat_len_local));
-            func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
-            return Ok(());
-        }
-
-        if is_fat_box {
-            // Canonical layout: payload occupies 2 consecutive slots
-            // — (ptr at canonical_slots[1], len at canonical_slots[2]).
-            let ptr_slot = canonical_slots.get(1).ok_or_else(|| {
-                CodegenError::InvalidIR(
-                    "FlatGcStruct payload lift: missing ptr slot in canonical layout".into(),
-                )
-            })?;
-            let len_slot = canonical_slots.get(2).ok_or_else(|| {
-                CodegenError::InvalidIR(
-                    "FlatGcStruct payload lift: missing len slot in canonical layout".into(),
-                )
-            })?;
-            let fat_value_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                CodegenError::InvalidIR(
-                    "FlatGcStruct payload lift: $fat_value type idx missing".into(),
-                )
-            })?;
-
-            // Store ptr at scratch + ptr_slot.offset.
-            func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-            if ptr_slot.offset != 0 {
-                func.instruction(&Instruction::I32Const(ptr_slot.offset as i32));
-                func.instruction(&Instruction::I32Add);
-            }
-            self.emit_signal_struct_read_for_lift(func, ci, sig_idx)?;
-            func.instruction(&Instruction::RefCastNonNull(
-                wasm_encoder::HeapType::Concrete(case_sub_idx),
-            ));
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: case_sub_idx,
-                field_index: 0,
-            });
-            func.instruction(&Instruction::RefAsNonNull);
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: fat_value_idx,
-                field_index: 0,
-            });
-            func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
-
-            // Store len at scratch + len_slot.offset.
-            func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-            if len_slot.offset != 0 {
-                func.instruction(&Instruction::I32Const(len_slot.offset as i32));
-                func.instruction(&Instruction::I32Add);
-            }
-            self.emit_signal_struct_read_for_lift(func, ci, sig_idx)?;
-            func.instruction(&Instruction::RefCastNonNull(
-                wasm_encoder::HeapType::Concrete(case_sub_idx),
-            ));
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: case_sub_idx,
-                field_index: 0,
-            });
-            func.instruction(&Instruction::RefAsNonNull);
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: fat_value_idx,
-                field_index: 1,
-            });
             func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
             return Ok(());
         }
@@ -3336,16 +3169,12 @@ impl<'a> WasmPackageBuilder<'a> {
                             func.instruction(&Instruction::I32Add);
                         }
                         func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
-                        if let Some(unmat_fn) = str_bytes_unmat {
-                            func.instruction(&Instruction::Call(unmat_fn));
-                        } else {
-                            let fv = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                                CodegenError::InvalidIR(
-                                    "list un-materializer (flat-gc): $fat_value missing".into(),
-                                )
-                            })?;
-                            func.instruction(&Instruction::StructNew(fv));
-                        }
+                        let unmat_fn = str_bytes_unmat.expect(
+                            "list un-materializer (flat-gc): fat-box payload that is not a \
+                             $str_bytes string — every valid list is a typed GC array; \
+                             nothing boxes into $fat_value",
+                        );
+                        func.instruction(&Instruction::Call(unmat_fn));
                         func.instruction(&Instruction::StructNew(case_sub_idx));
                     } else {
                         let payload_slot = canonical_slots.get(1).ok_or_else(|| {
@@ -4158,91 +3987,14 @@ impl<'a> WasmPackageBuilder<'a> {
             return self.generate_gc_list_string_materializer(arr_type_idx);
         }
         if elem_is_string {
-            // Phase 5e.4: per-element layout = ($fat_value ref → ptr@+0, len@+4).
-            let fat_value_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                CodegenError::InvalidIR(
-                    "list<string> materializer: $fat_value type idx missing".into(),
-                )
-            })?;
-            let elem_size: u32 = 8;
-            let elem_align: u32 = 4;
-            let mut func = Function::new([
-                (1, ValType::I32), // len
-                (1, ValType::I32), // data_ptr
-                (1, ValType::I32), // idx
-                (1, ValType::I32), // elem_addr
-            ]);
-            let arr_local: u32 = 0;
-            let len_local: u32 = 1;
-            let data_ptr_local: u32 = 2;
-            let idx_local: u32 = 3;
-            let elem_addr_local: u32 = 4;
-            // len = array.len(arr)
-            func.instruction(&wasm_encoder::Instruction::LocalGet(arr_local));
-            func.instruction(&wasm_encoder::Instruction::ArrayLen);
-            func.instruction(&wasm_encoder::Instruction::LocalSet(len_local));
-            // data_ptr = cabi_realloc(0, 0, elem_align, len * elem_size)
-            super::scratch::emit_cabi_realloc_array(&mut func, len_local, elem_size, elem_align, cabi_realloc);
-            func.instruction(&wasm_encoder::Instruction::LocalSet(data_ptr_local));
-            func.instruction(&wasm_encoder::Instruction::I32Const(0));
-            func.instruction(&wasm_encoder::Instruction::LocalSet(idx_local));
-            func.instruction(&wasm_encoder::Instruction::Block(
-                wasm_encoder::BlockType::Empty,
-            ));
-            func.instruction(&wasm_encoder::Instruction::Loop(
-                wasm_encoder::BlockType::Empty,
-            ));
-            func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));
-            func.instruction(&wasm_encoder::Instruction::LocalGet(len_local));
-            func.instruction(&wasm_encoder::Instruction::I32GeU);
-            func.instruction(&wasm_encoder::Instruction::BrIf(1));
-            // elem_addr = data_ptr + idx * 8
-            func.instruction(&wasm_encoder::Instruction::LocalGet(data_ptr_local));
-            func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));
-            func.instruction(&wasm_encoder::Instruction::I32Const(8));
-            func.instruction(&wasm_encoder::Instruction::I32Mul);
-            func.instruction(&wasm_encoder::Instruction::I32Add);
-            func.instruction(&wasm_encoder::Instruction::LocalSet(elem_addr_local));
-            // ptr at elem_addr+0
-            func.instruction(&wasm_encoder::Instruction::LocalGet(elem_addr_local));
-            func.instruction(&wasm_encoder::Instruction::LocalGet(arr_local));
-            func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));
-            func.instruction(&wasm_encoder::Instruction::ArrayGet(arr_type_idx));
-            func.instruction(&wasm_encoder::Instruction::RefAsNonNull);
-            func.instruction(&wasm_encoder::Instruction::StructGet {
-                struct_type_index: fat_value_idx,
-                field_index: 0,
-            });
-            func.instruction(&wasm_encoder::Instruction::I32Store(
-                super::scratch::mem_arg(0, 2),
-            ));
-            // len at elem_addr+4
-            func.instruction(&wasm_encoder::Instruction::LocalGet(elem_addr_local));
-            func.instruction(&wasm_encoder::Instruction::I32Const(4));
-            func.instruction(&wasm_encoder::Instruction::I32Add);
-            func.instruction(&wasm_encoder::Instruction::LocalGet(arr_local));
-            func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));
-            func.instruction(&wasm_encoder::Instruction::ArrayGet(arr_type_idx));
-            func.instruction(&wasm_encoder::Instruction::RefAsNonNull);
-            func.instruction(&wasm_encoder::Instruction::StructGet {
-                struct_type_index: fat_value_idx,
-                field_index: 1,
-            });
-            func.instruction(&wasm_encoder::Instruction::I32Store(
-                super::scratch::mem_arg(0, 2),
-            ));
-            // idx++
-            func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));
-            func.instruction(&wasm_encoder::Instruction::I32Const(1));
-            func.instruction(&wasm_encoder::Instruction::I32Add);
-            func.instruction(&wasm_encoder::Instruction::LocalSet(idx_local));
-            func.instruction(&wasm_encoder::Instruction::Br(0));
-            func.instruction(&wasm_encoder::Instruction::End);
-            func.instruction(&wasm_encoder::Instruction::End);
-            func.instruction(&wasm_encoder::Instruction::LocalGet(data_ptr_local));
-            func.instruction(&wasm_encoder::Instruction::LocalGet(len_local));
-            func.instruction(&wasm_encoder::Instruction::End);
-            return Ok(func);
+            // A `list<string>` element is a `$str_bytes` GC ref handled
+            // by `generate_gc_list_string_materializer` above; a legacy
+            // fat-box `option<scalar>` element no longer boxes into
+            // `$fat_value` either. This branch is unreachable.
+            unreachable!(
+                "list<string> materializer: element boxed into $fat_value — strings are \
+                 $str_bytes GC refs and no value boxes into $fat_value"
+            );
         }
         // Phase 5e.6: nested-list element — each elem is itself a typed
         // GC array ref. Recursively call its materializer to produce
@@ -4662,12 +4414,6 @@ impl<'a> WasmPackageBuilder<'a> {
             func.instruction(&Instruction::I32Store8(super::scratch::mem_arg(0, 0)));
             // Payload write.
             if let Some(payload_ty) = case_payload_ty(self.ctx, elem_ty, k) {
-                let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-                    || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                        && !self
-                            .record_gc_types
-                            .list_array_type_idx
-                            .contains_key(&payload_ty));
                 // strings-to-GC: string payload field is a $str_bytes ref —
                 // materialize once to (ptr, len) and store both canonical slots.
                 if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
@@ -4714,46 +4460,6 @@ impl<'a> WasmPackageBuilder<'a> {
                     }
                     func.instruction(&Instruction::LocalGet(mat_len_local));
                     func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
-                } else if is_fat_box {
-                    let fat_value_idx =
-                        self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                            CodegenError::InvalidIR(
-                                "list materializer (flat-gc): $fat_value type idx missing".into(),
-                            )
-                        })?;
-                    let ptr_slot = canonical_slots.get(1).ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "list materializer (flat-gc): missing ptr slot".into(),
-                        )
-                    })?;
-                    let len_slot = canonical_slots.get(2).ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "list materializer (flat-gc): missing len slot".into(),
-                        )
-                    })?;
-                    for (slot, fv_field) in [(ptr_slot, 0u32), (len_slot, 1u32)] {
-                        func.instruction(&Instruction::LocalGet(elem_addr_local));
-                        if slot.offset != 0 {
-                            func.instruction(&Instruction::I32Const(slot.offset as i32));
-                            func.instruction(&Instruction::I32Add);
-                        }
-                        func.instruction(&Instruction::LocalGet(arr_local));
-                        func.instruction(&Instruction::LocalGet(idx_local));
-                        func.instruction(&Instruction::ArrayGet(arr_type_idx));
-                        func.instruction(&Instruction::RefCastNonNull(
-                            wasm_encoder::HeapType::Concrete(case_sub_idx),
-                        ));
-                        func.instruction(&Instruction::StructGet {
-                            struct_type_index: case_sub_idx,
-                            field_index: 0,
-                        });
-                        func.instruction(&Instruction::RefAsNonNull);
-                        func.instruction(&Instruction::StructGet {
-                            struct_type_index: fat_value_idx,
-                            field_index: fv_field,
-                        });
-                        func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
-                    }
                 } else {
                     // Scalar payload — single canonical slot.
                     let payload_slot = canonical_slots.get(1).ok_or_else(|| {
@@ -4920,12 +4626,6 @@ impl<'a> WasmPackageBuilder<'a> {
             {
                 use super::super::gc_types::StructGetVariant;
                 use yel_core::types::InternedTyKind;
-                let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-                    || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                        && !self
-                            .record_gc_types
-                            .list_array_type_idx
-                            .contains_key(&payload_ty));
 
                 // strings-to-GC: string payload field is a `$str_bytes` ref —
                 // materialize once to (ptr, len) and store the canonical slots.
@@ -4978,66 +4678,6 @@ impl<'a> WasmPackageBuilder<'a> {
                         func.instruction(&Instruction::I32Add);
                     }
                     func.instruction(&Instruction::LocalGet(mat_len_local));
-                    func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
-                } else if is_fat_box {
-                    let ptr_slot = canonical_slots.get(1).ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "FlatGcStruct DTR field lift: missing ptr slot".into(),
-                        )
-                    })?;
-                    let len_slot = canonical_slots.get(2).ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "FlatGcStruct DTR field lift: missing len slot".into(),
-                        )
-                    })?;
-                    let fat_value_idx_local =
-                        self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                            CodegenError::InvalidIR(
-                                "FlatGcStruct DTR field lift: $fat_value type idx missing".into(),
-                            )
-                        })?;
-                    // Store ptr.
-                    func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-                    let abs = abs_field_offset + ptr_slot.offset;
-                    if abs != 0 {
-                        func.instruction(&Instruction::I32Const(abs as i32));
-                        func.instruction(&Instruction::I32Add);
-                    }
-                    emit_field_ref(self, func)?;
-                    func.instruction(&Instruction::RefCastNonNull(
-                        wasm_encoder::HeapType::Concrete(case_sub_idx),
-                    ));
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: case_sub_idx,
-                        field_index: 0,
-                    });
-                    func.instruction(&Instruction::RefAsNonNull);
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: fat_value_idx_local,
-                        field_index: 0,
-                    });
-                    func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
-
-                    // Store len.
-                    func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-                    let abs = abs_field_offset + len_slot.offset;
-                    if abs != 0 {
-                        func.instruction(&Instruction::I32Const(abs as i32));
-                        func.instruction(&Instruction::I32Add);
-                    }
-                    emit_field_ref(self, func)?;
-                    func.instruction(&Instruction::RefCastNonNull(
-                        wasm_encoder::HeapType::Concrete(case_sub_idx),
-                    ));
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: case_sub_idx,
-                        field_index: 0,
-                    });
-                    func.instruction(&Instruction::RefAsNonNull);
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: fat_value_idx_local,
-                        field_index: 1,
-                    });
                     func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
                 } else {
                     // Single-slot scalar payload.
@@ -5108,7 +4748,6 @@ impl<'a> WasmPackageBuilder<'a> {
         record_def_id: DefId,
         base_offset: u32,
         scratch_ptr_local: u32,
-        fat_value_idx: Option<u32>,
         prefix: &[(u32, u32)],
     ) -> Result<(), CodegenError> {
         let record_def = match self.ctx.defs.kind(record_def_id) {
@@ -5172,7 +4811,6 @@ impl<'a> WasmPackageBuilder<'a> {
                     *field_def,
                     abs_field_offset,
                     scratch_ptr_local,
-                    fat_value_idx,
                     &new_prefix,
                 )?;
                 continue;
@@ -5310,7 +4948,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 len_slot.store.emit_store(func);
                 continue;
             }
-            for (slot_idx, slot) in field_slots.iter().enumerate() {
+            for slot in field_slots.iter() {
                 func.instruction(&Instruction::LocalGet(scratch_ptr_local));
                 let total_off = abs_field_offset + slot.offset;
                 if total_off != 0 {
@@ -5341,22 +4979,6 @@ impl<'a> WasmPackageBuilder<'a> {
                     struct_type_index: record_type_idx,
                     field_index: gc_field_idx,
                 });
-                if matches!(
-                    field_kind,
-                    yel_core::types::InternedTyKind::String
-                        | yel_core::types::InternedTyKind::List(_)
-                ) {
-                    let fv = fat_value_idx.ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "DTR getter lift: fat_value type idx missing".into(),
-                        )
-                    })?;
-                    func.instruction(&Instruction::RefAsNonNull);
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: fv,
-                        field_index: slot_idx as u32,
-                    });
-                }
                 slot.store.emit_store(func);
             }
         }
@@ -5372,7 +4994,6 @@ impl<'a> WasmPackageBuilder<'a> {
         &self,
         func: &mut Function,
         record_def_id: DefId,
-        fat_value_idx: Option<u32>,
         next_param: &mut u32,
     ) -> Result<(), CodegenError> {
         let record_def = match self.ctx.defs.kind(record_def_id) {
@@ -5405,7 +5026,7 @@ impl<'a> WasmPackageBuilder<'a> {
             // build the matching case subtype, push the (ref null
             // $<sup>) for the parent struct.new.
             if self.flat_gc_migrated(field_ty) {
-                self.emit_flat_gc_setter_pack_field(func, field_ty, fat_value_idx, next_param)?;
+                self.emit_flat_gc_setter_pack_field(func, field_ty, next_param)?;
                 continue;
             }
             match self.ctx.ty_kind(field_ty) {
@@ -5416,7 +5037,6 @@ impl<'a> WasmPackageBuilder<'a> {
                         self.emit_setter_pack_dtr_record(
                             func,
                             *field_def,
-                            fat_value_idx,
                             next_param,
                         )?;
                     }
@@ -5474,12 +5094,15 @@ impl<'a> WasmPackageBuilder<'a> {
                         })?;
                         func.instruction(&Instruction::Call(unmat_fn));
                     } else {
-                        let fv = fat_value_idx.ok_or_else(|| {
-                            CodegenError::InvalidIR(
-                                "DTR setter pack: fat_value type idx missing".into(),
-                            )
-                        })?;
-                        func.instruction(&Instruction::StructNew(fv));
+                        // A `String | List` field with neither a $str_bytes
+                        // nor a typed-array un-materializer would be a
+                        // fat-pointer-boxed list, which no longer exists —
+                        // every valid list is a typed GC array.
+                        unreachable!(
+                            "DTR setter pack: String/List field with no un-materializer — \
+                             strings are $str_bytes and every valid list is a typed GC array; \
+                             nothing boxes into $fat_value"
+                        );
                     }
                 }
                 _ => {
@@ -5508,7 +5131,6 @@ impl<'a> WasmPackageBuilder<'a> {
         &self,
         func: &mut Function,
         field_ty: Ty,
-        fat_value_idx: Option<u32>,
         next_param: &mut u32,
     ) -> Result<(), CodegenError> {
         use yel_core::types::InternedTyKind;
@@ -5611,18 +5233,10 @@ impl<'a> WasmPackageBuilder<'a> {
                             )
                         })?;
                     func.instruction(&Instruction::Call(unmat_fn));
-                } else {
-                    let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-                        || matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_));
-                    if is_fat_box {
-                        let fv = fat_value_idx.ok_or_else(|| {
-                            CodegenError::InvalidIR(
-                                "FlatGcStruct setter pack: $fat_value type idx missing".into(),
-                            )
-                        })?;
-                        func.instruction(&Instruction::StructNew(fv));
-                    }
                 }
+                // A scalar payload's slots are already on the stack for
+                // the case struct.new below. String (str_bytes) and typed
+                // lists were handled above; nothing boxes into $fat_value.
                 func.instruction(&Instruction::StructNew(case_sub_idx));
             } else {
                 func.instruction(&Instruction::StructNewDefault(case_sub_idx));
@@ -5680,13 +5294,6 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Detect fat-box inner payload: case-subtype field is
         // `(ref null $fat_value)`.
-        let is_fat_box = matches!(self.ctx.ty_kind(inner_payload_ty), InternedTyKind::String)
-            || (matches!(self.ctx.ty_kind(inner_payload_ty), InternedTyKind::List(_))
-                && !self
-                    .record_gc_types
-                    .list_array_type_idx
-                    .contains_key(&inner_payload_ty));
-
         // strings-to-GC: nested string payload — the inner case-subtype
         // field is a `$str_bytes` ref; materialize to (ptr, len).
         if matches!(self.ctx.ty_kind(inner_payload_ty), InternedTyKind::String)
@@ -5742,55 +5349,6 @@ impl<'a> WasmPackageBuilder<'a> {
             }
             func.instruction(&Instruction::LocalGet(mat_len_local));
             func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
-            return Ok(());
-        }
-
-        if is_fat_box {
-            let fat_value_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                CodegenError::InvalidIR(
-                    "nested FlatGcStruct lift: $fat_value type idx missing".into(),
-                )
-            })?;
-            // Outer canonical_slots[2] = ptr, [3] = len.
-            let ptr_slot = canonical_slots.get(2).ok_or_else(|| {
-                CodegenError::InvalidIR(
-                    "nested FlatGcStruct lift (fat-box): missing outer ptr slot".into(),
-                )
-            })?;
-            let len_slot = canonical_slots.get(3).ok_or_else(|| {
-                CodegenError::InvalidIR(
-                    "nested FlatGcStruct lift (fat-box): missing outer len slot".into(),
-                )
-            })?;
-
-            for (slot, fv_field) in [(ptr_slot, 0u32), (len_slot, 1u32)] {
-                func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-                if slot.offset != 0 {
-                    func.instruction(&Instruction::I32Const(slot.offset as i32));
-                    func.instruction(&Instruction::I32Add);
-                }
-                self.emit_signal_struct_read_for_lift(func, ci, sig_idx)?;
-                func.instruction(&Instruction::RefCastNonNull(
-                    wasm_encoder::HeapType::Concrete(outer_case_sub_idx),
-                ));
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: outer_case_sub_idx,
-                    field_index: 0,
-                });
-                func.instruction(&Instruction::RefCastNonNull(
-                    wasm_encoder::HeapType::Concrete(inner_case_sub_idx),
-                ));
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: inner_case_sub_idx,
-                    field_index: 0,
-                });
-                func.instruction(&Instruction::RefAsNonNull);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: fat_value_idx,
-                    field_index: fv_field,
-                });
-                func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
-            }
             return Ok(());
         }
 
@@ -5926,34 +5484,27 @@ impl<'a> WasmPackageBuilder<'a> {
                     for i in 0..payload_flat.len() as u32 {
                         func.instruction(&Instruction::LocalGet(payload_start + i));
                     }
-                    let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-                        || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                            && !self
-                                .record_gc_types
-                                .list_array_type_idx
-                                .contains_key(&payload_ty));
-                    if is_fat_box {
-                        // strings-to-GC: string payload → build a $str_bytes
-                        // ref from (ptr, len) via the un-materializer, not a
-                        // $fat_value box.
-                        let str_bytes_unmat = if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-                        {
-                            self.record_gc_types.str_bytes_array_idx.and_then(|idx| {
-                                self.gc_list_unmaterializer_fn_indices.get(&idx).copied()
-                            })
-                        } else {
-                            None
-                        };
-                        if let Some(unmat_fn) = str_bytes_unmat {
-                            func.instruction(&Instruction::Call(unmat_fn));
-                        } else {
-                            let fv = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
+                    // strings-to-GC: a string payload builds a `$str_bytes`
+                    // ref from canonical (ptr, len). Every valid list is a
+                    // typed GC array, so String is the only ref-built payload
+                    // here — nothing boxes into $fat_value.
+                    if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String) {
+                        let str_bytes_idx =
+                            self.record_gc_types.str_bytes_array_idx.ok_or_else(|| {
                                 CodegenError::InvalidIR(
-                                    "pack canonical→flat-gc: $fat_value type idx missing".into(),
+                                    "pack canonical→flat-gc: $str_bytes missing".into(),
                                 )
                             })?;
-                            func.instruction(&Instruction::StructNew(fv));
-                        }
+                        let unmat_fn = *self
+                            .gc_list_unmaterializer_fn_indices
+                            .get(&str_bytes_idx)
+                            .ok_or_else(|| {
+                                CodegenError::InvalidIR(
+                                    "pack canonical→flat-gc: missing $str_bytes un-materializer"
+                                        .into(),
+                                )
+                            })?;
+                        func.instruction(&Instruction::Call(unmat_fn));
                     }
                     func.instruction(&Instruction::StructNew(case_sub_idx));
                 }
@@ -6028,7 +5579,6 @@ impl<'a> WasmPackageBuilder<'a> {
                 CodegenError::InvalidIR("record_pack_from_memory: missing record layout".into())
             })?
             .clone();
-        let fat_value_idx = self.record_gc_types.fat_value_type_idx;
         for (i, &field_def_id) in record_def.fields.iter().enumerate() {
             let field_ty = match self.ctx.defs.kind(field_def_id) {
                 yel_core::definitions::DefKind::Field(f) => f.ty,
@@ -6094,16 +5644,15 @@ impl<'a> WasmPackageBuilder<'a> {
                     func.instruction(&Instruction::I32Add);
                     func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
                     // strings-to-GC: build a $str_bytes ref instead of boxing.
-                    if matches!(self.ctx.ty_kind(field_ty), InternedTyKind::String)
-                    {
+                    // Typed-array lists matched the arm above; a `List` here
+                    // would be a non-typed-array list, which no longer exists.
+                    if matches!(self.ctx.ty_kind(field_ty), InternedTyKind::String) {
                         self.emit_str_bytes_unmaterialize(func)?;
                     } else {
-                        let fv = fat_value_idx.ok_or_else(|| {
-                            CodegenError::InvalidIR(
-                                "record_pack_from_memory: fat_value type idx missing".into(),
-                            )
-                        })?;
-                        func.instruction(&Instruction::StructNew(fv));
+                        unreachable!(
+                            "record_pack_from_memory: non-typed-array list field — every valid \
+                             list is a typed GC array; nothing boxes into $fat_value"
+                        );
                     }
                 }
                 _ => {
@@ -6264,14 +5813,6 @@ impl<'a> WasmPackageBuilder<'a> {
         base_field_offset: u32,
     ) -> Result<(), CodegenError> {
         use super::super::gc_types::StructGetVariant;
-        use yel_core::types::InternedTyKind;
-
-        let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-            || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                && !self
-                    .record_gc_types
-                    .list_array_type_idx
-                    .contains_key(&payload_ty));
 
         // Helper closure to push <record>.struct.get $rec field;
         // ref.cast to case subtype.
@@ -6285,59 +5826,6 @@ impl<'a> WasmPackageBuilder<'a> {
                 wasm_encoder::HeapType::Concrete(case_sub_idx),
             ));
         };
-
-        if is_fat_box {
-            let ptr_slot = canonical_slots.get(1).ok_or_else(|| {
-                CodegenError::InvalidIR("FlatGcStruct field payload lift: missing ptr slot".into())
-            })?;
-            let len_slot = canonical_slots.get(2).ok_or_else(|| {
-                CodegenError::InvalidIR("FlatGcStruct field payload lift: missing len slot".into())
-            })?;
-            let fat_value_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                CodegenError::InvalidIR(
-                    "FlatGcStruct field payload lift: $fat_value type idx missing".into(),
-                )
-            })?;
-
-            // Store ptr.
-            func.instruction(&Instruction::LocalGet(base_addr_local));
-            let abs_off = base_field_offset + ptr_slot.offset;
-            if abs_off != 0 {
-                func.instruction(&Instruction::I32Const(abs_off as i32));
-                func.instruction(&Instruction::I32Add);
-            }
-            emit_field_ref(func);
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: case_sub_idx,
-                field_index: 0,
-            });
-            func.instruction(&Instruction::RefAsNonNull);
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: fat_value_idx,
-                field_index: 0,
-            });
-            func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
-
-            // Store len.
-            func.instruction(&Instruction::LocalGet(base_addr_local));
-            let abs_off = base_field_offset + len_slot.offset;
-            if abs_off != 0 {
-                func.instruction(&Instruction::I32Const(abs_off as i32));
-                func.instruction(&Instruction::I32Add);
-            }
-            emit_field_ref(func);
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: case_sub_idx,
-                field_index: 0,
-            });
-            func.instruction(&Instruction::RefAsNonNull);
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: fat_value_idx,
-                field_index: 1,
-            });
-            func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
-            return Ok(());
-        }
 
         // Single-slot scalar payload.
         let payload_slot = canonical_slots.get(1).ok_or_else(|| {
@@ -6420,7 +5908,6 @@ impl<'a> WasmPackageBuilder<'a> {
                 CodegenError::InvalidIR("record_lift_to_memory: missing record layout".into())
             })?
             .clone();
-        let fat_value_idx = self.record_gc_types.fat_value_type_idx;
         for (i, &field_def_id) in record_def.fields.iter().enumerate() {
             let field_ty = match self.ctx.defs.kind(field_def_id) {
                 yel_core::definitions::DefKind::Field(f) => f.ty,
@@ -6552,45 +6039,14 @@ impl<'a> WasmPackageBuilder<'a> {
                     func.instruction(&Instruction::LocalGet(scratch_len));
                     func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
                 }
-                // Non-typed-array `list<T>` field: still boxed as $fat_value.
+                // A non-typed-array `list<T>` field would box into
+                // `$fat_value`, but every valid list is a typed GC array
+                // (matched above), so this arm is unreachable.
                 InternedTyKind::List(_) => {
-                    let fv = fat_value_idx.ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "record_lift_to_memory: fat_value type idx missing".into(),
-                        )
-                    })?;
-                    // Store ptr at abs_off.
-                    func.instruction(&Instruction::LocalGet(base_addr_local));
-                    if abs_off != 0 {
-                        func.instruction(&Instruction::I32Const(abs_off as i32));
-                        func.instruction(&Instruction::I32Add);
-                    }
-                    func.instruction(&Instruction::LocalGet(record_ref_local));
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: record_type_idx,
-                        field_index: gc_field_idx,
-                    });
-                    func.instruction(&Instruction::RefAsNonNull);
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: fv,
-                        field_index: 0,
-                    });
-                    func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
-                    // Store len at abs_off + 4.
-                    func.instruction(&Instruction::LocalGet(base_addr_local));
-                    func.instruction(&Instruction::I32Const((abs_off + 4) as i32));
-                    func.instruction(&Instruction::I32Add);
-                    func.instruction(&Instruction::LocalGet(record_ref_local));
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: record_type_idx,
-                        field_index: gc_field_idx,
-                    });
-                    func.instruction(&Instruction::RefAsNonNull);
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: fv,
-                        field_index: 1,
-                    });
-                    func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+                    unreachable!(
+                        "record_lift_to_memory: non-typed-array list field — every valid list \
+                         is a typed GC array; nothing boxes into $fat_value"
+                    );
                 }
                 _ => {
                     // Primitive / enum: struct.get → typed store at offset.

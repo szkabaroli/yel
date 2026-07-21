@@ -1881,49 +1881,17 @@ impl<'a> WasmPackageBuilder<'a> {
                         func.instruction(&Instruction::LocalGet(s_len));
                         func.instruction(&Instruction::I32Store(mem_arg(4, 2)));
                     }
-                    ArrayItemRepr::Fat {
-                        ptr_result,
-                        len_result,
-                    } => {
-                        // String element: unbox the `(ref null $fat_value)`
-                        // to its (ptr, len) fields into two i32 slots.
-                        let fv_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                            CodegenError::InvalidIR(
-                                "ArrayGetItem(Fat): $fat_value type idx not assigned".into(),
-                            )
-                        })?;
-                        for (field_index, dst) in [(0u32, ptr_result), (1u32, len_result)] {
-                            get_elem(func);
-                            func.instruction(&Instruction::RefAsNonNull);
-                            func.instruction(&Instruction::StructGet {
-                                struct_type_index: fv_idx,
-                                field_index,
-                            });
-                            func.instruction(&Instruction::LocalSet(slot_local(
-                                component, block,
-                                *dst,
-                                local_offset,
-                            )));
-                        }
-                    }
-                    ArrayItemRepr::FatToMem { buf_addr } => {
-                        // Write the unboxed (ptr, len) to memory at buf+0/+4.
-                        let fv_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                            CodegenError::InvalidIR(
-                                "ArrayGetItem(FatToMem): $fat_value type idx not assigned".into(),
-                            )
-                        })?;
-                        let buf_l = slot_local(component, block, *buf_addr, local_offset);
-                        for (field_index, mem_off) in [(0u32, 0u64), (1u32, 4u64)] {
-                            func.instruction(&Instruction::LocalGet(buf_l));
-                            get_elem(func);
-                            func.instruction(&Instruction::RefAsNonNull);
-                            func.instruction(&Instruction::StructGet {
-                                struct_type_index: fv_idx,
-                                field_index,
-                            });
-                            func.instruction(&Instruction::I32Store(mem_arg(mem_off, 2)));
-                        }
+                    ArrayItemRepr::Fat { .. } | ArrayItemRepr::FatToMem { .. } => {
+                        // A Fat / FatToMem repr for a non-string element
+                        // would mean the element is `$fat_value`-boxed, but
+                        // every list element is now a scalar, a typed GC ref,
+                        // or a `$str_bytes` string (handled by the guarded
+                        // arms above). Nothing boxes into `$fat_value`.
+                        unreachable!(
+                            "ArrayGetItem: Fat/FatToMem repr for non-string element — every \
+                             list element is a scalar, typed GC ref, or $str_bytes string; \
+                             nothing boxes into $fat_value"
+                        );
                     }
                 }
             }
