@@ -1433,6 +1433,11 @@ pub enum LirSlotValType {
     /// Codegen resolves the heap-type index via that map at
     /// local-declaration time. Mirrors `RefNullForRecord` for tuples.
     RefNullForTuple(Ty),
+    /// strings-to-GC (`plans/strings-to-gc.md`): nullable ref to the
+    /// module-shared `$str_bytes = (array (mut i8))` byte-array type that
+    /// backs a GC-native `String`. Codegen resolves the heap-type index via
+    /// `RecordGcTypes::str_bytes_array_idx`.
+    RefNullForStringBytes,
     /// Phase 0.3m: nullable ref to the module-shared `$handle-array`
     /// type. Used by the synthesized export-constructor block to type
     /// the array-scratch slot fed to `RegistryAlloc`. Codegen resolves

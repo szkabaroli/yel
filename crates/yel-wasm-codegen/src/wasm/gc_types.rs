@@ -593,6 +593,17 @@ fn slot_val_ty_to_val_ty(
         LirSlotValType::RefNullForListGc(_) => {
             unreachable!("GC list array ref not expected as a tree loop-var field type")
         }
+        LirSlotValType::RefNullForStringBytes => {
+            // strings-to-GC: a `list<string>` iter-body loop-var field holds
+            // the element's `$str_bytes` ref directly.
+            let idx = record_gc_types
+                .str_bytes_array_idx
+                .expect("RefNullForStringBytes: $str_bytes array type not registered");
+            ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(idx),
+            })
+        }
         LirSlotValType::RefNullForRecord(record_ty) => {
             use yel_core::types::InternedTyKind;
             let def_id = match ctx.ty_kind(*record_ty) {
@@ -732,6 +743,12 @@ pub struct RecordGcTypes {
     /// to recover the (ptr, len) fat-pointer pair on stack.
     /// `None` if no records were emitted (no rec group built).
     pub fat_value_type_idx: Option<u32>,
+    /// Shared `$str_bytes = (array (mut i8))` GC type backing every
+    /// `String` (strings-to-GC migration, `plans/strings-to-gc.md`). One
+    /// packed-byte-array type per program, always emitted; the
+    /// `internal_repr` `String → GcArrayRef` hook reads it. `None` only
+    /// before the rec group is built.
+    pub str_bytes_array_idx: Option<u32>,
     /// Per-list-element-type GC array type indices, keyed by the
     /// **list `Ty`** (the `Ty` whose `InternedTyKind` is `List(elem)`),
     /// NOT by the element `Ty` — matches call sites that have a
@@ -814,13 +831,9 @@ pub fn emit_program_record_types(
     // when the outer rec group's payload-field storage is resolved.
     let flat_gc_tys = topo_sort_flat_gc_tys(ctx, &flat_gc_tys_unsorted);
 
-    if record_def_ids.is_empty()
-        && list_tys.is_empty()
-        && tuple_tys.is_empty()
-        && flat_gc_tys.is_empty()
-    {
-        return (0, RecordGcTypes::default());
-    }
+    // strings-to-GC: the shared `$str_bytes` byte-array type is always
+    // emitted (a `String` is a GC byte array everywhere), so there is never
+    // a zero-GC-type program — this rec group is always non-empty.
 
     let mut registry = RecordGcTypes::default();
 
@@ -872,6 +885,31 @@ pub fn emit_program_record_types(
         .type_names
         .push((fat_value_idx, "fat_value".to_string()));
 
+    // strings-to-GC: emit the shared `$str_bytes = (array (mut i8))` as its
+    // own singleton rec group right after `$fat_value`. Packed i8 = one byte
+    // per element (UTF-8). Always emitted — a `String` is a GC byte array.
+    let after_singletons = {
+        let sb_idx = fat_value_idx + 1;
+        types.ty().rec(vec![SubType {
+            is_final: true,
+            supertype_idx: None,
+            composite_type: CompositeType {
+                shared: false,
+                inner: CompositeInnerType::Array(ArrayType(FieldType {
+                    element_type: StorageType::I8,
+                    mutable: true,
+                })),
+                descriptor: None,
+                describes: None,
+            },
+        }]);
+        registry.str_bytes_array_idx = Some(sb_idx);
+        registry
+            .type_names
+            .push((sb_idx, "str_bytes".to_string()));
+        fat_value_idx + 2
+    };
+
     // Merge flat-gc parents, records, list arrays, and tuple structs
     // into ONE big rec group. Forward refs within a rec group
     // resolve naturally — so `option<Person>`'s Some-case can reference
@@ -893,7 +931,7 @@ pub fn emit_program_record_types(
     // ($fat_value stays as its own singleton rec group above — it's
     //  referenced *from* the merged group but doesn't reference back,
     //  so the boundary is acyclic.)
-    let mut cursor = fat_value_idx + 1;
+    let mut cursor = after_singletons;
     for &parent_ty in &flat_gc_tys {
         let consumed = assign_flat_gc_indices(ctx, parent_ty, cursor, &mut registry);
         cursor += consumed;
@@ -1069,6 +1107,7 @@ pub fn emit_program_record_types(
     //   + N (records) + L (lists) + T (tuples).
     // (`flat_gc_total` is computed above for the SubType capacity hint.)
     let total = 1
+        + 1 // $str_bytes (always emitted)
         + flat_gc_total
         + record_def_ids.len() as u32
         + list_tys.len() as u32
@@ -2000,12 +2039,16 @@ fn record_field_storage_type(ctx: &CompilerContext, ty: Ty, registry: &RecordGcT
             })
         }
         InternedTyKind::String => {
-            let fat_value_idx = registry
-                .fat_value_type_idx
-                .expect("fat_value type idx must be assigned before record fields are typed");
+            // strings-to-GC (`plans/strings-to-gc.md`): a string element/field
+            // is a `(ref null $str_bytes)` GC byte array, not a `$fat_value`
+            // (ptr, len) box. Element read/write is then a plain ref get/set.
+            let sb_idx = registry.str_bytes_array_idx.expect(
+                "record_field_storage_type: String field but $str_bytes array \
+                 type not registered",
+            );
             ValType::Ref(RefType {
                 nullable: true,
-                heap_type: HeapType::Concrete(fat_value_idx),
+                heap_type: HeapType::Concrete(sb_idx),
             })
         }
         // Phase 5e.5 (Stage 6+): option / result that are migrated

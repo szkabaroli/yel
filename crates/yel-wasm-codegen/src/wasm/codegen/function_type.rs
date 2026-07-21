@@ -142,6 +142,16 @@ impl<'a> WasmPackageBuilder<'a> {
                     })?;
                 mk_ref(ty_idx)
             }
+            LirSlotValType::RefNullForStringBytes => {
+                let ty_idx = self.record_gc_types.str_bytes_array_idx.ok_or_else(|| {
+                    CodegenError::InvalidIR(
+                        "slot wasm val type: RefNullForStringBytes but $str_bytes array \
+                         type not registered"
+                            .into(),
+                    )
+                })?;
+                mk_ref(ty_idx)
+            }
             LirSlotValType::RefNullForSharedHandleArray => {
                 let ty_idx = self.shared_handle_arr_type_idx.ok_or_else(|| {
                     CodegenError::InvalidIR(

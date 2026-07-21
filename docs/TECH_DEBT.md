@@ -107,7 +107,6 @@ deferred bodies) the way `wasm/codegen/` is split.
 - **Stringify fast-paths only**: `wasm/expr.rs:463,475,487` `*-to-string` arms `todo!()` on unexpected arity; numeric repr "hit[s] the scalar fast-path and fall[s] back to S32 for…" (`wasm/functions.rs:477`).
 - **Not-yet-migrated `InternalRepr::Flat` arm** referenced as a TODO in `wasm/repr.rs` (`wasm/expr.rs:3508`) — part of the WASM-GC migration ([§1.5](#15-wasm-gc-representation-migration-canonical-flat--typed-gc)).
 - **WIT version hard-defaulted**: package version "default[s] … to `0.1.0` for now" when a source omits it (`wasm/functions.rs:328`, mirrored in `yelc/pipeline.rs::wit_options`).
-- **`list<string>.append` (and other boxed-element lists) emit invalid WASM**: `generate_list_append_function` (`wasm/codegen/record_list.rs:586`) writes the element via a single `LocalGet(1)`, and the append-call site (`wasm/expr.rs:761`) pushes the element via `emit_expr` — for a `string` element that's a raw `(ptr,len)` fat pointer, but the array element storage type is `(ref null $fat_value)` (`gc_types::list_element_storage_type`). The element is never boxed into `$fat_value`, so validation fails with `expected (ref null $type), found i32`. Only `list<scalar>.append` is exercised (the `list_append` positive fixture is `list<s32>`). Fix: box the element to its `list_element_storage_type` before `ArraySet`, reusing the `ListConstruct` boxing path. Blocks the natural drag-drop surface (`items.append(payload)`); the `drag_drop` fixture routes around it by recording the payload in a `string` signal.
 
 ---
 

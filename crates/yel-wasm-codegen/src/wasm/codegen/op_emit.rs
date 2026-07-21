@@ -360,6 +360,13 @@ impl<'a> WasmPackageBuilder<'a> {
                         crate::wasm::repr::InternalRepr::FlatGcStruct(_) => {
                             self.internal_stack_slots(lir_expr.ty)
                         }
+                        // strings-to-GC: a string is a single $str_bytes ref
+                        // internally, not canonical (ptr, len).
+                        crate::wasm::repr::InternalRepr::GcArrayRef(_)
+                            if matches!(self.ctx.ty_kind(lir_expr.ty), InternedTyKind::String) =>
+                        {
+                            self.internal_stack_slots(lir_expr.ty)
+                        }
                         _ => self.flatten_core_valtypes(lir_expr.ty).len(),
                     };
                     for _ in 0..drop_count {
@@ -448,6 +455,13 @@ impl<'a> WasmPackageBuilder<'a> {
                         payload_expr.as_deref(),
                         component,
                     )?;
+                } else if matches!(self.ctx.ty_kind(lir_expr.ty), InternedTyKind::String) {
+                    // strings-to-GC (`plans/strings-to-gc.md`): PushExpr is a
+                    // host-call boundary. A GC-native string is a `$str_bytes`
+                    // ref internally — materialize it to canonical (ptr, len)
+                    // right here before the host consumes it.
+                    self.emit_expr(func, lir_expr, component)?;
+                    self.emit_str_bytes_materialize(func)?;
                 } else {
                     self.emit_expr(func, lir_expr, component)?;
                 }
@@ -1822,6 +1836,12 @@ impl<'a> WasmPackageBuilder<'a> {
                     func.instruction(&Instruction::LocalGet(idx_l));
                     func.instruction(&Instruction::ArrayGet(ty_idx));
                 };
+                // strings-to-GC: a `list<string>` element is a `$str_bytes`
+                // ref, not a `$fat_value` box. Materialize it to canonical
+                // (ptr, len) at the for-loop item boundary.
+                let elem_is_gc_string =
+                    matches!(self.ctx.ty_kind(*list_ty), InternedTyKind::List(e)
+                        if matches!(self.ctx.ty_kind(*e), InternedTyKind::String));
                 match repr {
                     ArrayItemRepr::Scalar { result } => {
                         get_elem(func);
@@ -1830,6 +1850,36 @@ impl<'a> WasmPackageBuilder<'a> {
                             *result,
                             local_offset,
                         )));
+                    }
+                    ArrayItemRepr::Fat {
+                        ptr_result,
+                        len_result,
+                    } if elem_is_gc_string => {
+                        // Materialize str_bytes ref → (ptr, len) into slots.
+                        let ptr_l = slot_local(component, block, *ptr_result, local_offset);
+                        let len_l = slot_local(component, block, *len_result, local_offset);
+                        get_elem(func);
+                        self.emit_str_bytes_materialize(func)?;
+                        func.instruction(&Instruction::LocalSet(len_l));
+                        func.instruction(&Instruction::LocalSet(ptr_l));
+                    }
+                    ArrayItemRepr::FatToMem { buf_addr } if elem_is_gc_string => {
+                        // Materialize str_bytes ref → (ptr, len), write to
+                        // memory at buf+0/+4 via two i32 scratch temps.
+                        let buf_l = slot_local(component, block, *buf_addr, local_offset);
+                        let scratch = self.current_flat_scratch.unwrap_or_default();
+                        let s_ptr = scratch.i32_base;
+                        let s_len = scratch.i32_base + 1;
+                        get_elem(func);
+                        self.emit_str_bytes_materialize(func)?;
+                        func.instruction(&Instruction::LocalSet(s_len));
+                        func.instruction(&Instruction::LocalSet(s_ptr));
+                        func.instruction(&Instruction::LocalGet(buf_l));
+                        func.instruction(&Instruction::LocalGet(s_ptr));
+                        func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
+                        func.instruction(&Instruction::LocalGet(buf_l));
+                        func.instruction(&Instruction::LocalGet(s_len));
+                        func.instruction(&Instruction::I32Store(mem_arg(4, 2)));
                     }
                     ArrayItemRepr::Fat {
                         ptr_result,

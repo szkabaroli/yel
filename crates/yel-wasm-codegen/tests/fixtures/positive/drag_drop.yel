@@ -16,14 +16,11 @@ package yel:dragdrop@0.1.0;
 // a `Ptr`-mode `string` local (`load_fat_ptr`). The host delivers the
 // payload through the new `drop(string)` arm of the `event-value` variant.
 //
-// The drop body records the last dropped payload in a `string` signal.
-// (Accumulating into the `items` list — `items.append(payload)` — is the
-// more natural surface but is blocked by a pre-existing typed-GC gap:
-// `list<string>.append` doesn't box its element into `$fat_value`. See
-// docs/TECH_DEBT.md §4.)
+// The drop body accumulates the dropped payload into the `items` list via
+// `items.append(payload)` — with strings as GC byte arrays, a `list<string>`
+// element is a plain `(ref $str_bytes)` store, so append just works.
 export component App {
     items: list<string> = ["a", "b", "c"];
-    last: string = "";
 
     VStack {
         for item in items key(item) {
@@ -35,8 +32,8 @@ export component App {
             }
         }
         VStack {
-            "dropped: {last}"
-            drop: { payload -> last = payload; }
+            "drop here"
+            drop: { payload -> items = items.append(payload); }
         }
     }
 }

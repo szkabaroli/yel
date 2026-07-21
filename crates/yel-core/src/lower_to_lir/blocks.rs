@@ -91,6 +91,10 @@ pub fn ty_to_slot_val_type(
     if matches!(ctx.ty_kind(ty), InternedTyKind::Tuple(_)) {
         return LirSlotValType::RefNullForTuple(ty);
     }
+    // strings-to-GC: a `String` value is a single `$str_bytes` GC ref.
+    if matches!(ctx.ty_kind(ty), InternedTyKind::String) {
+        return LirSlotValType::RefNullForStringBytes;
+    }
     match ctx.ty_kind(ty) {
         InternedTyKind::F32 => LirSlotValType::F32,
         InternedTyKind::F64 => LirSlotValType::F64,
@@ -4414,7 +4418,10 @@ impl<'a> BlockLowering<'a> {
         // Phase 5e.1: when iterating a GC-array list, the item slot
         // holds the typed array element directly (a record GC ref or
         // unboxed scalar). Otherwise it's a memory ptr (i32).
-        let item_ptr = if is_gc_list {
+        // strings-to-GC: a `list<string>` update loop uses the FatToMem
+        // repr, so `upd_item_ptr` holds a linear-memory buffer address
+        // (i32), NOT the element's `$str_bytes` ref — keep it untyped.
+        let item_ptr = if is_gc_list && !is_string_elem_gc {
             let item_ty = match self.ctx.ty_kind(list_ty) {
                 InternedTyKind::List(e) => *e,
                 _ => list_ty,
@@ -7864,6 +7871,18 @@ fn compute_flat_scratch_counts(
                     &mut min_i64_for_extras,
                     &mut needs_load_scratch,
                 );
+            }
+            // strings-to-GC: an `ArrayGetItem::FatToMem` over a
+            // `list<string>` materializes the element's `$str_bytes` ref to
+            // (ptr, len) using two i32 scratch temps (see the codegen for the
+            // FatToMem arm). Reserve them here so the block declares them.
+            LirOp::ArrayGetItem { list_ty, repr, .. }
+                if matches!(repr, crate::lir::block::ArrayItemRepr::FatToMem { .. })
+                    && matches!(ctx.ty_kind(*list_ty),
+                        crate::types::InternedTyKind::List(e)
+                        if matches!(ctx.ty_kind(*e), crate::types::InternedTyKind::String)) =>
+            {
+                min_i32_for_extras = min_i32_for_extras.max(2);
             }
             _ => {}
         }

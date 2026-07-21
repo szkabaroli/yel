@@ -39,7 +39,8 @@ use super::WasmPackageBuilder;
 ///
 /// Rule of thumb:
 ///   - primitive scalar → its matching `ValType` (1 slot)
-///   - `string`, non-typed-array `list<T>` → fat pointer (`i32`, `i32`) — 2 slots
+///   - `string` → `(ref $str_bytes)` GC byte array (1 slot)
+///   - non-typed-array `list<T>` → fat pointer (`i32`, `i32`) — 2 slots
 ///   - record / tuple / typed-array list → single typed GC ref (1 slot)
 ///   - option / result / variant → typed FlatGcStruct ref (1 slot) when
 ///     migrated, otherwise canonical-flat
@@ -51,7 +52,7 @@ pub(super) enum InternalRepr {
     Zero,
     /// Exactly one stack slot of the given valtype.
     Scalar(wasm_encoder::ValType),
-    /// `(i32, i32)` fat pointer — used for strings, non-typed-array lists.
+    /// `(i32, i32)` fat pointer — used for non-typed-array lists.
     FatPointer,
     /// A record stored as a `(ref null $<rec>_record)` GC ref (1 stack
     /// slot). Contained `u32` is the record's GC struct type index.
@@ -104,10 +105,19 @@ impl WasmPackageBuilder<'_> {
         // some(v) = v). No discriminant slot internally.
         if let yel_core::types::InternedTyKind::Option(inner_ty) = self.ctx.ty_kind(ty) {
             let inner_ty = *inner_ty;
-            match self.internal_repr(inner_ty) {
-                InternalRepr::GcRef(idx) => return InternalRepr::GcRef(idx),
-                InternalRepr::GcArrayRef(idx) => return InternalRepr::GcArrayRef(idx),
-                _ => {}
+            // strings-to-GC: `option<string>` does NOT collapse to a bare
+            // `(ref null $str_bytes)` — a null str_bytes ref is a legitimate
+            // empty string, indistinguishable from `none`. Keep it as a
+            // FlatGcStruct (`$opt_string` sub-hierarchy) so `some("")` and
+            // `none` stay distinct. Other ref inners (records / lists) have
+            // no such ambiguity and still collapse.
+            let inner_is_gc_string = matches!(self.ctx.ty_kind(inner_ty), InternedTyKind::String);
+            if !inner_is_gc_string {
+                match self.internal_repr(inner_ty) {
+                    InternalRepr::GcRef(idx) => return InternalRepr::GcRef(idx),
+                    InternalRepr::GcArrayRef(idx) => return InternalRepr::GcArrayRef(idx),
+                    _ => {}
+                }
             }
         }
         // The `flat_gc_migrated` predicate is mirrored in
@@ -117,6 +127,15 @@ impl WasmPackageBuilder<'_> {
             && let Some(&super_idx) = self.record_gc_types.flat_gc_super_idx.get(&ty) {
                 return InternalRepr::FlatGcStruct(super_idx);
             }
+        // strings-to-GC (`plans/strings-to-gc.md`): a `String` is a GC byte
+        // array `(ref $str_bytes)`. `$str_bytes` is always emitted, so the
+        // index is present for every program that reaches here.
+        if matches!(self.ctx.ty_kind(ty), InternedTyKind::String) {
+            let idx = self.record_gc_types.str_bytes_array_idx.expect(
+                "internal_repr: String reached but $str_bytes array type not registered",
+            );
+            return InternalRepr::GcArrayRef(idx);
+        }
         match self.ctx.ty_kind(ty) {
             InternedTyKind::Unit | InternedTyKind::Error | InternedTyKind::Unknown => {
                 InternalRepr::Zero
@@ -124,7 +143,11 @@ impl WasmPackageBuilder<'_> {
             InternedTyKind::F32 => InternalRepr::Scalar(ValType::F32),
             InternedTyKind::F64 => InternalRepr::Scalar(ValType::F64),
             InternedTyKind::S64 | InternedTyKind::U64 => InternalRepr::Scalar(ValType::I64),
-            InternedTyKind::String | InternedTyKind::List(_) => InternalRepr::FatPointer,
+            // `String` is handled above (always `GcArrayRef`). Only a
+            // non-typed-array `list<T>` (one whose element makes
+            // `is_scalar_list_ty` false) still falls through to the
+            // fat-pointer fallback.
+            InternedTyKind::List(_) => InternalRepr::FatPointer,
             // Tuple / Adt::Record cases are handled at the top of this
             // function via `tuple_struct_type_idx` / `por_record_type_idx`
             // returning the typed `GcRef`. Reaching this match arm means
@@ -172,7 +195,7 @@ impl WasmPackageBuilder<'_> {
     ///   narrow ints widened to i32 — fields are full-width, the
     ///   narrow-store/load dance is no longer needed since each field
     ///   has its own slot).
-    /// - FatPointer → `[I32, I32]` for strings / non-typed-array lists.
+    /// - FatPointer → `[I32, I32]` for non-typed-array lists.
     /// - GcRef / GcArrayRef / FlatGcStruct → 1 typed ref slot.
     /// - Flat → canonical-ABI flattening for non-migrated option/result/variant/enum.
     /// - Zero → `[]` (no value).
@@ -373,6 +396,10 @@ impl WasmPackageBuilder<'_> {
             return Some(arr_idx);
         }
 
+        // strings-to-GC: `option<string>` deliberately does NOT collapse
+        // (a null str_bytes ref would be ambiguous with `none`); it stays a
+        // FlatGcStruct. See `internal_repr`'s Option arm.
+
         match self.ctx.ty_kind(inner) {
             InternedTyKind::Tuple(_) => self
                 .record_gc_types
@@ -410,7 +437,7 @@ impl WasmPackageBuilder<'_> {
             return true;
         }
 
-        // Strings: element is `(ref null $fat_value)`.
+        // Strings: element is `(ref null $str_bytes)`.
         if matches!(self.ctx.ty_kind(elem), InternedTyKind::String) {
             return true;
         }

@@ -109,6 +109,7 @@ digraph yel_signal_graph {
     "c1_fn_23" -> "c1_blk23_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
     "c1_handler_1" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on changed", class="yel-handler"];
     "c1_elem_13" -> "c1_handler_1" [label="fires", color="#7e57c2", class="yel-fires"];
+    "c1_handler_1" -> "c1_sig_470" [label="writes", color="#cc3333", class="yel-writes"];
     "c1_handler_1" -> "c1_fn_23" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c1_handler_2" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on pressed", class="yel-handler"];
     "c1_elem_13" -> "c1_handler_2" [label="fires", color="#7e57c2", class="yel-fires"];

@@ -1056,25 +1056,19 @@ fn global_signal_fans_out_to_all_instances() {
     );
 }
 
-/// Pin the **currently-broken** output of the
-/// `s32_to_string_aliasing` known-runtime-bug fixture (see
+/// Regression guard: the strings-to-GC migration FIXED the
+/// `s32_to_string_aliasing` bug (see
 /// `tests/fixtures/known_bugs/runtime/s32_to_string_aliasing.yel`).
 ///
 /// The fixture interleaves two integer reads of distinct globals
-/// (Alpha=7, Beta=11) into one Text. Two consecutive `s32_to_string`
-/// calls share a static linear-memory buffer; the second overwrites
-/// the first's contents while the first's `len` lingers, so `concat`
-/// reads `len_first` bytes from the shared address and produces a
-/// truncated prefix of the wrong value. Today's observed output is
-/// `"alpha=1 beta=11"` (the leading "1" is the first byte of the
-/// second call's "11", not Alpha's 7).
-///
-/// **When this test starts failing**, the integer-stringify path has
-/// been fixed. Move the fixture to `tests/fixtures/positive/` and
-/// delete this test. See the `runtime/` section of
-/// `tests/fixtures/known_bugs/README.md`.
+/// (Alpha=7, Beta=11) into one Text. Under the old fat-pointer repr two
+/// consecutive `s32_to_string` calls shared a static linear-memory
+/// buffer, so the second clobbered the first and `concat` produced the
+/// truncated `"alpha=1 beta=11"`. Now each `s32_to_string` result is
+/// interned into its own `$str_bytes` GC array, so the correct
+/// `"alpha=7 beta=11"` is produced.
 #[test]
-fn known_runtime_bug_s32_to_string_aliasing_pinned() {
+fn s32_to_string_no_aliasing() {
     let source = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/known_bugs/runtime/s32_to_string_aliasing.yel",
@@ -1090,12 +1084,13 @@ fn known_runtime_bug_s32_to_string_aliasing_pinned() {
     let correct = ops
         .iter()
         .any(|op| matches!(op, DomOp::CreateText { content, .. } if content == "alpha=7 beta=11"));
+    // strings-to-GC (`plans/strings-to-gc.md`): each `s32_to_string` result
+    // is interned into its own `$str_bytes` GC array, so `alpha`'s
+    // conversion is no longer clobbered by `beta`'s.
     assert!(
-        buggy && !correct,
-        "Expected the pinned buggy output `alpha=1 beta=11` (s32_to_string \
-         shared-buffer aliasing). If you see `alpha=7 beta=11`, the bug is \
-         FIXED — graduate the fixture to tests/fixtures/positive/ and delete \
-         this test. Mount ops: {:?}",
+        correct && !buggy,
+        "strings-to-GC fixes the s32_to_string aliasing bug: expected \
+         `alpha=7 beta=11`, got ops: {:?}",
         ops
     );
 }

@@ -849,13 +849,23 @@ impl<'a> WasmPackageBuilder<'a> {
         // the GC stack representation — they still use FatPointer internally.
         // Added at the end of the type section (after all GC types) so their
         // type indices don't shift the gc_type_base_after_dyn accounting.
-        let gc_list_arr_type_idxs: Vec<(yel_core::Ty, u32)> = self
+        let mut gc_list_arr_type_idxs: Vec<(yel_core::Ty, u32)> = self
             .record_gc_types
             .list_array_type_idx
             .iter()
             .filter(|&(&ty, _)| self.is_scalar_list_ty(ty))
             .map(|(&ty, &arr_idx)| (ty, arr_idx))
             .collect();
+        // strings-to-GC (`plans/strings-to-gc.md`): the `$str_bytes` array
+        // gets a materializer/un-materializer too, keyed by `Ty::STRING`.
+        // Appended last so it never perturbs the list entries' indices.
+        // Its body-emission is dispatched specially (String kind, not List).
+        {
+            let str_bytes_idx = self.record_gc_types.str_bytes_array_idx.expect(
+                "gc_list_arr_type_idxs: $str_bytes array type must be registered",
+            );
+            gc_list_arr_type_idxs.push((yel_core::Ty::STRING, str_bytes_idx));
+        }
         let mut materializer_type_by_arr_idx: HashMap<u32, u32> = HashMap::new();
         for (i, (_, arr_type_idx)) in gc_list_arr_type_idxs.iter().enumerate() {
             let type_idx = cursor + i as u32;
@@ -2045,6 +2055,10 @@ impl<'a> WasmPackageBuilder<'a> {
         // 13. Phase 5b-v.3: GC list materializer function bodies.
         // Order matches function section declaration above.
         for (ty, arr_type_idx) in &gc_list_arr_type_idxs {
+            if matches!(self.ctx.ty_kind(*ty), InternedTyKind::String) {
+                code.function(&self.generate_str_bytes_materializer(*arr_type_idx)?);
+                continue;
+            }
             let elem_ty = match self.ctx.ty_kind(*ty) {
                 InternedTyKind::List(e) => *e,
                 _ => {
@@ -2058,6 +2072,10 @@ impl<'a> WasmPackageBuilder<'a> {
         }
         // 13b. Phase 5e.6: GC list un-materializer function bodies.
         for (ty, arr_type_idx) in &gc_list_arr_type_idxs {
+            if matches!(self.ctx.ty_kind(*ty), InternedTyKind::String) {
+                code.function(&self.generate_str_bytes_unmaterializer(*arr_type_idx)?);
+                continue;
+            }
             let elem_ty = match self.ctx.ty_kind(*ty) {
                 InternedTyKind::List(e) => *e,
                 _ => {

@@ -1,6 +1,17 @@
 # Plan: strings as GC byte arrays (`String` → `(ref $str_bytes)`, reuse the typed-list infra)
 
-Status: draft, not started. Baseline: fuzz 69/100 (identical failing set is the regression guard), full workspace green.
+Status: **Stages 1–4 DONE** (flag `STRINGS_AS_GC = true`, tree green). Strings are
+`$str_bytes = (array (mut i8))` end-to-end internally; `(ptr,len)` conversion is
+confined to the WIT/host boundary via `emit_str_bytes_materialize` /
+`emit_str_bytes_unmaterialize` + a dedicated `$str_bytes` (un)materializer registered
+in the existing `gc_list_(un)materializer_fn_indices` tables. String ops reuse the
+existing runtime helpers wrapped so every string VALUE between ops is a single ref.
+`option<string>` stays a FlatGcStruct (a null `$str_bytes` would alias `none`).
+Verified: full workspace green, positive fixtures 77/77, fuzz 69/100 (identical
+baseline set), `list<string>.append` works, WIT boundary still `string`.
+**Remaining: Stage 5** (delete `$fat_value` + the fat-pointer runtime helpers if no
+internal user survives) and **Stage 6** (docs/ARCHITECTURE, remove the flag). Baseline:
+fuzz 69/100 (identical failing set is the regression guard).
 
 ## Goal
 

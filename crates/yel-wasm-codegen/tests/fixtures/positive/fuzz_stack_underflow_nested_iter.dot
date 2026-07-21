@@ -468,13 +468,15 @@ digraph yel_signal_graph {
     "c1_sig_488" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="title\n: string", class="yel-signal"];
     "c1_eff_0" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 0\nupdate-b0-s479 #144", class="yel-effect"];
     "c1_sig_479" -> "c1_eff_0" [label="reads", color="#3366cc", class="yel-reads"];
-    "c1_fn_141" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="derived-update #141", class="yel-fn"];
+    "c1_fn_141" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="derived-update #141\nwrites enabled", class="yel-fn"];
     "c1_eff_0" -> "c1_fn_141" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
+    "c1_fn_141" -> "c1_sig_482" [label="writes", color="#cc3333", class="yel-writes"];
     "c1_fn_142" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="derived-update #142\nwrites data", class="yel-fn"];
     "c1_eff_0" -> "c1_fn_142" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c1_fn_142" -> "c1_sig_486" [label="writes", color="#cc3333", class="yel-writes"];
-    "c1_fn_143" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="derived-update #143", class="yel-fn"];
+    "c1_fn_143" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="derived-update #143\nwrites title", class="yel-fn"];
     "c1_eff_0" -> "c1_fn_143" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
+    "c1_fn_143" -> "c1_sig_488" [label="writes", color="#cc3333", class="yel-writes"];
   }
   subgraph cluster_c2 {
     label="component Component19";

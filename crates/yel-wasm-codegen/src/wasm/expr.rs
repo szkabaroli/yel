@@ -112,6 +112,13 @@ impl WasmPackageBuilder<'_> {
                             // Record types (Adt) - return pointer as-is (field access will use it)
                             _ => {}
                         }
+                        // strings-to-GC: a string local is materialized in
+                        // memory as a fat pointer (for-loop items); re-intern
+                        // the loaded (ptr, len) into a $str_bytes ref so the
+                        // value flows GC-native.
+                        if matches!(self.ctx.ty_kind(expr.ty), InternedTyKind::String) {
+                            self.emit_str_bytes_unmaterialize(func)?;
+                        }
                     }
                     // BindingMode::Value: slot already holds the scalar value;
                     // the `local.get` above is the entire emission.
@@ -119,7 +126,8 @@ impl WasmPackageBuilder<'_> {
                         1
                     } else {
                         match self.ctx.ty_kind(expr.ty) {
-                            InternedTyKind::String | InternedTyKind::List(_) => 2,
+                            InternedTyKind::String => 1,
+                            InternedTyKind::List(_) => 2,
                             _ => 1,
                         }
                     });
@@ -170,27 +178,30 @@ impl WasmPackageBuilder<'_> {
                             // Record types (Adt) - return pointer as-is (field access will use it)
                             _ => {}
                         }
+                        // strings-to-GC: re-intern the loaded (ptr, len) into
+                        // a $str_bytes ref (see captured-local path above).
+                        if matches!(self.ctx.ty_kind(expr.ty), InternedTyKind::String) {
+                            self.emit_str_bytes_unmaterialize(func)?;
+                        }
                     }
                     return Ok(if binding_mode == LirBindingMode::Value {
                         1
                     } else {
                         match self.ctx.ty_kind(expr.ty) {
-                            InternedTyKind::String | InternedTyKind::List(_) => 2,
+                            InternedTyKind::String => 1,
+                            InternedTyKind::List(_) => 2,
                             _ => 1,
                         }
                     });
                 }
 
-                // Fallback: Local not found in captured locals or local_to_slot
-                // For string types (e.g., loop variables over list<string>), emit (ptr, len) pair
+                // Fallback: Local not found in captured locals or local_to_slot.
+                // For a string (e.g. loop var over list<string>) emit an empty
+                // `$str_bytes` ref.
                 let is_string = matches!(self.ctx.ty_kind(expr.ty), InternedTyKind::String);
                 if is_string {
-                    self.add_string("");
-                    if let Some((ptr, len)) = self.get_string_info("") {
-                        func.instruction(&Instruction::I32Const(ptr as i32));
-                        func.instruction(&Instruction::I32Const(len as i32));
-                        return Ok(2);
-                    }
+                    self.emit_string_literal_gc(func, "");
+                    return Ok(1);
                 }
                 todo!(
                     "Local not found in captured locals or local_to_slot: {:?}",
@@ -420,10 +431,11 @@ impl WasmPackageBuilder<'_> {
                         } else {
                             todo!("s32-to-string requires 1 arg: {:?}", expr.kind)
                         }
-                        if let Some(ref runtime_funcs) = self.runtime_funcs {
-                            func.instruction(&Instruction::Call(runtime_funcs.s32_to_string.expect("s32_to_string must be in runtime_needs (scan missed it?)")));
-                        }
-                        // Returns (ptr, len)
+                        let f = self.runtime_funcs.as_ref().and_then(|r| r.s32_to_string).expect("s32_to_string must be in runtime_needs (scan missed it?)");
+                        func.instruction(&Instruction::Call(f));
+                        // Helper returns (ptr, len). strings-to-GC: re-intern
+                        // into a $str_bytes ref so strings stay GC-native.
+                        self.emit_str_bytes_unmaterialize(func)?;
                     }
                     "bool-to-string" => {
                         // Call bool_to_string runtime function
@@ -432,10 +444,9 @@ impl WasmPackageBuilder<'_> {
                         } else {
                             todo!("bool-to-string requires 1 arg: {:?}", expr.kind)
                         }
-                        if let Some(ref runtime_funcs) = self.runtime_funcs {
-                            func.instruction(&Instruction::Call(runtime_funcs.bool_to_string.expect("bool_to_string must be in runtime_needs (scan missed it?)")));
-                        }
-                        // Returns (ptr, len)
+                        let f = self.runtime_funcs.as_ref().and_then(|r| r.bool_to_string).expect("bool_to_string must be in runtime_needs (scan missed it?)");
+                        func.instruction(&Instruction::Call(f));
+                        self.emit_str_bytes_unmaterialize(func)?;
                     }
                     "u32-to-string" => {
                         // u32 can be converted using s32_to_string (values fit in positive i32 range)
@@ -444,10 +455,9 @@ impl WasmPackageBuilder<'_> {
                         } else {
                             todo!("u32-to-string requires 1 arg: {:?}", expr.kind)
                         }
-                        if let Some(ref runtime_funcs) = self.runtime_funcs {
-                            func.instruction(&Instruction::Call(runtime_funcs.s32_to_string.expect("s32_to_string must be in runtime_needs (scan missed it?)")));
-                        }
-                        // Returns (ptr, len)
+                        let f = self.runtime_funcs.as_ref().and_then(|r| r.s32_to_string).expect("s32_to_string must be in runtime_needs (scan missed it?)");
+                        func.instruction(&Instruction::Call(f));
+                        self.emit_str_bytes_unmaterialize(func)?;
                     }
                     "s64-to-string" | "u64-to-string" => {
                         // Both s64 and u64 route to the shared s64_to_string
@@ -457,35 +467,32 @@ impl WasmPackageBuilder<'_> {
                             CodegenError::InvalidIR(format!("{} requires 1 arg", func_name))
                         })?;
                         self.emit_expr(func, component.get_expr(*arg), component)?;
-                        let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
-                            CodegenError::InvalidIR("Runtime functions not initialized".to_string())
-                        })?;
-                        func.instruction(&Instruction::Call(runtime_funcs.s64_to_string.expect("s64_to_string must be in runtime_needs (scan missed it?)")));
+                        let f = self.runtime_funcs.as_ref().and_then(|r| r.s64_to_string).expect("s64_to_string must be in runtime_needs (scan missed it?)");
+                        func.instruction(&Instruction::Call(f));
+                        self.emit_str_bytes_unmaterialize(func)?;
                     }
                     "f32-to-string" => {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR("f32-to-string requires 1 arg".to_string())
                         })?;
                         self.emit_expr(func, component.get_expr(*arg), component)?;
-                        let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
-                            CodegenError::InvalidIR("Runtime functions not initialized".to_string())
-                        })?;
-                        func.instruction(&Instruction::Call(runtime_funcs.f32_to_string.expect("f32_to_string must be in runtime_needs (scan missed it?)")));
+                        let f = self.runtime_funcs.as_ref().and_then(|r| r.f32_to_string).expect("f32_to_string must be in runtime_needs (scan missed it?)");
+                        func.instruction(&Instruction::Call(f));
+                        self.emit_str_bytes_unmaterialize(func)?;
                     }
                     "f64-to-string" => {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR("f64-to-string requires 1 arg".to_string())
                         })?;
                         self.emit_expr(func, component.get_expr(*arg), component)?;
-                        let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
-                            CodegenError::InvalidIR("Runtime functions not initialized".to_string())
-                        })?;
                         // Fallback: demote f64 -> f32 and stringify, since a
                         // dedicated f64_to_string runtime helper is not yet
                         // generated. This is lossy but validates cleanly and
                         // produces sensible interpolation output.
+                        let f = self.runtime_funcs.as_ref().and_then(|r| r.f32_to_string).expect("f32_to_string must be in runtime_needs (scan missed it?)");
                         func.instruction(&Instruction::F32DemoteF64);
-                        func.instruction(&Instruction::Call(runtime_funcs.f32_to_string.expect("f32_to_string must be in runtime_needs (scan missed it?)")));
+                        func.instruction(&Instruction::Call(f));
+                        self.emit_str_bytes_unmaterialize(func)?;
                     }
                     "char-to-string" => {
                         // A `char` is a u32 scalar value. For now delegate to
@@ -497,10 +504,9 @@ impl WasmPackageBuilder<'_> {
                             CodegenError::InvalidIR("char-to-string requires 1 arg".to_string())
                         })?;
                         self.emit_expr(func, component.get_expr(*arg), component)?;
-                        let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
-                            CodegenError::InvalidIR("Runtime functions not initialized".to_string())
-                        })?;
-                        func.instruction(&Instruction::Call(runtime_funcs.s32_to_string.expect("s32_to_string must be in runtime_needs (scan missed it?)")));
+                        let f = self.runtime_funcs.as_ref().and_then(|r| r.s32_to_string).expect("s32_to_string must be in runtime_needs (scan missed it?)");
+                        func.instruction(&Instruction::Call(f));
+                        self.emit_str_bytes_unmaterialize(func)?;
                     }
                     "object-to-string" => {
                         // Return "[object]" string
@@ -510,32 +516,36 @@ impl WasmPackageBuilder<'_> {
                                 func.instruction(&Instruction::Drop);
                             }
                         }
-                        let (ptr, len) = self.add_string("[object]");
-                        func.instruction(&Instruction::I32Const(ptr as i32));
-                        func.instruction(&Instruction::I32Const(len as i32));
+                        self.emit_string_literal_gc(func, "[object]");
                     }
                     "concat" => {
                         // String concatenation using concat<n> runtime function
                         let arity = args.len();
                         if arity == 0 {
-                            // Empty concat returns empty string
-                            let (ptr, len) = self.add_string("");
-                            func.instruction(&Instruction::I32Const(ptr as i32));
-                            func.instruction(&Instruction::I32Const(len as i32));
+                            // Empty concat returns an empty `$str_bytes` ref.
+                            self.emit_string_literal_gc(func, "");
                         } else if arity == 1 {
-                            // Single arg - just emit it directly
+                            // Single arg - already a `$str_bytes` ref.
                             self.emit_expr(func, component.get_expr(args[0]), component)?;
                         } else {
-                            // Emit all args (each produces ptr, len)
+                            // strings-to-GC: each arg is a `$str_bytes` ref;
+                            // materialize it to canonical (ptr,len) so the
+                            // existing concat<n> helper (which works on linear
+                            // memory) can consume it. The result (ptr,len) is
+                            // re-interned to a ref below.
                             for arg in args {
                                 self.emit_expr(func, component.get_expr(*arg), component)?;
+                                self.emit_str_bytes_materialize(func)?;
                             }
                             // Call concat<n>
-                            if let Some(ref runtime_funcs) = self.runtime_funcs
-                                && let Some(concat_fn) = runtime_funcs.concat(arity)
-                            {
+                            let concat_fn = self
+                                .runtime_funcs
+                                .as_ref()
+                                .and_then(|r| r.concat(arity));
+                            if let Some(concat_fn) = concat_fn {
                                 func.instruction(&Instruction::Call(concat_fn));
                             }
+                            self.emit_str_bytes_unmaterialize(func)?;
                         }
                     }
                     "len" => {
@@ -637,19 +647,21 @@ impl WasmPackageBuilder<'_> {
                             ));
                         }
 
-                        // First arg is the string (produces ptr, len on stack)
+                        // First arg is the string. Under strings-to-GC it is a
+                        // $str_bytes ref; materialize to (ptr,len) for the
+                        // linear-memory starts_with helper.
                         self.emit_expr(func, component.get_expr(args[0]), component)?;
+                        self.emit_str_bytes_materialize(func)?;
                         // Stack: [str_ptr, str_len]
 
-                        // Second arg is the prefix (produces ptr, len on stack)
+                        // Second arg is the prefix.
                         self.emit_expr(func, component.get_expr(args[1]), component)?;
+                        self.emit_str_bytes_materialize(func)?;
                         // Stack: [str_ptr, str_len, prefix_ptr, prefix_len]
 
                         // Call starts_with(str_ptr, str_len, prefix_ptr, prefix_len) -> bool
-                        let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
-                            CodegenError::InvalidIR("Runtime functions not initialized".to_string())
-                        })?;
-                        func.instruction(&Instruction::Call(runtime_funcs.starts_with.expect("starts_with must be in runtime_needs (scan missed it?)")));
+                        let f = self.runtime_funcs.as_ref().and_then(|r| r.starts_with).expect("starts_with must be in runtime_needs (scan missed it?)");
+                        func.instruction(&Instruction::Call(f));
                         // Stack: [bool]
                     }
                     "min" => {
@@ -835,6 +847,12 @@ impl WasmPackageBuilder<'_> {
                                 } else {
                                     func.instruction(&Instruction::Call(cb_func_idx));
                                 }
+                                // strings-to-GC: a string-returning callback
+                                // hands back canonical (ptr, len); re-intern to
+                                // a $str_bytes ref so it flows GC-native.
+                                if matches!(self.ctx.ty_kind(expr.ty), InternedTyKind::String) {
+                                    self.emit_str_bytes_unmaterialize(func)?;
+                                }
                             } else {
                                 return Err(CodegenError::InvalidIR(format!(
                                     "Call targets `{}` which is not a registered callback import; \
@@ -858,6 +876,14 @@ impl WasmPackageBuilder<'_> {
                 let slots_produced = match self.internal_repr(expr.ty) {
                     crate::wasm::repr::InternalRepr::FlatGcStruct(_) => {
                         self.internal_stack_slots(expr.ty)
+                    }
+                    // strings-to-GC: a string-returning builtin (concat /
+                    // *_to_string / object-to-string) now leaves a single
+                    // $str_bytes ref, not canonical (ptr, len).
+                    crate::wasm::repr::InternalRepr::GcArrayRef(_)
+                        if matches!(self.ctx.ty_kind(expr.ty), InternedTyKind::String) =>
+                    {
+                        1
                     }
                     _ => self.flatten_core_valtypes(expr.ty).len(),
                 };
@@ -975,6 +1001,11 @@ impl WasmPackageBuilder<'_> {
                         .list_array_type_idx
                         .contains_key(&field_ty);
                     if typed_array_field {
+                        return Ok(1);
+                    }
+                    // strings-to-GC: a string field is a `$str_bytes` ref —
+                    // the struct.get above already left it on the stack.
+                    if matches!(self.ctx.ty_kind(field_ty), InternedTyKind::String) {
                         return Ok(1);
                     }
                     // Phase 5e.5 Stage 7a: FlatGcStruct field —
@@ -1288,36 +1319,9 @@ impl WasmPackageBuilder<'_> {
                     // element types (scalars, records, tuples,
                     // FlatGcStruct, nested lists) yield their natural
                     // single-slot representation directly.
-                    let elem_is_string = matches!(
-                        self.ctx.ty_kind(expr.ty),
-                        InternedTyKind::String
-                    );
-                    if elem_is_string {
-                        let fv = self.record_gc_types.fat_value_type_idx
-                            .ok_or_else(|| CodegenError::InvalidIR(
-                                "Index: $fat_value type idx missing".into(),
-                            ))?;
-                        // base, idx, array.get → ref fat_value (twice
-                        // — once for ptr unbox, once for len unbox).
-                        self.emit_expr(func, base, component)?;
-                        self.emit_expr(func, index, component)?;
-                        func.instruction(&Instruction::ArrayGet(arr_ty_idx));
-                        func.instruction(&Instruction::RefAsNonNull);
-                        func.instruction(&Instruction::StructGet {
-                            struct_type_index: fv,
-                            field_index: 0,
-                        });
-                        // Re-emit base+idx to load len.
-                        self.emit_expr(func, base, component)?;
-                        self.emit_expr(func, index, component)?;
-                        func.instruction(&Instruction::ArrayGet(arr_ty_idx));
-                        func.instruction(&Instruction::RefAsNonNull);
-                        func.instruction(&Instruction::StructGet {
-                            struct_type_index: fv,
-                            field_index: 1,
-                        });
-                        return Ok(2);
-                    }
+                    // strings-to-GC: a string element is a plain `$str_bytes`
+                    // ref (single slot), read directly like any other typed
+                    // element — `array.get` yields the ref.
                     self.emit_expr(func, base, component)?;
                     self.emit_expr(func, index, component)?;
                     func.instruction(&Instruction::ArrayGet(arr_ty_idx));
@@ -1416,20 +1420,16 @@ impl WasmPackageBuilder<'_> {
                             _ => 4,
                         }
                     };
-                    let fat_value_idx = self.record_gc_types.fat_value_type_idx;
                     for i in 0..len_val {
                         let elem_addr = data_off + i * elem_size;
                         if elem_is_string {
-                            let fv = fat_value_idx.ok_or_else(|| CodegenError::InvalidIR(
-                                "ListStatic<string>: $fat_value type idx missing".into(),
-                            ))?;
-                            // ptr at elem_addr+0
+                            // strings-to-GC: load the pool (ptr, len) and
+                            // re-intern into a `$str_bytes` element ref.
                             func.instruction(&Instruction::I32Const(elem_addr as i32));
                             func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                            // len at elem_addr+4
                             func.instruction(&Instruction::I32Const((elem_addr + 4) as i32));
                             func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                            func.instruction(&Instruction::StructNew(fv));
+                            self.emit_str_bytes_unmaterialize(func)?;
                         } else {
                             // Scalar: typed load.
                             func.instruction(&Instruction::I32Const(elem_addr as i32));
@@ -1484,26 +1484,12 @@ impl WasmPackageBuilder<'_> {
                         func.instruction(&Instruction::I32Const(0));
                         func.instruction(&Instruction::ArrayNewDefault(arr_ty_idx));
                     } else {
-                        // String elements arrive as (ptr, len) and are
-                        // boxed into `$fat_value` before array.new_fixed.
-                        // Other element types (scalars, records,
-                        // tuples, FlatGcStruct, nested lists) push the
-                        // typed ref / scalar directly that the array
-                        // expects.
-                        let elem_is_string = elements
-                            .first()
-                            .map(|e| matches!(self.ctx.ty_kind(component.get_expr(*e).ty), InternedTyKind::String))
-                            .unwrap_or(false);
+                        // Each element pushes the typed ref / scalar the array
+                        // expects directly — a string element is a `$str_bytes`
+                        // ref from `emit_expr`, records/tuples/lists a typed
+                        // ref, scalars their value. No `$fat_value` box.
                         for elem in elements {
                             self.emit_expr(func, component.get_expr(*elem), component)?;
-                            if elem_is_string {
-                                let fv = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                                    CodegenError::InvalidIR(
-                                        "ListConstruct: $fat_value type idx missing".into(),
-                                    )
-                                })?;
-                                func.instruction(&Instruction::StructNew(fv));
-                            }
                         }
                         func.instruction(&Instruction::ArrayNewFixed {
                             array_type_index: arr_ty_idx,
@@ -1652,10 +1638,11 @@ impl WasmPackageBuilder<'_> {
                                 // emit_expr on a list<elem> with
                                 // GcArrayRef repr already pushes a
                                 // typed array — nothing to do.
-                            } else if matches!(
-                                self.ctx.ty_kind(field_ty),
-                                InternedTyKind::String | InternedTyKind::List(_)
-                            ) {
+                            } else if matches!(self.ctx.ty_kind(field_ty), InternedTyKind::String) {
+                                // strings-to-GC: the string field is a
+                                // $str_bytes ref already on the stack — no
+                                // $fat_value box.
+                            } else if matches!(self.ctx.ty_kind(field_ty), InternedTyKind::List(_)) {
                                 let fv_idx = fat_value_idx.ok_or_else(|| {
                                     CodegenError::InvalidIR(
                                         "RecordConstruct (SLR): fat_value type idx not assigned"
@@ -2431,7 +2418,10 @@ impl WasmPackageBuilder<'_> {
             if matches!(self.ctx.ty_kind(p.ty), InternedTyKind::String)
                 && joined_payload_slots.first() == Some(&ValType::I64)
             {
-                self.emit_expr(func, p, component)?; // ptr, len
+                self.emit_expr(func, p, component)?; // $str_bytes ref
+                // strings-to-GC: this is a canonical-ABI boundary — materialize
+                // the ref to (ptr, len) for pack_fat_ptr_to_i64.
+                self.emit_str_bytes_materialize(func)?;
                 let helper = self
                     .runtime_funcs
                     .as_ref()
@@ -2528,6 +2518,12 @@ impl WasmPackageBuilder<'_> {
             // pushed in its `internal_repr` shape (typed GC ref or
             // scalar slots) — no materializer call needed.
             self.emit_expr(func, p, component)?;
+            // strings-to-GC: canonical-ABI boundary — a string payload is a
+            // $str_bytes ref internally; materialize to (ptr, len) so the
+            // flat pack below sees the 2-slot canonical shape it expects.
+            if matches!(self.ctx.ty_kind(p.ty), InternedTyKind::String) {
+                self.emit_str_bytes_materialize(func)?;
+            }
 
             if let Some(&i) = mismatches.last() {
                 let pv = payload_flat[i];
@@ -2632,13 +2628,81 @@ impl WasmPackageBuilder<'_> {
                 func.instruction(&Instruction::I32Const(*c as i32));
             }
             LirLiteral::String(s) => {
-                self.add_string(s);
-                if let Some((ptr, len)) = self.get_string_info(s) {
-                    func.instruction(&Instruction::I32Const(ptr as i32));
-                    func.instruction(&Instruction::I32Const(len as i32));
-                }
+                self.emit_string_literal_gc(func, s);
             }
         }
+    }
+
+    /// strings-to-GC (`plans/strings-to-gc.md`): emit a string literal as a
+    /// `$str_bytes` GC byte array ref (one stack value). Reuses the static
+    /// string data pool as a byte source and the `$str_bytes`
+    /// un-materializer to build the array from `(ptr, len)`.
+    pub(super) fn emit_string_literal_gc(&mut self, func: &mut Function, s: &str) {
+        self.add_string(s);
+        let (ptr, len) = self
+            .get_string_info(s)
+            .expect("string literal just interned into the data pool");
+        let str_bytes_idx = self
+            .record_gc_types
+            .str_bytes_array_idx
+            .expect("emit_string_literal_gc: $str_bytes array type not registered");
+        let unmat = *self
+            .gc_list_unmaterializer_fn_indices
+            .get(&str_bytes_idx)
+            .expect("emit_string_literal_gc: $str_bytes un-materializer not registered");
+        func.instruction(&Instruction::I32Const(ptr as i32));
+        func.instruction(&Instruction::I32Const(len as i32));
+        func.instruction(&Instruction::Call(unmat));
+    }
+
+    /// strings-to-GC (`plans/strings-to-gc.md`): given a `$str_bytes` ref on
+    /// top of the stack, materialize it into canonical `(ptr, len)` in linear
+    /// memory (consumes the ref, pushes two i32s). The WIT-boundary "string
+    /// out" primitive — used before every host import call that takes a
+    /// string arg and in exported getters.
+    pub(super) fn emit_str_bytes_materialize(
+        &mut self,
+        func: &mut Function,
+    ) -> Result<(), CodegenError> {
+        let str_bytes_idx = self.record_gc_types.str_bytes_array_idx.ok_or_else(|| {
+            CodegenError::InvalidIR(
+                "string materialize: $str_bytes array type not registered".into(),
+            )
+        })?;
+        let mat = *self
+            .gc_list_materializer_fn_indices
+            .get(&str_bytes_idx)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR("string materialize: missing $str_bytes materializer".into())
+            })?;
+        func.instruction(&Instruction::Call(mat));
+        Ok(())
+    }
+
+    /// strings-to-GC: given canonical `(ptr, len)` on top of the stack,
+    /// build a `$str_bytes` GC byte array (consumes the two i32s, pushes one
+    /// ref). Used to re-intern the `(ptr, len)` output of the existing
+    /// numeric/concat runtime helpers back into the GC-native string repr so
+    /// that every string value flows as a single ref internally.
+    pub(super) fn emit_str_bytes_unmaterialize(
+        &mut self,
+        func: &mut Function,
+    ) -> Result<(), CodegenError> {
+        let str_bytes_idx = self.record_gc_types.str_bytes_array_idx.ok_or_else(|| {
+            CodegenError::InvalidIR(
+                "string unmaterialize: $str_bytes array type not registered".into(),
+            )
+        })?;
+        let unmat = *self
+            .gc_list_unmaterializer_fn_indices
+            .get(&str_bytes_idx)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(
+                    "string unmaterialize: missing $str_bytes un-materializer".into(),
+                )
+            })?;
+        func.instruction(&Instruction::Call(unmat));
+        Ok(())
     }
 
     /// Like emit_literal but returns the number of values pushed.
@@ -2650,14 +2714,9 @@ impl WasmPackageBuilder<'_> {
     ) -> usize {
         match lit {
             LirLiteral::String(s) => {
-                self.add_string(s);
-                if let Some((ptr, len)) = self.get_string_info(s) {
-                    func.instruction(&Instruction::I32Const(ptr as i32));
-                    func.instruction(&Instruction::I32Const(len as i32));
-                    2
-                } else {
-                    todo!("String not found in get_string_info: {:?}", lit)
-                }
+                // strings-to-GC: a string literal is one `$str_bytes` ref.
+                self.emit_string_literal_gc(func, s);
+                1
             }
             _ => {
                 self.emit_literal(func, lit, ty);
@@ -3155,17 +3214,21 @@ impl WasmPackageBuilder<'_> {
                     .contains_key(&payload_ty));
 
         if is_fat_box {
-            let fat_value_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
-                CodegenError::InvalidIR(
-                    "cb flat-gc return: $fat_value type idx missing".into(),
-                )
-            })?;
             // ptr at payload_base, len at payload_base + 4
             func.instruction(&Instruction::I32Const(ret_addr + payload_base as i32));
             func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
             func.instruction(&Instruction::I32Const(ret_addr + payload_base as i32 + 4));
             func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-            func.instruction(&Instruction::StructNew(fat_value_idx));
+            // strings-to-GC: a string payload builds a $str_bytes ref from
+            // (ptr, len); a non-typed-array list still boxes into $fat_value.
+            if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String) {
+                self.emit_str_bytes_unmaterialize(func)?;
+            } else {
+                let fat_value_idx = self.record_gc_types.fat_value_type_idx.ok_or_else(|| {
+                    CodegenError::InvalidIR("cb flat-gc return: $fat_value type idx missing".into())
+                })?;
+                func.instruction(&Instruction::StructNew(fat_value_idx));
+            }
             return Ok(());
         }
 

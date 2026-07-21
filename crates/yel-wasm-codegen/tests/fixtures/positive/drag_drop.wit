@@ -7,8 +7,6 @@ interface app-component {
     unmount: func();
     get-items: func() -> list<string>;
     set-items: func(value: list<string>);
-    get-last: func() -> string;
-    set-last: func(value: string);
   }
 }
 

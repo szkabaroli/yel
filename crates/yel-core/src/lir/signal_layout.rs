@@ -9,8 +9,8 @@
 //! Storage model:
 //! - **InStruct**: signal occupies `field_count` consecutive fields on
 //!   the component's `$Comp_<i>` GC struct starting at `field_start`.
-//!   Most signals are single-slot (`field_count = 1`); strings and
-//!   non-typed-array lists are fat pointers (`field_count = 2`).
+//!   Most signals are single-slot (`field_count = 1`); non-typed-array
+//!   lists are fat pointers (`field_count = 2`).
 //! - **Zero**: unit-typed signal — no storage allocated.
 //!
 //! Every non-unit signal is GC-struct-resident. Records/tuples used to
@@ -57,8 +57,7 @@ pub struct GcSlot {
     /// `field_start + 1`, `field_start + 2`, …
     pub field_start: u32,
     /// Number of consecutive fields. Today: 1 for Scalar / GcRef /
-    /// GcArrayRef / FlatGcStruct, 2 for FatPointer (string / non-
-    /// typed-array list).
+    /// GcArrayRef / FlatGcStruct, 2 for FatPointer (non-typed-array list).
     pub field_count: u32,
 }
 
@@ -67,7 +66,7 @@ pub struct GcSlot {
 /// Must match `WasmPackageBuilder::signal_storage_valtypes(ty).len()`
 /// exactly:
 /// - Unit / Error / Unknown: 0
-/// - String: 2 (fat pointer)
+/// - String: 1 (`(ref $str_bytes)` GC byte array)
 /// - List<T> where element is GC-eligible (scalar / record / tuple /
 ///   string / nested-list / FlatGcStruct): 1 (typed `GcArrayRef`)
 /// - List<T> otherwise: 2 (fat pointer fallback)
@@ -106,7 +105,7 @@ pub fn lir_slot_val_ty_for_signal_field(
     if field_idx >= count {
         return LirSlotValType::I32;
     }
-    // FatPointer signals (string, non-typed-array list) are always
+    // FatPointer signals (non-typed-array list) are always
     // [I32, I32] — both fields are i32.
     if count == 2 {
         return LirSlotValType::I32;
@@ -136,7 +135,8 @@ pub fn slot_count_for_signal_ty(
 ) -> u32 {
     match ctx.ty_kind(ty) {
         InternedTyKind::Unit | InternedTyKind::Error | InternedTyKind::Unknown => 0,
-        InternedTyKind::String => 2,
+        // A GC string is a single `(ref $str_bytes)` slot.
+        InternedTyKind::String => 1,
         InternedTyKind::List(_) => {
             let mut seen = HashSet::new();
             if crate::lower_to_lir::blocks::is_scalar_list_ty_struct(ctx, ty, &mut seen) {
