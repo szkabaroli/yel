@@ -244,11 +244,6 @@ impl CompilerContext {
         })
     }
 
-    /// Intern a tuple type.
-    pub fn mk_tuple(&mut self, elems: Vec<Ty>) -> Ty {
-        self.types.intern_tuple(elems)
-    }
-
     /// Intern a user-defined type.
     pub fn mk_adt(&mut self, def_id: DefId) -> Ty {
         self.types.intern_adt(def_id)
@@ -350,12 +345,6 @@ impl CompilerContext {
     pub fn lookup_component(&self, name: &str) -> Option<DefId> {
         let n = self.interner.intern(name);
         self.defs.lookup(n, Namespace::Component)
-    }
-
-    /// Look up a value (function, etc.) by name.
-    pub fn lookup_value(&self, name: &str) -> Option<DefId> {
-        let n = self.interner.intern(name);
-        self.defs.lookup(n, Namespace::Value)
     }
 
     // ========================================================================

@@ -377,52 +377,6 @@ impl LirBlock {
             }
         })
     }
-
-    pub fn with_ops(id: BlockId, ops: Vec<LirOp>) -> Self {
-        Self {
-            id,
-            ops,
-            captured_locals: HashMap::new(),
-            local_to_slot: HashMap::new(),
-            local_modes: HashMap::new(),
-            return_slot: None,
-            params: Vec::new(),
-            max_flat_scratch_counts: (0, 0, 0, 0),
-            mount_component_count: 0,
-            mount_component_children: Vec::new(),
-            boundary_params: Vec::new(),
-            boundary_param_slots: Vec::new(),
-            implicit_self: None,
-            slots: Vec::new(),
-        }
-    }
-
-    pub fn with_ops_and_captures(
-        id: BlockId,
-        ops: Vec<LirOp>,
-        captured_locals: HashMap<LocalId, LirSlotId>,
-    ) -> Self {
-        Self {
-            id,
-            ops,
-            captured_locals,
-            local_to_slot: HashMap::new(),
-            local_modes: HashMap::new(),
-            return_slot: None,
-            params: Vec::new(),
-            max_flat_scratch_counts: (0, 0, 0, 0),
-            mount_component_count: 0,
-            mount_component_children: Vec::new(),
-            boundary_params: Vec::new(),
-            boundary_param_slots: Vec::new(),
-            implicit_self: None,
-            slots: Vec::new(),
-        }
-    }
-
-    pub fn set_return_slot(&mut self, slot: LirSlotId) {
-        self.return_slot = Some(slot);
-    }
 }
 
 impl super::arena::LirFunctionLike for LirBlock {

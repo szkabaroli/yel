@@ -152,22 +152,6 @@ impl SourceMap {
     pub fn get(&self, id: SourceId) -> Option<&Source> {
         self.sources.get(&id)
     }
-
-    /// Get a source ID by path.
-    pub fn get_id(&self, path: &PathBuf) -> Option<SourceId> {
-        self.path_to_id.get(path).copied()
-    }
-
-    /// Get all source IDs, in ascending id order.
-    ///
-    /// The backing store is a `HashMap`, whose key-iteration order is
-    /// nondeterministic; sorting here keeps any output derived from this
-    /// public iterator byte-stable across runs.
-    pub fn source_ids(&self) -> impl Iterator<Item = SourceId> + '_ {
-        let mut ids: Vec<SourceId> = self.sources.keys().copied().collect();
-        ids.sort_unstable_by_key(|id| id.0);
-        ids.into_iter()
-    }
 }
 
 /// A location in source code.

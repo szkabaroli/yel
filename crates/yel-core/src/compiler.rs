@@ -148,11 +148,6 @@ impl Compiler {
         &self.ctx
     }
 
-    /// Get mutable compiler context.
-    pub fn context_mut(&mut self) -> &mut CompilerContext {
-        &mut self.ctx
-    }
-
     /// Build the **import-side boundary contract** as data on the module:
     /// one [`LirInterface`] per *foreign-package* global (today only the
     /// built-in `Dom` global). Each entry carries its package, the ADTs it

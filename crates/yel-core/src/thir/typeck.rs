@@ -65,15 +65,6 @@ impl TypeMap {
         Self::default()
     }
 
-    /// Get the type at a given offset.
-    pub fn type_at(&self, offset: usize) -> Option<Ty> {
-        self.entries
-            .iter()
-            .filter(|(span, _)| span.start <= offset && offset < span.end)
-            .min_by_key(|(span, _)| span.end - span.start)
-            .map(|(_, ty)| *ty)
-    }
-
     /// Record a type at a span.
     pub fn insert(&mut self, span: Span, ty: Ty) {
         self.entries.push((span, ty));

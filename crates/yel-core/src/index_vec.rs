@@ -80,10 +80,6 @@ impl<I: Idx, T> IndexVec<I, T> {
             .enumerate()
             .map(|(i, v)| (I::new(i as u32), v))
     }
-
-    pub fn next_idx(&self) -> I {
-        I::new(u32::try_from(self.raw.len()).expect("IndexVec exceeded u32::MAX entries"))
-    }
 }
 
 impl<I: Idx, T> Index<I> for IndexVec<I, T> {

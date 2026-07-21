@@ -36,11 +36,6 @@ impl LirTypeLayout {
     pub const fn zero() -> Self {
         Self { size: 0, align: 1 }
     }
-
-    /// Align an offset to this layout's alignment.
-    pub fn align_offset(&self, offset: u32) -> u32 {
-        align_to(offset, self.align)
-    }
 }
 
 /// Layout information for a variant/enum type.
@@ -81,8 +76,6 @@ pub struct LirLayoutContext<'ctx> {
     ctx: &'ctx CompilerContext,
     /// Cache of computed layouts for types.
     cache: HashMap<Ty, LirTypeLayout>,
-    /// Cache of variant layouts.
-    variant_cache: HashMap<String, VariantLayout>,
     /// Cache of record layouts by DefId.
     record_cache: HashMap<crate::ids::DefId, RecordLayout>,
 }
@@ -93,7 +86,6 @@ impl<'ctx> LirLayoutContext<'ctx> {
         Self {
             ctx,
             cache: HashMap::new(),
-            variant_cache: HashMap::new(),
             record_cache: HashMap::new(),
         }
     }
@@ -148,23 +140,6 @@ impl<'ctx> LirLayoutContext<'ctx> {
     /// Query the alignment for a type.
     pub fn align_of(&mut self, ty: Ty) -> u32 {
         self.layout_of(ty).align
-    }
-
-    /// Query variant layout (discriminant size, payload offset, etc.).
-    pub fn variant_layout(&mut self, ty_name: &str) -> Option<VariantLayout> {
-        // Check cache
-        if let Some(layout) = self.variant_cache.get(ty_name) {
-            return Some(layout.clone());
-        }
-
-        // TODO: Compute for user-defined variants
-        None
-    }
-
-    /// Get discriminant value for a variant case.
-    pub fn variant_discriminant(&self, _ty_name: &str, _case: &str) -> Option<u32> {
-        // TODO: Look up from definitions
-        None
     }
 
     /// Query record layout by DefId.

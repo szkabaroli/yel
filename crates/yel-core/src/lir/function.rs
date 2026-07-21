@@ -117,12 +117,6 @@ impl CallingConv {
         self.implicit_post.push(p);
         self
     }
-
-    /// Builder: set the wasm return list.
-    pub fn with_returns(mut self, r: Vec<LirSlotValType>) -> Self {
-        self.returns = r;
-        self
-    }
 }
 
 /// Who this function is — its identity space and contextual role.

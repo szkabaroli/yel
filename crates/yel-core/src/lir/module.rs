@@ -120,8 +120,4 @@ impl LirModule {
     pub fn exported_resources(&self) -> impl Iterator<Item = &LirResource> {
         self.resources.iter().filter(|c| c.is_export)
     }
-
-    pub fn has_exports(&self) -> bool {
-        self.resources.iter().any(|c| c.is_export)
-    }
 }

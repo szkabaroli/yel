@@ -431,14 +431,6 @@ impl Definitions {
         }
     }
 
-    /// Get as a mutable signal.
-    pub fn as_signal_mut(&mut self, def_id: DefId) -> Option<&mut SignalDef> {
-        match &mut self.items[def_id].kind {
-            DefKind::Signal(s) => Some(s),
-            _ => None,
-        }
-    }
-
     /// Check if a definition is a signal (reactive property).
     pub fn is_signal(&self, def_id: DefId) -> bool {
         matches!(&self.items[def_id].kind, DefKind::Signal(_))
@@ -472,11 +464,6 @@ impl Definitions {
             }
         }
         None
-    }
-
-    /// Find field or signal by name (works for both records and components).
-    pub fn find_member(&self, owner: DefId, name: Name) -> Option<(FieldIdx, DefId)> {
-        self.find_field(owner, name).or_else(|| self.find_signal(owner, name))
     }
 
     /// Get all component DefIds.
@@ -534,14 +521,6 @@ impl Definitions {
         self.items.is_empty()
     }
 
-    /// Get as an element.
-    pub fn as_element(&self, def_id: DefId) -> Option<&ElementDef> {
-        match &self.items[def_id].kind {
-            DefKind::Element(e) => Some(e),
-            _ => None,
-        }
-    }
-
     /// Get as a mutable element.
     pub fn as_element_mut(&mut self, def_id: DefId) -> Option<&mut ElementDef> {
         match &mut self.items[def_id].kind {
@@ -584,49 +563,6 @@ impl Definitions {
                 DefKind::ImportComponent(_) => Some(id),
                 _ => None,
             })
-    }
-
-    /// Find element property by name.
-    pub fn find_element_property(&self, owner: DefId, prop_name: Name) -> Option<(FieldIdx, DefId)> {
-        let props = match self.kind(owner) {
-            DefKind::Element(e) => &e.properties,
-            _ => return None,
-        };
-
-        for (idx, &prop_def_id) in props.iter().enumerate() {
-            if self.items[prop_def_id].name == prop_name {
-                return Some((FieldIdx::new(idx as u32), prop_def_id));
-            }
-        }
-        None
-    }
-
-    /// Find import component property by name.
-    pub fn find_import_component_property(&self, owner: DefId, prop_name: Name) -> Option<(FieldIdx, DefId)> {
-        let props = match self.kind(owner) {
-            DefKind::ImportComponent(c) => &c.properties,
-            _ => return None,
-        };
-
-        for (idx, &prop_def_id) in props.iter().enumerate() {
-            if self.items[prop_def_id].name == prop_name {
-                return Some((FieldIdx::new(idx as u32), prop_def_id));
-            }
-        }
-        None
-    }
-
-    /// Find import component method by name.
-    pub fn find_import_component_method(&self, owner: DefId, method_name: Name) -> Option<DefId> {
-        let methods = match self.kind(owner) {
-            DefKind::ImportComponent(c) => &c.methods,
-            _ => return None,
-        };
-
-        methods
-            .iter()
-            .copied()
-            .find(|&method_def_id| self.items[method_def_id].name == method_name)
     }
 
     /// Get as a global.

@@ -48,16 +48,4 @@ pub enum LirDiffStrategy {
     Unkeyed,
 }
 
-impl LirDiffStrategy {
-    /// Pick the strategy for a for-loop based on whether it has a key
-    /// clause. Keeps the choice point in one place so we can change
-    /// the policy (e.g. require keys for lists of records) without
-    /// chasing call sites.
-    pub fn for_for_loop(has_key: bool) -> Self {
-        if has_key {
-            Self::Keyed
-        } else {
-            Self::Unkeyed
-        }
-    }
-}
+impl LirDiffStrategy {}

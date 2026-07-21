@@ -307,21 +307,6 @@ impl<'a> WitAstBuilder<'a> {
         alias_id
     }
 
-    /// Build the WIT AST for a component.
-    /// Build WIT for an arbitrary number of components and globals.
-    ///
-    /// Per-compilation-unit, not per-component:
-    /// - every component contributes its resource interface (export) plus its
-    ///   own callback interface (import) if it has callbacks
-    /// - every host-boundary global contributes an imported interface
-    /// - the DOM interface is imported when at least one component is present
-    /// - the world is named after the package:
-    ///   `<package>-ui`  if any component is exported
-    ///   `<package>-lib` otherwise (libraries, globals-only files)
-    pub fn build_wit(&mut self, components: &[&LirResource]) -> Result<WorldId, CodegenError> {
-        self.build_wit_with_all(components, components)
-    }
-
     /// Build the WIT AST with an explicit full component list.
     ///
     /// `exported` drives export-facing WIT: resource interfaces, world
