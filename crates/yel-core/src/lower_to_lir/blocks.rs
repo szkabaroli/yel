@@ -804,10 +804,17 @@ impl<'a> BlockLowering<'a> {
         let mut idx = BoundaryDepIndex::default();
 
         // Pass 1: fold each PendingBinding into boundary_deps.
+        // `sentinel_count` feeds a debug-only diagnostic (the
+        // `#[cfg(debug_assertions)]` eprintln below); make the whole counter
+        // debug-only so release doesn't warn about a write-only variable.
+        #[cfg(debug_assertions)]
         let mut sentinel_count: u32 = 0;
         for pb in &self.binding_collector {
             if pb.owning_boundary == sentinel {
-                sentinel_count += 1;
+                #[cfg(debug_assertions)]
+                {
+                    sentinel_count += 1;
+                }
                 continue;
             }
             let entry = idx.boundary_deps.entry(pb.owning_boundary).or_default();
