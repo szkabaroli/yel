@@ -182,8 +182,18 @@ fn engine() -> Engine {
     // and wasmtime's validator rejects them without these features.
     cfg.wasm_gc(true);
     cfg.wasm_function_references(true);
+    // Fuel metering: a codegen bug that emits a non-terminating loop (e.g. a
+    // wrong list stride that corrupts the allocator free-list) would otherwise
+    // hang the whole test binary indefinitely. With fuel on, such a run traps
+    // with "all fuel consumed" — a fast, localized failure instead of a hang.
+    cfg.consume_fuel(true);
     Engine::new(&cfg).expect("engine")
 }
+
+/// Generous per-store fuel budget. Real round-trips here execute well under a
+/// million fuel units; a runaway loop burns through this in a fraction of a
+/// second and traps, so the ceiling only ever catches genuine non-termination.
+const STORE_FUEL: u64 = 5_000_000_000;
 
 /// Register every `yel:ui/dom@0.1.0` import with a recording closure.
 /// The closures mutate the shared `DomState` via `Store`'s state slot.
@@ -442,6 +452,7 @@ fn instantiate(bytes: &[u8], callback_interfaces: &[(&str, &[&str])]) -> (Harnes
         register_callbacks(&mut linker, iface, names);
     }
     let mut store = Store::new(&engine, dom.clone());
+    store.set_fuel(STORE_FUEL).expect("set fuel");
     let instance = linker
         .instantiate(&mut store, &component)
         .expect("instantiate");
