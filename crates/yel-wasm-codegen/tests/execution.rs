@@ -3852,6 +3852,63 @@ fn tuple_with_record_element_setter_getter_roundtrip() {
     }
 }
 
+/// Boundary round-trip for a *nested* tuple (`tuple<s32, tuple<s32,
+/// string>>`). Both the setter (`emit_setter_pack_tuple`) and getter
+/// (`emit_getter_lift_tuple`) recurse into the inner tuple, so this pins the
+/// recursive tuple pack/lift end-to-end.
+#[test]
+fn nested_tuple_setter_getter_roundtrip() {
+    let source = r#"
+        package yel:nesttup@0.1.0;
+        export component App {
+            nested: tuple<s32, tuple<s32, string>> = (0, (1, "init"));
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:nesttup/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "nested",
+        &r,
+        Val::Tuple(vec![
+            Val::S32(5),
+            Val::Tuple(vec![Val::S32(6), Val::String("inner".into())]),
+        ]),
+    );
+
+    let get_nested = get_func(&mut h, iface, "[method]app.get-nested");
+    let mut out = [Val::Bool(false)];
+    get_nested
+        .call(&mut h.store, &[Val::Resource(r)], &mut out)
+        .expect("get-nested");
+    match &out[0] {
+        Val::Tuple(outer) => {
+            assert!(matches!(&outer[0], Val::S32(5)), "outer.0, got {:?}", outer[0]);
+            match &outer[1] {
+                Val::Tuple(inner) => {
+                    assert!(
+                        matches!(&inner[0], Val::S32(6)),
+                        "inner.0 must be 6, got {:?}",
+                        inner[0]
+                    );
+                    match &inner[1] {
+                        Val::String(s) => assert_eq!(&**s, "inner"),
+                        other => panic!("inner.1 must round-trip, got {:?}", other),
+                    }
+                }
+                other => panic!("outer.1 must be a tuple, got {:?}", other),
+            }
+        }
+        other => panic!("get-nested returned non-tuple {:?}", other),
+    }
+}
+
 /// Phase 0 regression-guard: nested record field access through two
 /// levels: `state.user.addr.city`. Pins multi-level offset loads today
 /// and chained `struct.get` post-Phase 4.

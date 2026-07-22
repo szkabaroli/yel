@@ -26,5 +26,7 @@ export component App {
     withRecord: tuple<s32, Item> = (6, { n: 7, label: "r" });
     withOption: tuple<s32, option<string>> = (8, some("o"));
     withResult: tuple<s32, result<s32, string>> = (9, ok(10));
+    nested: tuple<s32, tuple<s32, string>> = (11, (12, "deep"));
+    nestedRecord: tuple<s32, tuple<Item, s32>> = (13, ({ n: 14, label: "z" }, 15));
     VStack { Text { "ok" } }
 }

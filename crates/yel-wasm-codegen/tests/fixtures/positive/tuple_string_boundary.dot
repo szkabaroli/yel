@@ -14,5 +14,7 @@ digraph yel_signal_graph {
     "c0_sig_460" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withRecord\n: tuple<s32, Item>", class="yel-signal"];
     "c0_sig_461" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withOption\n: tuple<s32, option<string>>", class="yel-signal"];
     "c0_sig_462" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withResult\n: tuple<s32, result<s32, string>>", class="yel-signal"];
+    "c0_sig_463" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="nested\n: tuple<s32, tuple<s32, string>>", class="yel-signal"];
+    "c0_sig_464" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="nestedRecord\n: tuple<s32, tuple<Item, s32>>", class="yel-signal"];
   }
 }

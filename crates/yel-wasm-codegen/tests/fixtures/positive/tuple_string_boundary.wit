@@ -26,6 +26,10 @@ interface app-component {
     set-with-option: func(value: tuple<s32, option<string>>);
     get-with-result: func() -> tuple<s32, result<s32, string>>;
     set-with-result: func(value: tuple<s32, result<s32, string>>);
+    get-nested: func() -> tuple<s32, tuple<s32, string>>;
+    set-nested: func(value: tuple<s32, tuple<s32, string>>);
+    get-nested-record: func() -> tuple<s32, tuple<item, s32>>;
+    set-nested-record: func(value: tuple<s32, tuple<item, s32>>);
   }
 }
 
