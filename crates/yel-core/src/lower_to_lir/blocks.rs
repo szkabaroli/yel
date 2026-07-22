@@ -5234,6 +5234,7 @@ impl<'a> BlockLowering<'a> {
             max_flat_scratch_counts: (0, 0, 0, 0),
             mount_component_count: 0,
             mount_component_children: Vec::new(),
+            callback_arg_composite_types: Vec::new(),
             boundary_params: Vec::new(),
             boundary_param_slots: Vec::new(),
             implicit_self: None,
@@ -6380,7 +6381,7 @@ pub(crate) fn populate_block_structural_metadata(
     // needed — collect per-block metadata first to avoid the borrow conflict.
     let signals: Vec<(Ty,)> = component.signals.iter().map(|s| (s.ty,)).collect();
 
-    let mut metas: Vec<(FlatValTypeCounts, u32, Vec<DefId>)> =
+    let mut metas: Vec<(FlatValTypeCounts, u32, Vec<DefId>, Vec<Ty>)> =
         Vec::with_capacity(component.blocks.len());
     for block in &component.blocks {
         let scratch =
@@ -6388,12 +6389,17 @@ pub(crate) fn populate_block_structural_metadata(
         let count = count_mount_sites(&block.ops);
         let mut children = Vec::new();
         collect_mount_children(&block.ops, &mut children);
-        metas.push((scratch, count, children));
+        let mut cb_arg_types = Vec::new();
+        collect_callback_arg_types(&block.ops, &component.exprs, &mut cb_arg_types);
+        metas.push((scratch, count, children, cb_arg_types));
     }
-    for (block, (scratch, count, children)) in component.blocks.iter_mut().zip(metas) {
+    for (block, (scratch, count, children, cb_arg_types)) in
+        component.blocks.iter_mut().zip(metas)
+    {
         block.max_flat_scratch_counts = scratch;
         block.mount_component_count = count;
         block.mount_component_children = children;
+        block.callback_arg_composite_types = cb_arg_types;
     }
 }
 
@@ -7508,6 +7514,173 @@ fn collect_mount_children(ops: &[LirOp], out: &mut Vec<DefId>) {
     }
 }
 
+/// Collect the `Ty` of every `Call` argument reachable from `ops`
+/// (recursively through `If` / `Loop` bodies and every expr subtree),
+/// deduped in first-occurrence order. A callback invoked with a composite
+/// argument must push that argument's canonical-ABI flattening; codegen
+/// reserves a typed ref local per distinct GC struct/ref type here. Over-
+/// collection is intentional — codegen filters to composite (GC) reprs and
+/// ignores scalar / list / string types, so pushing every call-arg type is
+/// safe and keeps this walker free of layout knowledge.
+fn collect_callback_arg_types(ops: &[LirOp], exprs: &[LirExpr], out: &mut Vec<Ty>) {
+    for op in ops {
+        match op {
+            LirOp::EvalExpr { expr, .. }
+            | LirOp::EvalExprToSlots { expr, .. }
+            | LirOp::DropExpr { expr }
+            | LirOp::SignalWriteExpr { expr, .. }
+            | LirOp::InitSignal { expr, .. }
+            | LirOp::PushExpr { expr } => {
+                collect_call_arg_types_in_expr(arena_expr(exprs, *expr), exprs, out);
+            }
+            LirOp::If(if_op) => {
+                collect_callback_arg_types(&if_op.then_ops, exprs, out);
+                collect_callback_arg_types(&if_op.else_ops, exprs, out);
+            }
+            LirOp::Loop { body_ops, .. } => {
+                collect_callback_arg_types(body_ops, exprs, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walk `expr`'s subtree; for every `Call` node push each argument's `Ty`
+/// (deduped) into `out`. Recurses through all child-carrying expr kinds so
+/// nested calls (e.g. a call whose arg is itself a call) are covered.
+fn collect_call_arg_types_in_expr(expr: &LirExpr, exprs: &[LirExpr], out: &mut Vec<Ty>) {
+    if let LirExprKind::Call { args, .. } = &expr.kind {
+        for a in args {
+            let arg = arena_expr(exprs, *a);
+            if !out.contains(&arg.ty) {
+                out.push(arg.ty);
+            }
+        }
+    }
+    match &expr.kind {
+        LirExprKind::Field { base, .. }
+        | LirExprKind::Unary { operand: base, .. }
+        | LirExprKind::IsCase { base, .. }
+        | LirExprKind::VariantField { base, .. } => {
+            collect_call_arg_types_in_expr(arena_expr(exprs, *base), exprs, out);
+        }
+        LirExprKind::Binary { lhs, rhs, .. } => {
+            collect_call_arg_types_in_expr(arena_expr(exprs, *lhs), exprs, out);
+            collect_call_arg_types_in_expr(arena_expr(exprs, *rhs), exprs, out);
+        }
+        LirExprKind::Index { base, index } => {
+            collect_call_arg_types_in_expr(arena_expr(exprs, *base), exprs, out);
+            collect_call_arg_types_in_expr(arena_expr(exprs, *index), exprs, out);
+        }
+        LirExprKind::Call { args, .. } => {
+            for a in args {
+                collect_call_arg_types_in_expr(arena_expr(exprs, *a), exprs, out);
+            }
+        }
+        LirExprKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_call_arg_types_in_expr(arena_expr(exprs, *condition), exprs, out);
+            collect_call_arg_types_in_expr(arena_expr(exprs, *then_expr), exprs, out);
+            collect_call_arg_types_in_expr(arena_expr(exprs, *else_expr), exprs, out);
+        }
+        LirExprKind::ListConstruct { elements, .. }
+        | LirExprKind::TupleConstruct { elements, .. } => {
+            for e in elements {
+                collect_call_arg_types_in_expr(arena_expr(exprs, *e), exprs, out);
+            }
+        }
+        LirExprKind::RecordConstruct { fields, .. } => {
+            for f in fields {
+                collect_call_arg_types_in_expr(arena_expr(exprs, *f), exprs, out);
+            }
+        }
+        LirExprKind::Range { start, end, .. } => {
+            collect_call_arg_types_in_expr(arena_expr(exprs, *start), exprs, out);
+            collect_call_arg_types_in_expr(arena_expr(exprs, *end), exprs, out);
+        }
+        LirExprKind::VariantCtor {
+            payload: Some(p), ..
+        } => {
+            collect_call_arg_types_in_expr(arena_expr(exprs, *p), exprs, out);
+        }
+        _ => {}
+    }
+}
+
+/// True if `expr` contains a `Call` whose argument type is a composite
+/// (record / tuple / option / result / user variant). Such arguments are
+/// lowered by materializing the value's canonical-ABI bytes to a scratch
+/// buffer then reloading the flat slots, which needs an i32 flat-scratch
+/// local. String / list args take a materializer path and are excluded.
+fn expr_contains_composite_call_arg(
+    expr: &LirExpr,
+    exprs: &[LirExpr],
+    ctx: &CompilerContext,
+) -> bool {
+    let is_composite = |ty: Ty| {
+        matches!(
+            ctx.ty_kind(ty),
+            InternedTyKind::Tuple(_)
+                | InternedTyKind::Adt(_)
+                | InternedTyKind::Option(_)
+                | InternedTyKind::Result { .. }
+        )
+    };
+    if let LirExprKind::Call { args, .. } = &expr.kind
+        && args
+            .iter()
+            .any(|a| is_composite(arena_expr(exprs, *a).ty))
+    {
+        return true;
+    }
+    match &expr.kind {
+        LirExprKind::Field { base, .. }
+        | LirExprKind::Unary { operand: base, .. }
+        | LirExprKind::IsCase { base, .. }
+        | LirExprKind::VariantField { base, .. } => {
+            expr_contains_composite_call_arg(arena_expr(exprs, *base), exprs, ctx)
+        }
+        LirExprKind::Binary { lhs, rhs, .. } => {
+            expr_contains_composite_call_arg(arena_expr(exprs, *lhs), exprs, ctx)
+                || expr_contains_composite_call_arg(arena_expr(exprs, *rhs), exprs, ctx)
+        }
+        LirExprKind::Index { base, index } => {
+            expr_contains_composite_call_arg(arena_expr(exprs, *base), exprs, ctx)
+                || expr_contains_composite_call_arg(arena_expr(exprs, *index), exprs, ctx)
+        }
+        LirExprKind::Call { args, .. } => args
+            .iter()
+            .any(|a| expr_contains_composite_call_arg(arena_expr(exprs, *a), exprs, ctx)),
+        LirExprKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_contains_composite_call_arg(arena_expr(exprs, *condition), exprs, ctx)
+                || expr_contains_composite_call_arg(arena_expr(exprs, *then_expr), exprs, ctx)
+                || expr_contains_composite_call_arg(arena_expr(exprs, *else_expr), exprs, ctx)
+        }
+        LirExprKind::ListConstruct { elements, .. }
+        | LirExprKind::TupleConstruct { elements, .. } => elements
+            .iter()
+            .any(|e| expr_contains_composite_call_arg(arena_expr(exprs, *e), exprs, ctx)),
+        LirExprKind::RecordConstruct { fields, .. } => fields
+            .iter()
+            .any(|f| expr_contains_composite_call_arg(arena_expr(exprs, *f), exprs, ctx)),
+        LirExprKind::Range { start, end, .. } => {
+            expr_contains_composite_call_arg(arena_expr(exprs, *start), exprs, ctx)
+                || expr_contains_composite_call_arg(arena_expr(exprs, *end), exprs, ctx)
+        }
+        LirExprKind::VariantCtor {
+            payload: Some(p), ..
+        } => expr_contains_composite_call_arg(arena_expr(exprs, *p), exprs, ctx),
+        _ => false,
+    }
+}
+
 fn compute_flat_scratch_counts(
     ops: &[LirOp],
     signals: &[(Ty,)],
@@ -7529,6 +7702,15 @@ fn compute_flat_scratch_counts(
             }
             if expr_contains_min_max_call(e, exprs, ctx) {
                 *min_i32 = (*min_i32).max(2);
+            }
+            // A composite callback argument (record / tuple / option /
+            // result / variant passed to a `Call`) is materialized to a
+            // scratch buffer then reloaded via `emit_flat_slot_load_at_ptr`,
+            // whose multi-slot path stashes the base pointer in the first i32
+            // flat-scratch local. Reserve one so that path has somewhere to
+            // write. String / list args take a different (materializer) path.
+            if expr_contains_composite_call_arg(e, exprs, ctx) {
+                *load_scratch = true;
             }
             let (need_i32, need_i64) = expr_contains_float_binop_scratch(e, exprs, ctx);
             if need_i32 {

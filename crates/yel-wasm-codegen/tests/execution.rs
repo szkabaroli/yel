@@ -3876,6 +3876,68 @@ fn callback_with_composite_args_compiles() {
     assert!(!bytes.is_empty(), "composite-arg callback should encode");
 }
 
+/// Regression: a callback invoked with a *composite* argument (option /
+/// result / tuple / record) must push the argument's canonical-ABI
+/// flattening — what the host import declares — not the value's internal GC
+/// ref. Previously these hit a loud `callback arg: composite argument …`
+/// error; now each is materialized to a scratch buffer and reloaded as flat
+/// slots. A successful encode + core validation is the guard (validation
+/// rejects a ref where the import wants scalars), matching
+/// `callback_with_composite_args_compiles`.
+#[test]
+fn callback_with_gc_composite_args_compiles() {
+    for (pkg, arg_ty, call) in [
+        ("yel:cbopt@0.1.0", "option<s32>", "on_data(some(1));"),
+        (
+            "yel:cbres@0.1.0",
+            "result<s32, string>",
+            "on_data(ok(1));",
+        ),
+        ("yel:cbtup@0.1.0", "tuple<s32, s32>", "on_data((1, 2));"),
+    ] {
+        let source = format!(
+            r#"
+            package {pkg};
+            export component App {{
+                on_data: func(a: {arg_ty});
+                VStack {{
+                    Button {{ clicked: {{ {call} }} }}
+                    Text {{ "ok" }}
+                }}
+            }}
+        "#
+        );
+        let bytes = compile_to_component(&source);
+        assert!(
+            !bytes.is_empty(),
+            "composite-arg callback ({arg_ty}) should encode"
+        );
+    }
+}
+
+/// Regression twin of `callback_with_gc_composite_args_compiles` for a
+/// user-declared record argument, exercising the `GcRef` (record struct)
+/// branch of the composite callback-arg lowering.
+#[test]
+fn callback_with_record_arg_compiles() {
+    let source = r#"
+        package yel:cbrec@0.1.0;
+        record Point {
+            x: s32,
+            y: s32,
+        }
+        export component App {
+            on_data: func(a: Point);
+            VStack {
+                Button { clicked: { on_data({ x: 1, y: 2 }); } }
+                Text { "ok" }
+            }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    assert!(!bytes.is_empty(), "record-arg callback should encode");
+}
+
 /// Regression: a `let` binding of a non-i32 scalar in an event handler.
 /// The lowering allocated a default *i32* slot with `Ptr` binding mode, so an
 /// `f32` / `f64` / `s64` value failed core validation ("expected i32, found

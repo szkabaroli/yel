@@ -209,6 +209,49 @@ impl<'a> WasmPackageBuilder<'a> {
             next_block_local += 1;
         }
 
+        // One typed `(ref null $idx)` scratch local per distinct GC
+        // struct/ref type used by a composite callback argument in this
+        // block. A callback invoked with a composite arg must push the
+        // arg's canonical-ABI flattening; the local holds the arg's GC ref
+        // while its canonical bytes are materialized to a scratch buffer.
+        // Scalars / lists / strings are handled inline in `emit_callback_arg`
+        // and skipped here.
+        let mut block_cb_arg_ref_locals: HashMap<u32, u32> = HashMap::new();
+        for &ty in &block.callback_arg_composite_types {
+            let gc_type_idx = match self.internal_repr(ty) {
+                crate::wasm::repr::InternalRepr::GcRef(idx)
+                | crate::wasm::repr::InternalRepr::GcVariant(idx) => idx,
+                _ => continue,
+            };
+            if block_cb_arg_ref_locals.contains_key(&gc_type_idx) {
+                continue;
+            }
+            locals.push((
+                1,
+                ValType::Ref(wasm_encoder::RefType {
+                    nullable: true,
+                    heap_type: wasm_encoder::HeapType::Concrete(gc_type_idx),
+                }),
+            ));
+            block_cb_arg_ref_locals.insert(gc_type_idx, next_block_local);
+            next_block_local += 1;
+        }
+        // Three shared i32 scratch locals for composite callback-arg
+        // lowering: buffer_ptr (the fresh canonical buffer), scratch_ptr and
+        // scratch_len (materializer `(ptr, len)` returns during the member
+        // lift). Reserved once, only when at least one composite arg exists.
+        let block_cb_arg_scratch: Option<(u32, u32, u32)> = if block_cb_arg_ref_locals.is_empty() {
+            None
+        } else {
+            let buffer_ptr = next_block_local;
+            let scratch_ptr = next_block_local + 1;
+            let scratch_len = next_block_local + 2;
+            locals.push((3, ValType::I32));
+            // These three are the last reserved locals; no further reservation
+            // reads `next_block_local`, so it isn't advanced past them.
+            Some((buffer_ptr, scratch_ptr, scratch_len))
+        };
+
         let mut func = Function::new(locals);
 
         // `local_offset` is the base index into the locals array for
@@ -387,6 +430,15 @@ impl<'a> WasmPackageBuilder<'a> {
             self.current_mount_child_alloc_arr_locals = Some(block_mount_child_alloc_arr_locals);
         }
 
+        // Composite callback-argument scratch locals; set/restore around the
+        // body emission like the mount-child locals above.
+        let prev_cb_arg_ref_locals = self.current_cb_arg_ref_locals.take();
+        let prev_cb_arg_scratch = self.current_cb_arg_scratch.take();
+        if !block_cb_arg_ref_locals.is_empty() {
+            self.current_cb_arg_ref_locals = Some(block_cb_arg_ref_locals);
+            self.current_cb_arg_scratch = block_cb_arg_scratch;
+        }
+
         // Emit block operations
         for op in &block.ops {
             self.emit_op(&mut func, op, comp_idx, block, local_offset)?;
@@ -405,6 +457,8 @@ impl<'a> WasmPackageBuilder<'a> {
         self.current_mount_child_locals = prev_mount_child_locals;
         self.current_mount_child_alloc_idx_locals = prev_mount_child_alloc_idx_locals;
         self.current_mount_child_alloc_arr_locals = prev_mount_child_alloc_arr_locals;
+        self.current_cb_arg_ref_locals = prev_cb_arg_ref_locals;
+        self.current_cb_arg_scratch = prev_cb_arg_scratch;
 
         // If the block is declared to return i32, push its designated
         // return slot as the final expression before `End`. The slot

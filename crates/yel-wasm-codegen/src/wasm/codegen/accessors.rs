@@ -24,7 +24,7 @@ use super::super::WasmPackageBuilder;
 ///   recurse to arbitrary depth (`option<result<result<…>>>`, `option<variant
 ///   with a gc-variant / list payload>`, …) through the one full-featured lift.
 #[derive(Clone, Copy)]
-enum GcRefSource<'a> {
+pub(in crate::wasm) enum GcRefSource<'a> {
     SelfChain {
         ci: usize,
         chain: &'a [(u32, u32)],
@@ -3492,7 +3492,7 @@ impl<'a> WasmPackageBuilder<'a> {
     /// collapsed option → disc from the null-check, inner lift on some,
     /// zero-filled payload on none; nested composite → recurse; string /
     /// typed list → materialize to (ptr, len); scalar / enum → typed store.
-    fn emit_member_lift_to_memory(
+    pub(in crate::wasm) fn emit_member_lift_to_memory(
         &mut self,
         func: &mut Function,
         ty: Ty,

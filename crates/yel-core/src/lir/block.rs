@@ -279,6 +279,16 @@ pub struct LirBlock {
     /// Codegen reserves one typed `(ref null $Comp_<child>)` local
     /// per entry for the mount-internal call/return.
     pub mount_component_children: Vec<DefId>,
+    /// Distinct composite argument `Ty`s of `Call` exprs reachable from
+    /// this block (recursively through `If` / `Loop` bodies). A callback
+    /// invoked with a composite argument must push the argument's
+    /// canonical-ABI flattening (what the host import declares), not the
+    /// internal GC ref — codegen reserves one typed ref local per distinct
+    /// GC struct/ref type here to hold the value while its bytes are
+    /// materialized. Over-collection is fine; codegen filters to the types
+    /// whose internal repr is a GC struct/ref (scalars / lists / strings are
+    /// handled inline). Deduped; order is first-occurrence.
+    pub callback_arg_composite_types: Vec<Ty>,
     /// Tree-boundary refs this block expects to receive as additional
     /// WASM function parameters, AFTER the legacy i32 params declared in
     /// `params`. When non-empty, the block opts into a dynamic per-block
@@ -348,6 +358,7 @@ impl LirBlock {
             max_flat_scratch_counts: (0, 0, 0, 0),
             mount_component_count: 0,
             mount_component_children: Vec::new(),
+            callback_arg_composite_types: Vec::new(),
             boundary_params: Vec::new(),
             boundary_param_slots: Vec::new(),
             implicit_self: None,

@@ -2554,6 +2554,69 @@ impl WasmPackageBuilder<'_> {
             func.instruction(&Instruction::Call(mat_fn));
             return Ok(());
         }
+        // Composite argument stored as a GC ref (record / tuple) or GC-variant
+        // supertype ref (option / result / user variant). The import declares
+        // the argument's full canonical-ABI flattening, so we materialize the
+        // value's canonical bytes into a scratch buffer, then reload the flat
+        // slots in declaration order. The typed ref local + three i32 scratch
+        // locals were reserved for this block by `block_fn.rs` from
+        // `LirBlock::callback_arg_composite_types`.
+        if let InternalRepr::GcRef(gc_type_idx) | InternalRepr::GcVariant(gc_type_idx) =
+            self.internal_repr(arg.ty)
+        {
+            let ref_local = self
+                .current_cb_arg_ref_locals
+                .as_ref()
+                .and_then(|m| m.get(&gc_type_idx).copied());
+            match (ref_local, self.current_cb_arg_scratch) {
+                (Some(ref_local), Some((buffer_local, scratch_ptr, scratch_len))) => {
+                    use super::codegen::accessors::GcRefSource;
+                    // Evaluate the argument and stash its typed GC ref; the
+                    // member lift re-reads it as a `LocalChain` source.
+                    self.emit_expr(func, arg, component)?;
+                    func.instruction(&Instruction::LocalSet(ref_local));
+                    // Allocate a scratch buffer sized for the canonical layout.
+                    let size = self.layout_ctx.size_of(arg.ty) as i32;
+                    let align = self.layout_ctx.align_of(arg.ty) as i32;
+                    let alloc_idx = self
+                        .alloc_funcs
+                        .as_ref()
+                        .ok_or_else(|| {
+                            CodegenError::InvalidIR(
+                                "callback arg: alloc_funcs not initialized".into(),
+                            )
+                        })?
+                        .alloc;
+                    func.instruction(&Instruction::I32Const(size));
+                    func.instruction(&Instruction::I32Const(align));
+                    func.instruction(&Instruction::Call(alloc_idx));
+                    func.instruction(&Instruction::LocalSet(buffer_local));
+                    // Write the value's canonical-ABI bytes into the buffer.
+                    self.emit_member_lift_to_memory(
+                        func,
+                        arg.ty,
+                        GcRefSource::LocalChain {
+                            ref_local,
+                            chain: &[],
+                        },
+                        buffer_local,
+                        0,
+                        Some((scratch_ptr, scratch_len)),
+                    )?;
+                    // Reload the canonical flat slots onto the stack, in order.
+                    func.instruction(&Instruction::LocalGet(buffer_local));
+                    self.emit_flat_slot_load_at_ptr(func, arg.ty)?;
+                    return Ok(());
+                }
+                _ => {
+                    return Err(CodegenError::InvalidIR(format!(
+                        "callback arg: composite argument of type {:?} (gc type {}) has no \
+                         reserved ref/scratch locals — block metadata did not record it",
+                        arg.ty, gc_type_idx
+                    )));
+                }
+            }
+        }
         // Composite argument that isn't a single (ptr, len) pair — the import
         // wants its full canonical flattening, which the argument side does not
         // yet lower. Fail loud instead of pushing the internal ref.

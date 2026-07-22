@@ -1230,6 +1230,20 @@ pub(crate) struct WasmPackageBuilder<'a> {
     /// Per-child-component scratch typed `(ref null $CompHandleArr_<child>)`
     /// local index reserved for `emit_registry_alloc`'s `arr` scratch.
     pub current_mount_child_alloc_arr_locals: Option<HashMap<usize, u32>>,
+    /// For each distinct GC struct/ref type index used by a composite
+    /// callback argument in the **current** block, the WASM local index of a
+    /// typed `(ref null $idx)` scratch local reserved up front. The local
+    /// holds the argument's GC ref while its canonical-ABI bytes are
+    /// materialized to a scratch buffer. `None` in blocks with no composite
+    /// callback arguments.
+    pub current_cb_arg_ref_locals: Option<HashMap<u32, u32>>,
+    /// Three shared i32 scratch local indices `(buffer_ptr, scratch_ptr,
+    /// scratch_len)` reserved for composite callback-argument lowering:
+    /// `buffer_ptr` holds the fresh canonical buffer, `scratch_ptr` /
+    /// `scratch_len` receive materializer `(ptr, len)` returns during the
+    /// member lift. `None` when the current block has no composite callback
+    /// arguments.
+    pub current_cb_arg_scratch: Option<(u32, u32, u32)>,
     /// Function-index base for every component by position; `[i]` is the
     /// constructor index for `components[i]`. Populated inside
     /// `build_core_module` once the final `first_component_func` is known.
@@ -1332,6 +1346,8 @@ impl<'a> WasmPackageBuilder<'a> {
             next_handler_local_id: HashMap::new(),
             parent_retention_cursor: HashMap::new(),
             current_mount_child_locals: None,
+            current_cb_arg_ref_locals: None,
+            current_cb_arg_scratch: None,
             current_mount_child_alloc_idx_locals: None,
             current_mount_child_alloc_arr_locals: None,
             component_func_bases: Vec::new(),
