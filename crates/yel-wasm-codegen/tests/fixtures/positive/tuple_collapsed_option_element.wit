@@ -1,0 +1,31 @@
+package yel:tupcollapse@0.1.0;
+
+interface shared-types {
+  record item {
+    n: s32,
+    label: string,
+  }
+}
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-rec: func() -> tuple<s32, option<item>>;
+    set-rec: func(value: tuple<s32, option<item>>);
+    get-rec-none: func() -> tuple<s32, option<item>>;
+    set-rec-none: func(value: tuple<s32, option<item>>);
+    get-lst: func() -> tuple<s32, option<list<s32>>>;
+    set-lst: func(value: tuple<s32, option<list<s32>>>);
+    get-tup: func() -> tuple<s32, option<tuple<s32, s32>>>;
+    set-tup: func(value: tuple<s32, option<tuple<s32, s32>>>);
+  }
+}
+
+world tupcollapse {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

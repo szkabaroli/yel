@@ -2013,6 +2013,14 @@ fn record_field_storage_type(ctx: &CompilerContext, ty: Ty, registry: &RecordGcT
                         heap_type: HeapType::Concrete(super_idx),
                     });
                 }
+            // Collapsing option<record|tuple|scalar-list>: store the inner's
+            // concrete ref (none = null), matching `internal_repr`'s collapse
+            // and the signal-storage / list-element rules — NOT anyref, so a
+            // record/tuple field read (`struct.get`) is typed and needs no
+            // cast. (`option<string>` / flat-gc options were handled above.)
+            if let Some(vt) = option_collapse_elem_valtype(ctx, ty, registry) {
+                return vt;
+            }
             ValType::Ref(RefType {
                 nullable: true,
                 heap_type: HeapType::Abstract {

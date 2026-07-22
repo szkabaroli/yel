@@ -4235,6 +4235,84 @@ fn record_with_mixed_width_result_field_roundtrip() {
 }
 
 #[test]
+fn tuple_with_collapsed_option_element_roundtrip() {
+    // A tuple element that is a collapsed option<record> — stored as one
+    // nullable record ref (none = null). The tuple getter/setter must write/
+    // read the disc and, on some, lower/build the inner record. Verifies
+    // Some(record) and None both round-trip.
+    let source = r#"
+        package yel:tupopt@0.1.0;
+        record Item { n: s32, label: string, }
+        export component App {
+            pair: tuple<s32, option<Item>> = (0, none);
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:tupopt/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+    let get_pair = get_func(&mut h, iface, "[method]app.get-pair");
+    let read = |h: &mut Harness, res: &ResourceAny| -> Val {
+        let mut out = [Val::Bool(false)];
+        get_pair
+            .call(&mut h.store, &[Val::Resource(*res)], &mut out)
+            .expect("get-pair");
+        std::mem::replace(&mut out[0], Val::Bool(false))
+    };
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "pair",
+        &r,
+        Val::Tuple(vec![
+            Val::S32(7),
+            Val::Option(Some(Box::new(Val::Record(vec![
+                ("n".into(), Val::S32(88)),
+                ("label".into(), Val::String("hi".into())),
+            ])))),
+        ]),
+    );
+    match read(&mut h, &r) {
+        Val::Tuple(e) => {
+            assert!(matches!(&e[0], Val::S32(7)), "tuple.0, got {:?}", e[0]);
+            match &e[1] {
+                Val::Option(Some(inner)) => match inner.as_ref() {
+                    Val::Record(f) => {
+                        let g = |k: &str| f.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+                        assert!(matches!(g("n"), Some(Val::S32(88))), "n, got {:?}", g("n"));
+                        match g("label") {
+                            Some(Val::String(s)) => assert_eq!(&**s, "hi"),
+                            other => panic!("label: {:?}", other),
+                        }
+                    }
+                    other => panic!("some payload must be record, got {:?}", other),
+                },
+                other => panic!("tuple.1 must be Some(record), got {:?}", other),
+            }
+        }
+        other => panic!("get-pair non-tuple {:?}", other),
+    }
+    // None
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "pair",
+        &r,
+        Val::Tuple(vec![Val::S32(9), Val::Option(None)]),
+    );
+    match read(&mut h, &r) {
+        Val::Tuple(e) => {
+            assert!(matches!(&e[0], Val::S32(9)), "tuple.0, got {:?}", e[0]);
+            assert!(matches!(&e[1], Val::Option(None)), "tuple.1 must be None, got {:?}", e[1]);
+        }
+        other => panic!("get-pair non-tuple {:?}", other),
+    }
+}
+
+#[test]
 fn record_with_tuple_field_roundtrip() {
     // A record field that is a tuple: the record lift/pack must delegate the
     // field to the recursive tuple lift/pack (it's a nested GC struct), not

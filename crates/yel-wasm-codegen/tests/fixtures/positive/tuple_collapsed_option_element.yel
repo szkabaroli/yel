@@ -1,0 +1,19 @@
+// A tuple element that is a collapsed option<composite> — option<record>,
+// option<tuple>, option<scalar-list> — stored as a single nullable ref
+// (none = null, some(v) = v). Two parts:
+//   1. record_field_storage_type now types a collapsing-option field/element
+//      as its concrete collapsed ref (via option_collapse_elem_valtype),
+//      matching internal_repr / signal storage — previously anyref, which made
+//      `struct.get` on the element fail to validate.
+//   2. the tuple getter/setter lower/build it: write disc = !ref.is_null and,
+//      on some, recurse into the inner record / tuple / scalar-list lift/pack.
+// Round-trip pinned by tuple_with_collapsed_option_element_roundtrip.
+package yel:tupcollapse@0.1.0;
+record Item { n: s32, label: string, }
+export component App {
+    rec: tuple<s32, option<Item>> = (1, some({ n: 2, label: "a" }));
+    recNone: tuple<s32, option<Item>> = (3, none);
+    lst: tuple<s32, option<list<s32>>> = (4, some([5, 6]));
+    tup: tuple<s32, option<tuple<s32, s32>>> = (7, some((8, 9)));
+    VStack { Text { "ok" } }
+}

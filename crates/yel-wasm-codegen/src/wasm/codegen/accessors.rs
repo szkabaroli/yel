@@ -5002,6 +5002,132 @@ impl<'a> WasmPackageBuilder<'a> {
                 offset += elem_layout.size;
                 continue;
             }
+            // collapsed option<composite> element (option<record|tuple|
+            // scalar-list>): stored as a single nullable ref (null = none).
+            // Canonical shape is [disc(i32), ...inner_canonical]. Write
+            // disc = !ref.is_null; on some, lower the inner at the payload
+            // offset; on none, zero-fill the payload slots.
+            if matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::Option(_))
+                && self.option_collapses_to_ref(elem_ty).is_some()
+            {
+                let inner_ty = match self.ctx.ty_kind(elem_ty) {
+                    InternedTyKind::Option(t) => *t,
+                    _ => unreachable!("guarded by match above"),
+                };
+                let elem_chain: Vec<(u32, u32)> = prefix
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once((tup_idx, i as u32)))
+                    .collect();
+                let elem_slots = self.flatten_core_slots(elem_ty);
+                let disc_off = offset + elem_slots.first().map(|s| s.offset).unwrap_or(0);
+                let payload_base = offset + elem_slots.get(1).map(|s| s.offset).unwrap_or(0);
+                // disc = !ref.is_null
+                func.instruction(&Instruction::LocalGet(scratch_ptr_local));
+                if disc_off != 0 {
+                    func.instruction(&Instruction::I32Const(disc_off as i32));
+                    func.instruction(&Instruction::I32Add);
+                }
+                self.emit_gc_field_chain(func, ci, &elem_chain)?;
+                func.instruction(&Instruction::RefIsNull);
+                func.instruction(&Instruction::I32Eqz);
+                func.instruction(&Instruction::I32Store8(super::scratch::mem_arg(0, 0)));
+                // if some (non-null), lower the inner.
+                self.emit_gc_field_chain(func, ci, &elem_chain)?;
+                func.instruction(&Instruction::RefIsNull);
+                func.instruction(&Instruction::I32Eqz);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+                if let InternedTyKind::Adt(d) = self.ctx.ty_kind(inner_ty)
+                    && matches!(self.ctx.defs.kind(*d), DefKind::Record(_))
+                {
+                    let rec_def = *d;
+                    self.emit_getter_lift_dtr_record(
+                        func,
+                        ci,
+                        rec_def,
+                        payload_base,
+                        scratch_ptr_local,
+                        &elem_chain,
+                    )?;
+                } else if matches!(self.ctx.ty_kind(inner_ty), InternedTyKind::Tuple(_)) {
+                    self.emit_getter_lift_tuple(
+                        func,
+                        ci,
+                        inner_ty,
+                        payload_base,
+                        scratch_ptr_local,
+                        mat_ptr_local,
+                        mat_len_local,
+                        &elem_chain,
+                    )?;
+                } else if let Some(&arr_idx) =
+                    self.record_gc_types.list_array_type_idx.get(&inner_ty)
+                {
+                    // scalar-list inner: materialize the array ref → (ptr, len).
+                    let mat_fn = *self
+                        .gc_list_materializer_fn_indices
+                        .get(&arr_idx)
+                        .ok_or_else(|| {
+                            CodegenError::InvalidIR(format!(
+                                "tuple option<list> element: missing materializer for {}",
+                                arr_idx
+                            ))
+                        })?;
+                    self.emit_gc_field_chain(func, ci, &elem_chain)?;
+                    func.instruction(&Instruction::Call(mat_fn));
+                    func.instruction(&Instruction::LocalSet(mat_len_local));
+                    func.instruction(&Instruction::LocalSet(mat_ptr_local));
+                    let ptr_off = offset + elem_slots[1].offset;
+                    let len_off = offset + elem_slots[2].offset;
+                    func.instruction(&Instruction::LocalGet(scratch_ptr_local));
+                    if ptr_off != 0 {
+                        func.instruction(&Instruction::I32Const(ptr_off as i32));
+                        func.instruction(&Instruction::I32Add);
+                    }
+                    func.instruction(&Instruction::LocalGet(mat_ptr_local));
+                    func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+                    func.instruction(&Instruction::LocalGet(scratch_ptr_local));
+                    if len_off != 0 {
+                        func.instruction(&Instruction::I32Const(len_off as i32));
+                        func.instruction(&Instruction::I32Add);
+                    }
+                    func.instruction(&Instruction::LocalGet(mat_len_local));
+                    func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+                } else {
+                    return Err(CodegenError::InvalidIR(format!(
+                        "tuple getter lift: collapsed option inner {:?} not supported",
+                        inner_ty
+                    )));
+                }
+                // else (none): zero-fill payload slots.
+                func.instruction(&Instruction::Else);
+                for slot in elem_slots.iter().skip(1) {
+                    func.instruction(&Instruction::LocalGet(scratch_ptr_local));
+                    let off = offset + slot.offset;
+                    if off != 0 {
+                        func.instruction(&Instruction::I32Const(off as i32));
+                        func.instruction(&Instruction::I32Add);
+                    }
+                    match slot.store {
+                        super::super::StoreWidth::I64 => {
+                            func.instruction(&Instruction::I64Const(0));
+                        }
+                        super::super::StoreWidth::F32 => {
+                            func.instruction(&Instruction::F32Const(0.0.into()));
+                        }
+                        super::super::StoreWidth::F64 => {
+                            func.instruction(&Instruction::F64Const(0.0.into()));
+                        }
+                        _ => {
+                            func.instruction(&Instruction::I32Const(0));
+                        }
+                    }
+                    slot.store.emit_store(func);
+                }
+                func.instruction(&Instruction::End);
+                offset += elem_layout.size;
+                continue;
+            }
             match self.internal_repr(elem_ty) {
                 super::super::repr::InternalRepr::Scalar(_) => {
                     func.instruction(&Instruction::LocalGet(scratch_ptr_local));
@@ -5224,6 +5350,60 @@ impl<'a> WasmPackageBuilder<'a> {
         for &elem_ty in &elements {
             if self.flat_gc_migrated(elem_ty) {
                 self.emit_flat_gc_setter_pack_field(func, elem_ty, next_param)?;
+                continue;
+            }
+            // collapsed option<composite> element: build a single nullable
+            // ref from canonical [disc, ...inner]. disc param selects some
+            // (build inner ref) vs none (typed null); either way the inner's
+            // canonical params are consumed from the counter (the some branch
+            // reads them; on none they are still present but unread).
+            if matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::Option(_))
+                && let Some(arr_idx) = self.option_collapses_to_ref(elem_ty)
+            {
+                let inner_ty = match self.ctx.ty_kind(elem_ty) {
+                    InternedTyKind::Option(t) => *t,
+                    _ => unreachable!("guarded by match above"),
+                };
+                let disc_param = *next_param;
+                *next_param += 1;
+                func.instruction(&Instruction::LocalGet(disc_param));
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
+                    ValType::Ref(wasm_encoder::RefType {
+                        nullable: true,
+                        heap_type: wasm_encoder::HeapType::Concrete(arr_idx),
+                    }),
+                )));
+                // some: build the inner ref, consuming its canonical params.
+                if let InternedTyKind::Adt(d) = self.ctx.ty_kind(inner_ty)
+                    && matches!(self.ctx.defs.kind(*d), DefKind::Record(_))
+                {
+                    self.emit_setter_pack_dtr_record(func, *d, next_param)?;
+                } else if matches!(self.ctx.ty_kind(inner_ty), InternedTyKind::Tuple(_)) {
+                    self.emit_setter_pack_tuple(func, inner_ty, next_param)?;
+                } else if self.record_gc_types.list_array_type_idx.contains_key(&inner_ty) {
+                    let inner_arr = self.record_gc_types.list_array_type_idx[&inner_ty];
+                    let unmat = *self
+                        .gc_list_unmaterializer_fn_indices
+                        .get(&inner_arr)
+                        .ok_or_else(|| {
+                            CodegenError::InvalidIR(format!(
+                                "tuple option<list> setter: missing un-materializer for {}",
+                                inner_arr
+                            ))
+                        })?;
+                    func.instruction(&Instruction::LocalGet(*next_param)); // ptr
+                    func.instruction(&Instruction::LocalGet(*next_param + 1)); // len
+                    func.instruction(&Instruction::Call(unmat));
+                    *next_param += 2;
+                } else {
+                    return Err(CodegenError::InvalidIR(format!(
+                        "tuple setter pack: collapsed option inner {:?} not supported",
+                        inner_ty
+                    )));
+                }
+                func.instruction(&Instruction::Else);
+                func.instruction(&Instruction::RefNull(wasm_encoder::HeapType::Concrete(arr_idx)));
+                func.instruction(&Instruction::End);
                 continue;
             }
             match self.internal_repr(elem_ty) {
