@@ -514,6 +514,83 @@ impl WasmPackageBuilder<'_> {
         self.record_gc_types.record_type_idx.get(&def_id).copied()
     }
 
+    /// For a record whose canonical flattening is a single slot, return the
+    /// chain of `(record_type_idx, gc_field_idx)` struct.gets from the record
+    /// down to the leaf scalar. At each level exactly one field carries the
+    /// slot (the others, if any, flatten to nothing); if that field is itself
+    /// a record the walk recurses. e.g. `record O { i: I }`, `record I { a:
+    /// s64 }` → `[(O, i), (I, a)]`, so a by-value getter reads `o.i.a` rather
+    /// than returning the intermediate `(ref $I)`.
+    pub(crate) fn single_slot_record_field_chain(
+        &self,
+        record_def_id: DefId,
+    ) -> Result<Vec<(u32, u32)>, CodegenError> {
+        let mut chain = Vec::new();
+        let mut def = record_def_id;
+        loop {
+            let type_idx = self
+                .record_gc_types
+                .record_type_idx
+                .get(&def)
+                .copied()
+                .ok_or_else(|| {
+                    CodegenError::InvalidIR(
+                        "single-slot record chain: missing record_type_idx".into(),
+                    )
+                })?;
+            let fields: Vec<DefId> = self
+                .ctx
+                .defs
+                .as_record(def)
+                .ok_or_else(|| {
+                    CodegenError::InvalidIR("single-slot record chain: not a record".into())
+                })?
+                .fields
+                .clone();
+            let field_gc = self
+                .record_gc_types
+                .field_gc_indices
+                .get(&def)
+                .cloned()
+                .ok_or_else(|| {
+                    CodegenError::InvalidIR(
+                        "single-slot record chain: missing field gc indices".into(),
+                    )
+                })?;
+            // The one field whose canonical flattening is non-empty carries
+            // the slot.
+            let mut chosen: Option<(usize, Ty)> = None;
+            for (pos, &fid) in fields.iter().enumerate() {
+                let fty = match self.ctx.defs.kind(fid) {
+                    DefKind::Field(f) => f.ty,
+                    _ => continue,
+                };
+                if !self.canonical_flat_valtypes(fty).is_empty() {
+                    chosen = Some((pos, fty));
+                    break;
+                }
+            }
+            let (pos, fty) = chosen.ok_or_else(|| {
+                CodegenError::InvalidIR("single-slot record chain: no slot-carrying field".into())
+            })?;
+            let gc_idx = *field_gc.get(pos).ok_or_else(|| {
+                CodegenError::InvalidIR(
+                    "single-slot record chain: gc field index out of range".into(),
+                )
+            })?;
+            chain.push((type_idx, gc_idx));
+            match self.ctx.ty_kind(fty) {
+                InternedTyKind::Adt(d)
+                    if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) =>
+                {
+                    def = *d;
+                }
+                _ => break,
+            }
+        }
+        Ok(chain)
+    }
+
     /// Number of WASM stack slots this type occupies in internal
     /// representation. Callers that used to do
     /// `flatten_core_valtypes(ty).len()` for internal purposes should

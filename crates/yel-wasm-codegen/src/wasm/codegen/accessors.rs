@@ -835,11 +835,6 @@ impl<'a> WasmPackageBuilder<'a> {
                 // says single-slot composites return the value, not
                 // a pointer). Read struct.get(comp).get(record).
                 if is_por && flat_valtypes.len() == 1 {
-                    let record_type_idx = self.por_record_type_idx(signal_ty).ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "POR getter (1 slot): record type idx missing".into(),
-                        )
-                    })?;
                     let record_def_id = match self.ctx.ty_kind(signal_ty) {
                         yel_core::types::InternedTyKind::Adt(d) => *d,
                         _ => {
@@ -848,27 +843,25 @@ impl<'a> WasmPackageBuilder<'a> {
                             ));
                         }
                     };
-                    let gc_field_idx = self
-                        .record_gc_types
-                        .field_gc_indices
-                        .get(&record_def_id)
-                        .and_then(|v| v.first())
-                        .copied()
-                        .ok_or_else(|| {
-                            CodegenError::InvalidIR(
-                                "POR getter (1 slot): record GC field index missing".into(),
-                            )
-                        })?;
+                    // The single canonical slot is a leaf scalar reached
+                    // through a chain of single-slot records (e.g. `record O {
+                    // i: I }`, `record I { a: s64 }` → the slot is `o.i.a`).
+                    // Walk that chain and read down to the scalar; stopping at
+                    // the first record ref would return a `(ref …)` where the
+                    // getter's flat return type (e.g. i64) is expected.
+                    let chain = self.single_slot_record_field_chain(record_def_id)?;
                     self.emit_self_ref(&mut func, ci)?;
                     func.instruction(&Instruction::StructGet {
                         struct_type_index: struct_ty,
                         field_index: field_path[0],
                     });
-                    func.instruction(&Instruction::RefAsNonNull);
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: record_type_idx,
-                        field_index: gc_field_idx,
-                    });
+                    for (record_type_idx, gc_field_idx) in chain {
+                        func.instruction(&Instruction::RefAsNonNull);
+                        func.instruction(&Instruction::StructGet {
+                            struct_type_index: record_type_idx,
+                            field_index: gc_field_idx,
+                        });
+                    }
                     return Ok(());
                 }
                 // Option-of-ref collapsed signal: storage is one

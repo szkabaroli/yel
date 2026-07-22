@@ -3981,6 +3981,57 @@ fn result_mixed_width_join_roundtrip() {
 /// builds the tuple from canonical params on Some and the getter lowers it
 /// (via the recursive tuple lift). Verifies Some and None both round-trip.
 #[test]
+fn single_slot_nested_record_roundtrip() {
+    // A record that flattens to a single 64-bit slot (a single-field record
+    // wrapping a single-s64-field record) is returned by-value as i64, not by
+    // pointer. The getter must read down the chain `o.i.a` to the leaf scalar;
+    // previously it stopped at `o.i` and returned a `(ref $I)` where i64 was
+    // expected, failing validation.
+    let source = r#"
+        package yel:sslot@0.1.0;
+        record I { a: s64, }
+        record O { i: I, }
+        export component App {
+            o: O = { i: { a: 1 } };
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:sslot/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+    let big: i64 = 7_000_000_000;
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "o",
+        &r,
+        Val::Record(vec![(
+            "i".into(),
+            Val::Record(vec![("a".into(), Val::S64(big))]),
+        )]),
+    );
+    let get_o = get_func(&mut h, iface, "[method]app.get-o");
+    let mut out = [Val::Bool(false)];
+    get_o
+        .call(&mut h.store, &[Val::Resource(r)], &mut out)
+        .expect("get-o");
+    match &out[0] {
+        Val::Record(f) => match f.iter().find(|(n, _)| n == "i").map(|(_, v)| v) {
+            Some(Val::Record(inner)) => {
+                match inner.iter().find(|(n, _)| n == "a").map(|(_, v)| v) {
+                    Some(Val::S64(x)) => assert_eq!(*x, big, "o.i.a must round-trip"),
+                    other => panic!("o.i.a: {:?}", other),
+                }
+            }
+            other => panic!("o.i must be a record, got {:?}", other),
+        },
+        other => panic!("get-o returned non-record {:?}", other),
+    }
+}
+
+#[test]
 fn option_record_collapse_roundtrip() {
     // Guards the pre-existing collapse-path discriminant bug: the collapsed
     // option getter/setter used `ref.is_null` directly (some=0), inverting the
