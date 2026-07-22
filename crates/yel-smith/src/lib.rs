@@ -2294,9 +2294,12 @@ impl GenerationContext {
     ) -> Result<Expr> {
         let param = "p".to_string();
         let body = match elem {
-            // Signed integers: `(p OP literal)`. Restricted to signed widths
-            // because bare int literals infer as s32 and don't coerce to
-            // unsigned/float in comparison position.
+            // Signed integers: `(p OP rhs)`. A bare int literal infers as s32
+            // and does NOT coerce to a narrower/wider signed width in
+            // comparison position, so `p: s8 < 5` is a type error. Only s32
+            // may compare against a literal; every other signed width compares
+            // the parameter against itself (`p OP p`), which is same-typed and
+            // valid for any width.
             TypeRef::S8 | TypeRef::S16 | TypeRef::S32 | TypeRef::S64 => {
                 let ops = [
                     BinaryOp::Lt,
@@ -2307,10 +2310,15 @@ impl GenerationContext {
                     BinaryOp::Ne,
                 ];
                 let op = ops[u.int_in_range(0..=ops.len() - 1)?];
+                let rhs = if matches!(elem, TypeRef::S32) {
+                    Expr::Int(u.int_in_range(-10..=10)?)
+                } else {
+                    Expr::Var(param.clone())
+                };
                 Expr::Binary {
                     op,
                     lhs: Box::new(Expr::Var(param.clone())),
-                    rhs: Box::new(Expr::Int(u.int_in_range(-10..=10)?)),
+                    rhs: Box::new(rhs),
                 }
             }
             // Bool element: use the parameter directly.
