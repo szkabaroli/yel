@@ -107,6 +107,7 @@ deferred bodies) the way `wasm/codegen/` is split.
 - **Stringify fast-paths only**: `wasm/expr.rs:463,475,487` `*-to-string` arms `todo!()` on unexpected arity; numeric repr "hit[s] the scalar fast-path and fall[s] back to S32 for…" (`wasm/functions.rs:477`).
 - **Not-yet-migrated `InternalRepr::Flat` arm** referenced as a TODO in `wasm/repr.rs` (`wasm/expr.rs:3508`) — part of the WASM-GC migration ([§1.5](#15-wasm-gc-representation-migration-canonical-flat--typed-gc)).
 - **WIT version hard-defaulted**: package version "default[s] … to `0.1.0` for now" when a source omits it (`wasm/functions.rs:328`, mirrored in `yelc/pipeline.rs::wit_options`).
+- **`color`/`brush` unsupported as property/signal types**: they work only as element *attribute values* (`Text { color: #ff0000 }`). As a stored property (`c: color = #ff0000`) the surface primitive `InternedTyKind::Color` (4-byte, `lir/layout.rs:276`) and the ADT a hex literal / named case desugars to (`Adt(known.variants.color)`, `hir/lower.rs:1123`) have different storage shapes, so typeck rejects the assignment (`expected color, found Color`) and codegen can't flatten it (`variant ctor payload flattens to 4 slots but joined shape only has 0`). Fixing needs the two representations unified across typeck + layout + codegen. `yel-smith` deliberately does not emit them as property types (`crates/yel-smith/src/lib.rs`).
 
 ---
 

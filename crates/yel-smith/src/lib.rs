@@ -1206,16 +1206,16 @@ impl GenerationContext {
             });
         }
 
-        // color / brush are in the language, so keep emitting them, but at a
-        // low rate (~5%): the hex-literal-vs-`color` typing bug they expose is
-        // already catalogued, and at full weight they crowd out other bugs.
-        if u.int_in_range(0..=39)? == 0 {
-            return Ok(if u.arbitrary()? {
-                TypeRef::Color
-            } else {
-                TypeRef::Brush
-            });
-        }
+        // color / brush are deliberately NOT emitted as property/signal types.
+        // They are only supported as element *attribute values* (`Text {
+        // color: #ff0000 }`), not as storable property types: the surface
+        // primitive `color`/`brush` and the ADT a hex literal / named case
+        // desugars to have different storage shapes, so `c: color = #ff0000`
+        // is correctly rejected by typeck and unimplementable in codegen today
+        // without unifying the two representations. Generating them here just
+        // produces a flood of `expected color, found Color` typeck errors and
+        // option<color/brush> repr panics. See the color-as-property gap noted
+        // in docs/TECH_DEBT.md.
 
         let choice: u8 = u.int_in_range(0..=20)?;
         Ok(match choice {
