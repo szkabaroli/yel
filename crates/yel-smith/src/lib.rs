@@ -68,6 +68,7 @@ pub struct YelModule {
     pub records: Vec<RecordDef>,
     pub enums: Vec<EnumDef>,
     pub variants: Vec<VariantDef>,
+    pub globals: Vec<GlobalDef>,
     pub components: Vec<ComponentDef>,
 }
 
@@ -99,10 +100,20 @@ impl YelModule {
             .map(|_| ctx.arbitrary_variant(u))
             .collect::<Result<_>>()?;
 
+        // Generate global blocks (before components so components can read them
+        // as `GlobalName.prop`).
+        let num_globals: usize = u.int_in_range(0..=2)?;
+        let globals: Vec<_> = (0..num_globals)
+            .map(|_| ctx.arbitrary_global(u))
+            .collect::<Result<_>>()?;
+
         // Generate components (ensure at least one is exported for valid WASM)
         let num_components: usize = u.int_in_range(1..=config.max_components)?;
+        // The first component is the exported entry point; the rest are
+        // internal. Decide this up front and pass it into generation so that
+        // boundary-crossing type choices (tuples, etc.) can be gated on it.
         let mut components: Vec<_> = (0..num_components)
-            .map(|_| ctx.arbitrary_component(u))
+            .map(|i| ctx.arbitrary_component(u, i == 0))
             .collect::<Result<_>>()?;
 
         // Ensure exactly one component is exported (the first one)
@@ -117,6 +128,7 @@ impl YelModule {
             records,
             enums,
             variants,
+            globals,
             components,
         })
     }
@@ -148,6 +160,12 @@ impl YelModule {
         // Variants
         for variant in &self.variants {
             out.push_str(&variant.to_source());
+            out.push_str("\n\n");
+        }
+
+        // Globals
+        for global in &self.globals {
+            out.push_str(&global.to_source());
             out.push_str("\n\n");
         }
 
@@ -325,6 +343,25 @@ impl TypeRef {
 // ============================================================================
 // Components
 // ============================================================================
+
+/// A top-level `global { ... }` block: a set of shared reactive properties
+/// referenced from components as `GlobalName.prop`.
+#[derive(Debug, Clone)]
+pub struct GlobalDef {
+    pub name: String,
+    pub properties: Vec<PropertyDef>,
+}
+
+impl GlobalDef {
+    fn to_source(&self) -> String {
+        let mut out = format!("global {} {{\n", self.name);
+        for prop in &self.properties {
+            out.push_str(&format!("    {}\n", prop.to_source()));
+        }
+        out.push_str("}\n");
+        out
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ComponentDef {
@@ -631,6 +668,13 @@ pub enum Expr {
         func: String,
         args: Vec<Expr>,
     },
+    // Method call: `receiver.method(args)` (e.g. `list.append(x)`,
+    // `list.filter({ p -> ... })`, `string.starts-with(prefix)`).
+    MethodCall {
+        receiver: Box<Expr>,
+        method: String,
+        args: Vec<Expr>,
+    },
     // Variant constructors
     VariantCtor {
         variant: String,
@@ -772,6 +816,14 @@ impl Expr {
                 let args_str: Vec<_> = args.iter().map(|a| a.to_source()).collect();
                 format!("{}({})", func, args_str.join(", "))
             }
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+            } => {
+                let args_str: Vec<_> = args.iter().map(|a| a.to_source()).collect();
+                format!("{}.{}({})", receiver.to_source(), method, args_str.join(", "))
+            }
             Expr::VariantCtor {
                 variant,
                 case,
@@ -820,6 +872,11 @@ impl Expr {
 #[derive(Debug, Clone)]
 pub enum Statement {
     Expr(Expr),
+    Let {
+        name: String,
+        ty: Option<TypeRef>,
+        value: Expr,
+    },
     Assign {
         target: Expr,
         value: Expr,
@@ -859,6 +916,10 @@ impl Statement {
     fn to_source(&self) -> String {
         match self {
             Statement::Expr(e) => format!("{};", e.to_source()),
+            Statement::Let { name, ty, value } => match ty {
+                Some(t) => format!("let {}: {} = {};", name, t.to_source(), value.to_source()),
+                None => format!("let {} = {};", name, value.to_source()),
+            },
             Statement::Assign { target, value } => {
                 format!("{} = {};", target.to_source(), value.to_source())
             }
@@ -930,8 +991,12 @@ struct GenerationContext {
     variants: BTreeMap<String, Vec<VariantCase>>,
     /// Current component's properties (name -> type).
     properties: BTreeMap<String, TypeRef>,
-    /// Current component's callbacks.
-    callbacks: Vec<String>,
+    /// Current component's callbacks: (name, parameter types). Parameter types
+    /// are retained so call sites can pass well-typed arguments.
+    callbacks: Vec<(String, Vec<TypeRef>)>,
+    /// Defined globals: global name -> (property name -> type).
+    /// Referenced from components as `GlobalName.prop`.
+    globals: BTreeMap<String, BTreeMap<String, TypeRef>>,
     /// Counter for unique names.
     name_counter: usize,
 }
@@ -945,6 +1010,7 @@ impl GenerationContext {
             variants: BTreeMap::new(),
             properties: BTreeMap::new(),
             callbacks: Vec::new(),
+            globals: BTreeMap::new(),
             name_counter: 0,
         }
     }
@@ -1044,70 +1110,132 @@ impl GenerationContext {
         Ok(VariantDef { name, cases })
     }
 
-    fn arbitrary_simple_type(&self, u: &mut Unstructured) -> Result<TypeRef> {
-        // Only generate types fully supported by the compiler
-        let choice: u8 = u.int_in_range(0..=11)?;
+    /// A scalar (non-compound) primitive type. Covers every numeric width so
+    /// codegen exercises packed i8/i16 byte stores, i64, f32 and f64. All are
+    /// boundary-safe.
+    fn arbitrary_scalar_type(&self, u: &mut Unstructured) -> Result<TypeRef> {
+        let choice: u8 = u.int_in_range(0..=13)?;
         Ok(match choice {
             0 => TypeRef::Bool,
-            1 => TypeRef::S32,
-            2 => TypeRef::U32,
-            3 => TypeRef::F32,
-            4 => TypeRef::String,
-            5 => TypeRef::Char,
-            6 => TypeRef::List(Box::new(TypeRef::String)),
-            7 => TypeRef::List(Box::new(TypeRef::S32)),
-            8 => TypeRef::Option(Box::new(TypeRef::String)),
-            9 => TypeRef::Option(Box::new(TypeRef::S32)),
+            1 => TypeRef::S8,
+            2 => TypeRef::S16,
+            3 => TypeRef::S32,
+            4 => TypeRef::S64,
+            5 => TypeRef::U8,
+            6 => TypeRef::U16,
+            7 => TypeRef::U32,
+            8 => TypeRef::U64,
+            9 => TypeRef::F32,
+            10 => TypeRef::F64,
+            11 => TypeRef::String,
+            _ => TypeRef::Char,
+        })
+    }
+
+    fn arbitrary_global(&mut self, u: &mut Unstructured) -> Result<GlobalDef> {
+        let name = self.arbitrary_pascal_ident("Store");
+
+        // Global property names (kebab-case, unique within the block).
+        let prop_names = ["count", "value", "label", "flag", "amount", "title"];
+        let num_props: usize = u.int_in_range(1..=4.min(prop_names.len()))?;
+
+        let mut prop_types: BTreeMap<String, TypeRef> = BTreeMap::new();
+        let mut properties = Vec::new();
+        for i in 0..num_props {
+            let prop_name = prop_names[i].to_string();
+            // Globals carry no WIT boundary constraint on their own, but keep
+            // types simple + always defaulted so the block is self-contained.
+            let ty = self.arbitrary_simple_type(u)?;
+            let default = self.arbitrary_literal_of_type(u, &ty)?;
+            prop_types.insert(prop_name.clone(), ty.clone());
+            properties.push(PropertyDef {
+                name: prop_name,
+                ty,
+                default: Some(default),
+            });
+        }
+
+        self.globals.insert(name.clone(), prop_types);
+        Ok(GlobalDef { name, properties })
+    }
+
+    fn arbitrary_simple_type(&self, u: &mut Unstructured) -> Result<TypeRef> {
+        // Only generate types fully supported by the compiler
+        let choice: u8 = u.int_in_range(0..=13)?;
+        Ok(match choice {
+            0..=6 => self.arbitrary_scalar_type(u)?,
+            7 => TypeRef::List(Box::new(TypeRef::String)),
+            8 => TypeRef::List(Box::new(TypeRef::S32)),
+            9 => TypeRef::Option(Box::new(TypeRef::String)),
+            10 => TypeRef::Option(Box::new(TypeRef::S32)),
             // Result types
-            10 => TypeRef::Result {
+            11 => TypeRef::Result {
                 ok: Some(Box::new(TypeRef::String)),
                 err: Some(Box::new(TypeRef::String)),
             },
-            _ => TypeRef::Result {
+            12 => TypeRef::Result {
                 ok: Some(Box::new(TypeRef::S32)),
                 err: Some(Box::new(TypeRef::String)),
             },
+            _ => self.arbitrary_scalar_type(u)?,
         })
     }
 
     fn arbitrary_type(&self, u: &mut Unstructured) -> Result<TypeRef> {
-        // Only generate types fully supported by the compiler
+        self.arbitrary_type_nested(u, 0)
+    }
+
+    /// Generate a (possibly compound, bounded-depth) property/param type.
+    ///
+    /// `depth` bounds how deeply compound types nest (`list<option<...>>`,
+    /// `list<list<...>>`, `option<record>`, …) so generation terminates.
+    /// Tuples are only emitted when the current component is *not* exported,
+    /// because bare tuples can't yet cross the WIT boundary (the canonical ABI
+    /// can't flatten them field-by-field). Nested element types recurse so the
+    /// exact combos that historically had bugs get exercised.
+    fn arbitrary_type_nested(&self, u: &mut Unstructured, depth: usize) -> Result<TypeRef> {
+        const MAX_TYPE_DEPTH: usize = 2;
+
+        // At the depth bound, only scalars/named types (no further nesting).
+        if depth >= MAX_TYPE_DEPTH {
+            let choice: u8 = u.int_in_range(0..=8)?;
+            return Ok(match choice {
+                0..=6 => self.arbitrary_scalar_type(u)?,
+                7 => self.pick_record_or(TypeRef::S32),
+                _ => self.pick_enum_or(TypeRef::Bool),
+            });
+        }
+
+        // color / brush are in the language, so keep emitting them, but at a
+        // low rate (~5%): the hex-literal-vs-`color` typing bug they expose is
+        // already catalogued, and at full weight they crowd out other bugs.
+        if u.int_in_range(0..=39)? == 0 {
+            return Ok(if u.arbitrary()? {
+                TypeRef::Color
+            } else {
+                TypeRef::Brush
+            });
+        }
+
         let choice: u8 = u.int_in_range(0..=20)?;
         Ok(match choice {
-            0 => TypeRef::Bool,
-            1 => TypeRef::S32,
-            2 => TypeRef::U32,
-            3 => TypeRef::F32,
-            4 => TypeRef::String,
-            5 => TypeRef::Char,
-            6 => TypeRef::List(Box::new(self.arbitrary_simple_type(u)?)),
-            7 => TypeRef::Option(Box::new(self.arbitrary_simple_type(u)?)),
-            8..=10 => {
-                // Pick a defined record if any
-                if let Some(name) = self.records.keys().next() {
-                    TypeRef::Named(name.clone())
-                } else {
-                    TypeRef::S32
-                }
-            }
-            11..=12 => {
-                // Pick a defined enum if any
-                if let Some(name) = self.enums.keys().next() {
-                    TypeRef::Named(name.clone())
-                } else {
-                    TypeRef::Bool
-                }
-            }
-            13..=14 => {
-                // Tuples are not yet supported as signal / param types through
-                // the WIT boundary (the canonical ABI expects tuples to flatten
-                // field-by-field, but the core module currently carries them as
-                // a single pointer). Until that's wired up, pick a safe primitive
-                // substitute so fuzzer seeds don't deterministically trip
-                // wit-component's "decode world" check.
-                TypeRef::String
-            }
+            0..=5 => self.arbitrary_scalar_type(u)?,
+            6..=8 => TypeRef::List(Box::new(self.arbitrary_type_nested(u, depth + 1)?)),
+            9..=11 => TypeRef::Option(Box::new(self.arbitrary_type_nested(u, depth + 1)?)),
+            12..=13 => self.pick_record_or(TypeRef::S32),
+            14 => self.pick_enum_or(TypeRef::Bool),
             15..=16 => {
+                // Tuple. Emitted in every position, including across the WIT
+                // boundary of exported components — if the canonical ABI can't
+                // flatten it yet, that's a real bug worth surfacing rather than
+                // a reason to suppress the construct.
+                let arity: usize = u.int_in_range(2..=3)?;
+                let elems: Vec<_> = (0..arity)
+                    .map(|_| self.arbitrary_type_nested(u, depth + 1))
+                    .collect::<Result<_>>()?;
+                TypeRef::Tuple(elems)
+            }
+            17..=18 => {
                 // Result type with simple ok/err types
                 let ok_ty = self.arbitrary_simple_type(u)?;
                 let err_ty = TypeRef::String; // Keep error type simple
@@ -1116,26 +1244,43 @@ impl GenerationContext {
                     err: Some(Box::new(err_ty)),
                 }
             }
-            17..=18 => {
-                // Pick a defined variant if any
-                if let Some(name) = self.variants.keys().next() {
-                    TypeRef::Named(name.clone())
-                } else {
-                    TypeRef::S32
-                }
-            }
+            19..=20 => self.pick_variant_or(TypeRef::S32),
             // Default to simple types
             _ => TypeRef::String,
         })
     }
 
-    fn arbitrary_component(&mut self, u: &mut Unstructured) -> Result<ComponentDef> {
+    fn pick_record_or(&self, fallback: TypeRef) -> TypeRef {
+        match self.records.keys().next() {
+            Some(name) => TypeRef::Named(name.clone()),
+            None => fallback,
+        }
+    }
+
+    fn pick_enum_or(&self, fallback: TypeRef) -> TypeRef {
+        match self.enums.keys().next() {
+            Some(name) => TypeRef::Named(name.clone()),
+            None => fallback,
+        }
+    }
+
+    fn pick_variant_or(&self, fallback: TypeRef) -> TypeRef {
+        match self.variants.keys().next() {
+            Some(name) => TypeRef::Named(name.clone()),
+            None => fallback,
+        }
+    }
+
+    fn arbitrary_component(
+        &mut self,
+        u: &mut Unstructured,
+        is_export: bool,
+    ) -> Result<ComponentDef> {
         // Reset per-component state
         self.properties.clear();
         self.callbacks.clear();
 
         let name = self.arbitrary_pascal_ident("Component");
-        let is_export: bool = u.arbitrary()?;
 
         // Generate properties (use valid kebab-case names)
         let prop_names = [
@@ -1168,10 +1313,19 @@ impl GenerationContext {
         let cb_names = ["on-click", "on-change", "on-submit", "on-select", "on-load"];
         let num_callbacks: usize =
             u.int_in_range(0..=cb_names.len().min(self.config.max_callbacks))?;
+        let cb_param_names = ["arg-a", "arg-b", "arg-c"];
         let callbacks: Vec<_> = (0..num_callbacks)
             .map(|i| {
                 let cb_name = cb_names[i].to_string();
-                self.callbacks.push(cb_name.clone());
+                // Generate 0-3 typed parameters. Simple (boundary-safe) types
+                // keep exported callbacks encodable while still exercising the
+                // callback-parameter codegen path (previously never emitted).
+                let num_params: usize = u.int_in_range(0..=cb_param_names.len())?;
+                let params: Vec<(String, TypeRef)> = (0..num_params)
+                    .map(|p| Ok((cb_param_names[p].to_string(), self.arbitrary_simple_type(u)?)))
+                    .collect::<Result<_>>()?;
+                let param_types: Vec<TypeRef> = params.iter().map(|(_, t)| t.clone()).collect();
+                self.callbacks.push((cb_name.clone(), param_types));
                 let has_return: bool = u.arbitrary()?;
                 let return_ty = if has_return {
                     Some(self.arbitrary_simple_type(u)?)
@@ -1182,7 +1336,7 @@ impl GenerationContext {
                 let cb_is_export = is_export && u.arbitrary()?;
                 Ok(CallbackDef {
                     name: cb_name,
-                    params: vec![],
+                    params,
                     return_ty,
                     is_export: cb_is_export,
                 })
@@ -1473,13 +1627,35 @@ impl GenerationContext {
     ) -> Result<Statement> {
         // Generate callback calls, property assignments (regular or compound) and if statements
 
+        // 15% chance to emit a `let` binding of a scalar-typed value. The bound
+        // name is fresh so it can't collide; we don't reference it afterwards
+        // (an unused local is valid), which keeps the statement self-contained.
+        if u.int_in_range(0..=19)? < 3 {
+            let ty = self.arbitrary_scalar_type(u)?;
+            let value = self.arbitrary_expr_of_type(u, &ty, 1)?;
+            let name = format!("local-{}", self.name_counter);
+            self.name_counter += 1;
+            // Roughly half the time include the explicit type annotation.
+            let annotated: bool = u.arbitrary()?;
+            return Ok(Statement::Let {
+                name,
+                ty: if annotated { Some(ty) } else { None },
+                value,
+            });
+        }
+
         // 15% chance to generate callback call if we have callbacks
         if !self.callbacks.is_empty() && u.int_in_range(0..=19)? < 3 {
             let cb_idx = u.int_in_range(0..=self.callbacks.len() - 1)?;
-            let cb_name = self.callbacks[cb_idx].clone();
+            let (cb_name, cb_params) = self.callbacks[cb_idx].clone();
+            // Pass a well-typed argument for each declared parameter.
+            let args: Vec<Expr> = cb_params
+                .iter()
+                .map(|ty| self.arbitrary_expr_of_type(u, ty, 1))
+                .collect::<Result<_>>()?;
             return Ok(Statement::Expr(Expr::Call {
                 func: cb_name,
-                args: vec![], // Callbacks are generated with no params
+                args,
             }));
         }
 
@@ -1583,6 +1759,23 @@ impl GenerationContext {
         if let Some((name, _)) = self.properties.iter().find(|(_, t)| *t == ty)
             && u.arbitrary::<bool>()? {
                 return Ok(Expr::Var(name.clone()));
+            }
+
+        // 25% chance to read a global property of the matching type
+        // (`GlobalName.prop`), exercising cross-block global signal reads.
+        if let Some((global_name, prop_name)) = self.find_global_prop_of_type(ty)
+            && u.int_in_range(0..=3)? == 0 {
+                return Ok(Expr::Field {
+                    base: Box::new(Expr::Var(global_name)),
+                    field: prop_name,
+                });
+            }
+
+        // Method calls, when the target type admits one. Kept before the other
+        // random branches so they actually fire.
+        if depth < 2
+            && let Some(expr) = self.try_arbitrary_method_call(u, ty, depth)? {
+                return Ok(expr);
             }
 
         // 10% chance to generate ternary expression for simple non-string types
@@ -2010,6 +2203,125 @@ impl GenerationContext {
             .map(|_| Ok(words[u.int_in_range(0..=words.len() - 1)?]))
             .collect::<Result<_>>()?;
         Ok(result.join(" "))
+    }
+
+    /// Find a global block property matching `ty`. Returns (GlobalName, prop).
+    fn find_global_prop_of_type(&self, ty: &TypeRef) -> Option<(String, String)> {
+        for (global_name, props) in &self.globals {
+            for (prop_name, prop_ty) in props {
+                if prop_ty == ty {
+                    return Some((global_name.clone(), prop_name.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Try to build a well-typed method call producing a value of `ty`:
+    ///   - `list.append(elem)` / `list.filter({ p -> bool })` when `ty` is a list
+    ///   - `string.starts-with(prefix)` when `ty` is bool
+    /// Returns `Ok(None)` when no suitable receiver exists in scope.
+    fn try_arbitrary_method_call(
+        &mut self,
+        u: &mut Unstructured,
+        ty: &TypeRef,
+        depth: usize,
+    ) -> Result<Option<Expr>> {
+        match ty {
+            // list<T> methods: build from a same-typed list property receiver.
+            TypeRef::List(elem) => {
+                let list_prop = self
+                    .properties
+                    .iter()
+                    .find(|(_, t)| *t == ty)
+                    .map(|(n, _)| n.clone());
+                let Some(list_name) = list_prop else {
+                    return Ok(None);
+                };
+                // 50/50 chance to even emit a method call here.
+                if u.arbitrary::<bool>()? {
+                    return Ok(None);
+                }
+                let elem = (**elem).clone();
+                if u.arbitrary::<bool>()? {
+                    // append(elem)
+                    let arg = self.arbitrary_expr_of_type(u, &elem, depth + 1)?;
+                    Ok(Some(Expr::MethodCall {
+                        receiver: Box::new(Expr::Var(list_name)),
+                        method: "append".into(),
+                        args: vec![arg],
+                    }))
+                } else {
+                    // filter({ p: elem -> <bool predicate over p> })
+                    let predicate = self.arbitrary_filter_predicate(u, &elem)?;
+                    Ok(Some(Expr::MethodCall {
+                        receiver: Box::new(Expr::Var(list_name)),
+                        method: "filter".into(),
+                        args: vec![predicate],
+                    }))
+                }
+            }
+            // string.starts-with(prefix) -> bool
+            TypeRef::Bool => {
+                let str_prop = self
+                    .properties
+                    .iter()
+                    .find(|(_, t)| matches!(t, TypeRef::String))
+                    .map(|(n, _)| n.clone());
+                let Some(str_name) = str_prop else {
+                    return Ok(None);
+                };
+                if u.arbitrary::<bool>()? {
+                    return Ok(None);
+                }
+                let prefix = Expr::String(self.arbitrary_string(u)?);
+                Ok(Some(Expr::MethodCall {
+                    receiver: Box::new(Expr::Var(str_name)),
+                    method: "starts-with".into(),
+                    args: vec![prefix],
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Build a `{ p: elem -> <bool> }` closure whose body is a valid boolean
+    /// predicate over the parameter `p`.
+    fn arbitrary_filter_predicate(
+        &mut self,
+        u: &mut Unstructured,
+        elem: &TypeRef,
+    ) -> Result<Expr> {
+        let param = "p".to_string();
+        let body = match elem {
+            // Signed integers: `(p OP literal)`. Restricted to signed widths
+            // because bare int literals infer as s32 and don't coerce to
+            // unsigned/float in comparison position.
+            TypeRef::S8 | TypeRef::S16 | TypeRef::S32 | TypeRef::S64 => {
+                let ops = [
+                    BinaryOp::Lt,
+                    BinaryOp::Le,
+                    BinaryOp::Gt,
+                    BinaryOp::Ge,
+                    BinaryOp::Eq,
+                    BinaryOp::Ne,
+                ];
+                let op = ops[u.int_in_range(0..=ops.len() - 1)?];
+                Expr::Binary {
+                    op,
+                    lhs: Box::new(Expr::Var(param.clone())),
+                    rhs: Box::new(Expr::Int(u.int_in_range(-10..=10)?)),
+                }
+            }
+            // Bool element: use the parameter directly.
+            TypeRef::Bool => Expr::Var(param.clone()),
+            // Otherwise a constant predicate keeps it well-typed.
+            _ => Expr::Bool(u.arbitrary()?),
+        };
+        Ok(Expr::Closure {
+            params: vec![(param, elem.clone())],
+            body: Box::new(body),
+        })
     }
 
     /// Find a property of type option<RecordName> where the record has a field of the given type.
