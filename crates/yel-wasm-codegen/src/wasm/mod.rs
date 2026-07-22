@@ -1897,7 +1897,7 @@ impl<'a> WasmPackageBuilder<'a> {
             };
             // Phase 5e.4: record ctor params follow canonical ABI
             // (each list/string field takes 2 i32 = ptr+len). Records
-            // whose fields are FlatGcStruct-migrated reach this path
+            // whose fields are GcVariant-migrated reach this path
             // ONLY for non-DTR records (memory-backed); DTR records
             // use the SLR struct.new path in expr.rs which never
             // calls record_ctor.

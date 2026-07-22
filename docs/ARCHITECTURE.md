@@ -146,7 +146,7 @@ Key LIR data structures (`lir/`):
 - `LirResource` (`lir/node.rs`) — one component/resource: `blocks`, `exprs` (interned), `strings` (interned + deduped), `slots`, `signals`, `effects`, `body_tree`, `tree_shape`, GC `struct_types`/`array_types`. (Renamed from `LirComponent`; see tech debt.)
 - `LirBlock` / `LirOp` (`lir/block.rs`, ~1.6k lines) — block = params + flat op stream. Ops reference exprs by `ExprId`, strings by `StringId`, values by `LirSlotId`.
 - `LirExpr { kind: LirExprKind, ty: Ty }` (`lir/expr.rs`).
-- `LirTypeRef` (`lir/block.rs`) — **symbolic** type references (`ComponentStruct`, `OtherComponentStruct(DefId)`, `TreeBoundary(TreeBoundaryId)`, `GlobalsStruct(DefId)`, `FlatGcCase(Ty, u32)`) resolved to concrete wasm type indices only in codegen.
+- `LirTypeRef` (`lir/block.rs`) — **symbolic** type references (`ComponentStruct`, `OtherComponentStruct(DefId)`, `TreeBoundary(TreeBoundaryId)`, `GlobalsStruct(DefId)`, `GcVariantCase(Ty, u32)`) resolved to concrete wasm type indices only in codegen.
 - Codegen reads LIR through **arena traits** (`lir/arena.rs`): `LirExprArena`, `LirStringArena`, `LirSlotArena`, aggregate `LirComponentArena`, and `LirFunctionLike` — so both `LirResource` and the flow frontend's per-function adapter feed the same emitter.
 - Reactivity layout: `lir/signal.rs`, `lir/signal_layout.rs` (per-signal slot/memory layout), `lir/tree_shape.rs` (mount-tree boundaries), `lir/layout.rs` (~650 lines), `lir/struct_types.rs` (GC struct/array decls), `lir/boundary_rewrite.rs` (boundary-field slot resolution), `lir/dedupe.rs` (post-pass structural dedup of identical update blocks via slot-normalized hashing).
 

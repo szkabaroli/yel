@@ -72,14 +72,14 @@ pub enum LirTypeRef {
     /// `WasmPackageBuilder::shared_handle_arr_type_idx`. Sibling of
     /// [`LirTypeRef::SharedHandleStruct`].
     SharedHandleArray,
-    /// Task #99: a specific case subtype of a FlatGcStruct supertype.
+    /// Task #99: a specific case subtype of a GcVariant supertype.
     /// First field is the parent type (option/result/variant); second
     /// is the case index (0 = None / Ok / first variant). Codegen
-    /// resolves via `record_gc_types.flat_gc_case_idx[(ty, case_idx)]`.
+    /// resolves via `record_gc_types.gc_variant_case_idx[(ty, case_idx)]`.
     /// Used by the unified inline signal-init helper to emit
     /// `struct.new_default $<sup>_<case>` for default-init of
-    /// FlatGcStruct-backed signals.
-    FlatGcCase(Ty, u32),
+    /// GcVariant-backed signals.
+    GcVariantCase(Ty, u32),
     /// Task #100: a tuple type's GC struct, keyed by the **tuple** `Ty`.
     /// Codegen resolves via `record_gc_types.tuple_struct_type_idx[ty]`.
     /// Used by the unified inline signal-write helper to target the
@@ -1376,11 +1376,11 @@ pub enum LirSlotValType {
     /// Phase 5e.5: nullable ref to a `option<T>` / `result<T,E>` /
     /// user-`variant` parent supertype. The contained `Ty` is the
     /// parent type itself, keyed in
-    /// `RecordGcTypes::flat_gc_super_idx`. Codegen resolves the heap
+    /// `RecordGcTypes::gc_variant_super_idx`. Codegen resolves the heap
     /// type index via that map at local-declaration time. Replaces
     /// the multi-i32 flat-slot allocation when the parent is migrated
     /// to the W3C subtype-hierarchy GC representation.
-    RefNullForFlatGc(Ty),
+    RefNullForGcVariant(Ty),
     /// Task #100: nullable ref to a tuple's GC struct type
     /// `(struct <field-per-elem>)`. The contained `Ty` is the **tuple**
     /// type itself, keyed in `RecordGcTypes::tuple_struct_type_idx`.

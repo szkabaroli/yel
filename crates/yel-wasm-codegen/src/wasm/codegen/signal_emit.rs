@@ -106,7 +106,7 @@ impl<'a> WasmPackageBuilder<'a> {
     /// **Boundary only.** Reachable when `signal_in_struct` is `false`
     /// — i.e. a Zero / unit-typed component-local signal that has no
     /// backing struct field. Every value-bearing signal now lives in
-    /// the component struct via FlatGcStruct / GcRef / GcArrayRef /
+    /// the component struct via GcVariant / GcRef / GcArrayRef /
     /// FatPointer / Scalar, so the linear-memory store path is dead
     /// for non-zero signals.
     pub(super) fn emit_flat_slot_store(
@@ -724,7 +724,7 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(())
     }
 
-    /// Phase 5e.5: emit a default-constant store for a FlatGcStruct
+    /// Phase 5e.5: emit a default-constant store for a GcVariant
     /// signal — `<self_ref>; struct.new_default $<case_sub>; struct.set
     /// $Comp <field>`. The signal's storage field is the supertype
     /// `(ref null $sup)`; `case_sub_idx` is the subtype index for the
@@ -754,7 +754,7 @@ impl<'a> WasmPackageBuilder<'a> {
         let field_path: Vec<u32> = component.signal_layout.signal_field_path(signal_idx);
         if field_path.len() != 1 {
             return Err(CodegenError::InvalidIR(format!(
-                "emit_signal_struct_store_const_default: FlatGcStruct signal must have \
+                "emit_signal_struct_store_const_default: GcVariant signal must have \
                  exactly one ref field (got {} field path entries) for signal {}",
                 field_path.len(),
                 signal_idx,

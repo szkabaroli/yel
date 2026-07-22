@@ -322,7 +322,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
                 // Determine stack arity from the expression's storage
                 // valtypes (matches the SignalWriteExpr → store path):
-                // 1 for Scalar / GcRef / GcArrayRef / FlatGcStruct,
+                // 1 for Scalar / GcRef / GcArrayRef / GcVariant,
                 // 2 for FatPointer (string / non-typed-array list).
                 // For Option / payload-less variant ctor, `emit_expr`
                 // pushes the partial set — handle the `none` case.
@@ -353,11 +353,11 @@ impl<'a> WasmPackageBuilder<'a> {
                 // that case. `flatten_core_valtypes` treats unknown primitives
                 // as a single i32, so we special-case Unit explicitly here.
                 if !matches!(self.ctx.ty_kind(lir_expr.ty), InternedTyKind::Unit) {
-                    // FlatGcStruct produces a single supertype ref, not
+                    // GcVariant produces a single supertype ref, not
                     // canonical-flat slots, so drop count must follow
                     // internal stack-slot count for those Tys.
                     let drop_count = match self.internal_repr(lir_expr.ty) {
-                        crate::wasm::repr::InternalRepr::FlatGcStruct(_) => {
+                        crate::wasm::repr::InternalRepr::GcVariant(_) => {
                             self.internal_stack_slots(lir_expr.ty)
                         }
                         // strings-to-GC: a string is a single $str_bytes ref
@@ -768,23 +768,23 @@ impl<'a> WasmPackageBuilder<'a> {
                 // Struct-migrated signals: `struct.new_default` in the
                 // constructor already initialised every field to its
                 // type's zero/null default, so nothing to do here —
-                // EXCEPT for FlatGcStruct, whose null default is
+                // EXCEPT for GcVariant, whose null default is
                 // semantically "no active case" rather than "case 0".
                 // Materialize case 0 explicitly so `ref.test` returns
                 // true for case 0 (matching legacy zero-byte memory
                 // init that produced "disc=0, payload=zeros").
                 if self.signal_in_struct(comp_idx, sig_idx) {
                     let signal_ty = component.signals[sig_idx].ty;
-                    if let super::super::repr::InternalRepr::FlatGcStruct(_) =
+                    if let super::super::repr::InternalRepr::GcVariant(_) =
                         self.internal_repr(signal_ty)
                     {
                         let case0_sub_idx = *self
                             .record_gc_types
-                            .flat_gc_case_idx
+                            .gc_variant_case_idx
                             .get(&(signal_ty, 0))
                             .ok_or_else(|| {
                                 CodegenError::InvalidIR(format!(
-                                    "InitSignalDefault: missing flat_gc_case_idx \
+                                    "InitSignalDefault: missing gc_variant_case_idx \
                                      for ty={:?} case=0",
                                     signal_ty
                                 ))
@@ -2097,14 +2097,14 @@ impl<'a> WasmPackageBuilder<'a> {
                         .into(),
                 )
             }),
-            LirTypeRef::FlatGcCase(ty, case_idx) => self
+            LirTypeRef::GcVariantCase(ty, case_idx) => self
                 .record_gc_types
-                .flat_gc_case_idx
+                .gc_variant_case_idx
                 .get(&(ty, case_idx))
                 .copied()
                 .ok_or_else(|| {
                     CodegenError::InternalError(format!(
-                        "LirTypeRef::FlatGcCase({:?}, {}): missing flat_gc_case_idx entry",
+                        "LirTypeRef::GcVariantCase({:?}, {}): missing gc_variant_case_idx entry",
                         ty, case_idx
                     ))
                 }),

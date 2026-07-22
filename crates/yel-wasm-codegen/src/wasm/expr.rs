@@ -856,12 +856,12 @@ impl WasmPackageBuilder<'_> {
                     }
                 }
                 // After Stage 7d the indirect-return path repacks
-                // canonical bytes into a single FlatGcStruct supertype
+                // canonical bytes into a single GcVariant supertype
                 // ref, so the produced stack-slot count matches
                 // `internal_stack_slots(expr.ty)` rather than the
-                // canonical-flat slot count for FlatGcStruct returns.
+                // canonical-flat slot count for GcVariant returns.
                 let slots_produced = match self.internal_repr(expr.ty) {
-                    crate::wasm::repr::InternalRepr::FlatGcStruct(_) => {
+                    crate::wasm::repr::InternalRepr::GcVariant(_) => {
                         self.internal_stack_slots(expr.ty)
                     }
                     // strings-to-GC: a string-returning builtin (concat /
@@ -995,26 +995,26 @@ impl WasmPackageBuilder<'_> {
                     if matches!(self.ctx.ty_kind(field_ty), InternedTyKind::String) {
                         return Ok(1);
                     }
-                    // FlatGcStruct field (option / result / variant): the
+                    // GcVariant field (option / result / variant): the
                     // struct.get above already left the supertype ref on the
                     // stack — the internal repr. Return it directly, consistent
-                    // with String / typed-list fields and with a FlatGcStruct
+                    // with String / typed-list fields and with a GcVariant
                     // *signal* read. Consumers that need the canonical
                     // (disc, payload…) shape — interpolation, concat, boundary
                     // lift — materialize the ref at their own call site,
                     // exactly as they already do for a signal read. (Previously
                     // this dropped the ref and materialized eagerly, which broke
                     // internal consumers like RecordConstruct that store the
-                    // field as its FlatGcStruct ref.)
+                    // field as its GcVariant ref.)
                     if matches!(
                         self.internal_repr(field_ty),
-                        crate::wasm::repr::InternalRepr::FlatGcStruct(_)
+                        crate::wasm::repr::InternalRepr::GcVariant(_)
                     ) {
                         return Ok(1);
                     }
                     // Every remaining SLR field shape (scalar) has been
                     // read directly by the struct.get above. String
-                    // ($str_bytes ref), typed-array list, and FlatGcStruct
+                    // ($str_bytes ref), typed-array list, and GcVariant
                     // fields returned earlier; nothing boxes into a
                     // fat-pointer here anymore.
                     return Ok(self.flatten_core_valtypes(expr.ty).len());
@@ -1197,7 +1197,7 @@ impl WasmPackageBuilder<'_> {
                                 // here as canonical-ABI flat slots from a
                                 // memory-backed record base. Phase 7
                                 // cleanup: every option/result Ty now has
-                                // `InternalRepr::FlatGcStruct`, and DTR
+                                // `InternalRepr::GcVariant`, and DTR
                                 // records (the GC-ref carriers) admit
                                 // option/result fields as
                                 // `(ref null $opt_super)` slots — the
@@ -1207,7 +1207,7 @@ impl WasmPackageBuilder<'_> {
                                     return Err(CodegenError::InvalidIR(format!(
                                         "Field on memory-backed base with Option/Result \
                                          field type {:?} is unreachable post Phase 7 — \
-                                         FlatGcStruct migration should have routed this \
+                                         GcVariant migration should have routed this \
                                          through the GC-struct Field path",
                                         field_ty
                                     )));
@@ -1254,7 +1254,7 @@ impl WasmPackageBuilder<'_> {
                     // $fat_value)` and unbox to (ptr, len) for legacy
                     // consumers expecting fat-pointer shape. All other
                     // element types (scalars, records, tuples,
-                    // FlatGcStruct, nested lists) yield their natural
+                    // GcVariant, nested lists) yield their natural
                     // single-slot representation directly.
                     // strings-to-GC: a string element is a plain `$str_bytes`
                     // ref (single slot), read directly like any other typed
@@ -1297,7 +1297,7 @@ impl WasmPackageBuilder<'_> {
                 // `emit_variant_ctor_flat` is still called for non-migrated
                 // types AND for boundary writes (set-attribute, exports,
                 // callback returns).
-                if let InternalRepr::FlatGcStruct(_) = self.internal_repr(expr.ty) {
+                if let InternalRepr::GcVariant(_) = self.internal_repr(expr.ty) {
                     self.emit_variant_ctor_gc(
                         func,
                         expr.ty,
@@ -1630,9 +1630,9 @@ impl WasmPackageBuilder<'_> {
                 // be migrated.
                 use super::repr::InternalRepr;
                 let case_sub_idx = match self.internal_repr(base.ty) {
-                    InternalRepr::FlatGcStruct(_) => *self
+                    InternalRepr::GcVariant(_) => *self
                         .record_gc_types
-                        .flat_gc_case_idx
+                        .gc_variant_case_idx
                         .get(&(base.ty, *case_idx))
                         .ok_or_else(|| {
                             CodegenError::InvalidIR(format!(
@@ -1643,7 +1643,7 @@ impl WasmPackageBuilder<'_> {
                         })?,
                     other => {
                         return Err(CodegenError::InvalidIR(format!(
-                            "IsCase: parent base.ty={:?} has non-FlatGcStruct \
+                            "IsCase: parent base.ty={:?} has non-GcVariant \
                              repr {:?} — lowering must only emit IsCase for \
                              migrated parents",
                             base.ty, other
@@ -1658,7 +1658,7 @@ impl WasmPackageBuilder<'_> {
                 // would match null against every subtype test,
                 // returning true for *every* case — broken.)
                 //
-                // InitSignalDefault for FlatGcStruct overrides the
+                // InitSignalDefault for GcVariant overrides the
                 // component-struct zero-init by storing
                 // `struct.new_default $<sup>_<case0>` so the user-
                 // observable default is "case 0", matching what the
@@ -1688,9 +1688,9 @@ impl WasmPackageBuilder<'_> {
                 use super::repr::InternalRepr;
                 use super::gc_types::StructGetVariant;
                 let case_sub_idx = match self.internal_repr(base.ty) {
-                    InternalRepr::FlatGcStruct(_) => *self
+                    InternalRepr::GcVariant(_) => *self
                         .record_gc_types
-                        .flat_gc_case_idx
+                        .gc_variant_case_idx
                         .get(&(base.ty, *case_idx))
                         .ok_or_else(|| {
                             CodegenError::InvalidIR(format!(
@@ -1702,7 +1702,7 @@ impl WasmPackageBuilder<'_> {
                     other => {
                         return Err(CodegenError::InvalidIR(format!(
                             "VariantField: parent base.ty={:?} has non-\
-                             FlatGcStruct repr {:?} — lowering must only emit \
+                             GcVariant repr {:?} — lowering must only emit \
                              VariantField for migrated parents",
                             base.ty, other
                         )));
@@ -1764,7 +1764,7 @@ impl WasmPackageBuilder<'_> {
     ///   payload value against the case subtype's single field.
     ///
     /// The caller must have already checked that the parent's
-    /// `internal_repr` is `FlatGcStruct` (typically via the dispatch in
+    /// `internal_repr` is `GcVariant` (typically via the dispatch in
     /// `LirExprKind::VariantCtor`).
     pub(super) fn emit_variant_ctor_gc(
         &mut self,
@@ -1776,7 +1776,7 @@ impl WasmPackageBuilder<'_> {
     ) -> Result<(), CodegenError> {
         let case_sub_idx = *self
             .record_gc_types
-            .flat_gc_case_idx
+            .gc_variant_case_idx
             .get(&(parent_ty, case_idx))
             .ok_or_else(|| {
                 CodegenError::InvalidIR(format!(
@@ -1816,7 +1816,7 @@ impl WasmPackageBuilder<'_> {
     /// shape (`disc i32, ...payload-slots`) on the stack.
     ///
     /// **Boundary-only.** Internal SSA emission must use
-    /// `emit_variant_ctor_gc` for any FlatGcStruct-migrated parent.
+    /// `emit_variant_ctor_gc` for any GcVariant-migrated parent.
     /// This function is still called from:
     /// - WIT export return-value lowering (set-attribute, callback args).
     /// - Option-of-ref collapse for `option<list<T>>` and similar
@@ -1824,7 +1824,7 @@ impl WasmPackageBuilder<'_> {
     ///
     /// (`InternalRepr::Flat` was removed in Phase 7 cleanup, so the
     /// "non-migrated option/result fallback" path no longer exists —
-    /// every option/result/variant now goes through `FlatGcStruct`
+    /// every option/result/variant now goes through `GcVariant`
     /// for internal SSA, and this helper is reached only by boundary
     /// dispatchers that need canonical-ABI bytes.)
     pub(super) fn emit_variant_ctor_flat(
@@ -1840,7 +1840,7 @@ impl WasmPackageBuilder<'_> {
         // Option-of-ref collapse path: parent_ty is `option<T>` whose
         // inner T has a ref internal repr. The whole option is one
         // nullable ref slot — no discriminant. THIR convention (matches
-        // FlatGcStruct case_idx): **0 = some**, **1 = none**.
+        // GcVariant case_idx): **0 = some**, **1 = none**.
         if let Some(arr_idx) = self.option_collapses_to_ref(parent_ty) {
             match case_idx {
                 0 => {
@@ -1868,7 +1868,7 @@ impl WasmPackageBuilder<'_> {
             &parent_flat[1..]
         };
 
-        // A nested FlatGcStruct variant payload (today: the language `color`
+        // A nested GcVariant variant payload (today: the language `color`
         // value inside `attribute-value::color`) is on the stack as a ref,
         // not as the parent's joined flat slots. Pack it via the reused
         // per-program color packer, which pushes the discriminant + the
@@ -2454,7 +2454,7 @@ impl WasmPackageBuilder<'_> {
     }
 
     /// Phase 7: pack a YEL `color` value (a `(ref null $var_color)`
-    /// FlatGcStruct supertype ref) into the canonical-ABI flattening
+    /// GcVariant supertype ref) into the canonical-ABI flattening
     /// of `attribute-value::color(color)`. Pushes the full attribute-
     /// value flat shape: `(disc=13, slot0=color_disc widened to i64,
     /// slot1=r as i32, slot2=g as i32, slot3=b as i32, slot4=a as i32)`.
@@ -2609,24 +2609,24 @@ impl WasmPackageBuilder<'_> {
             func.instruction(&Instruction::Call(unmat));
             return Ok(1);
         }
-        // Phase 5e.5 Stage 7b: callback returns of FlatGcStruct must
+        // Phase 5e.5 Stage 7b: callback returns of GcVariant must
         // produce a single supertype ref (matching internal_repr) for
         // signal-store / Field consumers — not the canonical (disc,
         // payload) flat slots. Re-pack the canonical bytes into a
         // case-subtype struct.
-        if let crate::wasm::repr::InternalRepr::FlatGcStruct(_) =
+        if let crate::wasm::repr::InternalRepr::GcVariant(_) =
             self.internal_repr(ret_ty)
         {
-            return self.emit_cb_flat_gc_return_load(func, ret_addr, ret_ty);
+            return self.emit_cb_gc_variant_return_load(func, ret_addr, ret_ty);
         }
         self.emit_cb_indirect_return_load(func, ret_addr, ret_ty)
     }
 
     /// Phase 5e.5 Stage 7b/7d: read canonical (disc, payload) bytes
     /// that the host wrote into the callback return scratch and
-    /// assemble a FlatGcStruct supertype ref. Handles option, result,
+    /// assemble a GcVariant supertype ref. Handles option, result,
     /// and user-variant uniformly via an N-case `if disc == k` cascade.
-    pub(super) fn emit_cb_flat_gc_return_load(
+    pub(super) fn emit_cb_gc_variant_return_load(
         &mut self,
         func: &mut Function,
         ret_addr: i32,
@@ -2636,28 +2636,28 @@ impl WasmPackageBuilder<'_> {
 
         let super_idx = *self
             .record_gc_types
-            .flat_gc_super_idx
+            .gc_variant_super_idx
             .get(&ret_ty)
             .ok_or_else(|| {
                 CodegenError::InvalidIR(format!(
-                    "cb flat-gc return: missing supertype idx for {:?}",
+                    "cb gc-variant return: missing supertype idx for {:?}",
                     ret_ty
                 ))
             })?;
         let case_count = *self
             .record_gc_types
-            .flat_gc_case_count
+            .gc_variant_case_count
             .get(&ret_ty)
             .ok_or_else(|| {
                 CodegenError::InvalidIR(format!(
-                    "cb flat-gc return: missing case count for {:?}",
+                    "cb gc-variant return: missing case count for {:?}",
                     ret_ty
                 ))
             })?;
 
         let slots = self.flatten_core_slots(ret_ty);
         let disc_slot = slots.first().ok_or_else(|| {
-            CodegenError::InvalidIR("cb flat-gc return: missing disc slot".into())
+            CodegenError::InvalidIR("cb gc-variant return: missing disc slot".into())
         })?;
         let disc_offset = disc_slot.offset as i32;
         // Payload area starts at the first non-disc slot offset (or
@@ -2681,11 +2681,11 @@ impl WasmPackageBuilder<'_> {
         for k in 0..case_count {
             let case_sub_idx = *self
                 .record_gc_types
-                .flat_gc_case_idx
+                .gc_variant_case_idx
                 .get(&(ret_ty, k))
                 .ok_or_else(|| {
                     CodegenError::InvalidIR(format!(
-                        "cb flat-gc return: missing case_idx for ({:?}, {})",
+                        "cb gc-variant return: missing case_idx for ({:?}, {})",
                         ret_ty, k
                     ))
                 })?;
@@ -2700,7 +2700,7 @@ impl WasmPackageBuilder<'_> {
             if let Some(payload_ty) =
                 super::gc_types::case_payload_ty(self.ctx, ret_ty, k)
             {
-                self.emit_cb_flat_gc_load_case_payload(
+                self.emit_cb_gc_variant_load_case_payload(
                     func,
                     ret_addr,
                     payload_ty,
@@ -2717,11 +2717,11 @@ impl WasmPackageBuilder<'_> {
         // Innermost else: invariant violation — push case0 default.
         let case0_sub_idx = *self
             .record_gc_types
-            .flat_gc_case_idx
+            .gc_variant_case_idx
             .get(&(ret_ty, 0))
             .ok_or_else(|| {
                 CodegenError::InvalidIR(format!(
-                    "cb flat-gc return: missing case 0 idx for {:?}",
+                    "cb gc-variant return: missing case 0 idx for {:?}",
                     ret_ty
                 ))
             })?;
@@ -2732,11 +2732,11 @@ impl WasmPackageBuilder<'_> {
         Ok(1)
     }
 
-    /// Helper for `emit_cb_flat_gc_return_load`: load a single case's
+    /// Helper for `emit_cb_gc_variant_return_load`: load a single case's
     /// payload from canonical-ABI memory at `payload_base` (absolute,
     /// i.e. `ret_addr + offset`) and leave the value(s) needed by the
     /// case-subtype's payload field on the stack.
-    fn emit_cb_flat_gc_load_case_payload(
+    fn emit_cb_gc_variant_load_case_payload(
         &mut self,
         func: &mut Function,
         ret_addr: i32,
@@ -2765,7 +2765,7 @@ impl WasmPackageBuilder<'_> {
 
         if payload_canonical.len() != 1 {
             return Err(CodegenError::InvalidIR(format!(
-                "cb flat-gc return: nested multi-slot payload ({} slots) \
+                "cb gc-variant return: nested multi-slot payload ({} slots) \
                  not yet supported — payload_ty={:?}",
                 payload_canonical.len(),
                 payload_ty
@@ -2778,7 +2778,7 @@ impl WasmPackageBuilder<'_> {
         let payload_slots = self.flatten_core_slots(payload_ty);
         let slot = payload_slots.first().ok_or_else(|| {
             CodegenError::InvalidIR(
-                "cb flat-gc return: payload has zero flat slots but non-empty canonical".into(),
+                "cb gc-variant return: payload has zero flat slots but non-empty canonical".into(),
             )
         })?;
         let slot_addr = ret_addr + payload_base as i32 + slot.offset as i32;
@@ -2804,7 +2804,7 @@ impl WasmPackageBuilder<'_> {
             }
             other => {
                 return Err(CodegenError::InvalidIR(format!(
-                    "cb flat-gc return: unsupported payload slot {:?}",
+                    "cb gc-variant return: unsupported payload slot {:?}",
                     other
                 )));
             }
@@ -2883,7 +2883,7 @@ impl WasmPackageBuilder<'_> {
     /// base address `addr`, pushing the values onto the stack in declaration
     /// order.
     ///
-    /// **Boundary / fallback only.** With FlatGcStruct now hosting
+    /// **Boundary / fallback only.** With GcVariant now hosting
     /// every option/result/variant signal, the SignalRead callsite for
     /// `signal_in_struct == false` is dead in practice. Kept so the
     /// not-yet-migrated `InternalRepr::Flat` arm (TODO in `repr.rs`)

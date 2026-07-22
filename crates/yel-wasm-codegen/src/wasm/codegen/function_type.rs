@@ -26,7 +26,7 @@ impl<'a> WasmPackageBuilder<'a> {
     /// Resolve one `LirSlotValType` into the corresponding wasm
     /// `ValType`. The GC-typed variants consult the per-component
     /// `GcTypeLayout` for boundary/anchor structs and the shared
-    /// `record_gc_types` registry for list/record/flat-gc supertypes.
+    /// `record_gc_types` registry for list/record/gc-variant supertypes.
     ///
     /// Errors loudly when a GC type-idx is missing from its registry
     /// (no silent fallback, per `crates/yel-wasm-codegen/CLAUDE.md`).
@@ -116,14 +116,14 @@ impl<'a> WasmPackageBuilder<'a> {
                     })?;
                 mk_ref(ty_idx)
             }
-            LirSlotValType::RefNullForFlatGc(parent_ty) => {
+            LirSlotValType::RefNullForGcVariant(parent_ty) => {
                 let ty_idx = *self
                     .record_gc_types
-                    .flat_gc_super_idx
+                    .gc_variant_super_idx
                     .get(&parent_ty)
                     .ok_or_else(|| {
                         CodegenError::InvalidIR(format!(
-                            "slot wasm val type: missing flat_gc_super_idx for {:?}",
+                            "slot wasm val type: missing gc_variant_super_idx for {:?}",
                             parent_ty
                         ))
                     })?;

@@ -481,7 +481,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // string> = ok("x"); }`) live in a separate arena that the component
         // walk above never visits. Their types must be seeded too, or
         // `internal_repr` panics ("option/result Ty not registered as
-        // FlatGcStruct") when the global's storage valtype is resolved. Both
+        // GcVariant") when the global's storage valtype is resolved. Both
         // arenas are flat — every subexpression is its own entry — so a plain
         // push of each entry's type covers the whole tree without recursion.
         for (_, top) in self.global_defaults.iter() {
@@ -957,12 +957,12 @@ impl<'a> WasmPackageBuilder<'a> {
         // the program references the language `color` type. Signature:
         // (ref null $var_color) → (i64 inner_disc, i32 r, i32 g, i32 b, i32 a).
         // Locate the color Ty (Adt of `known.variants.color`) by
-        // scanning the flat-gc registry rather than constructing a
+        // scanning the gc-variant registry rather than constructing a
         // fresh interned Ty (which would require mutable ctx).
         let color_def_id = self.ctx.known.variants.color;
         let color_ty_for_helper = color_def_id.and_then(|d| {
             self.record_gc_types
-                .flat_gc_super_idx
+                .gc_variant_super_idx
                 .keys()
                 .copied()
                 .find(|ty| {
@@ -973,7 +973,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 })
         });
         let color_super_idx = color_ty_for_helper
-            .and_then(|ty| self.record_gc_types.flat_gc_super_idx.get(&ty).copied());
+            .and_then(|ty| self.record_gc_types.gc_variant_super_idx.get(&ty).copied());
         // Use the type section's actual length as the about-to-be-
         // assigned type index — `cursor` only tracks GC types and
         // doesn't account for materializer/un-materializer function

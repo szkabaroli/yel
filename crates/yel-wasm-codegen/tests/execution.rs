@@ -3708,6 +3708,117 @@ fn list_of_records_iter_field_access() {
     }
 }
 
+/// Boundary round-trip for arbitrarily-deep nested GcVariant payloads and a
+/// gc-variant payload that is itself a variant with a list-payload case. The
+/// nested payload lift now recurses through the one full-featured
+/// `emit_gc_variant_lift` (via a `PayloadOf` ref source) instead of a hand-rolled
+/// 2-deep scalar/string-only cascade, and the param pack builds string/list
+/// payload refs from canonical (ptr,len). Covers `option<result<result<...>>>`
+/// and `option<result<list<s32>, string>>`.
+#[test]
+fn nested_gc_variant_deep_and_list_payload_roundtrip() {
+    let source = r#"
+        package yel:deepfgc@0.1.0;
+        export component App {
+            deep: option<result<result<s32, string>, string>> = some(ok(ok(1)));
+            withlist: option<result<list<s32>, string>> = some(err("init"));
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:deepfgc/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+
+    // Small helpers so the deep `Val` nesting stays readable.
+    let some = |v: Val| Val::Option(Some(Box::new(v)));
+    let ok = |v: Val| Val::Result(Ok(Some(Box::new(v))));
+    let err = |v: Val| Val::Result(Err(Some(Box::new(v))));
+
+    // deep := Some(Err("boom"))  (outer some, inner result = err(string))
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "deep",
+        &r,
+        some(err(Val::String("boom".into()))),
+    );
+    let get_deep = get_func(&mut h, iface, "[method]app.get-deep");
+    let mut out = [Val::Bool(false)];
+    get_deep
+        .call(&mut h.store, &[Val::Resource(r)], &mut out)
+        .expect("get-deep");
+    match &out[0] {
+        Val::Option(Some(inner)) => match &**inner {
+            Val::Result(Err(Some(s))) => match &**s {
+                Val::String(g) => assert_eq!(&**g, "boom"),
+                o => panic!("deep err string {:?}", o),
+            },
+            o => panic!("deep inner {:?}", o),
+        },
+        o => panic!("deep {:?}", o),
+    }
+
+    // deep := Some(Ok(Ok(42)))  (three levels, all leftmost)
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "deep",
+        &r,
+        some(ok(ok(Val::S32(42)))),
+    );
+    let mut out = [Val::Bool(false)];
+    get_deep
+        .call(&mut h.store, &[Val::Resource(r)], &mut out)
+        .expect("get-deep");
+    match &out[0] {
+        Val::Option(Some(inner)) => match &**inner {
+            Val::Result(Ok(Some(mid))) => match &**mid {
+                Val::Result(Ok(Some(v))) => assert!(matches!(&**v, Val::S32(42)), "deep leaf {:?}", v),
+                o => panic!("deep mid {:?}", o),
+            },
+            o => panic!("deep inner {:?}", o),
+        },
+        o => panic!("deep {:?}", o),
+    }
+
+    // withlist := Some(Ok([7, 8, 9]))
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "withlist",
+        &r,
+        some(ok(Val::List(vec![Val::S32(7), Val::S32(8), Val::S32(9)]))),
+    );
+    let get_wl = get_func(&mut h, iface, "[method]app.get-withlist");
+    let mut out = [Val::Bool(false)];
+    get_wl
+        .call(&mut h.store, &[Val::Resource(r)], &mut out)
+        .expect("get-withlist");
+    match &out[0] {
+        Val::Option(Some(inner)) => match &**inner {
+            Val::Result(Ok(Some(lst))) => match &**lst {
+                Val::List(e) => {
+                    let got: Vec<i32> = e
+                        .iter()
+                        .map(|v| match v {
+                            Val::S32(x) => *x,
+                            o => panic!("withlist elem {:?}", o),
+                        })
+                        .collect();
+                    assert_eq!(got, vec![7, 8, 9], "withlist elements");
+                }
+                o => panic!("withlist inner list {:?}", o),
+            },
+            o => panic!("withlist inner {:?}", o),
+        },
+        o => panic!("withlist {:?}", o),
+    }
+}
+
 /// Regression: a `func`-typed callback property with parameters
 /// (`cb: func(a: s32, b: u16)`) invoked from an event handler. The callback's
 /// `FunctionDef` was built with an empty `params` list (the interned `Func`
@@ -4056,10 +4167,10 @@ fn result_mixed_width_join_roundtrip() {
 /// builds the tuple from canonical params on Some and the getter lowers it
 /// (via the recursive tuple lift). Verifies Some and None both round-trip.
 #[test]
-fn record_with_nested_flat_gc_field_roundtrip() {
-    // A record field that is a 2-deep nested flat-gc (option<result<s32,s64>>):
+fn record_with_nested_gc_variant_field_roundtrip() {
+    // A record field that is a 2-deep nested gc-variant (option<result<s32,s64>>):
     // the field pack must recurse into the inner result via
-    // emit_pack_canonical_to_flat_gc (build the inner ref, then wrap in the
+    // emit_pack_canonical_to_gc_variant (build the inner ref, then wrap in the
     // option Some case), and the field lift recurses back. Verifies
     // Some(Ok(narrow)) survives set→get through the record field.
     let source = r#"
@@ -4126,7 +4237,7 @@ fn record_with_nested_flat_gc_field_roundtrip() {
 
 #[test]
 fn nested_option_result_mixed_width_roundtrip() {
-    // option<result<s32, s64>>: nested flat-gc whose inner result has
+    // option<result<s32, s64>>: nested gc-variant whose inner result has
     // mixed-width cases. Needs BOTH (a) the option some/none disc mapping and
     // (b) the setter width narrow (i32.wrap_i64) for the inner Ok(s32).
     let source = r#"
@@ -4192,8 +4303,8 @@ fn nested_option_result_mixed_width_roundtrip() {
 
 #[test]
 fn option_string_flatgc_roundtrip() {
-    // option<string> is a FlatGcStruct (it does NOT collapse — a null
-    // $str_bytes would alias none). The cleanest FlatGcStruct-option: verifies
+    // option<string> is a GcVariant (it does NOT collapse — a null
+    // $str_bytes would alias none). The cleanest GcVariant-option: verifies
     // the some/none discriminant convention at the WIT boundary (WIT option is
     // none=0, some=1).
     let source = r#"
@@ -4672,16 +4783,16 @@ fn list_of_float_first_tuples_roundtrip() {
     }
 }
 
-/// Boundary round-trip for a `list<flat-gc-with-composite-payload>` signal:
+/// Boundary round-trip for a `list<gc-variant-with-composite-payload>` signal:
 /// `list<result<option<string>, string>>` and `list<option<result<s32,
-/// string>>>`. Each element is a FlatGcStruct whose active case's payload is
-/// itself a composite (a nested flat-gc / string). The list materializer routes
-/// the per-element lift through `emit_flat_gc_lift` and the un-materializer
-/// through `emit_pack_canonical_to_flat_gc_from_memory`, so composite payloads
+/// string>>>`. Each element is a GcVariant whose active case's payload is
+/// itself a composite (a nested gc-variant / string). The list materializer routes
+/// the per-element lift through `emit_gc_variant_lift` and the un-materializer
+/// through `emit_pack_canonical_to_gc_variant_from_memory`, so composite payloads
 /// serialise/rebuild correctly — previously the inline copy loops handled only
 /// scalar + string payloads (`i32.store` of a ref / `struct.new` of an i32).
 #[test]
-fn list_of_flat_gc_composite_payload_roundtrip() {
+fn list_of_gc_variant_composite_payload_roundtrip() {
     let source = r#"
         package yel:listfgc@0.1.0;
         export component App {

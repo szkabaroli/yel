@@ -57,7 +57,7 @@ pub struct GcSlot {
     /// `field_start + 1`, `field_start + 2`, …
     pub field_start: u32,
     /// Number of consecutive fields. Today: 1 for Scalar / GcRef /
-    /// GcArrayRef / FlatGcStruct, 2 for FatPointer (non-typed-array list).
+    /// GcArrayRef / GcVariant, 2 for FatPointer (non-typed-array list).
     pub field_count: u32,
 }
 
@@ -68,7 +68,7 @@ pub struct GcSlot {
 /// - Unit / Error / Unknown: 0
 /// - String: 1 (`(ref $str_bytes)` GC byte array)
 /// - List<T> where element is GC-eligible (scalar / record / tuple /
-///   string / nested-list / FlatGcStruct): 1 (typed `GcArrayRef`)
+///   string / nested-list / GcVariant): 1 (typed `GcArrayRef`)
 /// - List<T> otherwise: 2 (fat pointer fallback)
 /// - everything else: 1
 ///

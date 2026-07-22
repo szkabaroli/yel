@@ -6,10 +6,9 @@
 //! this module — when a representation question has one answer, it
 //! can't become inconsistent between producer and consumer.
 //!
-//! Non-goals right now: this module doesn't yet wrap the full
-//! push/pop/store/load emission surface. It starts with the narrow
-//! slice that's biting us (ternary / if block types) and will grow as
-//! more emit sites migrate. See
+//! Non-goals: this module doesn't wrap the full push/pop/store/load
+//! emission surface — emit sites query the representation and emit
+//! their own instructions. See
 //! `.claude/plans/uniform-pointer-passing.md` for context on why we
 //! went with centralised-helpers instead of a full representation
 //! refactor — the latter pays runtime cost this doesn't.
@@ -41,8 +40,9 @@ use super::WasmPackageBuilder;
 ///   - primitive scalar → its matching `ValType` (1 slot)
 ///   - `string` → `(ref $str_bytes)` GC byte array (1 slot)
 ///   - `list<T>` / record / tuple → single typed GC ref (1 slot)
-///   - option / result / variant → typed FlatGcStruct ref (1 slot) when
-///     migrated, otherwise canonical-flat
+///   - option / result / variant → typed GcVariant ref (1 slot); an
+///     `option<T>` whose payload is a single non-null-ambiguous GC ref
+///     collapses to that nullable ref instead
 ///   - unit → zero slots
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InternalRepr {
@@ -61,7 +61,7 @@ pub(super) enum InternalRepr {
     /// An `option<T>` / `result<T,E>` / user `variant` stored as a
     /// single `(ref null $<parent>_super)` (1 stack slot). Contained
     /// `u32` is the parent supertype's GC struct type index from
-    /// `RecordGcTypes::flat_gc_super_idx`. Layout follows the W3C
+    /// `RecordGcTypes::gc_variant_super_idx`. Layout follows the W3C
     /// component-model GC ABI proposal (issue #525).
     ///
     /// Discrimination: `ref.test (ref $<parent>_<case>)` — no
@@ -72,7 +72,7 @@ pub(super) enum InternalRepr {
     /// WIT-boundary code paths must continue to use `flatten_core_valtypes`
     /// for canonical-ABI lift/lower; never query `signal_storage_valtypes`
     /// for boundary writes.
-    FlatGcStruct(u32),
+    GcVariant(u32),
 }
 
 /// One leaf field of a (possibly nested) record, paired with how to reach it
@@ -85,8 +85,10 @@ pub(crate) struct LeafFieldAccess {
     /// reaches the record root; the last pair is the leaf's own field.
     pub chain: Vec<(u32, u32)>,
     /// The leaf field's type (never a nested record — those are flattened).
+    #[allow(dead_code)]
     pub ty: Ty,
     /// Canonical-ABI byte offset of this field within the record.
+    #[allow(dead_code)]
     pub offset: u32,
 }
 
@@ -120,7 +122,7 @@ impl WasmPackageBuilder<'_> {
             // strings-to-GC: `option<string>` does NOT collapse to a bare
             // `(ref null $str_bytes)` — a null str_bytes ref is a legitimate
             // empty string, indistinguishable from `none`. Keep it as a
-            // FlatGcStruct (`$opt_string` sub-hierarchy) so `some("")` and
+            // GcVariant (`$opt_string` sub-hierarchy) so `some("")` and
             // `none` stay distinct. Other ref inners (records / lists) have
             // no such ambiguity and still collapse.
             let inner_is_gc_string = matches!(self.ctx.ty_kind(inner_ty), InternedTyKind::String);
@@ -132,12 +134,12 @@ impl WasmPackageBuilder<'_> {
                 }
             }
         }
-        // The `flat_gc_migrated` predicate is mirrored in
-        // `yel_core::lir::block_lower::is_flat_gc_migrated_ty`; both
+        // The `is_gc_variant` predicate is mirrored in
+        // `yel_core::lir::block_lower::is_gc_variant_ty`; both
         // sides MUST agree per Ty.
-        if self.flat_gc_migrated(ty)
-            && let Some(&super_idx) = self.record_gc_types.flat_gc_super_idx.get(&ty) {
-                return InternalRepr::FlatGcStruct(super_idx);
+        if self.is_gc_variant(ty)
+            && let Some(&super_idx) = self.record_gc_types.gc_variant_super_idx.get(&ty) {
+                return InternalRepr::GcVariant(super_idx);
             }
         // strings-to-GC (`plans/strings-to-gc.md`): a `String` is a GC byte
         // array `(ref $str_bytes)`. `$str_bytes` is always emitted, so the
@@ -188,19 +190,19 @@ impl WasmPackageBuilder<'_> {
                 }
                 // Enums lower to a single i32 discriminant.
                 DefKind::Enum(_) => InternalRepr::Scalar(ValType::I32),
-                // Variants are always FlatGcStruct via the
-                // `flat_gc_migrated` gate above. Reaching this arm means
+                // Variants are always GcVariant via the
+                // `is_gc_variant` gate above. Reaching this arm means
                 // the gate rejected the variant — the payload-admissibility
                 // rules need to broaden, not a new fallback.
                 _ => unreachable!(
-                    "internal_repr: variant {:?} rejected by flat_gc_migrated gate — \
-                     widen `flat_gc_payload_admissible` upstream rather than \
+                    "internal_repr: variant {:?} rejected by is_gc_variant gate — \
+                     widen `gc_variant_payload_admissible` upstream rather than \
                      adding a Flat fallback",
                     ty
                 ),
             },
             InternedTyKind::Option(_) | InternedTyKind::Result { .. } => unreachable!(
-                "internal_repr: option/result Ty {:?} not registered as FlatGcStruct — \
+                "internal_repr: option/result Ty {:?} not registered as GcVariant — \
                  the walker in `gc_types::collect_list_and_tuple_tys` should have caught it. \
                  Add a seed source (signal / record field / variant payload / LirExpr.ty) \
                  and check the option_collapses_to_ref / DefKind admission gates upstream.",
@@ -220,8 +222,7 @@ impl WasmPackageBuilder<'_> {
     ///   narrow ints widened to i32 — fields are full-width, the
     ///   narrow-store/load dance is no longer needed since each field
     ///   has its own slot).
-    /// - GcRef / GcArrayRef / FlatGcStruct → 1 typed ref slot.
-    /// - Flat → canonical-ABI flattening for non-migrated option/result/variant/enum.
+    /// - GcRef / GcArrayRef / GcVariant → 1 typed ref slot.
     /// - Zero → `[]` (no value).
     pub(crate) fn signal_storage_valtypes(&self, ty: Ty) -> Vec<ValType> {
         match self.internal_repr(ty) {
@@ -235,7 +236,7 @@ impl WasmPackageBuilder<'_> {
                 nullable: true,
                 heap_type: HeapType::Concrete(arr_idx),
             })],
-            InternalRepr::FlatGcStruct(super_idx) => vec![ValType::Ref(RefType {
+            InternalRepr::GcVariant(super_idx) => vec![ValType::Ref(RefType {
                 nullable: true,
                 heap_type: HeapType::Concrete(super_idx),
             })],
@@ -296,15 +297,15 @@ impl WasmPackageBuilder<'_> {
     }
 
     /// Structural mirror of
-    /// `yel_core::lir::block_lower::is_flat_gc_migrated_ty`. Both
+    /// `yel_core::lir::block_lower::is_gc_variant_ty`. Both
     /// sides MUST agree per Ty so that LIR slot allocation and WASM
     /// codegen pick the same shape (1 ref slot vs N flat slots).
-    pub(crate) fn flat_gc_migrated(&self, ty: Ty) -> bool {
+    pub(crate) fn is_gc_variant(&self, ty: Ty) -> bool {
         let mut visiting = HashSet::new();
-        self.flat_gc_migrated_inner(ty, &mut visiting)
+        self.is_gc_variant_inner(ty, &mut visiting)
     }
 
-    fn flat_gc_migrated_inner(&self, ty: Ty, visiting: &mut HashSet<DefId>) -> bool {
+    fn is_gc_variant_inner(&self, ty: Ty, visiting: &mut HashSet<DefId>) -> bool {
         match self.ctx.ty_kind(ty) {
             InternedTyKind::Option(inner) => {
                 let inner = *inner;
@@ -312,12 +313,12 @@ impl WasmPackageBuilder<'_> {
                 // when inner already has a single-GC-ref internal repr —
                 // scalar lists (typed array), tuples (struct), records
                 // (struct). In those cases `option_collapses_to_ref`
-                // wins inside `internal_repr` and FlatGcStruct would be
+                // wins inside `internal_repr` and GcVariant would be
                 // redundant; reject here so we don't also register an
                 // unused rec group.
                 //
                 // The yel-core mirror in
-                // `block_lower::is_flat_gc_migrated_ty_inner` rejects on
+                // `block_lower::is_gc_variant_ty_inner` rejects on
                 // the same structural shape — keep them in sync.
                 if self.is_scalar_list_ty(inner) {
                     return false;
@@ -331,15 +332,15 @@ impl WasmPackageBuilder<'_> {
                     }
                     _ => {}
                 }
-                self.flat_gc_payload_admissible(inner, visiting)
+                self.gc_variant_payload_admissible(inner, visiting)
             }
             InternedTyKind::Result { ok, err } => {
                 let ok_ok = match ok {
-                    Some(t) => self.flat_gc_payload_admissible(*t, visiting),
+                    Some(t) => self.gc_variant_payload_admissible(*t, visiting),
                     None => true,
                 };
                 let err_ok = match err {
-                    Some(t) => self.flat_gc_payload_admissible(*t, visiting),
+                    Some(t) => self.gc_variant_payload_admissible(*t, visiting),
                     None => true,
                 };
                 ok_ok && err_ok
@@ -357,7 +358,7 @@ impl WasmPackageBuilder<'_> {
                     if let DefKind::VariantCase(case) = self.ctx.defs.kind(c) {
                         match case.payload {
                             None => true,
-                            Some(p) => self.flat_gc_payload_admissible(p, visiting),
+                            Some(p) => self.gc_variant_payload_admissible(p, visiting),
                         }
                     } else {
                         false
@@ -370,7 +371,7 @@ impl WasmPackageBuilder<'_> {
         }
     }
 
-    fn flat_gc_payload_admissible(&self, ty: Ty, visiting: &mut HashSet<DefId>) -> bool {
+    fn gc_variant_payload_admissible(&self, ty: Ty, visiting: &mut HashSet<DefId>) -> bool {
         match self.ctx.ty_kind(ty) {
             InternedTyKind::Bool
             | InternedTyKind::S8
@@ -392,11 +393,11 @@ impl WasmPackageBuilder<'_> {
             InternedTyKind::Adt(d) => match self.ctx.defs.kind(*d) {
                 DefKind::Enum(_) => true,
                 DefKind::Record(_) => self.is_single_level_record(ty),
-                DefKind::Variant(_) => self.flat_gc_migrated_inner(ty, visiting),
+                DefKind::Variant(_) => self.is_gc_variant_inner(ty, visiting),
                 _ => false,
             },
             InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
-                self.flat_gc_migrated_inner(ty, visiting)
+                self.is_gc_variant_inner(ty, visiting)
             }
             _ => false,
         }
@@ -421,7 +422,7 @@ impl WasmPackageBuilder<'_> {
 
         // strings-to-GC: `option<string>` deliberately does NOT collapse
         // (a null str_bytes ref would be ambiguous with `none`); it stays a
-        // FlatGcStruct. See `internal_repr`'s Option arm.
+        // GcVariant. See `internal_repr`'s Option arm.
 
         match self.ctx.ty_kind(inner) {
             InternedTyKind::Tuple(_) => self
@@ -437,9 +438,9 @@ impl WasmPackageBuilder<'_> {
         }
     }
 
-    /// True iff `ty` is `list<T>` where `T` migrates to the typed-GC-
-    /// array path (primitive scalars, records, nested GC-eligible lists,
-    /// strings, FlatGcStruct elements, and tuples).
+    /// True iff `ty` is `list<T>` where `T` is stored as a typed GC
+    /// array (primitive scalars, records, nested GC-eligible lists,
+    /// strings, GcVariant elements, and tuples).
     pub(crate) fn is_scalar_list_ty(&self, ty: Ty) -> bool {
         let elem = match self.ctx.ty_kind(ty) {
             InternedTyKind::List(e) => *e,
@@ -448,10 +449,10 @@ impl WasmPackageBuilder<'_> {
 
         // A `list<T>` becomes a typed GC array `(array (mut <elem>))` iff its
         // element occupies a SINGLE wasm slot — i.e. `internal_repr(elem)` is
-        // `Scalar` / `GcRef` / `GcArrayRef` / `FlatGcStruct`. This subsumes
+        // `Scalar` / `GcRef` / `GcArrayRef` / `GcVariant`. This subsumes
         // every single-ref shape at once: primitives, enums, strings,
         // records, tuples, option-of-ref collapse (`option<record>` etc.),
-        // flat-gc (option/result/variant), and nested scalar lists.
+        // gc-variant (option/result/variant), and nested scalar lists.
         //
         // The only elements that are NOT single-slot are `FatPointer` (a
         // non-scalar nested list — the recursion terminates when its own
@@ -462,7 +463,7 @@ impl WasmPackageBuilder<'_> {
             InternalRepr::Scalar(_)
                 | InternalRepr::GcRef(_)
                 | InternalRepr::GcArrayRef(_)
-                | InternalRepr::FlatGcStruct(_)
+                | InternalRepr::GcVariant(_)
         )
     }
 
@@ -629,7 +630,7 @@ impl WasmPackageBuilder<'_> {
             InternalRepr::Scalar(_) => 1,
             InternalRepr::GcRef(_) => 1,
             InternalRepr::GcArrayRef(_) => 1,
-            InternalRepr::FlatGcStruct(_) => 1,
+            InternalRepr::GcVariant(_) => 1,
         }
     }
 
@@ -666,7 +667,7 @@ impl WasmPackageBuilder<'_> {
                     heap_type: wasm_encoder::HeapType::Concrete(arr_idx),
                 })))
             }
-            InternalRepr::FlatGcStruct(super_idx) => {
+            InternalRepr::GcVariant(super_idx) => {
                 Ok(BlockType::Result(ValType::Ref(wasm_encoder::RefType {
                     nullable: true,
                     heap_type: wasm_encoder::HeapType::Concrete(super_idx),

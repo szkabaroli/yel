@@ -377,7 +377,7 @@ impl<'a> WasmPackageBuilder<'a> {
         }
 
         // Stage 6: typed-GC body. Item is `array.get`'d directly to its
-        // element type (typed ref for records / tuples / FlatGcStruct
+        // element type (typed ref for records / tuples / GcVariant
         // / nested lists / strings-as-$fat_value, scalar for prims).
         // Locals: src_len i32, scratch_arr (ref), result_count i32,
         // loop_index i32, item_local (typed elem), final_arr (ref).

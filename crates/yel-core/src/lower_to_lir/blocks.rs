@@ -52,7 +52,7 @@ pub(crate) enum InlineResult {
 ///
 /// The gating predicates that decide which migration phase a type
 /// belongs to (`is_scalar_list_ty_struct`, `is_dtr_record_struct`,
-/// `is_flat_gc_migrated_ty_struct`) are the source of truth — keeping
+/// `is_gc_variant_ty_struct`) are the source of truth — keeping
 /// this function as the single dispatch point means UI and flow can
 /// never drift out of sync with codegen's storage-type expectations.
 pub fn ty_to_slot_val_type(
@@ -70,7 +70,7 @@ pub fn ty_to_slot_val_type(
     // collapsing-option>` collapses to a single nullable ref of the inner's
     // GC type (none == null, some(v) == v), mirroring codegen's
     // `internal_repr`. `option<string>` does NOT collapse (see
-    // `internal_repr`). MUST precede the FlatGcStruct / record / tuple
+    // `internal_repr`). MUST precede the GcVariant / record / tuple
     // arms below so the collapsed shape wins.
     if let InternedTyKind::Option(inner_ty) = ctx.ty_kind(ty)
         && let Some(vt) = collapsed_ref_slot_val_ty(ctx, *inner_ty)
@@ -84,8 +84,8 @@ pub fn ty_to_slot_val_type(
         }
     // Phase 5e.5: option / result / variant migrated to W3C
     // subtype-hierarchy GC repr — single nullable supertype ref.
-    if is_flat_gc_migrated_ty_struct(ctx, ty) {
-        return LirSlotValType::RefNullForFlatGc(ty);
+    if is_gc_variant_ty_struct(ctx, ty) {
+        return LirSlotValType::RefNullForGcVariant(ty);
     }
     // Task #100: tuples are GcRef-repr internally — single nullable
     // ref to the tuple struct type. Mirrors records (RefNullForRecord).
@@ -201,30 +201,30 @@ fn is_dtr_field_ty_struct(
         InternedTyKind::Adt(d) => match ctx.defs.kind(*d) {
             DefKind::Record(_) => is_dtr_record_struct_inner(ctx, *d, seen),
             // Phase 5e.5: migrated user variants are 1 ref slot.
-            DefKind::Variant(_) => is_flat_gc_migrated_ty_struct(ctx, ty),
+            DefKind::Variant(_) => is_gc_variant_ty_struct(ctx, ty),
             _ => false,
         },
         // Phase 5e.5: migrated option/result are 1 ref slot.
         InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
-            is_flat_gc_migrated_ty_struct(ctx, ty)
+            is_gc_variant_ty_struct(ctx, ty)
         }
         _ => false,
     }
 }
 
-/// Phase 5e.5: structural mirror of `is_flat_gc_migrated_ty` (method
+/// Phase 5e.5: structural mirror of `is_gc_variant_ty` (method
 /// form on `BlockLowering`) for use in free-function contexts. Both
 /// MUST agree for a given Ty so that DTR eligibility, slot-type
 /// allocation, and codegen storage-type rules stay in lockstep.
-pub(crate) fn is_flat_gc_migrated_ty_struct(
+pub(crate) fn is_gc_variant_ty_struct(
     ctx: &crate::context::CompilerContext,
     ty: crate::types::Ty,
 ) -> bool {
     let mut visiting = HashSet::new();
-    is_flat_gc_migrated_ty_struct_inner(ctx, ty, &mut visiting)
+    is_gc_variant_ty_struct_inner(ctx, ty, &mut visiting)
 }
 
-fn is_flat_gc_migrated_ty_struct_inner(
+fn is_gc_variant_ty_struct_inner(
     ctx: &crate::context::CompilerContext,
     ty: crate::types::Ty,
     visiting: &mut HashSet<crate::DefId>,
@@ -241,15 +241,15 @@ fn is_flat_gc_migrated_ty_struct_inner(
                 {
                     return false;
                 }
-            is_flat_gc_payload_ty_struct(ctx, inner, visiting)
+            is_gc_variant_payload_ty_struct(ctx, inner, visiting)
         }
         InternedTyKind::Result { ok, err } => {
             let ok_ok = match ok {
-                Some(t) => is_flat_gc_payload_ty_struct(ctx, *t, visiting),
+                Some(t) => is_gc_variant_payload_ty_struct(ctx, *t, visiting),
                 None => true,
             };
             let err_ok = match err {
-                Some(t) => is_flat_gc_payload_ty_struct(ctx, *t, visiting),
+                Some(t) => is_gc_variant_payload_ty_struct(ctx, *t, visiting),
                 None => true,
             };
             ok_ok && err_ok
@@ -267,7 +267,7 @@ fn is_flat_gc_migrated_ty_struct_inner(
                 if let DefKind::VariantCase(case) = ctx.defs.kind(c) {
                     match case.payload {
                         None => true,
-                        Some(p) => is_flat_gc_payload_ty_struct(ctx, p, visiting),
+                        Some(p) => is_gc_variant_payload_ty_struct(ctx, p, visiting),
                     }
                 } else {
                     false
@@ -280,7 +280,7 @@ fn is_flat_gc_migrated_ty_struct_inner(
     }
 }
 
-fn is_flat_gc_payload_ty_struct(
+fn is_gc_variant_payload_ty_struct(
     ctx: &crate::context::CompilerContext,
     ty: crate::types::Ty,
     visiting: &mut HashSet<crate::DefId>,
@@ -308,11 +308,11 @@ fn is_flat_gc_payload_ty_struct(
         InternedTyKind::Adt(d) => match ctx.defs.kind(*d) {
             DefKind::Enum(_) => true,
             DefKind::Record(_) => is_dtr_record_struct(ctx, *d),
-            DefKind::Variant(_) => is_flat_gc_migrated_ty_struct_inner(ctx, ty, visiting),
+            DefKind::Variant(_) => is_gc_variant_ty_struct_inner(ctx, ty, visiting),
             _ => false,
         },
         InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
-            is_flat_gc_migrated_ty_struct_inner(ctx, ty, visiting)
+            is_gc_variant_ty_struct_inner(ctx, ty, visiting)
         }
         _ => false,
     }
@@ -328,7 +328,7 @@ fn is_flat_gc_payload_ty_struct(
 /// (unit / error / unknown), a callback (`Func`), or a `FatPointer` — the
 /// only remaining fat-pointer element is a *non-scalar nested list* (which
 /// recurses). Everything else — primitives, enums, strings, records,
-/// tuples, `option`/`result`/`variant` (flat-gc **or** option-of-ref
+/// tuples, `option`/`result`/`variant` (gc-variant **or** option-of-ref
 /// collapse), and nested scalar lists — is a single ref/scalar.
 pub fn is_scalar_list_ty_struct(
     ctx: &crate::context::CompilerContext,
@@ -360,8 +360,8 @@ fn is_single_slot_elem_struct(
         // fat pointer.
         InternedTyKind::List(_) => is_scalar_list_ty_struct(ctx, elem, seen),
         // Everything else is a single ref / scalar: primitives, UI units,
-        // strings, tuples, option/result (collapse or flat-gc), and every
-        // Adt (record → GcRef, enum → i32, variant → FlatGcStruct).
+        // strings, tuples, option/result (collapse or gc-variant), and every
+        // Adt (record → GcRef, enum → i32, variant → GcVariant).
         _ => true,
     }
 }
@@ -1855,7 +1855,7 @@ impl<'a> BlockLowering<'a> {
                         // ADDRESS (the body reads via `load_fat_ptr`), not the
                         // `$str_bytes` ref. Every other GC-array element stores
                         // its VALUE in its natural single-slot shape via
-                        // `ty_to_slot_val_type` (records / tuples / flat-gc /
+                        // `ty_to_slot_val_type` (records / tuples / gc-variant /
                         // option-of-ref collapse / scalars), so the field type
                         // and the item slot type agree.
                         IterSource::ListGc => {
@@ -1884,7 +1884,7 @@ impl<'a> BlockLowering<'a> {
                     // A signal-backed list is GC-iterated iff its element is
                     // single-slot — the same `is_scalar_list_ty_struct`
                     // predicate codegen keys on (scalars, records, tuples,
-                    // strings, flat-gc, and option-of-ref collapse). Keeping
+                    // strings, gc-variant, and option-of-ref collapse). Keeping
                     // this in lockstep is what avoids the for-loop update
                     // `debug_assert!(is_gc_list)` panic.
                     let elem_is_gc = is_scalar_list_ty_struct(
@@ -4706,7 +4706,7 @@ impl<'a> BlockLowering<'a> {
 
         // Load for-loop items from memory at start of block. Phase
         // 5e.5 Stage 7e: type the temp slot from the outer item's Ty
-        // (when bound by Value) so list<FlatGcStruct> elements arrive
+        // (when bound by Value) so list<GcVariant> elements arrive
         // as the typed supertype ref.
         let mut loaded_items: HashMap<LocalId, LirSlotId> = HashMap::new();
         for (local_id, outer_ty, item_struct_ty, mode) in &outer_items_snapshot {
@@ -5788,7 +5788,7 @@ impl<'a> BlockLowering<'a> {
 
             // Default-init for gc-backed signals.
             //
-            // Task #99: inline FlatGcStruct case-0 materialization via
+            // Task #99: inline GcVariant case-0 materialization via
             // StructNewDefaultSym + StructSetSym. For other gc-only
             // shapes (scalars, fat-pointer string/list), the parent
             // `struct.new_default $Comp` already zeroed every field
@@ -5799,28 +5799,28 @@ impl<'a> BlockLowering<'a> {
                     // `InitSignalDefault` arm handles those — bail.
                     return InlineResult::NotHandled;
                 };
-                // FlatGcStruct shape = option<T>/result<T,E>/variant<…>
-                // where every payload is flat-gc-compatible. The
-                // codegen-side `InternalRepr::FlatGcStruct` mirrors this
+                // GcVariant shape = option<T>/result<T,E>/variant<…>
+                // where every payload is gc-variant-compatible. The
+                // codegen-side `InternalRepr::GcVariant` mirrors this
                 // predicate (see repr.rs line 118).
                 let kind = self.ctx.ty_kind(signal_ty);
-                let is_flat_gc_shape = matches!(
+                let is_gc_variant_shape = matches!(
                     kind,
                     InternedTyKind::Option(_) | InternedTyKind::Result { .. }
                 ) || matches!(kind, InternedTyKind::Adt(d)
                     if matches!(self.ctx.defs.kind(*d), DefKind::Variant(_)));
-                if is_flat_gc_shape && is_flat_gc_migrated_ty_struct(self.ctx, signal_ty) {
+                if is_gc_variant_shape && is_gc_variant_ty_struct(self.ctx, signal_ty) {
                     // Allocate scratch typed as the parent supertype ref.
                     let scratch = self.alloc_temp_slot_typed_named(
-                        LirSlotValType::RefNullForFlatGc(signal_ty),
-                        "signal_init_flat_gc_case0",
+                        LirSlotValType::RefNullForGcVariant(signal_ty),
+                        "signal_init_gc_variant_case0",
                     );
                     let self_ref = self
                         .resource_self_ref_slot
                         .expect("resource_self_ref_slot allocated at top of lower_component");
                     // struct.new_default $<sup>_<case0> → scratch
                     self.emit(LirOp::StructNewDefaultSym {
-                        ty_ref: crate::lir::block::LirTypeRef::FlatGcCase(signal_ty, 0),
+                        ty_ref: crate::lir::block::LirTypeRef::GcVariantCase(signal_ty, 0),
                         result: scratch,
                     });
                     // <self_ref>.<field> = scratch
@@ -5848,7 +5848,7 @@ impl<'a> BlockLowering<'a> {
             // the only multi-field shape (FatPointer = [i32, i32]),
             // but the helper is forward-compatible).
             // First slot uses the natural slot val_ty (handles ref types
-            // for GcRef / GcArrayRef / FlatGcStruct / FatPointer-first).
+            // for GcRef / GcArrayRef / GcVariant / FatPointer-first).
             // Companion slots for fat-pointer types (string / non-typed-
             // array list) are always I32 — those are the only multi-slot
             // shapes today.
@@ -6013,7 +6013,7 @@ impl<'a> BlockLowering<'a> {
 
             // Per-field scratch slots. Task #103: the first slot must
             // use the *natural* slot val_ty (handles ref types for
-            // GcRef / GcArrayRef / FlatGcStruct / FatPointer-first) so
+            // GcRef / GcArrayRef / GcVariant / FatPointer-first) so
             // EvalExprToSlots' typed result matches. The signal-only
             // mirror returns I32 for list / record refs, which would
             // mismatch a `(ref $array)` literal at the EvalExprToSlots
