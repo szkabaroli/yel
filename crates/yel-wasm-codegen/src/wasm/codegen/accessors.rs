@@ -4898,6 +4898,25 @@ impl<'a> WasmPackageBuilder<'a> {
                 continue;
             }
 
+            // Tuple leaf: the field is a nested tuple GC struct. Lower it
+            // recursively — `full_chain` reaches the tuple ref, and the tuple
+            // lift writes each element at its offset within the field.
+            if matches!(self.ctx.ty_kind(field_ty), InternedTyKind::Tuple(_)) {
+                let mat_ptr_local = scratch_ptr_local + 1;
+                let mat_len_local = scratch_ptr_local + 2;
+                self.emit_getter_lift_tuple(
+                    func,
+                    ci,
+                    field_ty,
+                    abs_field_offset,
+                    scratch_ptr_local,
+                    mat_ptr_local,
+                    mat_len_local,
+                    &full_chain,
+                )?;
+                continue;
+            }
+
             let field_kind = self.ctx.ty_kind(field_ty).clone();
             let field_slots = self.flatten_core_slots(field_ty);
 
@@ -5214,6 +5233,12 @@ impl<'a> WasmPackageBuilder<'a> {
                         }
                     }
                 },
+                InternedTyKind::Tuple(_) => {
+                    // Nested tuple field: build its GC struct from the field's
+                    // canonical params (recursively) and leave the tuple ref
+                    // for the parent struct.new.
+                    self.emit_setter_pack_tuple(func, field_ty, next_param)?;
+                }
                 InternedTyKind::String | InternedTyKind::List(_) => {
                     // Typed list field (in list_array_type_idx): the
                     // record-field storage type is `(ref null $list_arr)`,
@@ -5452,8 +5477,18 @@ impl<'a> WasmPackageBuilder<'a> {
                         None
                     };
                 let payload_flat = self.canonical_flat_valtypes(payload_ty);
-                for i in 0..payload_flat.len() {
+                for (i, vt_payload) in payload_flat.iter().enumerate() {
                     func.instruction(&Instruction::LocalGet(payload_start_param + i as u32));
+                    // The param carries the field's JOINED canonical valtype
+                    // (the canonical-ABI `join` may have widened it, e.g.
+                    // result<s32, s64> joins the payload slot to i64). Bridge
+                    // it back to this case's payload valtype before building
+                    // the case subtype — otherwise `struct.new $..._<case>`
+                    // sees the wrong width (i64 where an i32 field is
+                    // expected). Same narrowing the direct FlatGcStruct signal
+                    // setter applies.
+                    let vt_joined = canonical.get(1 + i).copied().unwrap_or(*vt_payload);
+                    emit_canonical_reinterpret(func, vt_joined, *vt_payload)?;
                 }
                 if let Some(arr_type_idx) = typed_list_arr_idx {
                     let unmat_fn = *self

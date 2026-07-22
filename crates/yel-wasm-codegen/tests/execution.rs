@@ -3981,6 +3981,134 @@ fn result_mixed_width_join_roundtrip() {
 /// builds the tuple from canonical params on Some and the getter lowers it
 /// (via the recursive tuple lift). Verifies Some and None both round-trip.
 #[test]
+fn record_with_mixed_width_result_field_roundtrip() {
+    // A record field that is a mixed-width result (`result<s32, s64>`): the
+    // record pack must narrow the joined i64 param to the Ok case's i32 field
+    // (i32.wrap_i64), and the record lift must widen it back. Verifies both
+    // the Ok (narrow) and Err (full 64) cases round-trip through the field.
+    let source = r#"
+        package yel:recres@0.1.0;
+        record R { v: result<s32, s64>, }
+        export component App {
+            r: R = { v: ok(0) };
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:recres/app-component@0.1.0";
+    let res = ctor_and_mount(&mut h, iface, "app");
+    let get_r = get_func(&mut h, iface, "[method]app.get-r");
+    let read_v = |h: &mut Harness, r: &ResourceAny| -> Val {
+        let mut out = [Val::Bool(false)];
+        get_r
+            .call(&mut h.store, &[Val::Resource(*r)], &mut out)
+            .expect("get-r");
+        match std::mem::replace(&mut out[0], Val::Bool(false)) {
+            Val::Record(mut f) => f
+                .drain(..)
+                .find(|(n, _)| n == "v")
+                .map(|(_, v)| v)
+                .expect("field v"),
+            other => panic!("get-r non-record {:?}", other),
+        }
+    };
+    // Ok(42) — narrow payload in the joined i64 slot.
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "r",
+        &res,
+        Val::Record(vec![(
+            "v".into(),
+            Val::Result(Ok(Some(Box::new(Val::S32(42))))),
+        )]),
+    );
+    match read_v(&mut h, &res) {
+        Val::Result(Ok(Some(v))) => {
+            assert!(matches!(*v, Val::S32(42)), "Ok must be 42, got {:?}", v)
+        }
+        other => panic!("expected Ok(42), got {:?}", other),
+    }
+    // Err(big) — full-width i64.
+    let big: i64 = 9_000_000_000;
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "r",
+        &res,
+        Val::Record(vec![(
+            "v".into(),
+            Val::Result(Err(Some(Box::new(Val::S64(big))))),
+        )]),
+    );
+    match read_v(&mut h, &res) {
+        Val::Result(Err(Some(v))) => {
+            assert!(matches!(*v, Val::S64(x) if x == big), "Err must be {}, got {:?}", big, v)
+        }
+        other => panic!("expected Err({}), got {:?}", big, other),
+    }
+}
+
+#[test]
+fn record_with_tuple_field_roundtrip() {
+    // A record field that is a tuple: the record lift/pack must delegate the
+    // field to the recursive tuple lift/pack (it's a nested GC struct), not
+    // treat it as a scalar slot. Verifies a record { s32, tuple<s32, string> }
+    // round-trips through set→get, string included.
+    let source = r#"
+        package yel:rectup@0.1.0;
+        record R { n: s32, pair: tuple<s32, string>, }
+        export component App {
+            r: R = { n: 0, pair: (1, "init") };
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:rectup/app-component@0.1.0";
+    let res = ctor_and_mount(&mut h, iface, "app");
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "r",
+        &res,
+        Val::Record(vec![
+            ("n".into(), Val::S32(9)),
+            (
+                "pair".into(),
+                Val::Tuple(vec![Val::S32(8), Val::String("hi".into())]),
+            ),
+        ]),
+    );
+    let get_r = get_func(&mut h, iface, "[method]app.get-r");
+    let mut out = [Val::Bool(false)];
+    get_r
+        .call(&mut h.store, &[Val::Resource(res)], &mut out)
+        .expect("get-r");
+    match &out[0] {
+        Val::Record(f) => {
+            let g = |k: &str| f.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+            assert!(matches!(g("n"), Some(Val::S32(9))), "n, got {:?}", g("n"));
+            match g("pair") {
+                Some(Val::Tuple(e)) => {
+                    assert!(matches!(&e[0], Val::S32(8)), "pair.0, got {:?}", e[0]);
+                    match &e[1] {
+                        Val::String(s) => assert_eq!(&**s, "hi"),
+                        other => panic!("pair.1: {:?}", other),
+                    }
+                }
+                other => panic!("pair must be a tuple, got {:?}", other),
+            }
+        }
+        other => panic!("get-r returned non-record {:?}", other),
+    }
+}
+
+#[test]
 fn single_slot_nested_record_roundtrip() {
     // A record that flattens to a single 64-bit slot (a single-field record
     // wrapping a single-s64-field record) is returned by-value as i64, not by
