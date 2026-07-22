@@ -4717,28 +4717,34 @@ impl<'a> WasmPackageBuilder<'a> {
                 use super::super::gc_types::StructGetVariant;
                 use yel_core::types::InternedTyKind;
 
-                // strings-to-GC: string payload field is a `$str_bytes` ref —
-                // materialize once to (ptr, len) and store the canonical slots.
-                if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-                {
-                    let arr_type_idx = self.record_gc_types.str_bytes_array_idx.ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "FlatGcStruct DTR string field lift: $str_bytes missing".into(),
-                        )
-                    })?;
+                // Typed-GC-array list payload OR string payload — both are a
+                // single GC array ref (`$<elem>_list` / `$str_bytes`) in the
+                // case subtype; materialize once to canonical (ptr, len) and
+                // store both slots. (Parity with the signal payload lift; the
+                // field path previously handled only the string sub-case and
+                // stored a list ref as a raw i32.)
+                let payload_arr_idx: Option<u32> =
+                    if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_)) {
+                        self.record_gc_types.list_array_type_idx.get(&payload_ty).copied()
+                    } else if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String) {
+                        self.record_gc_types.str_bytes_array_idx
+                    } else {
+                        None
+                    };
+                if let Some(arr_type_idx) = payload_arr_idx {
                     let mat_fn = *self
                         .gc_list_materializer_fn_indices
                         .get(&arr_type_idx)
                         .ok_or_else(|| {
                             CodegenError::InvalidIR(
-                                "FlatGcStruct DTR string field lift: missing materializer".into(),
+                                "FlatGcStruct DTR array field lift: missing materializer".into(),
                             )
                         })?;
                     let ptr_slot = *canonical_slots.get(1).ok_or_else(|| {
-                        CodegenError::InvalidIR("DTR string field lift: missing ptr slot".into())
+                        CodegenError::InvalidIR("DTR array field lift: missing ptr slot".into())
                     })?;
                     let len_slot = *canonical_slots.get(2).ok_or_else(|| {
-                        CodegenError::InvalidIR("DTR string field lift: missing len slot".into())
+                        CodegenError::InvalidIR("DTR array field lift: missing len slot".into())
                     })?;
                     let mat_ptr_local = scratch_ptr_local + 1;
                     let mat_len_local = scratch_ptr_local + 2;

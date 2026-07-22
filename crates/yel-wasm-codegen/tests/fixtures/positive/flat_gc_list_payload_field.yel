@@ -1,0 +1,16 @@
+// A variant/result case whose payload is a `list` (or string), when it sits
+// as a FIELD/element of a record/tuple/option, is lifted at the WIT boundary
+// by emit_flat_gc_dtr_field_lift. That path previously handled only a string
+// payload and stored a list payload's array ref as a raw i32 ("expected i32,
+// found (ref …)"). It now materializes both list and string case payloads to
+// canonical (ptr, len) — parity with the direct-signal payload lift. Here the
+// variant sits as a tuple element, which reaches the field lift via the tuple
+// getter.
+package yel:flatgclist@0.1.0;
+variant V { a(list<s32>), b(string), c(s32), }
+export component App {
+    withList: tuple<V, s32> = (V.a([1, 2]), 3);
+    withStr: tuple<V, s32> = (V.b("x"), 4);
+    plain: tuple<V, s32> = (V.c(5), 6);
+    VStack { Text { "ok" } }
+}

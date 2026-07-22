@@ -1,0 +1,30 @@
+package yel:flatgclist@0.1.0;
+
+interface shared-types {
+  variant v {
+    a(list<s32>),
+    b(string),
+    c(s32),
+  }
+}
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-with-list: func() -> tuple<v, s32>;
+    set-with-list: func(value: tuple<v, s32>);
+    get-with-str: func() -> tuple<v, s32>;
+    set-with-str: func(value: tuple<v, s32>);
+    get-plain: func() -> tuple<v, s32>;
+    set-plain: func(value: tuple<v, s32>);
+  }
+}
+
+world flatgclist {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}
