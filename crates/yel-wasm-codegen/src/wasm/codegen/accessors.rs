@@ -2137,7 +2137,6 @@ impl<'a> WasmPackageBuilder<'a> {
         super_idx: u32,
         scratch_ptr_local: u32,
     ) -> Result<(), CodegenError> {
-        use super::scratch::mem_arg;
         let _ = super_idx;
 
         let cabi_realloc = self
@@ -2148,32 +2147,15 @@ impl<'a> WasmPackageBuilder<'a> {
             })?
             .cabi_realloc;
         let layout_info = self.layout_ctx.layout_of(signal_ty);
-        let canonical_slots = self.flatten_core_slots(signal_ty);
 
-        let disc_offset = canonical_slots.first().map(|s| s.offset).ok_or_else(|| {
-            CodegenError::InvalidIR(format!(
-                "FlatGcStruct lift: canonical layout has zero slots for {:?}",
-                signal_ty
-            ))
-        })?;
-
-        // scratch = cabi_realloc(0, 0, align, size)
+        // A flat-gc signal is a flat-gc field of the component struct reached
+        // at `field_path[0]`. Allocate the canonical-ABI lift scratch and
+        // delegate to the one flat-gc field lift (empty prefix, offset 0) so
+        // the signal and nested-field lifts share a single case-loop + payload
+        // implementation.
         super::scratch::emit_cabi_realloc_fixed(func, layout_info.align, layout_info.size, cabi_realloc);
         func.instruction(&Instruction::LocalSet(scratch_ptr_local));
 
-        let case_count = *self
-            .record_gc_types
-            .flat_gc_case_count
-            .get(&signal_ty)
-            .ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "FlatGcStruct lift: missing case count for {:?}",
-                    signal_ty
-                ))
-            })?;
-
-        // The flat-gc supertype ref lives at the signal's component-struct
-        // field; its reach chain is `[(component_struct, field)]`.
         let struct_ty = self.gc_layouts[ci].component_struct_type_idx.ok_or_else(|| {
             CodegenError::InvalidIR("FlatGcStruct lift: missing component_struct_type_idx".into())
         })?;
@@ -2188,71 +2170,10 @@ impl<'a> WasmPackageBuilder<'a> {
                     sig_idx
                 ))
             })?;
-        let field_chain: Vec<(u32, u32)> = vec![(struct_ty, field_idx)];
+        self.emit_flat_gc_dtr_field_lift(
+            func, ci, signal_ty, struct_ty, field_idx, &[], 0, scratch_ptr_local,
+        )?;
 
-        // Outer block lets a matching case skip the remaining tests +
-        // the fall-through default via `br $done`.
-        func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
-
-        for k in 0..case_count {
-            let case_sub_idx = *self
-                .record_gc_types
-                .flat_gc_case_idx
-                .get(&(signal_ty, k))
-                .ok_or_else(|| {
-                    CodegenError::InvalidIR(format!(
-                        "FlatGcStruct lift: missing case_idx for ({:?}, {})",
-                        signal_ty, k
-                    ))
-                })?;
-
-            self.emit_gc_field_chain(func, ci, &field_chain)?;
-            func.instruction(&Instruction::RefTestNonNull(
-                wasm_encoder::HeapType::Concrete(case_sub_idx),
-            ));
-            func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
-
-            // disc = k
-            func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-            if disc_offset != 0 {
-                func.instruction(&Instruction::I32Const(disc_offset as i32));
-                func.instruction(&Instruction::I32Add);
-            }
-            func.instruction(&Instruction::I32Const(k as i32));
-            func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
-
-            if let Some(payload_ty) =
-                super::super::gc_types::case_payload_ty(self.ctx, signal_ty, k)
-            {
-                self.emit_flat_gc_payload_lift(
-                    func,
-                    ci,
-                    &field_chain,
-                    case_sub_idx,
-                    payload_ty,
-                    &canonical_slots,
-                    scratch_ptr_local,
-                )?;
-            }
-
-            // Skip remaining cases + fall-through default.
-            func.instruction(&Instruction::Br(1));
-            func.instruction(&Instruction::End);
-        }
-
-        // Fall-through default (signal field was null): disc=0.
-        func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-        if disc_offset != 0 {
-            func.instruction(&Instruction::I32Const(disc_offset as i32));
-            func.instruction(&Instruction::I32Add);
-        }
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
-
-        // End outer block.
-        func.instruction(&Instruction::End);
-
-        // Return scratch pointer.
         func.instruction(&Instruction::LocalGet(scratch_ptr_local));
         Ok(())
     }
