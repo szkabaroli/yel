@@ -3789,6 +3789,69 @@ fn tuple_with_string_element_setter_getter_roundtrip() {
     }
 }
 
+/// Boundary round-trip for a tuple whose element is a *record* (with a
+/// string field). The tuple stores the record as a nested GC struct ref, so
+/// the setter recursively packs the record from its canonical params and the
+/// getter recursively lowers it back — reusing the same recursive record
+/// machinery that record signals use. Verifies both directions round-trip.
+#[test]
+fn tuple_with_record_element_setter_getter_roundtrip() {
+    let source = r#"
+        package yel:tuprec@0.1.0;
+        record Item { n: s32, label: string, }
+        export component App {
+            entry: tuple<s32, Item> = (0, { n: 1, label: "init" });
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:tuprec/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "entry",
+        &r,
+        Val::Tuple(vec![
+            Val::S32(9),
+            Val::Record(vec![
+                ("n".into(), Val::S32(77)),
+                ("label".into(), Val::String("deep".into())),
+            ]),
+        ]),
+    );
+
+    let get_entry = get_func(&mut h, iface, "[method]app.get-entry");
+    let mut out = [Val::Bool(false)];
+    get_entry
+        .call(&mut h.store, &[Val::Resource(r)], &mut out)
+        .expect("get-entry");
+    match &out[0] {
+        Val::Tuple(elems) => {
+            assert!(matches!(&elems[0], Val::S32(9)), "tuple.0, got {:?}", elems[0]);
+            match &elems[1] {
+                Val::Record(fields) => {
+                    let get = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+                    assert!(
+                        matches!(get("n"), Some(Val::S32(77))),
+                        "record.n must be 77, got {:?}",
+                        get("n")
+                    );
+                    match get("label") {
+                        Some(Val::String(s)) => assert_eq!(&**s, "deep"),
+                        other => panic!("record.label must round-trip, got {:?}", other),
+                    }
+                }
+                other => panic!("tuple.1 must be a record, got {:?}", other),
+            }
+        }
+        other => panic!("get-entry returned non-tuple {:?}", other),
+    }
+}
+
 /// Phase 0 regression-guard: nested record field access through two
 /// levels: `state.user.addr.city`. Pins multi-level offset loads today
 /// and chained `struct.get` post-Phase 4.

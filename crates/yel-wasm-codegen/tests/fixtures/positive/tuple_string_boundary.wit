@@ -1,5 +1,12 @@
 package yel:tupbound@0.1.0;
 
+interface shared-types {
+  record item {
+    n: s32,
+    label: string,
+  }
+}
+
 interface app-component {
   resource app {
     constructor();
@@ -13,10 +20,17 @@ interface app-component {
     set-both: func(value: tuple<string, string>);
     get-listed: func() -> tuple<s32, list<s32>>;
     set-listed: func(value: tuple<s32, list<s32>>);
+    get-with-record: func() -> tuple<s32, item>;
+    set-with-record: func(value: tuple<s32, item>);
+    get-with-option: func() -> tuple<s32, option<string>>;
+    set-with-option: func(value: tuple<s32, option<string>>);
+    get-with-result: func() -> tuple<s32, result<s32, string>>;
+    set-with-result: func(value: tuple<s32, result<s32, string>>);
   }
 }
 
 world tupbound {
+  import shared-types;
   import yel:ui/dom@0.1.0;
   export app-component;
   export yel:ui/dispatch@0.1.0;

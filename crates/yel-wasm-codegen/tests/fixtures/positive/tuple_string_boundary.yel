@@ -11,11 +11,20 @@
 // elements un-materialize `(ptr,len)` → array ref in the setter and
 // materialize back in the getter. Round-trip is pinned by
 // `tuple_with_string_element_setter_getter_roundtrip` in tests/execution.rs.
+// Composite tuple elements (record / option / result) are also handled: the
+// setter recursively packs them from canonical params (reusing the record
+// pack / flat-gc helpers) and the getter recursively lowers them back. Only
+// nested-tuple-in-tuple remains unimplemented (needs a recursive tuple
+// helper) and returns a clean error rather than broken WASM.
 package yel:tupbound@0.1.0;
+record Item { n: s32, label: string, }
 export component App {
     pair: tuple<s32, string> = (1, "hi");
     swapped: tuple<string, s32> = ("a", 2);
     both: tuple<string, string> = ("x", "y");
     listed: tuple<s32, list<s32>> = (3, [4, 5]);
+    withRecord: tuple<s32, Item> = (6, { n: 7, label: "r" });
+    withOption: tuple<s32, option<string>> = (8, some("o"));
+    withResult: tuple<s32, result<s32, string>> = (9, ok(10));
     VStack { Text { "ok" } }
 }

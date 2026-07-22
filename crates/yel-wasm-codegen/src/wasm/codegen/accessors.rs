@@ -1085,6 +1085,45 @@ impl<'a> WasmPackageBuilder<'a> {
                         // Align offset.
                         let aligned = (offset + elem_layout.align - 1) & !(elem_layout.align - 1);
                         offset = aligned;
+                        // Migrated option / result / variant element: lower the
+                        // FlatGcStruct supertype ref (read from the tuple field)
+                        // to canonical (disc, ...payload) at this offset.
+                        if self.flat_gc_migrated(elem_ty) {
+                            let prefix: Vec<(u32, u32)> = vec![(struct_ty, field_path[0])];
+                            self.emit_flat_gc_dtr_field_lift(
+                                &mut func,
+                                ci,
+                                elem_ty,
+                                tup_idx,
+                                i as u32,
+                                &prefix,
+                                offset,
+                                scratch_ptr_local,
+                            )?;
+                            offset += elem_layout.size;
+                            continue;
+                        }
+                        // Record element: recursively lower its fields into the
+                        // canonical scratch (same helper record signals use).
+                        // The prefix reaches the record ref: component field →
+                        // tuple ref → tuple element i.
+                        if let InternedTyKind::Adt(d) = self.ctx.ty_kind(elem_ty)
+                            && matches!(self.ctx.defs.kind(*d), DefKind::Record(_))
+                        {
+                            let rec_def = *d;
+                            let prefix: Vec<(u32, u32)> =
+                                vec![(struct_ty, field_path[0]), (tup_idx, i as u32)];
+                            self.emit_getter_lift_dtr_record(
+                                &mut func,
+                                ci,
+                                rec_def,
+                                offset,
+                                scratch_ptr_local,
+                                &prefix,
+                            )?;
+                            offset += elem_layout.size;
+                            continue;
+                        }
                         // Helper to push the internal tuple-element ref/value.
                         match self.internal_repr(elem_ty) {
                             super::super::repr::InternalRepr::Scalar(_) => {
@@ -1147,8 +1186,9 @@ impl<'a> WasmPackageBuilder<'a> {
                             other => {
                                 return Err(CodegenError::InvalidIR(format!(
                                     "tuple getter: element type {:?} (repr {:?}) not yet \
-                                     supported at the WIT boundary — only scalars, strings \
-                                     and scalar lists are handled",
+                                     supported at the WIT boundary — scalars, strings, scalar \
+                                     lists, records and option/result are handled (nested \
+                                     tuples and collapsed option<composite> pending)",
                                     elem_ty, other
                                 )));
                             }
@@ -1938,6 +1978,13 @@ impl<'a> WasmPackageBuilder<'a> {
                 //     is not yet supported as a tuple element at the boundary.
                 let mut next_param: u32 = 1;
                 for &elem_ty in &elements {
+                    // Migrated option / result / variant element: build the
+                    // FlatGcStruct supertype ref from its canonical
+                    // (disc, ...payload) params via the shared helper.
+                    if self.flat_gc_migrated(elem_ty) {
+                        self.emit_flat_gc_setter_pack_field(&mut func, elem_ty, &mut next_param)?;
+                        continue;
+                    }
                     match self.internal_repr(elem_ty) {
                         super::super::repr::InternalRepr::Scalar(_) => {
                             func.instruction(&Instruction::LocalGet(next_param));
@@ -1958,11 +2005,34 @@ impl<'a> WasmPackageBuilder<'a> {
                             func.instruction(&Instruction::Call(unmat));
                             next_param += 2;
                         }
+                        super::super::repr::InternalRepr::GcRef(_)
+                            if matches!(
+                                self.ctx.ty_kind(elem_ty),
+                                InternedTyKind::Adt(d)
+                                    if matches!(self.ctx.defs.kind(*d), DefKind::Record(_))
+                            ) =>
+                        {
+                            // Record element: recursively build its GC struct
+                            // from the element's canonical params (same helper
+                            // record signals use — handles nested records,
+                            // strings, lists, flat-gc fields). Leaves one
+                            // `(ref $<rec>_record)` for the tuple struct.new.
+                            let rec_def = match self.ctx.ty_kind(elem_ty) {
+                                InternedTyKind::Adt(d) => *d,
+                                _ => unreachable!("guarded by match above"),
+                            };
+                            self.emit_setter_pack_dtr_record(
+                                &mut func,
+                                rec_def,
+                                &mut next_param,
+                            )?;
+                        }
                         other => {
                             return Err(CodegenError::InvalidIR(format!(
                                 "tuple setter: element type {:?} (repr {:?}) not yet \
-                                 supported at the WIT boundary — only scalars, strings \
-                                 and scalar lists are handled",
+                                 supported at the WIT boundary — scalars, strings, scalar \
+                                 lists, records and option/result are handled (nested \
+                                 tuples pending)",
                                 elem_ty, other
                             )));
                         }
