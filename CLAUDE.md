@@ -21,6 +21,7 @@ Full framing: [`docs/ARCHITECTURE.md` §0](docs/ARCHITECTURE.md).
 - **Hacks / shortcuts / ugly corners:** [`docs/TECH_DEBT.md`](docs/TECH_DEBT.md) — read before refactoring LIR or codegen.
 - **Refactor plans:** [`plans/`](plans) — `lir-resource-flatten.md`, `flow-frontend.md`.
 - **Coding rules as a skill:** [`/compiler-skills`](.agents/skills/compiler-skills/SKILL.md) (compiler patterns), [`/rust-skills`](.agents/skills/rust-skills/SKILL.md) (general Rust).
+- **Hunting miscompilation bugs with the fuzzer:** [`/fuzzer-debugging`](.agents/skills/fuzzer-debugging/SKILL.md) — the yel-smith triage loop (measure → categorize → minimize → narrow → locate) and verify-with-round-trips discipline. The [`fuzzer-bug-hunter`](.claude/agents/fuzzer-bug-hunter.md) agent runs this end-to-end.
 
 ## The pipeline (one line)
 
