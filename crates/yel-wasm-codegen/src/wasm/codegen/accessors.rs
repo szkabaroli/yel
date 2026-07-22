@@ -9,6 +9,7 @@ use yel_core::types::InternedTyKind;
 use yel_core::{DefId, DefKind, Ty};
 
 use super::super::CodegenError;
+use super::super::FlatSlot;
 use super::super::WasmPackageBuilder;
 
 /// Phase 5e.5 Stage 7d: when canonical-ABI joined-flat slot type
@@ -846,22 +847,27 @@ impl<'a> WasmPackageBuilder<'a> {
                     // The single canonical slot is a leaf scalar reached
                     // through a chain of single-slot records (e.g. `record O {
                     // i: I }`, `record I { a: s64 }` → the slot is `o.i.a`).
-                    // Walk that chain and read down to the scalar; stopping at
-                    // the first record ref would return a `(ref …)` where the
-                    // getter's flat return type (e.g. i64) is expected.
-                    let chain = self.single_slot_record_field_chain(record_def_id)?;
-                    self.emit_self_ref(&mut func, ci)?;
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: struct_ty,
-                        field_index: field_path[0],
-                    });
-                    for (record_type_idx, gc_field_idx) in chain {
-                        func.instruction(&Instruction::RefAsNonNull);
-                        func.instruction(&Instruction::StructGet {
-                            struct_type_index: record_type_idx,
-                            field_index: gc_field_idx,
-                        });
-                    }
+                    // Read down that chain to the scalar and return it by
+                    // value; stopping at the first record ref would return a
+                    // `(ref …)` where the getter's flat return type (e.g. i64)
+                    // is expected. Same leaf-access primitive the multi-slot
+                    // lift uses — here there is exactly one (scalar) leaf.
+                    let leaves = self.record_leaf_field_accesses(record_def_id)?;
+                    let leaf = match leaves.as_slice() {
+                        [l] => l,
+                        _ => {
+                            return Err(CodegenError::InvalidIR(format!(
+                                "single-slot record getter: expected exactly one leaf, \
+                                 got {} for {:?}",
+                                leaves.len(),
+                                record_def_id
+                            )));
+                        }
+                    };
+                    let full_chain: Vec<(u32, u32)> = std::iter::once((struct_ty, field_path[0]))
+                        .chain(leaf.chain.iter().copied())
+                        .collect();
+                    self.emit_gc_field_chain(&mut func, ci, &full_chain)?;
                     return Ok(());
                 }
                 // Option-of-ref collapsed signal: storage is one
@@ -4663,27 +4669,15 @@ impl<'a> WasmPackageBuilder<'a> {
             })?;
 
         // Re-emits `<self>.<prefix>.struct.get $rec field` (leaves a
-        // (ref null $<sup>) on the stack). This pattern is the same
-        // as the primitive-field branch above; centralised here for
-        // re-emission across multiple ref.tests.
-        let prefix = prefix.to_vec();
+        // (ref null $<sup>) on the stack) across multiple ref.tests — the
+        // shared `emit_gc_field_chain` on the full path to this field.
+        let field_chain: Vec<(u32, u32)> = prefix
+            .iter()
+            .copied()
+            .chain(std::iter::once((record_type_idx, gc_field_idx)))
+            .collect();
         let emit_field_ref = |this: &Self, func: &mut Function| -> Result<(), CodegenError> {
-            this.emit_self_ref(func, ci)?;
-            for (idx, &(s_ty, f_idx)) in prefix.iter().enumerate() {
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: s_ty,
-                    field_index: f_idx,
-                });
-                if idx + 1 < prefix.len() {
-                    func.instruction(&Instruction::RefAsNonNull);
-                }
-            }
-            func.instruction(&Instruction::RefAsNonNull);
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: record_type_idx,
-                field_index: gc_field_idx,
-            });
-            Ok(())
+            this.emit_gc_field_chain(func, ci, &field_chain)
         };
 
         // Outer block lets a matching case skip remaining tests +
@@ -4837,6 +4831,31 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(())
     }
 
+    /// Emit `self_ref` then the `struct.get` chain in `chain`, leaving the
+    /// value of the final field on the stack. `chain` is the full path from
+    /// the component self to the target field — `(struct_type_idx,
+    /// gc_field_idx)` per hop — and each intermediate ref is `ref.as_non_null`
+    /// before the next `struct.get`. The one place the nested-record /
+    /// tuple-element ref walk is emitted (see `record_leaf_field_accesses`).
+    fn emit_gc_field_chain(
+        &self,
+        func: &mut Function,
+        ci: usize,
+        chain: &[(u32, u32)],
+    ) -> Result<(), CodegenError> {
+        self.emit_self_ref(func, ci)?;
+        for (idx, &(s_ty, f_idx)) in chain.iter().enumerate() {
+            if idx > 0 {
+                func.instruction(&Instruction::RefAsNonNull);
+            }
+            func.instruction(&Instruction::StructGet {
+                struct_type_index: s_ty,
+                field_index: f_idx,
+            });
+        }
+        Ok(())
+    }
+
     fn emit_getter_lift_dtr_record(
         &mut self,
         func: &mut Function,
@@ -4846,100 +4865,47 @@ impl<'a> WasmPackageBuilder<'a> {
         scratch_ptr_local: u32,
         prefix: &[(u32, u32)],
     ) -> Result<(), CodegenError> {
-        let record_def = match self.ctx.defs.kind(record_def_id) {
-            DefKind::Record(r) => r.clone(),
-            _ => {
-                return Err(CodegenError::InvalidIR(
-                    "DTR getter lift: not a record def".into(),
-                ));
-            }
-        };
-        let record_type_idx = self
-            .record_gc_types
-            .record_type_idx
-            .get(&record_def_id)
-            .copied()
-            .ok_or_else(|| {
-                CodegenError::InvalidIR("DTR getter lift: missing record type idx".into())
-            })?;
-        let gc_field_indices: Vec<u32> = self
-            .record_gc_types
-            .field_gc_indices
-            .get(&record_def_id)
-            .cloned()
-            .ok_or_else(|| {
-                CodegenError::InvalidIR("DTR getter lift: missing gc field indices".into())
-            })?;
-        let record_layout = self
-            .layout_ctx
-            .record_layout_by_id(record_def_id)
-            .ok_or_else(|| {
-                CodegenError::InvalidIR("DTR getter lift: missing record_layout".into())
-            })?
-            .clone();
-        for (i, &field_def_id) in record_def.fields.iter().enumerate() {
-            let field_ty = match self.ctx.defs.kind(field_def_id) {
-                yel_core::definitions::DefKind::Field(f) => f.ty,
-                _ => {
-                    return Err(CodegenError::InvalidIR(
-                        "DTR getter lift: not a field def".into(),
-                    ));
-                }
-            };
-            let (_name, field_offset, _ty) =
-                record_layout.field_offsets.get(i).cloned().ok_or_else(|| {
-                    CodegenError::InvalidIR(format!(
-                        "DTR getter lift: field offset missing for field {}",
-                        i
-                    ))
-                })?;
-            let gc_field_idx = gc_field_indices[i];
-            let abs_field_offset = base_offset + field_offset;
-            // Nested record field: recurse with extended prefix.
-            if let yel_core::types::InternedTyKind::Adt(field_def) = self.ctx.ty_kind(field_ty)
-                && let yel_core::definitions::DefKind::Record(_) = self.ctx.defs.kind(*field_def)
-            {
-                let mut new_prefix: Vec<(u32, u32)> = prefix.to_vec();
-                new_prefix.push((record_type_idx, gc_field_idx));
-                self.emit_getter_lift_dtr_record(
-                    func,
-                    ci,
-                    *field_def,
-                    abs_field_offset,
-                    scratch_ptr_local,
-                    &new_prefix,
-                )?;
-                continue;
-            }
-            // Phase 5e.5: FlatGcStruct field (migrated option /
-            // result / variant). Walk each case via ref.test and
-            // write disc + payload bytes at canonical offsets.
+        // Flatten the record (transparently through nested records) into its
+        // leaf fields, each with the struct.get chain that reaches it and its
+        // canonical byte offset. The nested-record traversal lives in
+        // `record_leaf_field_accesses`; here we only lower each leaf by type.
+        let leaves = self.record_leaf_field_accesses(record_def_id)?;
+        for leaf in leaves {
+            let abs_field_offset = base_offset + leaf.offset;
+            // Full path from self to the leaf field = prefix ++ leaf.chain.
+            let full_chain: Vec<(u32, u32)> =
+                prefix.iter().copied().chain(leaf.chain.iter().copied()).collect();
+            let field_ty = leaf.ty;
+
+            // FlatGcStruct leaf (migrated option / result / variant): dispatch
+            // on case. Its lift reads the field via the chain-to-parent + the
+            // final (parent_struct_ty, gc_field_idx).
             if self.flat_gc_migrated(field_ty) {
+                let (&(parent_ty, gc_field_idx), parent_prefix) =
+                    full_chain.split_last().ok_or_else(|| {
+                        CodegenError::InvalidIR("DTR getter lift: empty leaf chain".into())
+                    })?;
                 self.emit_flat_gc_dtr_field_lift(
                     func,
                     ci,
                     field_ty,
-                    record_type_idx,
+                    parent_ty,
                     gc_field_idx,
-                    prefix,
+                    parent_prefix,
                     abs_field_offset,
                     scratch_ptr_local,
                 )?;
                 continue;
             }
-            // Primitive / string / list field. Emit one store per flat slot.
+
             let field_kind = self.ctx.ty_kind(field_ty).clone();
             let field_slots = self.flatten_core_slots(field_ty);
-            // Phase 7: typed-GC-array list field — stored as
-            // `(ref null $list_<elem>)`, NOT a $fat_value box. Lift
-            // via the per-array materializer to canonical (ptr, len).
-            // Strings stay on the $fat_value path (still ref-boxed).
+
+            // Typed-GC-array list leaf: read the array ref, materialize to
+            // canonical (ptr, len), store both slots.
             let typed_arr_idx: Option<u32> =
                 if matches!(field_kind, yel_core::types::InternedTyKind::List(_)) {
-                    self.record_gc_types
-                        .list_array_type_idx
-                        .get(&field_ty)
-                        .copied()
+                    self.record_gc_types.list_array_type_idx.get(&field_ty).copied()
                 } else {
                     None
                 };
@@ -4953,97 +4919,33 @@ impl<'a> WasmPackageBuilder<'a> {
                             arr_idx
                         ))
                     })?;
-                // Read field once → typed array ref → call materializer → (ptr, len).
-                self.emit_self_ref(func, ci)?;
-                for (idx, &(s_ty, f_idx)) in prefix.iter().enumerate() {
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: s_ty,
-                        field_index: f_idx,
-                    });
-                    if idx + 1 < prefix.len() {
-                        func.instruction(&Instruction::RefAsNonNull);
-                    }
-                }
-                func.instruction(&Instruction::RefAsNonNull);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: record_type_idx,
-                    field_index: gc_field_idx,
-                });
+                self.emit_gc_field_chain(func, ci, &full_chain)?;
                 func.instruction(&Instruction::Call(mat_fn));
-                // Stack: ptr, len. Stash into the getter function's
-                // pre-reserved `mat_ptr_local` (=scratch_ptr+1) and
-                // `mat_len_local` (=scratch_ptr+2) so we can write
-                // each at its absolute slot offset.
-                let mat_len_local = scratch_ptr_local + 2;
-                let mat_ptr_local = scratch_ptr_local + 1;
-                func.instruction(&Instruction::LocalSet(mat_len_local));
-                func.instruction(&Instruction::LocalSet(mat_ptr_local));
-                let ptr_local = mat_ptr_local;
-                let len_local = mat_len_local;
-                let ptr_slot = &field_slots[0];
-                let len_slot = &field_slots[1];
-                let ptr_off = abs_field_offset + ptr_slot.offset;
-                let len_off = abs_field_offset + len_slot.offset;
-                func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-                if ptr_off != 0 {
-                    func.instruction(&Instruction::I32Const(ptr_off as i32));
-                    func.instruction(&Instruction::I32Add);
-                }
-                func.instruction(&Instruction::LocalGet(ptr_local));
-                ptr_slot.store.emit_store(func);
-                func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-                if len_off != 0 {
-                    func.instruction(&Instruction::I32Const(len_off as i32));
-                    func.instruction(&Instruction::I32Add);
-                }
-                func.instruction(&Instruction::LocalGet(len_local));
-                len_slot.store.emit_store(func);
+                self.store_materialized_ptr_len(
+                    func,
+                    scratch_ptr_local,
+                    abs_field_offset,
+                    &field_slots,
+                );
                 continue;
             }
-            // strings-to-GC: a string field is a `$str_bytes` ref. Read it
-            // once, materialize to (ptr, len), store both canonical slots.
-            if matches!(field_kind, yel_core::types::InternedTyKind::String)
-            {
-                self.emit_self_ref(func, ci)?;
-                for (idx, &(s_ty, f_idx)) in prefix.iter().enumerate() {
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: s_ty,
-                        field_index: f_idx,
-                    });
-                    if idx + 1 < prefix.len() {
-                        func.instruction(&Instruction::RefAsNonNull);
-                    }
-                }
-                func.instruction(&Instruction::RefAsNonNull);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: record_type_idx,
-                    field_index: gc_field_idx,
-                });
+
+            // strings-to-GC: a string leaf is a `$str_bytes` ref; materialize
+            // to canonical (ptr, len).
+            if matches!(field_kind, yel_core::types::InternedTyKind::String) {
+                self.emit_gc_field_chain(func, ci, &full_chain)?;
                 self.emit_str_bytes_materialize(func)?;
-                let mat_len_local = scratch_ptr_local + 2;
-                let mat_ptr_local = scratch_ptr_local + 1;
-                func.instruction(&Instruction::LocalSet(mat_len_local));
-                func.instruction(&Instruction::LocalSet(mat_ptr_local));
-                let ptr_slot = &field_slots[0];
-                let len_slot = &field_slots[1];
-                let ptr_off = abs_field_offset + ptr_slot.offset;
-                let len_off = abs_field_offset + len_slot.offset;
-                func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-                if ptr_off != 0 {
-                    func.instruction(&Instruction::I32Const(ptr_off as i32));
-                    func.instruction(&Instruction::I32Add);
-                }
-                func.instruction(&Instruction::LocalGet(mat_ptr_local));
-                ptr_slot.store.emit_store(func);
-                func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-                if len_off != 0 {
-                    func.instruction(&Instruction::I32Const(len_off as i32));
-                    func.instruction(&Instruction::I32Add);
-                }
-                func.instruction(&Instruction::LocalGet(mat_len_local));
-                len_slot.store.emit_store(func);
+                self.store_materialized_ptr_len(
+                    func,
+                    scratch_ptr_local,
+                    abs_field_offset,
+                    &field_slots,
+                );
                 continue;
             }
+
+            // Scalar leaf: one store per flat slot (a scalar is a single
+            // slot; the chain is re-read per slot to keep the value typed).
             for slot in field_slots.iter() {
                 func.instruction(&Instruction::LocalGet(scratch_ptr_local));
                 let total_off = abs_field_offset + slot.offset;
@@ -5051,34 +4953,46 @@ impl<'a> WasmPackageBuilder<'a> {
                     func.instruction(&Instruction::I32Const(total_off as i32));
                     func.instruction(&Instruction::I32Add);
                 }
-                // Emit ref chain: self, then for each (struct_ty,
-                // field_idx) in prefix do struct.get + ref.as_non_null
-                // (except final, where we keep nullable for the last
-                // struct.get's argument). Actually: we need the value
-                // to be `ref` for the next struct.get. The inner record
-                // field returns `(ref null $<inner>)` so we ref.as_non_null
-                // before chaining further. We always pass nullable refs
-                // to struct.get; struct.get accepts nullable refs.
-                self.emit_self_ref(func, ci)?;
-                for (idx, &(s_ty, f_idx)) in prefix.iter().enumerate() {
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: s_ty,
-                        field_index: f_idx,
-                    });
-                    if idx + 1 < prefix.len() {
-                        func.instruction(&Instruction::RefAsNonNull);
-                    }
-                }
-                // After prefix walk: stack top = (ref null $rec_record).
-                func.instruction(&Instruction::RefAsNonNull);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: record_type_idx,
-                    field_index: gc_field_idx,
-                });
+                self.emit_gc_field_chain(func, ci, &full_chain)?;
                 slot.store.emit_store(func);
             }
         }
         Ok(())
+    }
+
+    /// Given a materialized `(ptr, len)` on top of the stack (len on top),
+    /// stash them and store ptr / len at their canonical slot offsets
+    /// (`field_slots[0]` / `[1]`) relative to `abs_field_offset` in the lift
+    /// scratch. Uses the getter's reserved `scratch_ptr+1 / +2` mat locals.
+    fn store_materialized_ptr_len(
+        &self,
+        func: &mut Function,
+        scratch_ptr_local: u32,
+        abs_field_offset: u32,
+        field_slots: &[FlatSlot],
+    ) {
+        let mat_len_local = scratch_ptr_local + 2;
+        let mat_ptr_local = scratch_ptr_local + 1;
+        func.instruction(&Instruction::LocalSet(mat_len_local));
+        func.instruction(&Instruction::LocalSet(mat_ptr_local));
+        let ptr_slot = &field_slots[0];
+        let len_slot = &field_slots[1];
+        let ptr_off = abs_field_offset + ptr_slot.offset;
+        let len_off = abs_field_offset + len_slot.offset;
+        func.instruction(&Instruction::LocalGet(scratch_ptr_local));
+        if ptr_off != 0 {
+            func.instruction(&Instruction::I32Const(ptr_off as i32));
+            func.instruction(&Instruction::I32Add);
+        }
+        func.instruction(&Instruction::LocalGet(mat_ptr_local));
+        ptr_slot.store.emit_store(func);
+        func.instruction(&Instruction::LocalGet(scratch_ptr_local));
+        if len_off != 0 {
+            func.instruction(&Instruction::I32Const(len_off as i32));
+            func.instruction(&Instruction::I32Add);
+        }
+        func.instruction(&Instruction::LocalGet(mat_len_local));
+        len_slot.store.emit_store(func);
     }
 
     /// Lower a tuple GC struct (reached via `prefix`) to its canonical-ABI
@@ -5116,25 +5030,16 @@ impl<'a> WasmPackageBuilder<'a> {
                 CodegenError::InvalidIR("tuple getter lift: missing tuple_struct_type_idx".into())
             })?;
         // Emit the struct.get chain that leaves tuple element `i`'s internal
-        // value on the stack: self → walk prefix → the tuple ref → element i.
+        // value on the stack: self → walk prefix → the tuple ref → element i,
+        // via the shared `emit_gc_field_chain` on `prefix ++ [(tup_idx, i)]`.
         let emit_elem =
             |this: &Self, func: &mut Function, i: u32| -> Result<(), CodegenError> {
-                this.emit_self_ref(func, ci)?;
-                for (idx, &(s_ty, f_idx)) in prefix.iter().enumerate() {
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: s_ty,
-                        field_index: f_idx,
-                    });
-                    if idx + 1 < prefix.len() {
-                        func.instruction(&Instruction::RefAsNonNull);
-                    }
-                }
-                func.instruction(&Instruction::RefAsNonNull);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: tup_idx,
-                    field_index: i,
-                });
-                Ok(())
+                let chain: Vec<(u32, u32)> = prefix
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once((tup_idx, i)))
+                    .collect();
+                this.emit_gc_field_chain(func, ci, &chain)
             };
         let mut offset: u32 = base_offset;
         for (i, &elem_ty) in elements.iter().enumerate() {

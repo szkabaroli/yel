@@ -75,6 +75,21 @@ pub(super) enum InternalRepr {
     FlatGcStruct(u32),
 }
 
+/// One leaf field of a (possibly nested) record, paired with how to reach it
+/// and where it lands in the canonical-ABI memory layout. Produced by
+/// [`WasmPackageBuilder::record_leaf_field_accesses`].
+#[derive(Debug, Clone)]
+pub(crate) struct LeafFieldAccess {
+    /// `(record_type_idx, gc_field_idx)` `struct.get` chain from the record's
+    /// root ref down to this leaf field. Callers prepend the prefix that
+    /// reaches the record root; the last pair is the leaf's own field.
+    pub chain: Vec<(u32, u32)>,
+    /// The leaf field's type (never a nested record — those are flattened).
+    pub ty: Ty,
+    /// Canonical-ABI byte offset of this field within the record.
+    pub offset: u32,
+}
+
 impl WasmPackageBuilder<'_> {
     /// Classify how a Yel type is represented on the **internal** WASM
     /// stack. Every emit site that needs to know "how many values does
@@ -514,81 +529,93 @@ impl WasmPackageBuilder<'_> {
         self.record_gc_types.record_type_idx.get(&def_id).copied()
     }
 
-    /// For a record whose canonical flattening is a single slot, return the
-    /// chain of `(record_type_idx, gc_field_idx)` struct.gets from the record
-    /// down to the leaf scalar. At each level exactly one field carries the
-    /// slot (the others, if any, flatten to nothing); if that field is itself
-    /// a record the walk recurses. e.g. `record O { i: I }`, `record I { a:
-    /// s64 }` → `[(O, i), (I, a)]`, so a by-value getter reads `o.i.a` rather
-    /// than returning the intermediate `(ref $I)`.
-    pub(crate) fn single_slot_record_field_chain(
-        &self,
+    /// Flatten a record into its **leaf fields** — every field that is not
+    /// itself a nested record (scalar / string / list / tuple / option /
+    /// result / variant). Each leaf is returned with the `struct.get` chain
+    /// that reaches it from the record's root ref and its canonical-ABI byte
+    /// offset within the record. Nested-record fields are walked transparently
+    /// (their leaves inherit the extended chain + accumulated offset).
+    ///
+    /// This is the single source of truth for "canonical slot → field-access
+    /// chain": both the by-value single-slot record getter and the multi-slot
+    /// record lift consume it, so the nested-record traversal lives in exactly
+    /// one place. Chains are `(record_type_idx, gc_field_idx)` pairs, relative
+    /// to the record root (callers prepend the prefix that reaches the record).
+    pub(crate) fn record_leaf_field_accesses(
+        &mut self,
         record_def_id: DefId,
-    ) -> Result<Vec<(u32, u32)>, CodegenError> {
-        let mut chain = Vec::new();
-        let mut def = record_def_id;
-        loop {
-            let type_idx = self
-                .record_gc_types
-                .record_type_idx
-                .get(&def)
-                .copied()
-                .ok_or_else(|| {
-                    CodegenError::InvalidIR(
-                        "single-slot record chain: missing record_type_idx".into(),
-                    )
-                })?;
-            let fields: Vec<DefId> = self
-                .ctx
-                .defs
-                .as_record(def)
-                .ok_or_else(|| {
-                    CodegenError::InvalidIR("single-slot record chain: not a record".into())
-                })?
-                .fields
-                .clone();
-            let field_gc = self
-                .record_gc_types
-                .field_gc_indices
-                .get(&def)
-                .cloned()
-                .ok_or_else(|| {
-                    CodegenError::InvalidIR(
-                        "single-slot record chain: missing field gc indices".into(),
-                    )
-                })?;
-            // The one field whose canonical flattening is non-empty carries
-            // the slot.
-            let mut chosen: Option<(usize, Ty)> = None;
-            for (pos, &fid) in fields.iter().enumerate() {
-                let fty = match self.ctx.defs.kind(fid) {
-                    DefKind::Field(f) => f.ty,
-                    _ => continue,
-                };
-                if !self.canonical_flat_valtypes(fty).is_empty() {
-                    chosen = Some((pos, fty));
-                    break;
-                }
-            }
-            let (pos, fty) = chosen.ok_or_else(|| {
-                CodegenError::InvalidIR("single-slot record chain: no slot-carrying field".into())
+    ) -> Result<Vec<LeafFieldAccess>, CodegenError> {
+        let mut out = Vec::new();
+        self.collect_record_leaf_accesses(record_def_id, 0, &[], &mut out)?;
+        Ok(out)
+    }
+
+    fn collect_record_leaf_accesses(
+        &mut self,
+        record_def_id: DefId,
+        base_offset: u32,
+        prefix: &[(u32, u32)],
+        out: &mut Vec<LeafFieldAccess>,
+    ) -> Result<(), CodegenError> {
+        let type_idx = self
+            .record_gc_types
+            .record_type_idx
+            .get(&record_def_id)
+            .copied()
+            .ok_or_else(|| {
+                CodegenError::InvalidIR("record leaf accesses: missing record_type_idx".into())
             })?;
-            let gc_idx = *field_gc.get(pos).ok_or_else(|| {
-                CodegenError::InvalidIR(
-                    "single-slot record chain: gc field index out of range".into(),
-                )
+        let fields: Vec<DefId> = self
+            .ctx
+            .defs
+            .as_record(record_def_id)
+            .ok_or_else(|| CodegenError::InvalidIR("record leaf accesses: not a record".into()))?
+            .fields
+            .clone();
+        let field_gc = self
+            .record_gc_types
+            .field_gc_indices
+            .get(&record_def_id)
+            .cloned()
+            .ok_or_else(|| {
+                CodegenError::InvalidIR("record leaf accesses: missing field gc indices".into())
             })?;
+        let layout = self
+            .layout_ctx
+            .record_layout_by_id(record_def_id)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR("record leaf accesses: missing record_layout".into())
+            })?
+            .clone();
+        for (i, &fid) in fields.iter().enumerate() {
+            let fty = match self.ctx.defs.kind(fid) {
+                DefKind::Field(f) => f.ty,
+                _ => continue,
+            };
+            let (_name, field_offset, _ty) = layout.field_offsets.get(i).cloned().ok_or_else(|| {
+                CodegenError::InvalidIR(format!("record leaf accesses: field offset missing for {}", i))
+            })?;
+            let gc_idx = *field_gc.get(i).ok_or_else(|| {
+                CodegenError::InvalidIR("record leaf accesses: gc field index out of range".into())
+            })?;
+            let mut chain = prefix.to_vec();
             chain.push((type_idx, gc_idx));
+            let abs_off = base_offset + field_offset;
             match self.ctx.ty_kind(fty) {
                 InternedTyKind::Adt(d)
                     if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) =>
                 {
-                    def = *d;
+                    // Nested record: recurse, extending the chain + offset.
+                    self.collect_record_leaf_accesses(*d, abs_off, &chain, out)?;
                 }
-                _ => break,
+                _ => out.push(LeafFieldAccess {
+                    chain,
+                    ty: fty,
+                    offset: abs_off,
+                }),
             }
         }
-        Ok(chain)
+        Ok(())
     }
 
     /// Number of WASM stack slots this type occupies in internal
