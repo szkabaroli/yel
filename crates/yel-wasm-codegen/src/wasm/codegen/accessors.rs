@@ -956,6 +956,31 @@ impl<'a> WasmPackageBuilder<'a> {
                         return Ok(());
                     }
                 }
+                // Phase 5e.5: FlatGcStruct signal — lift the GC ref
+                // to the canonical-ABI (disc, payload) memory layout
+                // by testing each case subtype and writing the
+                // matching disc + payload bytes into a scratch
+                // buffer. The boundary helper expects 1 ref slot
+                // in storage, but the canonical shape is multi-slot,
+                // so the generic loop below would mis-walk. This MUST
+                // precede the `flat_valtypes.len() == 1` direct-return
+                // branch below: an all-empty (payload-less) variant —
+                // or a `result<(),()>` — has a single canonical i32
+                // discriminant slot yet its storage is a GC ref, so
+                // the direct `struct.get` would return a ref where the
+                // getter's i32 result is expected.
+                if let super::super::repr::InternalRepr::FlatGcStruct(super_idx) =
+                    self.internal_repr(signal_ty)
+                {
+                    return self.emit_flat_gc_signal_lift(
+                        &mut func,
+                        ci,
+                        sig_idx,
+                        signal_ty,
+                        super_idx,
+                        scratch_ptr_local,
+                    );
+                }
                 if flat_valtypes.len() == 1 {
                     // Single-slot: read field, return it directly.
                     self.emit_self_ref(&mut func, ci)?;
@@ -1073,26 +1098,6 @@ impl<'a> WasmPackageBuilder<'a> {
                     }
                     func.instruction(&Instruction::LocalGet(scratch_ptr_local));
                     return Ok(());
-                }
-
-                // Phase 5e.5: FlatGcStruct signal — lift the GC ref
-                // to the canonical-ABI (disc, payload) memory layout
-                // by testing each case subtype and writing the
-                // matching disc + payload bytes into a scratch
-                // buffer. The boundary helper expects 1 ref slot
-                // in storage, but the canonical shape is multi-slot,
-                // so the generic loop below would mis-walk.
-                if let super::super::repr::InternalRepr::FlatGcStruct(super_idx) =
-                    self.internal_repr(signal_ty)
-                {
-                    return self.emit_flat_gc_signal_lift(
-                        &mut func,
-                        ci,
-                        sig_idx,
-                        signal_ty,
-                        super_idx,
-                        scratch_ptr_local,
-                    );
                 }
 
                 // option<T> where T's internal repr is a single GC
