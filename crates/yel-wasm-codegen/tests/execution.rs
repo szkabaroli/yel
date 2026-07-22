@@ -3736,6 +3736,59 @@ fn tuple_signal_default_init() {
     );
 }
 
+/// Boundary round-trip: a `tuple<s32, string>` signal set through the
+/// exported setter and read back through the exported getter must return
+/// the same value. The tuple is stored internally as a GC struct whose
+/// string element is a `$str_bytes` ref, so the setter has to un-materialize
+/// the canonical `(ptr, len)` into that ref and the getter has to materialize
+/// it back — exercising both directions of the tuple-element canonical-ABI
+/// flattening (regression for the "type mismatch: expected i32, found (ref …)"
+/// encode failure that made every tuple-with-a-string signal unbuildable).
+#[test]
+fn tuple_with_string_element_setter_getter_roundtrip() {
+    let source = r#"
+        package yel:tupstr@0.1.0;
+        export component App {
+            pair: tuple<s32, string> = (1, "init");
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:tupstr/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "pair",
+        &r,
+        Val::Tuple(vec![Val::S32(42), Val::String("hello".into())]),
+    );
+
+    let get_pair = get_func(&mut h, iface, "[method]app.get-pair");
+    let mut out = [Val::Bool(false)];
+    get_pair
+        .call(&mut h.store, &[Val::Resource(r)], &mut out)
+        .expect("get-pair");
+    match &out[0] {
+        Val::Tuple(elems) => {
+            assert_eq!(elems.len(), 2, "tuple arity, got {:?}", elems);
+            assert!(
+                matches!(&elems[0], Val::S32(42)),
+                "tuple.0 must be 42, got {:?}",
+                elems[0]
+            );
+            match &elems[1] {
+                Val::String(s) => assert_eq!(&**s, "hello", "tuple.1 must round-trip"),
+                other => panic!("tuple.1 must be a string, got {:?}", other),
+            }
+        }
+        other => panic!("get-pair returned non-tuple {:?}", other),
+    }
+}
+
 /// Phase 0 regression-guard: nested record field access through two
 /// levels: `state.user.addr.city`. Pins multi-level offset loads today
 /// and chained `struct.get` post-Phase 4.

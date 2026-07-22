@@ -1,0 +1,21 @@
+// Regression: a tuple signal is stored internally as a GC struct whose
+// string/list elements are GC array refs (`$str_bytes` / `$<elem>_list`),
+// but the exported getter/setter flattened it to the canonical ABI by
+// pushing every canonical param straight into `struct.new` (setter) or
+// storing each field raw (getter). For a string/list element that meant an
+// i32 (ptr/len) where a `(ref …)` was expected — every tuple-with-a-string
+// signal failed `wit-component` encoding ("expected i32, found (ref null …)").
+//
+// Fixed by converting each tuple element between canonical and internal repr
+// at the boundary: single-slot scalars pass through; string/scalar-list
+// elements un-materialize `(ptr,len)` → array ref in the setter and
+// materialize back in the getter. Round-trip is pinned by
+// `tuple_with_string_element_setter_getter_roundtrip` in tests/execution.rs.
+package yel:tupbound@0.1.0;
+export component App {
+    pair: tuple<s32, string> = (1, "hi");
+    swapped: tuple<string, s32> = ("a", 2);
+    both: tuple<string, string> = ("x", "y");
+    listed: tuple<s32, list<s32>> = (3, [4, 5]);
+    VStack { Text { "ok" } }
+}

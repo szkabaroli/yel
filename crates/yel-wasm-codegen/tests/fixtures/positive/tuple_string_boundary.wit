@@ -1,0 +1,23 @@
+package yel:tupbound@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-pair: func() -> tuple<s32, string>;
+    set-pair: func(value: tuple<s32, string>);
+    get-swapped: func() -> tuple<string, s32>;
+    set-swapped: func(value: tuple<string, s32>);
+    get-both: func() -> tuple<string, string>;
+    set-both: func(value: tuple<string, string>);
+    get-listed: func() -> tuple<s32, list<s32>>;
+    set-listed: func(value: tuple<s32, list<s32>>);
+  }
+}
+
+world tupbound {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

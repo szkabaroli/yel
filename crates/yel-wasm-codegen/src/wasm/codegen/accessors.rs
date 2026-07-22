@@ -1070,30 +1070,89 @@ impl<'a> WasmPackageBuilder<'a> {
                     // Allocate lift scratch.
                     super::scratch::emit_cabi_realloc_fixed(&mut func, layout_info.align, layout_info.size, cabi_realloc);
                     func.instruction(&Instruction::LocalSet(scratch_ptr_local));
-                    // For each tuple element, compute canonical offset
-                    // and store the field's value.
+                    // For each tuple element, compute its canonical offset
+                    // and lower the internal field value into canonical form
+                    // at that offset:
+                    //   * single-slot scalar → struct.get the field and store
+                    //     it directly.
+                    //   * string / scalar-list → the field is a GC array ref;
+                    //     materialize it into canonical (ptr, len) and store
+                    //     both (ptr @ offset, len @ offset+4).
+                    //   * anything else is not yet supported (see the setter).
                     let mut offset: u32 = 0;
                     for (i, &elem_ty) in elements.iter().enumerate() {
                         let elem_layout = self.layout_ctx.layout_of(elem_ty);
                         // Align offset.
                         let aligned = (offset + elem_layout.align - 1) & !(elem_layout.align - 1);
                         offset = aligned;
-                        func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-                        if offset != 0 {
-                            func.instruction(&Instruction::I32Const(offset as i32));
-                            func.instruction(&Instruction::I32Add);
+                        // Helper to push the internal tuple-element ref/value.
+                        match self.internal_repr(elem_ty) {
+                            super::super::repr::InternalRepr::Scalar(_) => {
+                                func.instruction(&Instruction::LocalGet(scratch_ptr_local));
+                                if offset != 0 {
+                                    func.instruction(&Instruction::I32Const(offset as i32));
+                                    func.instruction(&Instruction::I32Add);
+                                }
+                                self.emit_self_ref(&mut func, ci)?;
+                                func.instruction(&Instruction::StructGet {
+                                    struct_type_index: struct_ty,
+                                    field_index: field_path[0],
+                                });
+                                func.instruction(&Instruction::RefAsNonNull);
+                                func.instruction(&Instruction::StructGet {
+                                    struct_type_index: tup_idx,
+                                    field_index: i as u32,
+                                });
+                                self.emit_typed_field_store(&mut func, elem_ty);
+                            }
+                            super::super::repr::InternalRepr::GcArrayRef(arr_idx) => {
+                                let mat_fn = *self
+                                    .gc_list_materializer_fn_indices
+                                    .get(&arr_idx)
+                                    .ok_or_else(|| {
+                                        CodegenError::InvalidIR(format!(
+                                            "tuple getter: missing materializer for GC array {}",
+                                            arr_idx
+                                        ))
+                                    })?;
+                                // Read the element ref and materialize → (ptr, len).
+                                self.emit_self_ref(&mut func, ci)?;
+                                func.instruction(&Instruction::StructGet {
+                                    struct_type_index: struct_ty,
+                                    field_index: field_path[0],
+                                });
+                                func.instruction(&Instruction::RefAsNonNull);
+                                func.instruction(&Instruction::StructGet {
+                                    struct_type_index: tup_idx,
+                                    field_index: i as u32,
+                                });
+                                func.instruction(&Instruction::Call(mat_fn));
+                                func.instruction(&Instruction::LocalSet(mat_len_local));
+                                func.instruction(&Instruction::LocalSet(mat_ptr_local));
+                                // store ptr @ offset
+                                func.instruction(&Instruction::LocalGet(scratch_ptr_local));
+                                if offset != 0 {
+                                    func.instruction(&Instruction::I32Const(offset as i32));
+                                    func.instruction(&Instruction::I32Add);
+                                }
+                                func.instruction(&Instruction::LocalGet(mat_ptr_local));
+                                func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+                                // store len @ offset+4
+                                func.instruction(&Instruction::LocalGet(scratch_ptr_local));
+                                func.instruction(&Instruction::I32Const((offset + 4) as i32));
+                                func.instruction(&Instruction::I32Add);
+                                func.instruction(&Instruction::LocalGet(mat_len_local));
+                                func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+                            }
+                            other => {
+                                return Err(CodegenError::InvalidIR(format!(
+                                    "tuple getter: element type {:?} (repr {:?}) not yet \
+                                     supported at the WIT boundary — only scalars, strings \
+                                     and scalar lists are handled",
+                                    elem_ty, other
+                                )));
+                            }
                         }
-                        self.emit_self_ref(&mut func, ci)?;
-                        func.instruction(&Instruction::StructGet {
-                            struct_type_index: struct_ty,
-                            field_index: field_path[0],
-                        });
-                        func.instruction(&Instruction::RefAsNonNull);
-                        func.instruction(&Instruction::StructGet {
-                            struct_type_index: tup_idx,
-                            field_index: i as u32,
-                        });
-                        self.emit_typed_field_store(&mut func, elem_ty);
                         offset += elem_layout.size;
                     }
                     func.instruction(&Instruction::LocalGet(scratch_ptr_local));
@@ -1866,12 +1925,47 @@ impl<'a> WasmPackageBuilder<'a> {
                         )
                     })?;
                 self.emit_self_ref(&mut func, comp_idx)?;
+                // Build the tuple GC struct from the canonical-ABI flat
+                // params. Each element's params must be converted to the
+                // element's INTERNAL storage repr (the tuple struct field
+                // type) before `struct.new`:
+                //   * single-slot scalar → the param is already the field
+                //     value; push it as-is.
+                //   * string / scalar-list → the field is a GC array ref
+                //     (`$str_bytes` / `$<elem>_list`); consume the canonical
+                //     (ptr, len) pair and un-materialize it into that ref.
+                //   * anything else (record / nested tuple / option / result)
+                //     is not yet supported as a tuple element at the boundary.
                 let mut next_param: u32 = 1;
                 for &elem_ty in &elements {
-                    let elem_slots = self.canonical_flat_valtypes(elem_ty);
-                    for _ in 0..elem_slots.len() {
-                        func.instruction(&Instruction::LocalGet(next_param));
-                        next_param += 1;
+                    match self.internal_repr(elem_ty) {
+                        super::super::repr::InternalRepr::Scalar(_) => {
+                            func.instruction(&Instruction::LocalGet(next_param));
+                            next_param += 1;
+                        }
+                        super::super::repr::InternalRepr::GcArrayRef(arr_idx) => {
+                            let unmat = *self
+                                .gc_list_unmaterializer_fn_indices
+                                .get(&arr_idx)
+                                .ok_or_else(|| {
+                                    CodegenError::InvalidIR(format!(
+                                        "tuple setter: missing un-materializer for GC array {}",
+                                        arr_idx
+                                    ))
+                                })?;
+                            func.instruction(&Instruction::LocalGet(next_param)); // ptr
+                            func.instruction(&Instruction::LocalGet(next_param + 1)); // len
+                            func.instruction(&Instruction::Call(unmat));
+                            next_param += 2;
+                        }
+                        other => {
+                            return Err(CodegenError::InvalidIR(format!(
+                                "tuple setter: element type {:?} (repr {:?}) not yet \
+                                 supported at the WIT boundary — only scalars, strings \
+                                 and scalar lists are handled",
+                                elem_ty, other
+                            )));
+                        }
                     }
                 }
                 func.instruction(&Instruction::StructNew(tup_idx));
