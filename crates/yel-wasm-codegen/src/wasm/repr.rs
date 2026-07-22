@@ -754,7 +754,15 @@ pub(super) fn collect_ternary_block_shapes(
             }
             LirExprKind::Call { args, .. } => {
                 for a in args {
-                    visit_expr(builder, &exprs[a.0 as usize], exprs, into);
+                    let arg = &exprs[a.0 as usize];
+                    // A composite callback argument is pushed to the stack as
+                    // its canonical-ABI flat slots via `if` blocks whose type
+                    // is the (gc-variant / collapsed-option) value's own
+                    // canonical shape. Register every such shape reachable in
+                    // the argument so the Type section interns a matching
+                    // `() -> (slots…)` function type.
+                    collect_arg_block_shapes(builder, arg.ty, into);
+                    visit_expr(builder, arg, exprs, into);
                 }
             }
             LirExprKind::Ternary {
@@ -790,5 +798,69 @@ pub(super) fn collect_ternary_block_shapes(
             }
             _ => {}
         }
+    }
+}
+
+/// Register the canonical-ABI block shapes needed to push a value of `ty` to
+/// the stack as a composite callback argument. Every gc-variant / collapsed-
+/// option node (top-level or nested inside a record / tuple / variant payload)
+/// is produced through a WASM `if` whose block type is that node's own
+/// canonical shape; this walks the type structure and records each multi-slot
+/// shape so the Type section interns a `() -> (slots…)` function type for it.
+fn collect_arg_block_shapes(
+    builder: &WasmPackageBuilder<'_>,
+    ty: Ty,
+    into: &mut HashMap<Vec<ValType>, ()>,
+) {
+    if builder.is_gc_variant(ty) || builder.option_collapses_to_ref(ty).is_some() {
+        let shape = builder.flatten_core_valtypes(ty);
+        if shape.len() >= 2 {
+            into.insert(shape, ());
+        }
+    }
+    match builder.ctx.ty_kind(ty) {
+        InternedTyKind::Option(inner) => collect_arg_block_shapes(builder, *inner, into),
+        InternedTyKind::Result { ok, err } => {
+            if let Some(t) = ok {
+                collect_arg_block_shapes(builder, *t, into);
+            }
+            if let Some(t) = err {
+                collect_arg_block_shapes(builder, *t, into);
+            }
+        }
+        InternedTyKind::Tuple(elems) => {
+            for &e in elems.iter() {
+                collect_arg_block_shapes(builder, e, into);
+            }
+        }
+        InternedTyKind::Adt(def_id) => {
+            let def_id = *def_id;
+            if let Some(rec) = builder.ctx.defs.as_record(def_id) {
+                let field_tys: Vec<Ty> = rec
+                    .fields
+                    .iter()
+                    .filter_map(|&fid| match builder.ctx.defs.kind(fid) {
+                        yel_core::definitions::DefKind::Field(f) => Some(f.ty),
+                        _ => None,
+                    })
+                    .collect();
+                for t in field_tys {
+                    collect_arg_block_shapes(builder, t, into);
+                }
+            } else if let Some(var) = builder.ctx.defs.as_variant(def_id) {
+                let payload_tys: Vec<Ty> = var
+                    .cases
+                    .iter()
+                    .filter_map(|&cid| match builder.ctx.defs.kind(cid) {
+                        yel_core::definitions::DefKind::VariantCase(c) => c.payload,
+                        _ => None,
+                    })
+                    .collect();
+                for t in payload_tys {
+                    collect_arg_block_shapes(builder, t, into);
+                }
+            }
+        }
+        _ => {}
     }
 }

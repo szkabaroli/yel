@@ -121,6 +121,68 @@ fn emit_canonical_reinterpret(
     Ok(())
 }
 
+/// Widen a value on top of the stack from its own canonical slot valtype
+/// (`vt_case`) up to the `join`ed slot valtype (`vt_joined`) that a
+/// gc-variant's canonical shape declares at that position. The inverse of
+/// [`emit_canonical_reinterpret`] (which goes joined → case). The `join`
+/// widens toward i32/i64 (any 64-bit or ref beats 32-bit; integer beats float
+/// at equal width), so the only bridges are same-width reinterprets and
+/// zero-extends into i64. A ref → i64 stop-gap join is a loud gap.
+fn emit_canonical_widen(
+    func: &mut Function,
+    vt_case: ValType,
+    vt_joined: ValType,
+) -> Result<(), CodegenError> {
+    if vt_case == vt_joined {
+        return Ok(());
+    }
+    match (vt_case, vt_joined) {
+        // Same-width int/float reinterpret (join picks the integer).
+        (ValType::F32, ValType::I32) => {
+            func.instruction(&Instruction::I32ReinterpretF32);
+        }
+        (ValType::F64, ValType::I64) => {
+            func.instruction(&Instruction::I64ReinterpretF64);
+        }
+        // 32-bit → i64 joined slot: zero-extend into the low half (the host
+        // reads only the case's own low bits, so zero-extension is lossless).
+        (ValType::I32, ValType::I64) => {
+            func.instruction(&Instruction::I64ExtendI32U);
+        }
+        (ValType::F32, ValType::I64) => {
+            func.instruction(&Instruction::I32ReinterpretF32);
+            func.instruction(&Instruction::I64ExtendI32U);
+        }
+        _ => {
+            return Err(CodegenError::InvalidIR(format!(
+                "canonical-ABI widen: unsupported case→joined bridge {:?} → {:?}",
+                vt_case, vt_joined
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Push the zero value of `vt` onto the stack (zero-padding a joined payload
+/// slot a shorter variant case doesn't cover). A ref slot pads with a typed
+/// null.
+fn push_zero_valtype(func: &mut Function, vt: ValType) -> Result<(), CodegenError> {
+    match vt {
+        ValType::I32 => func.instruction(&Instruction::I32Const(0)),
+        ValType::I64 => func.instruction(&Instruction::I64Const(0)),
+        ValType::F32 => func.instruction(&Instruction::F32Const(0.0.into())),
+        ValType::F64 => func.instruction(&Instruction::F64Const(0.0.into())),
+        ValType::Ref(rt) => func.instruction(&Instruction::RefNull(rt.heap_type)),
+        other => {
+            return Err(CodegenError::InvalidIR(format!(
+                "canonical-ABI zero-pad: unsupported slot valtype {:?}",
+                other
+            )));
+        }
+    };
+    Ok(())
+}
+
 impl<'a> WasmPackageBuilder<'a> {
     pub(super) fn single_slot_getter_type(&self, ty: Ty) -> Result<Option<u32>, CodegenError> {
         use wasm_encoder::ValType;
@@ -3624,7 +3686,323 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(())
     }
 
+    /// Direct twin of [`Self::emit_member_lift_to_memory`]: push a value of
+    /// type `ty`, reached through `source`, onto the WASM stack as exactly its
+    /// canonical-ABI flat slots (`flatten_core_valtypes(ty)`) in declaration
+    /// order — **no linear-memory buffer, no alloc/free**. Used to pass a
+    /// composite argument by value to a host callback import.
+    ///
+    /// gc-variant / collapsed-option cases are produced through a WASM `if`
+    /// whose block type is the value's own canonical shape (pre-interned in
+    /// `ternary_block_types`), so nested composites compose without staging
+    /// locals. A cross-case `join` that would widen a **non-top** stack slot
+    /// of a multi-slot payload returns a loud [`CodegenError`] rather than
+    /// miscompile (staging that slot is out of scope for this path).
+    pub(in crate::wasm) fn emit_value_to_canonical_stack(
+        &mut self,
+        func: &mut Function,
+        ty: Ty,
+        source: GcRefSource,
+    ) -> Result<(), CodegenError> {
+        use yel_core::types::InternedTyKind;
+        // gc-variant (option<scalar> / result / user variant): multi-case
+        // dispatch producing [i32 disc, ...joined payload].
+        if self.is_gc_variant(ty) {
+            return self.emit_gc_variant_to_canonical_stack(func, ty, source);
+        }
+        // Collapsed option (inner has a ref repr): [i32 disc, ...inner].
+        if self.option_collapses_to_ref(ty).is_some() {
+            let inner_ty = match self.ctx.ty_kind(ty) {
+                InternedTyKind::Option(t) => *t,
+                _ => unreachable!("option_collapses_to_ref on non-option"),
+            };
+            return self.emit_collapsed_option_to_canonical_stack(func, ty, inner_ty, source);
+        }
+        // Record / tuple: push each member's canonical slots in order.
+        if let Some((struct_type_index, members)) = self.composite_gc_members(ty)? {
+            for member in &members {
+                let hop = (struct_type_index, member.gc_field_index);
+                let member_chain: Vec<(u32, u32)>;
+                let member_source = match source {
+                    GcRefSource::SelfChain { ci, chain } => {
+                        member_chain = chain.iter().copied().chain(std::iter::once(hop)).collect();
+                        GcRefSource::SelfChain {
+                            ci,
+                            chain: &member_chain,
+                        }
+                    }
+                    GcRefSource::LocalChain { ref_local, chain } => {
+                        member_chain = chain.iter().copied().chain(std::iter::once(hop)).collect();
+                        GcRefSource::LocalChain {
+                            ref_local,
+                            chain: &member_chain,
+                        }
+                    }
+                    GcRefSource::PayloadOf { .. } | GcRefSource::ArrayElem { .. } => {
+                        return Err(CodegenError::InvalidIR(
+                            "value->stack: record/tuple member source must be a self/local chain"
+                                .into(),
+                        ));
+                    }
+                };
+                self.emit_value_to_canonical_stack(func, member.ty, member_source)?;
+            }
+            return Ok(());
+        }
+        // String / typed list: the materializer leaves (ptr, len) on the stack
+        // — already the two canonical slots in order, no scratch needed.
+        if matches!(self.ctx.ty_kind(ty), InternedTyKind::String)
+            || (matches!(self.ctx.ty_kind(ty), InternedTyKind::List(_))
+                && self.record_gc_types.list_array_type_idx.contains_key(&ty))
+        {
+            let mat_fn = self.ptr_len_materializer(ty)?;
+            self.emit_gc_ref(func, source)?;
+            func.instruction(&Instruction::Call(mat_fn));
+            return Ok(());
+        }
+        // Scalar / enum: a single canonical slot. Reading the value through
+        // `source` (a record/tuple field is stored full-width) yields the
+        // canonical slot valtype directly — no join at this level.
+        let slots = self.flatten_core_slots(ty);
+        if slots.len() != 1 {
+            return Err(CodegenError::InvalidIR(format!(
+                "value->stack: type {:?} is neither composite nor a single-slot scalar \
+                 ({} canonical slots)",
+                ty,
+                slots.len()
+            )));
+        }
+        self.emit_gc_ref(func, source)?;
+        Ok(())
+    }
 
+    /// Collapsed `option<T>` (T has a ref repr): push `[i32 disc, ...inner]`.
+    /// disc = `!ref.is_null` (some=1, none=0 — the WIT option discriminant);
+    /// on some recurse the inner (the option ref *is* the inner ref), on none
+    /// zero-pad the inner slots.
+    fn emit_collapsed_option_to_canonical_stack(
+        &mut self,
+        func: &mut Function,
+        ty: Ty,
+        inner_ty: Ty,
+        source: GcRefSource,
+    ) -> Result<(), CodegenError> {
+        let canon = self.flatten_core_valtypes(ty);
+        let block_ty = self.canonical_block_type(ty)?;
+        self.emit_gc_ref(func, source)?;
+        func.instruction(&Instruction::RefIsNull);
+        func.instruction(&Instruction::If(block_ty));
+        // NONE (ref is null): disc 0, zero-pad the inner slots.
+        func.instruction(&Instruction::I32Const(0));
+        for &vt in &canon[1..] {
+            push_zero_valtype(func, vt)?;
+        }
+        func.instruction(&Instruction::Else);
+        // SOME: disc 1, then the inner value's canonical slots. A collapsed
+        // option has a single payload case, so the inner's canonical slots
+        // exactly fill `canon[1..]` — no join widening.
+        func.instruction(&Instruction::I32Const(1));
+        self.emit_value_to_canonical_stack(func, inner_ty, source)?;
+        func.instruction(&Instruction::End);
+        Ok(())
+    }
+
+    /// gc-variant (non-collapsed option / result / user variant): push
+    /// `[i32 disc, ...joined payload]` via a `ref.test` if/else cascade, each
+    /// branch producing the full canonical shape (block type = the variant's
+    /// canonical shape).
+    fn emit_gc_variant_to_canonical_stack(
+        &mut self,
+        func: &mut Function,
+        ty: Ty,
+        source: GcRefSource,
+    ) -> Result<(), CodegenError> {
+        let canon_vts = self.flatten_core_valtypes(ty);
+        let block_ty = self.canonical_block_type(ty)?;
+        let case_count = *self
+            .record_gc_types
+            .gc_variant_case_count
+            .get(&ty)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "value->stack gc-variant: missing case count for {:?}",
+                    ty
+                ))
+            })?;
+        self.emit_variant_case_chain(func, ty, source, block_ty, case_count, 0, &canon_vts)
+    }
+
+    /// Recursive if/else spine for [`Self::emit_gc_variant_to_canonical_stack`].
+    /// Case `k`: `ref.test` the case subtype; then-branch produces
+    /// `[disc(k), ...payload(k) widened/padded]`, else-branch recurses to
+    /// `k+1`. After the last case a default branch produces `[0, ...zeros]`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_variant_case_chain(
+        &mut self,
+        func: &mut Function,
+        ty: Ty,
+        source: GcRefSource,
+        block_ty: wasm_encoder::BlockType,
+        case_count: u32,
+        k: u32,
+        canon_vts: &[wasm_encoder::ValType],
+    ) -> Result<(), CodegenError> {
+        if k == case_count {
+            // Default (no case matched — defensive; a valid non-null value
+            // always matches one case): disc 0 + zero payload.
+            func.instruction(&Instruction::I32Const(0));
+            for &vt in &canon_vts[1..] {
+                push_zero_valtype(func, vt)?;
+            }
+            return Ok(());
+        }
+        let case_sub_idx = *self
+            .record_gc_types
+            .gc_variant_case_idx
+            .get(&(ty, k))
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "value->stack gc-variant: missing case_idx for ({:?}, {})",
+                    ty, k
+                ))
+            })?;
+        self.emit_gc_ref(func, source)?;
+        func.instruction(&Instruction::RefTestNonNull(
+            wasm_encoder::HeapType::Concrete(case_sub_idx),
+        ));
+        func.instruction(&Instruction::If(block_ty));
+        func.instruction(&Instruction::I32Const(
+            self.gc_variant_wit_disc(ty, k) as i32,
+        ));
+        if let Some(payload_ty) = super::super::gc_types::case_payload_ty(self.ctx, ty, k) {
+            self.emit_case_payload_to_joined_stack(
+                func,
+                source,
+                case_sub_idx,
+                payload_ty,
+                &canon_vts[1..],
+            )?;
+        } else {
+            for &vt in &canon_vts[1..] {
+                push_zero_valtype(func, vt)?;
+            }
+        }
+        func.instruction(&Instruction::Else);
+        self.emit_variant_case_chain(func, ty, source, block_ty, case_count, k + 1, canon_vts)?;
+        func.instruction(&Instruction::End);
+        Ok(())
+    }
+
+    /// Push a gc-variant case's payload as the `joined` payload slots (the
+    /// variant's canonical `[1..]` valtypes), widening the payload's own slots
+    /// up to the joined valtypes and zero-padding any trailing joined slots the
+    /// (shorter) payload doesn't cover.
+    fn emit_case_payload_to_joined_stack(
+        &mut self,
+        func: &mut Function,
+        source: GcRefSource,
+        case_sub_idx: u32,
+        payload_ty: Ty,
+        joined: &[wasm_encoder::ValType],
+    ) -> Result<(), CodegenError> {
+        use super::super::gc_types::{struct_get_op_for_payload, StructGetVariant};
+        use yel_core::types::InternedTyKind;
+        let payload_vts: Vec<wasm_encoder::ValType> = self
+            .flatten_core_slots(payload_ty)
+            .iter()
+            .map(|s| s.valtype)
+            .collect();
+        let m = payload_vts.len();
+        if m > joined.len() {
+            return Err(CodegenError::InvalidIR(format!(
+                "value->stack payload: {:?} flattens to {} slots but joined payload is {}",
+                payload_ty,
+                m,
+                joined.len()
+            )));
+        }
+        let is_scalar_leaf = m == 1
+            && !self.is_gc_variant(payload_ty)
+            && self.option_collapses_to_ref(payload_ty).is_none()
+            && self.composite_gc_members(payload_ty)?.is_none()
+            && !matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
+            && !(matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
+                && self.record_gc_types.list_array_type_idx.contains_key(&payload_ty));
+        if is_scalar_leaf {
+            // Read the (possibly packed) scalar payload with correct
+            // signedness, then widen to the joined slot valtype.
+            self.emit_gc_ref(func, source)?;
+            func.instruction(&Instruction::RefCastNonNull(
+                wasm_encoder::HeapType::Concrete(case_sub_idx),
+            ));
+            match struct_get_op_for_payload(self.ctx, payload_ty) {
+                StructGetVariant::Plain => func.instruction(&Instruction::StructGet {
+                    struct_type_index: case_sub_idx,
+                    field_index: 0,
+                }),
+                StructGetVariant::Signed => func.instruction(&Instruction::StructGetS {
+                    struct_type_index: case_sub_idx,
+                    field_index: 0,
+                }),
+                StructGetVariant::Unsigned => func.instruction(&Instruction::StructGetU {
+                    struct_type_index: case_sub_idx,
+                    field_index: 0,
+                }),
+            };
+            emit_canonical_widen(func, payload_vts[0], joined[0])?;
+        } else {
+            // string / typed list / nested composite payload: produce its
+            // canonical slots directly, reached through a `PayloadOf` source.
+            let payload_source = GcRefSource::PayloadOf {
+                inner: &source,
+                case_sub_idx,
+            };
+            self.emit_value_to_canonical_stack(func, payload_ty, payload_source)?;
+            // Reconcile each produced slot with the joined valtype. Only the
+            // final (top-of-stack) slot can be widened without staging; a
+            // non-top mismatch is a loud gap.
+            for i in 0..m {
+                if payload_vts[i] != joined[i] {
+                    if i == m - 1 {
+                        emit_canonical_widen(func, payload_vts[i], joined[i])?;
+                    } else {
+                        return Err(CodegenError::InvalidIR(format!(
+                            "value->stack payload: multi-slot payload {:?} needs a cross-case \
+                             join widening at non-top slot {} ({:?} -> {:?}); staging that slot \
+                             is not supported on the direct callback-arg path",
+                            payload_ty, i, payload_vts[i], joined[i]
+                        )));
+                    }
+                }
+            }
+        }
+        // Zero-pad joined slots this payload doesn't cover.
+        for &vt in &joined[m..] {
+            push_zero_valtype(func, vt)?;
+        }
+        Ok(())
+    }
+
+    /// The WASM `if`/`block` type that produces a value of `ty`'s canonical-ABI
+    /// shape: `Empty` for zero slots, `Result(vt)` for one, else a pre-interned
+    /// `() -> (slots…)` function type looked up in `ternary_block_types`.
+    fn canonical_block_type(&self, ty: Ty) -> Result<wasm_encoder::BlockType, CodegenError> {
+        let vts = self.flatten_core_valtypes(ty);
+        match vts.len() {
+            0 => Ok(wasm_encoder::BlockType::Empty),
+            1 => Ok(wasm_encoder::BlockType::Result(vts[0])),
+            _ => {
+                let idx = self.ternary_block_types.get(&vts).ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "value->stack: canonical block shape {:?} for {:?} was not pre-interned \
+                         (collect_ternary_block_shapes must register composite callback args)",
+                        vts, ty
+                    ))
+                })?;
+                Ok(wasm_encoder::BlockType::FunctionType(*idx))
+            }
+        }
+    }
 
 }
 

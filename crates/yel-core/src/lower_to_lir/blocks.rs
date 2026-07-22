@@ -7610,77 +7610,6 @@ fn collect_call_arg_types_in_expr(expr: &LirExpr, exprs: &[LirExpr], out: &mut V
     }
 }
 
-/// True if `expr` contains a `Call` whose argument type is a composite
-/// (record / tuple / option / result / user variant). Such arguments are
-/// lowered by materializing the value's canonical-ABI bytes to a scratch
-/// buffer then reloading the flat slots, which needs an i32 flat-scratch
-/// local. String / list args take a materializer path and are excluded.
-fn expr_contains_composite_call_arg(
-    expr: &LirExpr,
-    exprs: &[LirExpr],
-    ctx: &CompilerContext,
-) -> bool {
-    let is_composite = |ty: Ty| {
-        matches!(
-            ctx.ty_kind(ty),
-            InternedTyKind::Tuple(_)
-                | InternedTyKind::Adt(_)
-                | InternedTyKind::Option(_)
-                | InternedTyKind::Result { .. }
-        )
-    };
-    if let LirExprKind::Call { args, .. } = &expr.kind
-        && args
-            .iter()
-            .any(|a| is_composite(arena_expr(exprs, *a).ty))
-    {
-        return true;
-    }
-    match &expr.kind {
-        LirExprKind::Field { base, .. }
-        | LirExprKind::Unary { operand: base, .. }
-        | LirExprKind::IsCase { base, .. }
-        | LirExprKind::VariantField { base, .. } => {
-            expr_contains_composite_call_arg(arena_expr(exprs, *base), exprs, ctx)
-        }
-        LirExprKind::Binary { lhs, rhs, .. } => {
-            expr_contains_composite_call_arg(arena_expr(exprs, *lhs), exprs, ctx)
-                || expr_contains_composite_call_arg(arena_expr(exprs, *rhs), exprs, ctx)
-        }
-        LirExprKind::Index { base, index } => {
-            expr_contains_composite_call_arg(arena_expr(exprs, *base), exprs, ctx)
-                || expr_contains_composite_call_arg(arena_expr(exprs, *index), exprs, ctx)
-        }
-        LirExprKind::Call { args, .. } => args
-            .iter()
-            .any(|a| expr_contains_composite_call_arg(arena_expr(exprs, *a), exprs, ctx)),
-        LirExprKind::Ternary {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            expr_contains_composite_call_arg(arena_expr(exprs, *condition), exprs, ctx)
-                || expr_contains_composite_call_arg(arena_expr(exprs, *then_expr), exprs, ctx)
-                || expr_contains_composite_call_arg(arena_expr(exprs, *else_expr), exprs, ctx)
-        }
-        LirExprKind::ListConstruct { elements, .. }
-        | LirExprKind::TupleConstruct { elements, .. } => elements
-            .iter()
-            .any(|e| expr_contains_composite_call_arg(arena_expr(exprs, *e), exprs, ctx)),
-        LirExprKind::RecordConstruct { fields, .. } => fields
-            .iter()
-            .any(|f| expr_contains_composite_call_arg(arena_expr(exprs, *f), exprs, ctx)),
-        LirExprKind::Range { start, end, .. } => {
-            expr_contains_composite_call_arg(arena_expr(exprs, *start), exprs, ctx)
-                || expr_contains_composite_call_arg(arena_expr(exprs, *end), exprs, ctx)
-        }
-        LirExprKind::VariantCtor {
-            payload: Some(p), ..
-        } => expr_contains_composite_call_arg(arena_expr(exprs, *p), exprs, ctx),
-        _ => false,
-    }
-}
-
 fn compute_flat_scratch_counts(
     ops: &[LirOp],
     signals: &[(Ty,)],
@@ -7702,15 +7631,6 @@ fn compute_flat_scratch_counts(
             }
             if expr_contains_min_max_call(e, exprs, ctx) {
                 *min_i32 = (*min_i32).max(2);
-            }
-            // A composite callback argument (record / tuple / option /
-            // result / variant passed to a `Call`) is materialized to a
-            // scratch buffer then reloaded via `emit_flat_slot_load_at_ptr`,
-            // whose multi-slot path stashes the base pointer in the first i32
-            // flat-scratch local. Reserve one so that path has somewhere to
-            // write. String / list args take a different (materializer) path.
-            if expr_contains_composite_call_arg(e, exprs, ctx) {
-                *load_scratch = true;
             }
             let (need_i32, need_i64) = expr_contains_float_binop_scratch(e, exprs, ctx);
             if need_i32 {

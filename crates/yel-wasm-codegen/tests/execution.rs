@@ -85,6 +85,11 @@ struct DomState {
     /// Callbacks (package-level `{package}-callbacks` interface) that
     /// fired during the last op. Stored as (iface, func, self_rep_hint).
     callbacks: Vec<(String, String, u32)>,
+    /// Full decoded argument list of each callback invocation, in order.
+    /// wasmtime lifts the canonical-ABI params back into typed `Val`s, so a
+    /// wrong composite-arg lowering shows up here as a decode failure or a
+    /// wrong value. `[0]` is the `self` borrow; `[1..]` are the real args.
+    callback_args: Vec<Vec<Val>>,
 }
 
 impl DomState {
@@ -416,17 +421,15 @@ fn register_callbacks(linker: &mut Linker<SharedDom>, iface_name: &str, names: &
         let iface_owned = iface_name.to_string();
         let name_owned = name.to_string();
         iface
-            .func_new(name, move |store, _ty, _args, _results| {
-                // Dynamic API gives us `ResourceAny` without a way to
-                // extract the raw rep without a typed binding. For
-                // behaviour tests we only need to know the callback
-                // fired and with what signature — log it, leave the
-                // self-rep as a placeholder 0.
-                store.data().lock().unwrap().callbacks.push((
-                    iface_owned.clone(),
-                    name_owned.clone(),
-                    0,
-                ));
+            .func_new(name, move |store, _ty, args, _results| {
+                // Record the invocation and the full decoded argument list.
+                // The dynamic API can't cheaply extract the resource rep, so
+                // the self-rep hint stays 0; the composite args (args[1..])
+                // are the round-trip signal.
+                let mut s = store.data().lock().unwrap();
+                s.callbacks
+                    .push((iface_owned.clone(), name_owned.clone(), 0));
+                s.callback_args.push(args.to_vec());
                 Ok(())
             })
             .unwrap();
@@ -3936,6 +3939,92 @@ fn callback_with_record_arg_compiles() {
     "#;
     let bytes = compile_to_component(source);
     assert!(!bytes.is_empty(), "record-arg callback should encode");
+}
+
+/// Execution round-trip for the direct value→canonical-stack callback-arg
+/// lowering: fire a click handler that calls a host callback with a composite
+/// argument built from distinct non-default values, and assert the host
+/// RECEIVES the exact value. wasmtime lifts the canonical-ABI params back to a
+/// typed `Val`, so a wrong disc / join / zero-pad shows up as a wrong `Val`
+/// (or a decode trap) — the only check that catches a validates-but-wrong
+/// flattening.
+///
+/// The callback is declared on an `export global` (not the component) so its
+/// host import is `func(a: T)` with no `self: borrow<app>` param — that keeps
+/// instantiation off the resource-linking machinery the harness lacks, while
+/// still exercising the identical composite-arg lowering. Covers `option<s32>`
+/// (gc-variant disc + payload), `result<s32, s64>` (mixed-width join: the
+/// `s32` case widens up to the i64 joined slot), and `tuple<s32, s32>` (record
+/// path).
+#[test]
+fn callback_composite_arg_reaches_host_with_correct_value() {
+    // (package namespace, callback arg type, call expression, expected Val).
+    let cases: Vec<(&str, &str, &str, Val)> = vec![
+        (
+            "yel:cbopt",
+            "option<s32>",
+            "Store.on_data(some(42));",
+            Val::Option(Some(Box::new(Val::S32(42)))),
+        ),
+        (
+            "yel:cbresmix",
+            "result<s32, s64>",
+            "Store.on_data(ok(7));",
+            Val::Result(Ok(Some(Box::new(Val::S32(7))))),
+        ),
+        (
+            "yel:cbtup",
+            "tuple<s32, s32>",
+            "Store.on_data((3, 4));",
+            Val::Tuple(vec![Val::S32(3), Val::S32(4)]),
+        ),
+    ];
+    for (pkg_ns, arg_ty, call, expected) in cases {
+        let source = format!(
+            r#"
+            package {pkg_ns}@0.1.0;
+            export global Store {{
+                on_data: func(a: {arg_ty});
+            }}
+            export component App {{
+                VStack {{
+                    Button {{ clicked: {{ {call} }} }}
+                    Text {{ "ok" }}
+                }}
+            }}
+        "#
+        );
+        let bytes = compile_to_component(&source);
+        let callbacks_iface = format!("{pkg_ns}/store@0.1.0");
+        let component_iface = format!("{pkg_ns}/app-component@0.1.0");
+        let (mut h, dom) = instantiate(&bytes, &[(callbacks_iface.as_str(), &["on-data"])]);
+        ctor_and_mount(&mut h, &component_iface, "app");
+
+        let handler = dom
+            .lock()
+            .unwrap()
+            .listeners
+            .iter()
+            .find(|(_, e, _)| e == "clicked")
+            .map(|(_, _, id)| *id)
+            .unwrap_or_else(|| panic!("{arg_ty}: no click handler registered"));
+        call_dispatch(&mut h, handler);
+
+        let args = dom.lock().unwrap().callback_args.clone();
+        assert_eq!(
+            args.len(),
+            1,
+            "{arg_ty}: expected exactly one callback invocation, got {args:?}"
+        );
+        // Global callback: no `self` borrow, so args[0] is the composite arg.
+        let received = args[0]
+            .first()
+            .unwrap_or_else(|| panic!("{arg_ty}: callback missing arg: {:?}", args[0]));
+        assert_eq!(
+            received, &expected,
+            "{arg_ty}: host received wrong callback arg value"
+        );
+    }
 }
 
 /// Regression: a `let` binding of a non-i32 scalar in an event handler.
