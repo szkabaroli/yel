@@ -828,7 +828,19 @@ impl WasmPackageBuilder<'_> {
                             if let Some(cb_func_idx) =
                                 import_layout.import_index(*func_def_id)
                             {
-                                let result_flat = self.flatten_core_valtypes(expr.ty);
+                                // The callback IMPORT signature is built with
+                                // the canonical ABI (`canonical_flat_valtypes`,
+                                // see codegen/build.rs) and switches to the
+                                // indirect (ret_ptr) return convention whenever
+                                // the canonical result has >1 flat slot. The
+                                // call site MUST decide the same way from the
+                                // canonical shape — not the internal repr. They
+                                // diverge for scalar `list<T>` (canonical
+                                // `(ptr, len)` = 2, internal collapsed ref = 1)
+                                // and option-of-ref collapses; deciding from the
+                                // internal shape there disagreed with the import
+                                // and underflowed the stack.
+                                let result_flat = self.canonical_flat_valtypes(expr.ty);
                                 let uses_indirect_return = result_flat.len() > 1;
 
                                 // Component callbacks are resource methods —
@@ -3030,6 +3042,32 @@ impl WasmPackageBuilder<'_> {
         })?;
         func.instruction(&Instruction::I32Const(ret_addr));
         func.instruction(&Instruction::Call(cb_func_idx));
+        // strings-to-GC / scalar-list twin: a `list<T>` callback return
+        // arrives canonically as `(ptr, len)` written into the return
+        // scratch, but internally a scalar list is a single typed GC array
+        // ref. Load the two canonical i32s and un-materialize them into the
+        // typed `(ref null $<elem>_list)` — mirroring the String path
+        // (`(ptr, len)` -> `$str_bytes` ref) so the value flows GC-native.
+        if self.is_scalar_list_ty(ret_ty)
+            && let Some(&arr_idx) = self.record_gc_types.list_array_type_idx.get(&ret_ty)
+        {
+            let unmat = *self
+                .gc_list_unmaterializer_fn_indices
+                .get(&arr_idx)
+                .ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "cb scalar-list return: missing un-materializer for arr {} (type {:?})",
+                        arr_idx, ret_ty
+                    ))
+                })?;
+            // ptr at ret_addr + 0, len at ret_addr + 4 (canonical list layout).
+            func.instruction(&Instruction::I32Const(ret_addr));
+            func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
+            func.instruction(&Instruction::I32Const(ret_addr + 4));
+            func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
+            func.instruction(&Instruction::Call(unmat));
+            return Ok(1);
+        }
         // Phase 5e.5 Stage 7b: callback returns of FlatGcStruct must
         // produce a single supertype ref (matching internal_repr) for
         // signal-store / Field consumers — not the canonical (disc,
