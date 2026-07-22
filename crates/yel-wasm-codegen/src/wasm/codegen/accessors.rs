@@ -1532,6 +1532,77 @@ impl<'a> WasmPackageBuilder<'a> {
                 };
                 if let InternedTyKind::List(elem_ty) = self.ctx.ty_kind(inner_ty) {
                     let elem_ty = *elem_ty;
+                    // When the inner list's element is stored as a GC ref
+                    // (string → `$str_bytes`, flat-gc record, option-collapse,
+                    // nested list) the inline copy loop below is wrong — it
+                    // would `array.set` a raw i32 into a ref-typed element
+                    // ("expected ref, found i32"). Route the whole inner list
+                    // through the shared per-list un-materializer instead,
+                    // exactly as the plain `list<T>` setter does; only the
+                    // discriminant handling is layered on top. Genuine scalar
+                    // elements keep the byte-identical inline loop.
+                    let elem_needs_unmaterializer = matches!(
+                        self.internal_repr(elem_ty),
+                        super::super::repr::InternalRepr::FlatGcStruct(_)
+                    ) || matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::String)
+                        || self.elem_option_collapses(elem_ty).is_some()
+                        || (matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::List(_))
+                            && self
+                                .record_gc_types
+                                .list_array_type_idx
+                                .contains_key(&elem_ty));
+                    if elem_needs_unmaterializer {
+                        let unmat_fn = *self
+                            .gc_list_unmaterializer_fn_indices
+                            .get(&arr_type_idx)
+                            .ok_or_else(|| {
+                                CodegenError::InvalidIR(format!(
+                                    "option<list> setter: missing un-materializer for arr {}",
+                                    arr_type_idx
+                                ))
+                            })?;
+                        // Setter params: 0=rep, 1=disc, 2=ptr, 3=len.
+                        let self_ref_local: u32 = 4;
+                        let mut func = Function::new([(
+                            1,
+                            ValType::Ref(wasm_encoder::RefType {
+                                nullable: true,
+                                heap_type: wasm_encoder::HeapType::Concrete(struct_ty),
+                            }),
+                        )]);
+                        self.emit_registry_lookup(&mut func, comp_idx, 0, self_ref_local)?;
+                        self.current_self_local = Some(self_ref_local);
+                        self.current_self_comp_idx = Some(comp_idx);
+                        self.emit_self_ref(&mut func, comp_idx)?;
+                        // disc==0 → none (typed null ref); else build the
+                        // array from canonical (ptr, len) via the
+                        // un-materializer (boxes each element correctly).
+                        func.instruction(&Instruction::LocalGet(1)); // disc
+                        func.instruction(&Instruction::I32Eqz);
+                        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
+                            ValType::Ref(wasm_encoder::RefType {
+                                nullable: true,
+                                heap_type: wasm_encoder::HeapType::Concrete(arr_type_idx),
+                            }),
+                        )));
+                        func.instruction(&Instruction::RefNull(
+                            wasm_encoder::HeapType::Concrete(arr_type_idx),
+                        ));
+                        func.instruction(&Instruction::Else);
+                        func.instruction(&Instruction::LocalGet(2)); // ptr
+                        func.instruction(&Instruction::LocalGet(3)); // len
+                        func.instruction(&Instruction::Call(unmat_fn));
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::StructSet {
+                            struct_type_index: struct_ty,
+                            field_index: field_path[0],
+                        });
+                        self.emit_trigger_effects(&mut func, signal_def_id, comp_idx)?;
+                        self.current_self_local = None;
+                        self.current_self_comp_idx = Some(comp_idx);
+                        func.instruction(&Instruction::End);
+                        return Ok(func);
+                    }
                     let (elem_size, _elem_align) =
                         gc_list_elem_canonical_info(self.ctx, &mut self.layout_ctx, elem_ty);
                     // Setter params: 0=rep, 1=disc, 2=ptr, 3=len.
