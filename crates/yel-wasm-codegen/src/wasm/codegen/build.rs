@@ -513,6 +513,28 @@ impl<'a> WasmPackageBuilder<'a> {
         cursor += record_types_count;
         self.record_gc_types = record_gc_types;
 
+        // Every valid `list<T>` is a typed GC array — `ListConstruct` emits
+        // `array.new_fixed` (the `GcArrayRef` branch), never the legacy memory
+        // `list_ctor` helper. Those helpers are therefore dead, and worse than
+        // useless: `generate_list_ctor` stores each element as a single i32, so
+        // for a tuple / record / float element it emits `i32.store` of an f64 /
+        // multi-field value and fails core validation (a dead function still
+        // gets validated). Drop every collected list-construct whose list type
+        // is a typed GC array so no dead, invalid helper is generated. Only a
+        // genuinely non-GC-array list (none exist for valid programs today)
+        // would keep a legacy ctor.
+        let gc_array_elem_tys: HashSet<Ty> = self
+            .record_gc_types
+            .list_array_type_idx
+            .keys()
+            .filter_map(|&list_ty| match self.ctx.ty_kind(list_ty) {
+                InternedTyKind::List(elem) => Some(*elem),
+                _ => None,
+            })
+            .collect();
+        self.list_constructs
+            .retain(|(elem_ty, _)| !gc_array_elem_tys.contains(elem_ty));
+
         // Stage 6: now that `list_array_type_idx` is populated, intern
         // the per-filter signatures `(ref null $list_arr, ...captured
         // signal storage slots) -> (ref null $list_arr)`. Push directly

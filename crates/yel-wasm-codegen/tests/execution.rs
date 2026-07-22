@@ -4552,6 +4552,62 @@ fn option_tuple_collapse_roundtrip() {
     }
 }
 
+/// Regression: a `list<tuple<f64, s32>>` (float-*first* tuple element) used to
+/// fail core validation. The list construct emits `array.new_fixed`, but a dead
+/// legacy `list_ctor` helper was still generated for the (elem_ty, count) pair;
+/// that helper `i32.store`s its first param, so a leading f64 param produced
+/// `expected i32, found f64`. `list<tuple<s32, f64>>` slipped through only
+/// because its first field is i32. The dead helpers are no longer generated for
+/// typed-GC-array lists. This pins that the float-first list compiles, runs, and
+/// round-trips.
+#[test]
+fn list_of_float_first_tuples_roundtrip() {
+    let source = r#"
+        package yel:listftup@0.1.0;
+        export component App {
+            pts: list<tuple<f64, s32>> = [(1.5, 2), (3.5, 4)];
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:listftup/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "pts",
+        &r,
+        Val::List(vec![
+            Val::Tuple(vec![Val::Float64(2.5), Val::S32(10)]),
+            Val::Tuple(vec![Val::Float64(-4.5), Val::S32(20)]),
+        ]),
+    );
+    let get_pts = get_func(&mut h, iface, "[method]app.get-pts");
+    let mut out = [Val::Bool(false)];
+    get_pts
+        .call(&mut h.store, &[Val::Resource(r)], &mut out)
+        .expect("get-pts");
+    match &out[0] {
+        Val::List(e) => {
+            let expected = [(2.5_f64, 10_i32), (-4.5, 20)];
+            assert_eq!(e.len(), expected.len(), "pts len");
+            for (i, (f, n)) in expected.iter().enumerate() {
+                match &e[i] {
+                    Val::Tuple(t) => {
+                        assert!(matches!(&t[0], Val::Float64(x) if x == f), "pts[{i}].0 got {:?}", t[0]);
+                        assert!(matches!(&t[1], Val::S32(x) if x == n), "pts[{i}].1 got {:?}", t[1]);
+                    }
+                    other => panic!("pts[{i}] non-tuple {:?}", other),
+                }
+            }
+        }
+        other => panic!("get-pts non-list {:?}", other),
+    }
+}
+
 /// Boundary round-trip for a `list<flat-gc-with-composite-payload>` signal:
 /// `list<result<option<string>, string>>` and `list<option<result<s32,
 /// string>>>`. Each element is a FlatGcStruct whose active case's payload is
