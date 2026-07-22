@@ -1,0 +1,21 @@
+package yel:goptres@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+  }
+}
+
+interface s {
+  set-no-default-opt: func(v: option<string>);
+  set-no-default-res: func(v: result<string, string>);
+}
+
+world goptres {
+  import s;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

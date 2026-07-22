@@ -477,6 +477,32 @@ impl<'a> WasmPackageBuilder<'a> {
                 walk_expr(expr, &component.exprs, &mut extra_seed_tys);
             }
         }
+        // Global-block property defaults (e.g. `global S { v: result<string,
+        // string> = ok("x"); }`) live in a separate arena that the component
+        // walk above never visits. Their types must be seeded too, or
+        // `internal_repr` panics ("option/result Ty not registered as
+        // FlatGcStruct") when the global's storage valtype is resolved. Both
+        // arenas are flat — every subexpression is its own entry — so a plain
+        // push of each entry's type covers the whole tree without recursion.
+        for (_, top) in self.global_defaults.iter() {
+            extra_seed_tys.push(top.ty);
+        }
+        for expr in self.global_default_exprs.iter() {
+            extra_seed_tys.push(expr.ty);
+        }
+        // A global property with no default has no expr to seed from, yet its
+        // declared type still needs GC-type registration (the globals-layout
+        // pass below calls `signal_storage_valtypes` on it). Seed every global
+        // property's type directly.
+        for block_def_id in self.ctx.defs.globals().collect::<Vec<_>>() {
+            if let Some(block) = self.ctx.defs.as_global(block_def_id) {
+                for &prop_id in &block.properties {
+                    if let Some(prop_ty) = self.ctx.defs.type_of(prop_id) {
+                        extra_seed_tys.push(prop_ty);
+                    }
+                }
+            }
+        }
         let (record_types_count, record_gc_types) =
             super::super::gc_types::emit_program_record_types(
                 self.ctx,

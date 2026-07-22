@@ -1,0 +1,19 @@
+// Regression: the GC-type seed walk that feeds `emit_program_record_types`
+// only visited component expression arenas, never global-block property
+// defaults nor no-default global property types. A global whose property is
+// an option/result (`global S { v: result<string, string>; }`) therefore
+// never registered its FlatGcStruct type, and `internal_repr` /
+// `signal_storage_valtypes` panicked ("option/result Ty not registered as
+// FlatGcStruct") while laying out the globals block. Fixed by seeding both the
+// global default expression arenas and every global property's declared type.
+package yel:goptres@0.1.0;
+global S {
+    withDefault: result<string, string> = ok("hi");
+    optWithDefault: option<string> = some("x");
+    noDefaultRes: result<string, string>;
+    noDefaultOpt: option<string>;
+    nested: result<option<string>, string> = ok(some("y"));
+}
+export component App {
+    VStack { Text { "hi" } }
+}
