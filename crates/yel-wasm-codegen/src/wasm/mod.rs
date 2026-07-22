@@ -662,6 +662,23 @@ fn join_flat_valtypes(
     out
 }
 
+/// Max in-memory alignment of a flattened canonical-ABI slot list: 8 for any
+/// 64-bit slot (i64/f64), else 4, and at least 1. Used to place a variant /
+/// result's joined payload at a correctly-aligned offset (an i64 joined slot
+/// must sit at an 8-aligned offset), matching `compute_result_layout`.
+fn flat_valtypes_align(slots: &[wasm_encoder::ValType]) -> u32 {
+    use wasm_encoder::ValType;
+    slots
+        .iter()
+        .map(|vt| match vt {
+            ValType::I64 | ValType::F64 => 8u32,
+            _ => 4u32,
+        })
+        .max()
+        .unwrap_or(1)
+        .max(1)
+}
+
 /// Memory layout for a component (computed from block-based slots).
 #[derive(Clone)]
 pub(crate) struct MemoryLayout {
@@ -1977,16 +1994,26 @@ impl<'a> WasmPackageBuilder<'a> {
                     .map(|t| self.canonical_flat_valtypes(t))
                     .unwrap_or_default();
                 let joined = join_flat_valtypes(&ok_flat, &err_flat);
-                let payload_base = base_offset + 4;
+                // Align the payload base to the joined payload's alignment.
+                // The canonical-ABI `join` widens a mixed slot up to i64, so a
+                // `result<s32, s64>` payload is an i64 that must sit at an
+                // 8-aligned offset — NOT a hardcoded +4. This must match
+                // `LayoutContext::compute_result_layout`'s
+                // `align_to(1, max_align)`, or the getter (which sizes its
+                // scratch from `layout_of`) writes the payload at a different
+                // offset than the host reads it.
+                let payload_align = flat_valtypes_align(&joined);
+                let payload_base = base_offset + align_to(1, payload_align);
                 let mut slot_off = 0u32;
                 for vt in &joined {
-                    let (store, size) = match vt {
-                        ValType::I32 => (StoreWidth::I32, 4u32),
-                        ValType::I64 => (StoreWidth::I64, 8u32),
-                        ValType::F32 => (StoreWidth::F32, 4u32),
-                        ValType::F64 => (StoreWidth::F64, 8u32),
-                        _ => (StoreWidth::I32, 4u32),
+                    let (store, size, align) = match vt {
+                        ValType::I32 => (StoreWidth::I32, 4u32, 4u32),
+                        ValType::I64 => (StoreWidth::I64, 8u32, 8u32),
+                        ValType::F32 => (StoreWidth::F32, 4u32, 4u32),
+                        ValType::F64 => (StoreWidth::F64, 8u32, 8u32),
+                        _ => (StoreWidth::I32, 4u32, 4u32),
                     };
+                    slot_off = align_to(slot_off, align);
                     out.push(FlatSlot {
                         valtype: *vt,
                         offset: payload_base + slot_off,
@@ -2059,13 +2086,14 @@ impl<'a> WasmPackageBuilder<'a> {
                     }
                     let mut slot_off = 0u32;
                     for vt in &joined {
-                        let (store, size) = match vt {
-                            ValType::I32 => (StoreWidth::I32, 4u32),
-                            ValType::I64 => (StoreWidth::I64, 8u32),
-                            ValType::F32 => (StoreWidth::F32, 4u32),
-                            ValType::F64 => (StoreWidth::F64, 8u32),
-                            _ => (StoreWidth::I32, 4u32),
+                        let (store, size, align) = match vt {
+                            ValType::I32 => (StoreWidth::I32, 4u32, 4u32),
+                            ValType::I64 => (StoreWidth::I64, 8u32, 8u32),
+                            ValType::F32 => (StoreWidth::F32, 4u32, 4u32),
+                            ValType::F64 => (StoreWidth::F64, 8u32, 8u32),
+                            _ => (StoreWidth::I32, 4u32, 4u32),
                         };
+                        slot_off = align_to(slot_off, align);
                         out.push(FlatSlot {
                             valtype: *vt,
                             offset: base_offset + payload_offset + slot_off,

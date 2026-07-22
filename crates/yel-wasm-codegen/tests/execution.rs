@@ -3909,6 +3909,73 @@ fn nested_tuple_setter_getter_roundtrip() {
     }
 }
 
+/// Boundary round-trip for a mixed-width `result<s32, s64>`. Its cases have
+/// different payload widths, so the canonical ABI `join`s the payload slot up
+/// to i64; the `Ok(s32)` case must be narrowed (i32.wrap_i64) on the setter
+/// and widened on the getter. Verifies both the low-32 case and the full-64
+/// case round-trip losslessly.
+#[test]
+fn result_mixed_width_join_roundtrip() {
+    let source = r#"
+        package yel:reswide@0.1.0;
+        export component App {
+            r: result<s32, s64> = ok(0);
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:reswide/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+
+    let get_r = get_func(&mut h, iface, "[method]app.get-r");
+    let read = |h: &mut Harness, res: &ResourceAny| -> Val {
+        let mut out = [Val::Bool(false)];
+        get_r
+            .call(&mut h.store, &[Val::Resource(*res)], &mut out)
+            .expect("get-r");
+        std::mem::replace(&mut out[0], Val::Bool(false))
+    };
+
+    // Ok(42): narrow payload stored in the joined i64 slot.
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "r",
+        &r,
+        Val::Result(Ok(Some(Box::new(Val::S32(42))))),
+    );
+    match read(&mut h, &r) {
+        Val::Result(Ok(Some(v))) => assert!(
+            matches!(*v, Val::S32(42)),
+            "Ok payload must be 42, got {:?}",
+            v
+        ),
+        other => panic!("expected Ok(42), got {:?}", other),
+    }
+
+    // Err(big): full-width i64 payload that must not be truncated.
+    let big: i64 = 9_000_000_000;
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "r",
+        &r,
+        Val::Result(Err(Some(Box::new(Val::S64(big))))),
+    );
+    match read(&mut h, &r) {
+        Val::Result(Err(Some(v))) => assert!(
+            matches!(*v, Val::S64(x) if x == big),
+            "Err payload must be {}, got {:?}",
+            big,
+            v
+        ),
+        other => panic!("expected Err({}), got {:?}", big, other),
+    }
+}
+
 /// Phase 0 regression-guard: nested record field access through two
 /// levels: `state.user.addr.city`. Pins multi-level offset loads today
 /// and chained `struct.get` post-Phase 4.

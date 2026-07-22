@@ -1,0 +1,36 @@
+package yel:reswide@0.1.0;
+
+interface shared-types {
+  variant mixed {
+    small(s32),
+    big(s64),
+    float(f64),
+    empty,
+  }
+}
+
+interface app-component {
+  use shared-types.{ mixed };
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-a: func() -> result<s32, s64>;
+    set-a: func(value: result<s32, s64>);
+    get-b: func() -> result<f64, s32>;
+    set-b: func(value: result<f64, s32>);
+    get-c: func() -> result<f32, f64>;
+    set-c: func(value: result<f32, f64>);
+    get-v: func() -> mixed;
+    set-v: func(value: mixed);
+    get-with-string: func() -> result<string, s64>;
+    set-with-string: func(value: result<string, s64>);
+  }
+}
+
+world reswide {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

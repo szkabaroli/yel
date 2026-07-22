@@ -25,6 +25,7 @@ fn emit_canonical_reinterpret(
         return Ok(());
     }
     match (vt_joined, vt_case) {
+        // Same-width bit reinterprets (join of i32/f32 or i64/f64).
         (ValType::I32, ValType::F32) => {
             func.instruction(&Instruction::F32ReinterpretI32);
         }
@@ -36,6 +37,20 @@ fn emit_canonical_reinterpret(
         }
         (ValType::F64, ValType::I64) => {
             func.instruction(&Instruction::I64ReinterpretF64);
+        }
+        // Width-narrowing joins: the canonical-ABI `join` widens a mixed
+        // {i32/f32, i64/f64} slot up to i64, so a case whose payload is 32-bit
+        // reads its value out of the low half of the i64 joined slot. The
+        // narrow value was stored zero/bit-extended into the low bits, so
+        // `i32.wrap_i64` recovers it losslessly (then reinterpret to f32 if
+        // the case payload is f32). `join` never produces a slot narrower
+        // than a case's payload, so only i64→{i32,f32} occur here.
+        (ValType::I64, ValType::I32) => {
+            func.instruction(&Instruction::I32WrapI64);
+        }
+        (ValType::I64, ValType::F32) => {
+            func.instruction(&Instruction::I32WrapI64);
+            func.instruction(&Instruction::F32ReinterpretI32);
         }
         _ => {
             return Err(CodegenError::InvalidIR(format!(

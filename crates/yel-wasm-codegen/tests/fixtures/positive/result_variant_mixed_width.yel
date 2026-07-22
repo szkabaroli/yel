@@ -1,0 +1,22 @@
+// Regression: a variant / result whose cases have different-width payloads
+// (one 32-bit, one 64-bit) flattens under the canonical ABI by `join`ing the
+// payload slot up to i64. Two bugs made these unbuildable or wrong:
+//   1. `emit_canonical_reinterpret` had no I64→I32 / I64→F32 bridge, so the
+//      setter (which narrows the joined param to a 32-bit case payload)
+//      returned "unsupported joined→case bridge I64 → I32".
+//   2. `collect_flat_slots` placed the Result payload at a hardcoded +4
+//      offset instead of aligning to the joined payload (i64 needs +8), while
+//      `layout_of` correctly used +8 — so the getter allocated 16 bytes but
+//      wrote the payload where the host never reads it (value came back 0).
+// Both fixed; round-trip pinned by result_mixed_width_join_roundtrip in
+// tests/execution.rs.
+package yel:reswide@0.1.0;
+variant Mixed { small(s32), big(s64), float(f64), empty, }
+export component App {
+    a: result<s32, s64> = ok(1);
+    b: result<f64, s32> = err(2);
+    c: result<f32, f64> = ok(1.5);
+    v: Mixed = Mixed.small(3);
+    withString: result<string, s64> = ok("x");
+    VStack { Text { "ok" } }
+}
