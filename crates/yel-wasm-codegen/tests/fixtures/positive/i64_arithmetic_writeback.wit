@@ -1,0 +1,21 @@
+package yel:i64arith@0.1.0;
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-a: func() -> s64;
+    set-a: func(value: s64);
+    get-b: func() -> s64;
+    set-b: func(value: s64);
+    get-u: func() -> u64;
+    set-u: func(value: u64);
+  }
+}
+
+world i64arith {
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

@@ -1,0 +1,26 @@
+// Regression: arithmetic on s64/u64 signals emitted i32.add/i32.mul/... on
+// i64 operands (the BinOp/UnaryOp emit arms only special-cased F32/F64 and
+// defaulted everything else to i32), so `a = a + b` on an s64 signal produced
+// a core module that failed validation with "expected i32, found i64". Fixed
+// by adding S64|U64 arms emitting the i64 instructions (and i64.eqz / i64.mul
+// for unary Not/Neg). Comparisons on s64 correctly yield an i32 bool.
+package yel:i64arith@0.1.0;
+export component App {
+    a: s64 = 100;
+    b: s64 = 7;
+    u: u64 = 42;
+    VStack {
+        clicked: {
+            a = a + b;
+            a = a - b;
+            a = a * b;
+            a = a / b;
+            a = a % b;
+            a = -a;
+            u = u + 1;
+        }
+        Text { "s={a + b}" }
+        Text { "lt={a < b}" }
+        Text { "u={u}" }
+    }
+}

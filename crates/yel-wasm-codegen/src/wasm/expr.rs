@@ -2346,6 +2346,30 @@ impl WasmPackageBuilder<'_> {
                     }
                 }
             }
+            InternedTyKind::S64 | InternedTyKind::U64 => {
+                // 64-bit integer operands. Mirrors the default i32 arm
+                // (same signed convention — see the s32/u32 note there)
+                // but with i64 instructions so the stack stays i64-typed.
+                // Comparisons consume two i64 and yield i32 (bool).
+                match op {
+                    BinOp::Add => func.instruction(&Instruction::I64Add),
+                    BinOp::Sub => func.instruction(&Instruction::I64Sub),
+                    BinOp::Mul => func.instruction(&Instruction::I64Mul),
+                    BinOp::Div => func.instruction(&Instruction::I64DivS),
+                    BinOp::Mod => func.instruction(&Instruction::I64RemS),
+                    BinOp::Eq => func.instruction(&Instruction::I64Eq),
+                    BinOp::Ne => func.instruction(&Instruction::I64Ne),
+                    BinOp::Lt => func.instruction(&Instruction::I64LtS),
+                    BinOp::Gt => func.instruction(&Instruction::I64GtS),
+                    BinOp::Le => func.instruction(&Instruction::I64LeS),
+                    BinOp::Ge => func.instruction(&Instruction::I64GeS),
+                    BinOp::And => func.instruction(&Instruction::I64And),
+                    BinOp::Or => func.instruction(&Instruction::I64Or),
+                    BinOp::BitAnd => func.instruction(&Instruction::I64And),
+                    BinOp::BitOr => func.instruction(&Instruction::I64Or),
+                    BinOp::BitXor => func.instruction(&Instruction::I64Xor),
+                };
+            }
             _ => {
                 // Default: i32 operations
                 match op {
@@ -2393,6 +2417,16 @@ impl WasmPackageBuilder<'_> {
                 }
                 UnaryOp::Neg => {
                     func.instruction(&Instruction::F64Neg);
+                }
+            },
+            InternedTyKind::S64 | InternedTyKind::U64 => match op {
+                UnaryOp::Not => {
+                    // i64.eqz consumes an i64 and yields i32 (bool).
+                    func.instruction(&Instruction::I64Eqz);
+                }
+                UnaryOp::Neg => {
+                    func.instruction(&Instruction::I64Const(-1));
+                    func.instruction(&Instruction::I64Mul);
                 }
             },
             _ => match op {
