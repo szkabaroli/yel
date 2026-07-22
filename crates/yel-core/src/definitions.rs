@@ -337,7 +337,7 @@ impl Definitions {
 
     /// Get as a component.
     pub fn as_component(&self, def_id: DefId) -> Option<&ComponentDef> {
-        match &self.items[def_id].kind {
+        match &self.items.get(def_id)?.kind {
             DefKind::Component(c) => Some(c),
             _ => None,
         }
@@ -345,7 +345,7 @@ impl Definitions {
 
     /// Get as a mutable component.
     pub fn as_component_mut(&mut self, def_id: DefId) -> Option<&mut ComponentDef> {
-        match &mut self.items[def_id].kind {
+        match &mut self.items.get_mut(def_id)?.kind {
             DefKind::Component(c) => Some(c),
             _ => None,
         }
@@ -353,7 +353,7 @@ impl Definitions {
 
     /// Get as a record.
     pub fn as_record(&self, def_id: DefId) -> Option<&RecordDef> {
-        match &self.items[def_id].kind {
+        match &self.items.get(def_id)?.kind {
             DefKind::Record(r) => Some(r),
             _ => None,
         }
@@ -361,7 +361,7 @@ impl Definitions {
 
     /// Get as a mutable record.
     pub fn as_record_mut(&mut self, def_id: DefId) -> Option<&mut RecordDef> {
-        match &mut self.items[def_id].kind {
+        match &mut self.items.get_mut(def_id)?.kind {
             DefKind::Record(r) => Some(r),
             _ => None,
         }
@@ -369,7 +369,7 @@ impl Definitions {
 
     /// Get as an enum.
     pub fn as_enum(&self, def_id: DefId) -> Option<&EnumDef> {
-        match &self.items[def_id].kind {
+        match &self.items.get(def_id)?.kind {
             DefKind::Enum(e) => Some(e),
             _ => None,
         }
@@ -377,7 +377,7 @@ impl Definitions {
 
     /// Get as a mutable enum.
     pub fn as_enum_mut(&mut self, def_id: DefId) -> Option<&mut EnumDef> {
-        match &mut self.items[def_id].kind {
+        match &mut self.items.get_mut(def_id)?.kind {
             DefKind::Enum(e) => Some(e),
             _ => None,
         }
@@ -385,7 +385,7 @@ impl Definitions {
 
     /// Get as a variant.
     pub fn as_variant(&self, def_id: DefId) -> Option<&VariantDef> {
-        match &self.items[def_id].kind {
+        match &self.items.get(def_id)?.kind {
             DefKind::Variant(v) => Some(v),
             _ => None,
         }
@@ -393,7 +393,7 @@ impl Definitions {
 
     /// Get as a mutable variant.
     pub fn as_variant_mut(&mut self, def_id: DefId) -> Option<&mut VariantDef> {
-        match &mut self.items[def_id].kind {
+        match &mut self.items.get_mut(def_id)?.kind {
             DefKind::Variant(v) => Some(v),
             _ => None,
         }
@@ -401,7 +401,7 @@ impl Definitions {
 
     /// Get as a function.
     pub fn as_function(&self, def_id: DefId) -> Option<&FunctionDef> {
-        match &self.items[def_id].kind {
+        match &self.items.get(def_id)?.kind {
             DefKind::Function(f) => Some(f),
             _ => None,
         }
@@ -409,7 +409,7 @@ impl Definitions {
 
     /// Get as a mutable function.
     pub fn as_function_mut(&mut self, def_id: DefId) -> Option<&mut FunctionDef> {
-        match &mut self.items[def_id].kind {
+        match &mut self.items.get_mut(def_id)?.kind {
             DefKind::Function(f) => Some(f),
             _ => None,
         }
@@ -417,7 +417,7 @@ impl Definitions {
 
     /// Get as a field.
     pub fn as_field(&self, def_id: DefId) -> Option<&FieldDef> {
-        match &self.items[def_id].kind {
+        match &self.items.get(def_id)?.kind {
             DefKind::Field(f) => Some(f),
             _ => None,
         }
@@ -425,7 +425,7 @@ impl Definitions {
 
     /// Get as a signal.
     pub fn as_signal(&self, def_id: DefId) -> Option<&SignalDef> {
-        match &self.items[def_id].kind {
+        match &self.items.get(def_id)?.kind {
             DefKind::Signal(s) => Some(s),
             _ => None,
         }
@@ -433,7 +433,7 @@ impl Definitions {
 
     /// Check if a definition is a signal (reactive property).
     pub fn is_signal(&self, def_id: DefId) -> bool {
-        matches!(&self.items[def_id].kind, DefKind::Signal(_))
+        self.items.get(def_id).is_some_and(|d| matches!(&d.kind, DefKind::Signal(_)))
     }
 
     /// Find field by name within a record.
@@ -523,7 +523,7 @@ impl Definitions {
 
     /// Get as a mutable element.
     pub fn as_element_mut(&mut self, def_id: DefId) -> Option<&mut ElementDef> {
-        match &mut self.items[def_id].kind {
+        match &mut self.items.get_mut(def_id)?.kind {
             DefKind::Element(e) => Some(e),
             _ => None,
         }
@@ -531,7 +531,7 @@ impl Definitions {
 
     /// Get as an import component.
     pub fn as_import_component(&self, def_id: DefId) -> Option<&ImportComponentDef> {
-        match &self.items[def_id].kind {
+        match &self.items.get(def_id)?.kind {
             DefKind::ImportComponent(c) => Some(c),
             _ => None,
         }
@@ -539,7 +539,7 @@ impl Definitions {
 
     /// Get as a mutable import component.
     pub fn as_import_component_mut(&mut self, def_id: DefId) -> Option<&mut ImportComponentDef> {
-        match &mut self.items[def_id].kind {
+        match &mut self.items.get_mut(def_id)?.kind {
             DefKind::ImportComponent(c) => Some(c),
             _ => None,
         }
@@ -567,7 +567,7 @@ impl Definitions {
 
     /// Get as a global.
     pub fn as_global(&self, def_id: DefId) -> Option<&GlobalDef> {
-        match &self.items[def_id].kind {
+        match &self.items.get(def_id)?.kind {
             DefKind::Global(g) => Some(g),
             _ => None,
         }
@@ -575,7 +575,7 @@ impl Definitions {
 
     /// Get as a mutable global.
     pub fn as_global_mut(&mut self, def_id: DefId) -> Option<&mut GlobalDef> {
-        match &mut self.items[def_id].kind {
+        match &mut self.items.get_mut(def_id)?.kind {
             DefKind::Global(g) => Some(g),
             _ => None,
         }

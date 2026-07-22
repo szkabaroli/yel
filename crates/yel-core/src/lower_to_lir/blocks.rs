@@ -793,9 +793,9 @@ impl<'a> BlockLowering<'a> {
     /// per-(boundary, signal) update-fn emission.
     ///
     /// Bindings whose `owning_boundary == TreeBoundaryId(u32::MAX)`
-    /// (the unresolved-derivation sentinel) are excluded; the count
-    /// is reported via `tracing::debug!` so we can see if any are
-    /// still unresolved.
+    /// (the unresolved-derivation sentinel — set by the
+    /// `.unwrap_or(TreeBoundaryId(u32::MAX))` fallbacks in the lowering)
+    /// are excluded from the dependency index.
     pub(crate) fn build_boundary_dep_index(
         &self,
         tree_shape: &ComponentTreeShape,
@@ -803,31 +803,16 @@ impl<'a> BlockLowering<'a> {
         let sentinel = TreeBoundaryId(u32::MAX);
         let mut idx = BoundaryDepIndex::default();
 
-        // Pass 1: fold each PendingBinding into boundary_deps.
-        // `sentinel_count` feeds a debug-only diagnostic (the
-        // `#[cfg(debug_assertions)]` eprintln below); make the whole counter
-        // debug-only so release doesn't warn about a write-only variable.
-        #[cfg(debug_assertions)]
-        let mut sentinel_count: u32 = 0;
+        // Pass 1: fold each PendingBinding into boundary_deps, skipping
+        // sentinel (unresolved) owning boundaries.
         for pb in &self.binding_collector {
             if pb.owning_boundary == sentinel {
-                #[cfg(debug_assertions)]
-                {
-                    sentinel_count += 1;
-                }
                 continue;
             }
             let entry = idx.boundary_deps.entry(pb.owning_boundary).or_default();
             for dep in &pb.dependencies {
                 entry.insert(*dep);
             }
-        }
-        #[cfg(debug_assertions)]
-        if sentinel_count > 0 {
-            eprintln!(
-                "build_boundary_dep_index: {} PendingBinding(s) skipped due to unresolved owning_boundary sentinel",
-                sentinel_count
-            );
         }
 
         // Compute children index in one O(n) pass from parent_link.
