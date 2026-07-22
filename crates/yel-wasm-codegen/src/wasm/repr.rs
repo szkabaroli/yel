@@ -403,6 +403,27 @@ impl WasmPackageBuilder<'_> {
         }
     }
 
+    /// A **lossy** nested collapsing-option: `option<T>` whose internal repr
+    /// collapses to a single nullable ref (`internal_repr` is `GcRef` /
+    /// `GcArrayRef`) but which `option_collapses_to_ref` does NOT recognise —
+    /// i.e. the inner `T` is itself a collapsing option. Then the outer `none`
+    /// (null) and `some(none)` (also null, the inner's own `none`) are
+    /// indistinguishable: three states, one nullable ref. This representation
+    /// silently loses `some(none)`. Codegen refuses to generate getters/setters
+    /// for such signals (a loud `CodegenError`) rather than round-trip a
+    /// corrupted value; the correct fix is a non-collapsing gc-variant repr
+    /// with an explicit discriminant (needs gc-variant composite payloads).
+    pub(crate) fn is_lossy_nested_collapsing_option(&self, ty: Ty) -> bool {
+        if !matches!(self.ctx.ty_kind(ty), InternedTyKind::Option(_)) {
+            return false;
+        }
+        let collapses = matches!(
+            self.internal_repr(ty),
+            InternalRepr::GcRef(_) | InternalRepr::GcArrayRef(_)
+        );
+        collapses && self.option_collapses_to_ref(ty).is_none()
+    }
+
     pub(crate) fn option_collapses_to_ref(&self, ty: Ty) -> Option<u32> {
         let inner = match self.ctx.ty_kind(ty) {
             InternedTyKind::Option(inner) => *inner,

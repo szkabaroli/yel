@@ -540,6 +540,19 @@ impl<'a> WasmPackageBuilder<'a> {
         sig_idx: usize,
         comp_idx: Option<usize>,
     ) -> Result<Function, CodegenError> {
+        // A lossy nested collapsing-option (option<option<record|tuple|list>>)
+        // collapses to a single nullable ref that cannot distinguish `none`
+        // from `some(none)`. Refuse loudly rather than emit a getter that
+        // round-trips a corrupted value (or the misleading "no materializer
+        // for GC list" the storage-field walk would otherwise raise).
+        if self.is_lossy_nested_collapsing_option(signal_ty) {
+            return Err(CodegenError::InvalidIR(format!(
+                "getter: {:?} is a nested collapsing option whose single-ref storage \
+                 loses `some(none)` vs `none`; a non-collapsing gc-variant repr (needs \
+                 gc-variant composite payloads) is required",
+                signal_ty
+            )));
+        }
         // GC-struct-migrated signal — return value is computed from
         // struct.get instead of memory.load. Single-slot canonical-ABI
         // returns push the value directly; multi-slot returns lift into a
@@ -721,6 +734,36 @@ impl<'a> WasmPackageBuilder<'a> {
                         scratch_ptr_local,
                     );
                 }
+                // Collapsed option (option<record|tuple|list>): storage is a
+                // single nullable ref, but the canonical shape is
+                // [disc, ...inner]. Handle BEFORE the generic single-slot
+                // direct return below, which would wrongly return the raw ref.
+                // An empty inner (e.g. `option<record {}>`) collapses to just
+                // [disc]: return `!ref.is_null` (some=1/none=0) by value.
+                // Otherwise lift disc+payload into a cabi_realloc scratch.
+                if matches!(self.ctx.ty_kind(signal_ty), InternedTyKind::Option(_))
+                    && self.option_collapses_to_ref(signal_ty).is_some()
+                {
+                    if flat_valtypes.len() == 1 {
+                        self.emit_self_ref(&mut func, ci)?;
+                        func.instruction(&Instruction::StructGet {
+                            struct_type_index: struct_ty,
+                            field_index: field_path[0],
+                        });
+                        func.instruction(&Instruction::RefIsNull);
+                        func.instruction(&Instruction::I32Eqz);
+                        return Ok(());
+                    }
+                    return self.emit_option_collapsed_ref_signal_lift(
+                        &mut func,
+                        ci,
+                        sig_idx,
+                        signal_ty,
+                        scratch_ptr_local,
+                        mat_ptr_local,
+                        mat_len_local,
+                    );
+                }
                 if flat_valtypes.len() == 1 {
                     // Single-slot: read field, return it directly.
                     self.emit_self_ref(&mut func, ci)?;
@@ -820,19 +863,6 @@ impl<'a> WasmPackageBuilder<'a> {
                 // [disc(i32), ...inner_canonical]. Dispatch to a
                 // dedicated lift that null-checks the ref, writes
                 // disc + payload accordingly.
-                if matches!(self.ctx.ty_kind(signal_ty), InternedTyKind::Option(_))
-                    && self.option_collapses_to_ref(signal_ty).is_some()
-                {
-                    return self.emit_option_collapsed_ref_signal_lift(
-                        &mut func,
-                        ci,
-                        sig_idx,
-                        signal_ty,
-                        scratch_ptr_local,
-                        mat_ptr_local,
-                        mat_len_local,
-                    );
-                }
 
                 // Multi-slot: allocate a per-call lift scratch via
                 // cabi_realloc(0, 0, align, size) sized to the signal
@@ -981,6 +1011,17 @@ impl<'a> WasmPackageBuilder<'a> {
         let signal_def_id = signal.def_id;
 
         let ty = signal.ty;
+
+        // Mirror the getter guard: a lossy nested collapsing-option cannot be
+        // stored without losing `some(none)` vs `none`. Refuse loudly.
+        if self.is_lossy_nested_collapsing_option(ty) {
+            return Err(CodegenError::InvalidIR(format!(
+                "setter: {:?} is a nested collapsing option whose single-ref storage \
+                 loses `some(none)` vs `none`; a non-collapsing gc-variant repr (needs \
+                 gc-variant composite payloads) is required",
+                ty
+            )));
+        }
 
         // Write each canonical-ABI flat param into its backing struct
         // field. The setter signature is `(self: i32, flat_0, flat_1, ...)`;
@@ -3240,11 +3281,12 @@ impl<'a> WasmPackageBuilder<'a> {
                 _ => unreachable!("option_collapses_to_ref non-option"),
             };
             let slots = self.flatten_core_slots(ty);
-            let payload_offset = slots.get(1).map(|s| s.offset).ok_or_else(|| {
-                CodegenError::InvalidIR(
-                    "member pack: collapsed option missing payload slot".into(),
-                )
-            })?;
+            // An empty inner (e.g. `option<record {}>`) flattens to just
+            // `[disc]` — there is no payload slot. `some` still builds the
+            // inner ref (an empty `struct.new`, reading no payload params /
+            // bytes), so a missing payload slot is fine: the dummy offset is
+            // never read. Non-empty inners have a real payload offset here.
+            let payload_offset = slots.get(1).map(|s| s.offset).unwrap_or(0);
             match source {
                 CanonicalSource::Params { first_param } => {
                     func.instruction(&Instruction::LocalGet(first_param));
