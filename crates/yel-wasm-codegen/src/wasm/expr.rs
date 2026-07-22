@@ -1820,7 +1820,6 @@ impl WasmPackageBuilder<'_> {
         field_ty: Ty,
         component: &LirResource,
     ) -> Result<usize, CodegenError> {
-        use super::gc_types::StructGetVariant;
         use yel_core::types::InternedTyKind;
 
         // Phase 5e.5 Stage 7a/7d: dispatch on parent kind.
@@ -1865,16 +1864,19 @@ impl WasmPackageBuilder<'_> {
                 ))
             })?;
 
-        let inner_canonical = self.flatten_core_valtypes(inner);
-        if inner_canonical.len() > 2 {
-            return Err(CodegenError::InvalidIR(format!(
-                "flat_gc field materialize: nested multi-slot option \
-                 payload not yet supported — inner ty={:?} has {} \
-                 canonical slots",
-                inner,
-                inner_canonical.len()
-            )));
-        }
+        // Canonical layout: [disc, joined_payload…]. The joined payload
+        // is what the `if`'s Some arm must produce (the None arm supplies
+        // all-zeros of the same width). Mirrors the `result<T,E>` field
+        // path (`emit_flat_gc_result_field_materialize`): compute the
+        // joined width from the field's canonical flattening (drop the
+        // leading discriminant), then materialize the case subtype's
+        // *internal* payload repr to canonical slots — a `string` payload
+        // is stored as a single `$str_bytes` ref that must be expanded to
+        // `(ptr, len)`, so the naive "first canonical slot" shortcut is
+        // wrong for anything wider than one slot.
+        let full_flat = self.flatten_core_valtypes(field_ty);
+        let payload_joined: Vec<wasm_encoder::ValType> =
+            full_flat.get(1..).unwrap_or(&[]).to_vec();
 
         // Slot 0: discriminant. Some=0, None=1 per YEL convention; null
         // ref → ref.test_non_null returns 0 → eqz returns 1 → None.
@@ -1888,75 +1890,100 @@ impl WasmPackageBuilder<'_> {
         ));
         func.instruction(&Instruction::I32Eqz);
 
-        // Single-slot scalar / typed payload: canonical len == 1.
-        let payload_valtype = inner_canonical.into_iter().next().ok_or_else(|| {
-            CodegenError::InvalidIR(
-                "flat_gc field materialize: empty inner canonical layout".into(),
-            )
-        })?;
-        self.emit_expr(func, base, component)?;
-        func.instruction(&Instruction::StructGet {
-            struct_type_index: parent_type_idx,
-            field_index: gc_field_idx,
-        });
-        func.instruction(&Instruction::RefTestNonNull(
-            wasm_encoder::HeapType::Concrete(case_some_idx),
-        ));
-        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(payload_valtype)));
-        self.emit_expr(func, base, component)?;
-        func.instruction(&Instruction::StructGet {
-            struct_type_index: parent_type_idx,
-            field_index: gc_field_idx,
-        });
-        func.instruction(&Instruction::RefCastNonNull(
-            wasm_encoder::HeapType::Concrete(case_some_idx),
-        ));
-        let getter = super::gc_types::struct_get_op_for_payload(self.ctx, inner);
-        match getter {
-            StructGetVariant::Plain => {
+        if payload_joined.len() <= 1 {
+            // ---- single-slot scalar / typed payload (byte-identical to
+            // the original scalar path: `option<s32>`, `option<bool>`,
+            // single-ref record). ----
+            if let Some(payload_valtype) = payload_joined.first().copied() {
+                self.emit_expr(func, base, component)?;
                 func.instruction(&Instruction::StructGet {
-                    struct_type_index: case_some_idx,
-                    field_index: 0,
+                    struct_type_index: parent_type_idx,
+                    field_index: gc_field_idx,
                 });
-            }
-            StructGetVariant::Signed => {
-                func.instruction(&Instruction::StructGetS {
-                    struct_type_index: case_some_idx,
-                    field_index: 0,
-                });
-            }
-            StructGetVariant::Unsigned => {
-                func.instruction(&Instruction::StructGetU {
-                    struct_type_index: case_some_idx,
-                    field_index: 0,
-                });
-            }
-        }
-        func.instruction(&Instruction::Else);
-        match payload_valtype {
-            wasm_encoder::ValType::I32 => {
-                func.instruction(&Instruction::I32Const(0));
-            }
-            wasm_encoder::ValType::I64 => {
-                func.instruction(&Instruction::I64Const(0));
-            }
-            wasm_encoder::ValType::F32 => {
-                func.instruction(&Instruction::F32Const(0.0_f32.into()));
-            }
-            wasm_encoder::ValType::F64 => {
-                func.instruction(&Instruction::F64Const(0.0_f64.into()));
-            }
-            other => {
-                return Err(CodegenError::InvalidIR(format!(
-                    "flat_gc field materialize: unsupported default \
-                     payload valtype {:?}",
-                    other
+                func.instruction(&Instruction::RefTestNonNull(
+                    wasm_encoder::HeapType::Concrete(case_some_idx),
+                ));
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
+                    payload_valtype,
                 )));
+                // Some arm.
+                self.emit_flat_gc_result_field_arm(
+                    func,
+                    base,
+                    parent_type_idx,
+                    gc_field_idx,
+                    case_some_idx,
+                    Some(inner),
+                    &payload_joined,
+                    component,
+                )?;
+                func.instruction(&Instruction::Else);
+                // None arm: all-zeros.
+                self.emit_flat_gc_result_field_arm(
+                    func,
+                    base,
+                    parent_type_idx,
+                    gc_field_idx,
+                    case_some_idx,
+                    None,
+                    &payload_joined,
+                    component,
+                )?;
+                func.instruction(&Instruction::End);
             }
+        } else {
+            // ---- multi-slot payload (e.g. `option<string>` → the Some
+            // arm expands the `$str_bytes` ref to `(ptr, len)`). One typed
+            // if/else produces the full joined payload width; both arms
+            // convert their internal repr to canonical slots and zero-pad
+            // the trailing positions. ----
+            let joined_type_idx =
+                *self.ternary_block_types.get(&payload_joined).ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "flat_gc option field materialize: no pre-registered \
+                         block type for joined payload shape {:?} (field \
+                         {:?}) — collect_ternary_block_shapes must register it",
+                        payload_joined, field_ty
+                    ))
+                })?;
+            self.emit_expr(func, base, component)?;
+            func.instruction(&Instruction::StructGet {
+                struct_type_index: parent_type_idx,
+                field_index: gc_field_idx,
+            });
+            func.instruction(&Instruction::RefTestNonNull(
+                wasm_encoder::HeapType::Concrete(case_some_idx),
+            ));
+            func.instruction(&Instruction::If(wasm_encoder::BlockType::FunctionType(
+                joined_type_idx,
+            )));
+            // Some arm.
+            self.emit_flat_gc_result_field_arm(
+                func,
+                base,
+                parent_type_idx,
+                gc_field_idx,
+                case_some_idx,
+                Some(inner),
+                &payload_joined,
+                component,
+            )?;
+            func.instruction(&Instruction::Else);
+            // None arm: all-zeros.
+            self.emit_flat_gc_result_field_arm(
+                func,
+                base,
+                parent_type_idx,
+                gc_field_idx,
+                case_some_idx,
+                None,
+                &payload_joined,
+                component,
+            )?;
+            func.instruction(&Instruction::End);
         }
-        func.instruction(&Instruction::End);
 
-        Ok(self.flatten_core_valtypes(field_ty).len())
+        Ok(full_flat.len())
     }
 
     /// Phase 5e.5 Stage 7d: materialize a `result<T, E>` FlatGcStruct

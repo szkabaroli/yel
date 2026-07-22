@@ -636,7 +636,10 @@ pub(super) fn collect_ternary_block_shapes(
         // `() -> (joined…)` function type for the block. Mirrors the
         // Ternary registration above.
         if let LirExprKind::Field { .. } = &e.kind
-            && matches!(builder.ctx.ty_kind(e.ty), InternedTyKind::Result { .. })
+            && matches!(
+                builder.ctx.ty_kind(e.ty),
+                InternedTyKind::Result { .. } | InternedTyKind::Option(_)
+            )
         {
             let full = builder.flatten_core_valtypes(e.ty);
             if full.len() >= 2 {
