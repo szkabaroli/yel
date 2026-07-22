@@ -1127,11 +1127,33 @@ impl<'ctx> TypeChecker<'ctx> {
                         expr.span,
                         ErrorCode::TypeMismatch,
                         format!(
-                            "mixed numeric types in binary `{:?}`: `{}` and `{}` \
+                            "mixed numeric types in binary `{}`: `{}` and `{}` \
                              have no implicit coercion — convert one side explicitly",
                             op,
                             self.type_to_string(lhs_thir.ty),
                             self.type_to_string(rhs_thir.ty),
+                        ),
+                    );
+                }
+
+                // Comparison operators only lower for scalar / enum operands.
+                // Reject `==` / `<` / … on GC composites (string, list, tuple,
+                // option, result, record, variant) at type-check time rather
+                // than miscompiling them into a scalar comparison of GC refs.
+                if op.is_comparison()
+                    && lhs_thir.ty != Ty::ERROR
+                    && rhs_thir.ty != Ty::ERROR
+                    && (self.is_noncomparable_composite(lhs_thir.ty)
+                        || self.is_noncomparable_composite(rhs_thir.ty))
+                {
+                    self.ctx.diagnostics.error(
+                        expr.span,
+                        ErrorCode::UncomparableType,
+                        format!(
+                            "the `{}` operator is not supported on type `{}` — \
+                             comparison requires a numeric, bool, char, or enum operand",
+                            op,
+                            self.type_to_string(lhs_thir.ty),
                         ),
                     );
                 }
@@ -2481,6 +2503,25 @@ impl<'ctx> TypeChecker<'ctx> {
 
     fn is_numeric_type(&self, ty: Ty) -> bool {
         self.is_integer_type(ty) || self.is_float_type(ty)
+    }
+
+    /// A composite/GC type that cannot be a comparison (`==`, `!=`, `<`, …)
+    /// operand: codegen lowers a comparison to a single scalar instruction
+    /// (`i32.eq`, `i64.lt_s`, …), which only works on numeric / bool / char /
+    /// enum values. `string` / `list` / `tuple` / `option` / `result` / record
+    /// / user-variant are GC refs (or multi-slot canonical values), so a
+    /// comparison on them can't lower — reject it here instead of emitting
+    /// type-incorrect WASM.
+    fn is_noncomparable_composite(&self, ty: Ty) -> bool {
+        use InternedTyKind::*;
+        match self.ctx.ty_kind(ty) {
+            String | List(_) | Tuple(_) | Option(_) | Result { .. } => true,
+            Adt(def_id) => matches!(
+                self.ctx.defs.kind(*def_id),
+                DefKind::Record(_) | DefKind::Variant(_)
+            ),
+            _ => false,
+        }
     }
 
     fn types_compatible(&self, actual: Ty, expected: Ty) -> bool {

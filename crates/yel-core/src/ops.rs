@@ -60,6 +60,35 @@ impl BinOp {
             _ => None,
         }
     }
+
+    /// The source-level operator symbol (inverse of [`BinOp::parse`]). Used in
+    /// diagnostics so users see `==` rather than the `Eq` variant name.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Mod => "%",
+            BinOp::Eq => "==",
+            BinOp::Ne => "!=",
+            BinOp::Lt => "<",
+            BinOp::Le => "<=",
+            BinOp::Gt => ">",
+            BinOp::Ge => ">=",
+            BinOp::And => "&&",
+            BinOp::Or => "||",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+        }
+    }
+}
+
+impl std::fmt::Display for BinOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.symbol())
+    }
 }
 
 /// Unary operators.
@@ -76,5 +105,19 @@ impl UnaryOp {
             "!" => Some(UnaryOp::Not),
             _ => None,
         }
+    }
+
+    /// The source-level operator symbol (inverse of [`UnaryOp::parse`]).
+    pub fn symbol(self) -> &'static str {
+        match self {
+            UnaryOp::Neg => "-",
+            UnaryOp::Not => "!",
+        }
+    }
+}
+
+impl std::fmt::Display for UnaryOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.symbol())
     }
 }

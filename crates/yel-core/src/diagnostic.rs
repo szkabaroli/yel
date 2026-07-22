@@ -32,6 +32,10 @@ pub enum ErrorCode {
     IntLiteralOutOfRange,
     /// An unknown unit suffix on a literal (e.g. `10xyz`).
     UnknownUnitSuffix,
+    /// A comparison operator (`==`, `<`, …) was applied to a type that does
+    /// not support comparison (a GC composite: string/list/tuple/option/
+    /// result/record/variant). Only scalars and enums are comparable.
+    UncomparableType,
 
     // — Name resolution —
     /// A name is defined more than once in the same scope.
@@ -88,6 +92,7 @@ impl ErrorCode {
             ErrorCode::CannotInferType => "E0002",
             ErrorCode::IntLiteralOutOfRange => "E0003",
             ErrorCode::UnknownUnitSuffix => "E0004",
+            ErrorCode::UncomparableType => "E0005",
             ErrorCode::DuplicateDefinition => "E0010",
             ErrorCode::UnresolvedName => "E0011",
             ErrorCode::NoSuchCase => "E0012",
