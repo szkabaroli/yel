@@ -12,6 +12,27 @@ use super::super::CodegenError;
 use super::super::FlatSlot;
 use super::super::WasmPackageBuilder;
 
+/// How the FlatGcStruct supertype ref that a lift reads from is reached on the
+/// stack. The composite payload-lift family (`emit_flat_gc_lift` and friends)
+/// re-emits this ref once per case in the `ref.test` cascade, so it must be
+/// side-effect-free and cheap to re-emit — both variants are.
+///
+/// - `SelfChain`: a signal / record-field lift walks `self` + a `struct.get`
+///   chain (`emit_gc_field_chain`).
+/// - `ArrayElem`: a `list<flat-gc>` materializer reads `arr[idx]`.
+#[derive(Clone, Copy)]
+enum FlatGcRefSource<'a> {
+    SelfChain {
+        ci: usize,
+        chain: &'a [(u32, u32)],
+    },
+    ArrayElem {
+        arr_local: u32,
+        idx_local: u32,
+        arr_type_idx: u32,
+    },
+}
+
 /// Phase 5e.5 Stage 7d: when canonical-ABI joined-flat slot type
 /// `vt_joined` differs from a case payload's actual valtype
 /// `vt_case`, emit the reinterpret bridge. Same-width int/float
@@ -2598,12 +2619,13 @@ impl<'a> WasmPackageBuilder<'a> {
     fn emit_flat_gc_payload_lift(
         &mut self,
         func: &mut Function,
-        ci: usize,
-        field_chain: &[(u32, u32)],
+        source: FlatGcRefSource,
         case_sub_idx: u32,
         payload_ty: Ty,
         canonical_slots: &[crate::wasm::FlatSlot],
         scratch_ptr_local: u32,
+        mat_ptr_local: u32,
+        mat_len_local: u32,
     ) -> Result<(), CodegenError> {
         use super::super::gc_types::StructGetVariant;
         use yel_core::types::InternedTyKind;
@@ -2646,12 +2668,8 @@ impl<'a> WasmPackageBuilder<'a> {
                     "FlatGcStruct payload lift (typed list): missing len slot".into(),
                 )
             })?;
-            // Pre-allocated scratch locals 3 (ptr) and 4 (len) in the
-            // getter's local space — see getter setup above.
-            let mat_ptr_local: u32 = 3;
-            let mat_len_local: u32 = 4;
             // Load case typed array ref, call materializer → (ptr, len).
-            self.emit_gc_field_chain(func, ci, field_chain)?;
+            self.emit_flat_gc_ref(func, source)?;
             func.instruction(&Instruction::RefCastNonNull(
                 wasm_encoder::HeapType::Concrete(case_sub_idx),
             ));
@@ -2703,9 +2721,7 @@ impl<'a> WasmPackageBuilder<'a> {
             let len_slot = canonical_slots.get(2).ok_or_else(|| {
                 CodegenError::InvalidIR("FlatGcStruct string payload lift: missing len slot".into())
             })?;
-            let mat_ptr_local: u32 = 3;
-            let mat_len_local: u32 = 4;
-            self.emit_gc_field_chain(func, ci, field_chain)?;
+            self.emit_flat_gc_ref(func, source)?;
             func.instruction(&Instruction::RefCastNonNull(
                 wasm_encoder::HeapType::Concrete(case_sub_idx),
             ));
@@ -2788,7 +2804,7 @@ impl<'a> WasmPackageBuilder<'a> {
                         ))
                     })?;
                 // Load inner ref: <signal>; ref.cast outer_case; struct.get 0
-                self.emit_gc_field_chain(func, ci, field_chain)?;
+                self.emit_flat_gc_ref(func, source)?;
                 func.instruction(&Instruction::RefCastNonNull(
                     wasm_encoder::HeapType::Concrete(case_sub_idx),
                 ));
@@ -2823,13 +2839,14 @@ impl<'a> WasmPackageBuilder<'a> {
                 {
                     self.emit_nested_flat_gc_inner_payload_lift(
                         func,
-                        ci,
-                        field_chain,
+                        source,
                         case_sub_idx,
                         inner_case_sub_idx,
                         inner_payload_ty,
                         canonical_slots,
                         scratch_ptr_local,
+                        mat_ptr_local,
+                        mat_len_local,
                     )?;
                 }
                 func.instruction(&Instruction::Br(1));
@@ -2867,7 +2884,7 @@ impl<'a> WasmPackageBuilder<'a> {
             func.instruction(&Instruction::I32Const(payload_slot.offset as i32));
             func.instruction(&Instruction::I32Add);
         }
-        self.emit_gc_field_chain(func, ci, field_chain)?;
+        self.emit_flat_gc_ref(func, source)?;
         func.instruction(&Instruction::RefCastNonNull(
             wasm_encoder::HeapType::Concrete(case_sub_idx),
         ));
@@ -3104,35 +3121,7 @@ impl<'a> WasmPackageBuilder<'a> {
             self.internal_repr(elem_ty),
             super::super::repr::InternalRepr::FlatGcStruct(_)
         ) {
-            let layout_info = self.layout_ctx.layout_of(elem_ty);
-            let elem_size = layout_info.size as i32;
-            let canonical_slots = self.flatten_core_slots(elem_ty);
-            let case_count = *self
-                .record_gc_types
-                .flat_gc_case_count
-                .get(&elem_ty)
-                .ok_or_else(|| {
-                    CodegenError::InvalidIR(format!(
-                        "list un-materializer (flat-gc): missing case count for {:?}",
-                        elem_ty
-                    ))
-                })?;
-            let super_idx = *self
-                .record_gc_types
-                .flat_gc_super_idx
-                .get(&elem_ty)
-                .ok_or_else(|| {
-                    CodegenError::InvalidIR(format!(
-                        "list un-materializer (flat-gc): missing super idx for {:?}",
-                        elem_ty
-                    ))
-                })?;
-            let _ = super_idx;
-            let disc_off = canonical_slots
-                .first()
-                .map(|s| s.offset as i32)
-                .unwrap_or(0);
-
+            let elem_size = self.layout_ctx.layout_of(elem_ty).size as i32;
             func.instruction(&Instruction::I32Const(0));
             func.instruction(&Instruction::LocalSet(idx_local));
             func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
@@ -3148,126 +3137,17 @@ impl<'a> WasmPackageBuilder<'a> {
             func.instruction(&Instruction::I32Mul);
             func.instruction(&Instruction::I32Add);
             func.instruction(&Instruction::LocalSet(elem_addr_local));
-            // disc = load8u(elem_addr + disc_off)
-            // arr.set(idx, <build case ref via cascade>)
+            // arr.set(idx, <build supertype ref from canonical bytes at elem_addr>)
+            // The one reach-generic pack (scalar / string / typed list / nested
+            // flat-gc) — the un-materializer twin of `emit_flat_gc_lift`.
             func.instruction(&Instruction::LocalGet(arr_local));
             func.instruction(&Instruction::LocalGet(idx_local));
-
-            // Build via chained-if cascade reading disc.
-            let result_ty = wasm_encoder::BlockType::Result(wasm_encoder::ValType::Ref(
-                wasm_encoder::RefType {
-                    nullable: true,
-                    heap_type: wasm_encoder::HeapType::Concrete(super_idx),
-                },
-            ));
-            let mut nesting: u32 = 0;
-            for k in 0..case_count {
-                let case_sub_idx = *self
-                    .record_gc_types
-                    .flat_gc_case_idx
-                    .get(&(elem_ty, k))
-                    .ok_or_else(|| {
-                        CodegenError::InvalidIR(format!(
-                            "list un-materializer (flat-gc): missing case_idx for ({:?}, {})",
-                            elem_ty, k
-                        ))
-                    })?;
-                // disc == k ?
-                func.instruction(&Instruction::LocalGet(elem_addr_local));
-                if disc_off != 0 {
-                    func.instruction(&Instruction::I32Const(disc_off));
-                    func.instruction(&Instruction::I32Add);
-                }
-                func.instruction(&Instruction::I32Load8U(super::scratch::mem_arg(0, 0)));
-                func.instruction(&Instruction::I32Const(self.flat_gc_wit_disc(elem_ty, k) as i32));
-                func.instruction(&Instruction::I32Eq);
-                func.instruction(&Instruction::If(result_ty));
-                // Build case k.
-                if let Some(payload_ty) =
-                    super::super::gc_types::case_payload_ty(self.ctx, elem_ty, k)
-                {
-                    let is_fat_box = matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-                        || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                            && !self
-                                .record_gc_types
-                                .list_array_type_idx
-                                .contains_key(&payload_ty));
-                    if is_fat_box {
-                        let str_bytes_unmat = if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-                        {
-                            self.record_gc_types.str_bytes_array_idx.and_then(|idx| {
-                                self.gc_list_unmaterializer_fn_indices.get(&idx).copied()
-                            })
-                        } else {
-                            None
-                        };
-                        let ptr_slot = canonical_slots.get(1).ok_or_else(|| {
-                            CodegenError::InvalidIR(
-                                "list un-materializer (flat-gc): missing ptr slot".into(),
-                            )
-                        })?;
-                        let len_slot = canonical_slots.get(2).ok_or_else(|| {
-                            CodegenError::InvalidIR(
-                                "list un-materializer (flat-gc): missing len slot".into(),
-                            )
-                        })?;
-                        // ptr
-                        func.instruction(&Instruction::LocalGet(elem_addr_local));
-                        if ptr_slot.offset != 0 {
-                            func.instruction(&Instruction::I32Const(ptr_slot.offset as i32));
-                            func.instruction(&Instruction::I32Add);
-                        }
-                        func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
-                        // len
-                        func.instruction(&Instruction::LocalGet(elem_addr_local));
-                        if len_slot.offset != 0 {
-                            func.instruction(&Instruction::I32Const(len_slot.offset as i32));
-                            func.instruction(&Instruction::I32Add);
-                        }
-                        func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
-                        let unmat_fn = str_bytes_unmat.expect(
-                            "list un-materializer (flat-gc): fat-box payload that is not a \
-                             $str_bytes string — every valid list is a typed GC array; \
-                             nothing boxes into $fat_value",
-                        );
-                        func.instruction(&Instruction::Call(unmat_fn));
-                        func.instruction(&Instruction::StructNew(case_sub_idx));
-                    } else {
-                        let payload_slot = canonical_slots.get(1).ok_or_else(|| {
-                            CodegenError::InvalidIR(
-                                "list un-materializer (flat-gc): missing payload slot".into(),
-                            )
-                        })?;
-                        func.instruction(&Instruction::LocalGet(elem_addr_local));
-                        if payload_slot.offset != 0 {
-                            func.instruction(&Instruction::I32Const(payload_slot.offset as i32));
-                            func.instruction(&Instruction::I32Add);
-                        }
-                        self.emit_typed_field_load(&mut func, payload_ty);
-                        func.instruction(&Instruction::StructNew(case_sub_idx));
-                    }
-                } else {
-                    func.instruction(&Instruction::StructNewDefault(case_sub_idx));
-                }
-                func.instruction(&Instruction::Else);
-                nesting += 1;
-            }
-            // Default: case 0.
-            let case0 = *self
-                .record_gc_types
-                .flat_gc_case_idx
-                .get(&(elem_ty, 0))
-                .ok_or_else(|| {
-                    CodegenError::InvalidIR(format!(
-                        "list un-materializer (flat-gc): missing case 0 for {:?}",
-                        elem_ty
-                    ))
-                })?;
-            func.instruction(&Instruction::StructNewDefault(case0));
-            for _ in 0..nesting {
-                func.instruction(&Instruction::End);
-            }
-            // Stack: arr_ref, idx, case_ref → array.set
+            self.emit_pack_canonical_to_flat_gc_from_memory(
+                &mut func,
+                elem_ty,
+                elem_addr_local,
+                0,
+            )?;
             func.instruction(&Instruction::ArraySet(arr_type_idx));
             // idx++
             func.instruction(&Instruction::LocalGet(idx_local));
@@ -4473,11 +4353,6 @@ impl<'a> WasmPackageBuilder<'a> {
         arr_type_idx: u32,
         elem_ty: yel_core::Ty,
     ) -> Result<Function, CodegenError> {
-        use super::super::gc_types::{
-            StructGetVariant, case_payload_ty, struct_get_op_for_payload,
-        };
-        use yel_core::types::InternedTyKind;
-
         let cabi_realloc = self
             .alloc_funcs
             .as_ref()
@@ -4490,17 +4365,6 @@ impl<'a> WasmPackageBuilder<'a> {
         let layout_info = self.layout_ctx.layout_of(elem_ty);
         let elem_size = layout_info.size;
         let elem_align = layout_info.align;
-        let canonical_slots = self.flatten_core_slots(elem_ty);
-        let case_count = *self
-            .record_gc_types
-            .flat_gc_case_count
-            .get(&elem_ty)
-            .ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "list materializer (flat-gc): missing case count for {:?}",
-                    elem_ty
-                ))
-            })?;
 
         let arr_ref_valtype = wasm_encoder::ValType::Ref(wasm_encoder::RefType {
             nullable: true,
@@ -4547,140 +4411,25 @@ impl<'a> WasmPackageBuilder<'a> {
         func.instruction(&Instruction::I32Add);
         func.instruction(&Instruction::LocalSet(elem_addr_local));
 
-        // Per-case ref.test cascade. Outer block lets a matching arm
-        // skip the rest + the fall-through default.
-        func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
-        for k in 0..case_count {
-            let case_sub_idx = *self
-                .record_gc_types
-                .flat_gc_case_idx
-                .get(&(elem_ty, k))
-                .ok_or_else(|| {
-                    CodegenError::InvalidIR(format!(
-                        "list materializer (flat-gc): missing case_idx for ({:?}, {})",
-                        elem_ty, k
-                    ))
-                })?;
-            // arr.get(idx); ref.test $case_sub
-            func.instruction(&Instruction::LocalGet(arr_local));
-            func.instruction(&Instruction::LocalGet(idx_local));
-            func.instruction(&Instruction::ArrayGet(arr_type_idx));
-            func.instruction(&Instruction::RefTestNonNull(
-                wasm_encoder::HeapType::Concrete(case_sub_idx),
-            ));
-            func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
-            // disc = k at elem_addr + canonical_slots[0].offset
-            let disc_off = canonical_slots.first().map(|s| s.offset).unwrap_or(0) as i32;
-            func.instruction(&Instruction::LocalGet(elem_addr_local));
-            if disc_off != 0 {
-                func.instruction(&Instruction::I32Const(disc_off));
-                func.instruction(&Instruction::I32Add);
-            }
-            func.instruction(&Instruction::I32Const(self.flat_gc_wit_disc(elem_ty, k) as i32));
-            func.instruction(&Instruction::I32Store8(super::scratch::mem_arg(0, 0)));
-            // Payload write.
-            if let Some(payload_ty) = case_payload_ty(self.ctx, elem_ty, k) {
-                // strings-to-GC: string payload field is a $str_bytes ref —
-                // materialize once to (ptr, len) and store both canonical slots.
-                if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-                {
-                    let arr_idx = self.record_gc_types.str_bytes_array_idx.ok_or_else(|| {
-                        CodegenError::InvalidIR("list mat (flat-gc) string: $str_bytes missing".into())
-                    })?;
-                    let str_mat_fn = *self
-                        .gc_list_materializer_fn_indices
-                        .get(&arr_idx)
-                        .ok_or_else(|| {
-                            CodegenError::InvalidIR("list mat (flat-gc) string: missing mat".into())
-                        })?;
-                    let ptr_slot = *canonical_slots.get(1).ok_or_else(|| {
-                        CodegenError::InvalidIR("list mat (flat-gc) string: missing ptr slot".into())
-                    })?;
-                    let len_slot = *canonical_slots.get(2).ok_or_else(|| {
-                        CodegenError::InvalidIR("list mat (flat-gc) string: missing len slot".into())
-                    })?;
-                    func.instruction(&Instruction::LocalGet(arr_local));
-                    func.instruction(&Instruction::LocalGet(idx_local));
-                    func.instruction(&Instruction::ArrayGet(arr_type_idx));
-                    func.instruction(&Instruction::RefCastNonNull(
-                        wasm_encoder::HeapType::Concrete(case_sub_idx),
-                    ));
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: case_sub_idx,
-                        field_index: 0,
-                    });
-                    func.instruction(&Instruction::Call(str_mat_fn));
-                    func.instruction(&Instruction::LocalSet(mat_len_local));
-                    func.instruction(&Instruction::LocalSet(mat_ptr_local));
-                    func.instruction(&Instruction::LocalGet(elem_addr_local));
-                    if ptr_slot.offset != 0 {
-                        func.instruction(&Instruction::I32Const(ptr_slot.offset as i32));
-                        func.instruction(&Instruction::I32Add);
-                    }
-                    func.instruction(&Instruction::LocalGet(mat_ptr_local));
-                    func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
-                    func.instruction(&Instruction::LocalGet(elem_addr_local));
-                    if len_slot.offset != 0 {
-                        func.instruction(&Instruction::I32Const(len_slot.offset as i32));
-                        func.instruction(&Instruction::I32Add);
-                    }
-                    func.instruction(&Instruction::LocalGet(mat_len_local));
-                    func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
-                } else {
-                    // Scalar payload — single canonical slot.
-                    let payload_slot = canonical_slots.get(1).ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "list materializer (flat-gc): missing payload slot".into(),
-                        )
-                    })?;
-                    func.instruction(&Instruction::LocalGet(elem_addr_local));
-                    if payload_slot.offset != 0 {
-                        func.instruction(&Instruction::I32Const(payload_slot.offset as i32));
-                        func.instruction(&Instruction::I32Add);
-                    }
-                    func.instruction(&Instruction::LocalGet(arr_local));
-                    func.instruction(&Instruction::LocalGet(idx_local));
-                    func.instruction(&Instruction::ArrayGet(arr_type_idx));
-                    func.instruction(&Instruction::RefCastNonNull(
-                        wasm_encoder::HeapType::Concrete(case_sub_idx),
-                    ));
-                    let getter = struct_get_op_for_payload(self.ctx, payload_ty);
-                    match getter {
-                        StructGetVariant::Plain => {
-                            func.instruction(&Instruction::StructGet {
-                                struct_type_index: case_sub_idx,
-                                field_index: 0,
-                            });
-                        }
-                        StructGetVariant::Signed => {
-                            func.instruction(&Instruction::StructGetS {
-                                struct_type_index: case_sub_idx,
-                                field_index: 0,
-                            });
-                        }
-                        StructGetVariant::Unsigned => {
-                            func.instruction(&Instruction::StructGetU {
-                                struct_type_index: case_sub_idx,
-                                field_index: 0,
-                            });
-                        }
-                    }
-                    self.emit_typed_field_store(&mut func, payload_ty);
-                }
-            }
-            func.instruction(&Instruction::Br(1));
-            func.instruction(&Instruction::End);
-        }
-        // Default (null ref): disc = 0.
-        let disc_off = canonical_slots.first().map(|s| s.offset).unwrap_or(0) as i32;
-        func.instruction(&Instruction::LocalGet(elem_addr_local));
-        if disc_off != 0 {
-            func.instruction(&Instruction::I32Const(disc_off));
-            func.instruction(&Instruction::I32Add);
-        }
-        func.instruction(&Instruction::I32Const(0));
-        func.instruction(&Instruction::I32Store8(super::scratch::mem_arg(0, 0)));
-        func.instruction(&Instruction::End); // outer per-elem block
+        // Per-element lift: reach the element via `arr[idx]` and lift its
+        // active case's disc + payload into canonical memory at `elem_addr`.
+        // Shares the reach-generic FlatGcStruct lift with the signal /
+        // record-field getters, so composite payloads (string / nested
+        // option / result / typed list) all round-trip — not just the
+        // scalar + string cases the old inline cascade handled.
+        self.emit_flat_gc_lift(
+            &mut func,
+            FlatGcRefSource::ArrayElem {
+                arr_local,
+                idx_local,
+                arr_type_idx,
+            },
+            elem_ty,
+            0,
+            elem_addr_local,
+            mat_ptr_local,
+            mat_len_local,
+        )?;
 
         // idx++
         func.instruction(&Instruction::LocalGet(idx_local));
@@ -4728,36 +4477,65 @@ impl<'a> WasmPackageBuilder<'a> {
         abs_field_offset: u32,
         scratch_ptr_local: u32,
     ) -> Result<(), CodegenError> {
-        use super::scratch::mem_arg;
-        let canonical_slots = self.flatten_core_slots(field_ty);
-        let disc_offset = canonical_slots.first().map(|s| s.offset).ok_or_else(|| {
-            CodegenError::InvalidIR(format!(
-                "FlatGcStruct DTR field lift: empty canonical layout for {:?}",
-                field_ty
-            ))
-        })?;
-        let case_count = *self
-            .record_gc_types
-            .flat_gc_case_count
-            .get(&field_ty)
-            .ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "FlatGcStruct DTR field lift: missing case count for {:?}",
-                    field_ty
-                ))
-            })?;
-
-        // Re-emits `<self>.<prefix>.struct.get $rec field` (leaves a
-        // (ref null $<sup>) on the stack) across multiple ref.tests — the
-        // shared `emit_gc_field_chain` on the full path to this field.
+        // Reach the field's FlatGcStruct supertype ref via the full
+        // `<self>.<prefix>.struct.get $rec field` chain, then lift generically.
+        // The signal/DTR getter reserves scratch locals 3 (ptr) and 4 (len)
+        // for inner materializer returns — see the getter setup.
         let field_chain: Vec<(u32, u32)> = prefix
             .iter()
             .copied()
             .chain(std::iter::once((record_type_idx, gc_field_idx)))
             .collect();
-        let emit_field_ref = |this: &Self, func: &mut Function| -> Result<(), CodegenError> {
-            this.emit_gc_field_chain(func, ci, &field_chain)
-        };
+        self.emit_flat_gc_lift(
+            func,
+            FlatGcRefSource::SelfChain {
+                ci,
+                chain: &field_chain,
+            },
+            field_ty,
+            abs_field_offset,
+            scratch_ptr_local,
+            3,
+            4,
+        )
+    }
+
+    /// Reach-generic FlatGcStruct lift: dispatch on the value's active case via
+    /// a `ref.test` cascade and write the canonical-ABI discriminant + payload
+    /// bytes at `scratch_ptr_local + base_offset + slot.offset`. The outer ref
+    /// is reached through `source` (self-chain field or list array element), so
+    /// this one body serves both the signal / record-field getters and the
+    /// `list<flat-gc>` materializer. `mat_ptr_local` / `mat_len_local` are
+    /// caller-reserved scratch i32s for inner string / list materializer
+    /// returns.
+    fn emit_flat_gc_lift(
+        &mut self,
+        func: &mut Function,
+        source: FlatGcRefSource,
+        flat_gc_ty: Ty,
+        base_offset: u32,
+        scratch_ptr_local: u32,
+        mat_ptr_local: u32,
+        mat_len_local: u32,
+    ) -> Result<(), CodegenError> {
+        use super::scratch::mem_arg;
+        let canonical_slots = self.flatten_core_slots(flat_gc_ty);
+        let disc_offset = canonical_slots.first().map(|s| s.offset).ok_or_else(|| {
+            CodegenError::InvalidIR(format!(
+                "FlatGcStruct lift: empty canonical layout for {:?}",
+                flat_gc_ty
+            ))
+        })?;
+        let case_count = *self
+            .record_gc_types
+            .flat_gc_case_count
+            .get(&flat_gc_ty)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "FlatGcStruct lift: missing case count for {:?}",
+                    flat_gc_ty
+                ))
+            })?;
 
         // Outer block lets a matching case skip remaining tests +
         // fall-through default.
@@ -4767,15 +4545,15 @@ impl<'a> WasmPackageBuilder<'a> {
             let case_sub_idx = *self
                 .record_gc_types
                 .flat_gc_case_idx
-                .get(&(field_ty, k))
+                .get(&(flat_gc_ty, k))
                 .ok_or_else(|| {
                     CodegenError::InvalidIR(format!(
-                        "FlatGcStruct DTR field lift: missing case_idx for ({:?}, {})",
-                        field_ty, k
+                        "FlatGcStruct lift: missing case_idx for ({:?}, {})",
+                        flat_gc_ty, k
                     ))
                 })?;
 
-            emit_field_ref(self, func)?;
+            self.emit_flat_gc_ref(func, source)?;
             func.instruction(&Instruction::RefTestNonNull(
                 wasm_encoder::HeapType::Concrete(case_sub_idx),
             ));
@@ -4783,35 +4561,37 @@ impl<'a> WasmPackageBuilder<'a> {
 
             // disc = k
             func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-            let disc_abs = abs_field_offset + disc_offset;
+            let disc_abs = base_offset + disc_offset;
             if disc_abs != 0 {
                 func.instruction(&Instruction::I32Const(disc_abs as i32));
                 func.instruction(&Instruction::I32Add);
             }
-            func.instruction(&Instruction::I32Const(self.flat_gc_wit_disc(field_ty, k) as i32));
+            func.instruction(&Instruction::I32Const(self.flat_gc_wit_disc(flat_gc_ty, k) as i32));
             func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
 
-            if let Some(payload_ty) = super::super::gc_types::case_payload_ty(self.ctx, field_ty, k)
+            if let Some(payload_ty) =
+                super::super::gc_types::case_payload_ty(self.ctx, flat_gc_ty, k)
             {
                 // Delegate to the one reach-generic payload lift (scalar /
-                // string / list / nested flat-gc). The field's canonical slots
-                // carry field-relative offsets, so shift them by
-                // `abs_field_offset` to absolute before handing them over.
+                // string / list / nested flat-gc). The value's canonical slots
+                // carry value-relative offsets, so shift them by `base_offset`
+                // to absolute before handing them over.
                 let abs_slots: Vec<crate::wasm::FlatSlot> = canonical_slots
                     .iter()
                     .map(|s| crate::wasm::FlatSlot {
-                        offset: abs_field_offset + s.offset,
+                        offset: base_offset + s.offset,
                         ..*s
                     })
                     .collect();
                 self.emit_flat_gc_payload_lift(
                     func,
-                    ci,
-                    &field_chain,
+                    source,
                     case_sub_idx,
                     payload_ty,
                     &abs_slots,
                     scratch_ptr_local,
+                    mat_ptr_local,
+                    mat_len_local,
                 )?;
             }
 
@@ -4821,7 +4601,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Default: write disc=0 (legacy zero-byte parity).
         func.instruction(&Instruction::LocalGet(scratch_ptr_local));
-        let disc_abs = abs_field_offset + disc_offset;
+        let disc_abs = base_offset + disc_offset;
         if disc_abs != 0 {
             func.instruction(&Instruction::I32Const(disc_abs as i32));
             func.instruction(&Instruction::I32Add);
@@ -4857,6 +4637,29 @@ impl<'a> WasmPackageBuilder<'a> {
             });
         }
         Ok(())
+    }
+
+    /// Push the FlatGcStruct supertype ref described by `source` onto the
+    /// stack — the reach-generic entry the composite payload lift re-emits per
+    /// case. See [`FlatGcRefSource`].
+    fn emit_flat_gc_ref(
+        &self,
+        func: &mut Function,
+        source: FlatGcRefSource,
+    ) -> Result<(), CodegenError> {
+        match source {
+            FlatGcRefSource::SelfChain { ci, chain } => self.emit_gc_field_chain(func, ci, chain),
+            FlatGcRefSource::ArrayElem {
+                arr_local,
+                idx_local,
+                arr_type_idx,
+            } => {
+                func.instruction(&Instruction::LocalGet(arr_local));
+                func.instruction(&Instruction::LocalGet(idx_local));
+                func.instruction(&Instruction::ArrayGet(arr_type_idx));
+                Ok(())
+            }
+        }
     }
 
     fn emit_getter_lift_dtr_record(
@@ -5763,13 +5566,14 @@ impl<'a> WasmPackageBuilder<'a> {
     fn emit_nested_flat_gc_inner_payload_lift(
         &mut self,
         func: &mut Function,
-        ci: usize,
-        field_chain: &[(u32, u32)],
+        source: FlatGcRefSource,
         outer_case_sub_idx: u32,
         inner_case_sub_idx: u32,
         inner_payload_ty: Ty,
         canonical_slots: &[crate::wasm::FlatSlot],
         scratch_ptr_local: u32,
+        mat_ptr_local: u32,
+        mat_len_local: u32,
     ) -> Result<(), CodegenError> {
         use super::super::gc_types::StructGetVariant;
         use yel_core::types::InternedTyKind;
@@ -5797,9 +5601,7 @@ impl<'a> WasmPackageBuilder<'a> {
             let len_slot = *canonical_slots.get(3).ok_or_else(|| {
                 CodegenError::InvalidIR("nested string lift: missing len slot".into())
             })?;
-            let mat_ptr_local = scratch_ptr_local + 1;
-            let mat_len_local = scratch_ptr_local + 2;
-            self.emit_gc_field_chain(func, ci, field_chain)?;
+            self.emit_flat_gc_ref(func, source)?;
             func.instruction(&Instruction::RefCastNonNull(
                 wasm_encoder::HeapType::Concrete(outer_case_sub_idx),
             ));
@@ -5847,7 +5649,7 @@ impl<'a> WasmPackageBuilder<'a> {
             ));
             func.instruction(&Instruction::I32Add);
         }
-        self.emit_gc_field_chain(func, ci, field_chain)?;
+        self.emit_flat_gc_ref(func, source)?;
         func.instruction(&Instruction::RefCastNonNull(
             wasm_encoder::HeapType::Concrete(outer_case_sub_idx),
         ));
@@ -6016,6 +5818,189 @@ impl<'a> WasmPackageBuilder<'a> {
             .ok_or_else(|| {
                 CodegenError::InvalidIR(format!(
                     "pack canonical→flat-gc: missing case_idx for ({:?}, 0)",
+                    ty
+                ))
+            })?;
+        func.instruction(&Instruction::StructNewDefault(case0_sub_idx));
+        for _ in 0..nesting {
+            func.instruction(&Instruction::End);
+        }
+        Ok(())
+    }
+
+    /// Memory-sourced twin of [`Self::emit_pack_canonical_to_flat_gc`]: build a
+    /// `(ref null $sup)` from canonical-ABI bytes living in linear memory at
+    /// `addr_local + base_offset + slot.offset` (rather than from flattened
+    /// params). Used by the `list<flat-gc>` un-materializer, where each element's
+    /// canonical record sits at `elem_addr`. Handles scalar / string / typed-list
+    /// payloads and recurses on a nested FlatGcStruct payload — the pack-side
+    /// mirror of `emit_flat_gc_lift`'s composite coverage.
+    ///
+    /// Each case reads its payload at its own natural width (the memory layout
+    /// stores every case's payload at the shared aligned offset with that
+    /// case's size — unlike the flattened param path, no `join` reinterpret is
+    /// needed).
+    fn emit_pack_canonical_to_flat_gc_from_memory(
+        &mut self,
+        func: &mut Function,
+        ty: Ty,
+        addr_local: u32,
+        base_offset: u32,
+    ) -> Result<(), CodegenError> {
+        use yel_core::types::InternedTyKind;
+        let slots = self.flatten_core_slots(ty);
+        let disc_off = slots.first().map(|s| s.offset).unwrap_or(0);
+        let case_count = *self
+            .record_gc_types
+            .flat_gc_case_count
+            .get(&ty)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "pack canonical(mem)→flat-gc: missing case count for {:?}",
+                    ty
+                ))
+            })?;
+        let super_idx = *self
+            .record_gc_types
+            .flat_gc_super_idx
+            .get(&ty)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "pack canonical(mem)→flat-gc: missing super idx for {:?}",
+                    ty
+                ))
+            })?;
+        let result_ty =
+            wasm_encoder::BlockType::Result(wasm_encoder::ValType::Ref(wasm_encoder::RefType {
+                nullable: true,
+                heap_type: wasm_encoder::HeapType::Concrete(super_idx),
+            }));
+
+        let mut nesting: u32 = 0;
+        for k in 0..case_count {
+            let case_sub_idx = *self
+                .record_gc_types
+                .flat_gc_case_idx
+                .get(&(ty, k))
+                .ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "pack canonical(mem)→flat-gc: missing case_idx for ({:?}, {})",
+                        ty, k
+                    ))
+                })?;
+            // disc == wit_disc(k) ?  (load8u at addr + base_offset + disc_off)
+            func.instruction(&Instruction::LocalGet(addr_local));
+            let disc_abs = base_offset + disc_off;
+            if disc_abs != 0 {
+                func.instruction(&Instruction::I32Const(disc_abs as i32));
+                func.instruction(&Instruction::I32Add);
+            }
+            func.instruction(&Instruction::I32Load8U(super::scratch::mem_arg(0, 0)));
+            func.instruction(&Instruction::I32Const(self.flat_gc_wit_disc(ty, k) as i32));
+            func.instruction(&Instruction::I32Eq);
+            func.instruction(&Instruction::If(result_ty));
+            if let Some(payload_ty) = super::super::gc_types::case_payload_ty(self.ctx, ty, k) {
+                if matches!(
+                    self.internal_repr(payload_ty),
+                    super::super::repr::InternalRepr::FlatGcStruct(_)
+                ) {
+                    // Nested flat-gc payload: recurse, its canonical record
+                    // sits at the outer payload region (slot[1]).
+                    let inner_off = slots
+                        .get(1)
+                        .map(|s| s.offset)
+                        .ok_or_else(|| {
+                            CodegenError::InvalidIR(
+                                "pack canonical(mem)→flat-gc: missing inner slot".into(),
+                            )
+                        })?;
+                    self.emit_pack_canonical_to_flat_gc_from_memory(
+                        func,
+                        payload_ty,
+                        addr_local,
+                        base_offset + inner_off,
+                    )?;
+                    func.instruction(&Instruction::StructNew(case_sub_idx));
+                } else if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
+                    || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
+                        && self
+                            .record_gc_types
+                            .list_array_type_idx
+                            .contains_key(&payload_ty))
+                {
+                    // string / typed-list payload: load (ptr, len) at slots
+                    // [1],[2] and rebuild the GC ref via its un-materializer.
+                    let arr_idx = if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
+                    {
+                        self.record_gc_types.str_bytes_array_idx
+                    } else {
+                        self.record_gc_types.list_array_type_idx.get(&payload_ty).copied()
+                    }
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR(
+                            "pack canonical(mem)→flat-gc: missing array idx for ptr/len payload"
+                                .into(),
+                        )
+                    })?;
+                    let unmat_fn = *self
+                        .gc_list_unmaterializer_fn_indices
+                        .get(&arr_idx)
+                        .ok_or_else(|| {
+                            CodegenError::InvalidIR(
+                                "pack canonical(mem)→flat-gc: missing un-materializer".into(),
+                            )
+                        })?;
+                    let ptr_slot = slots.get(1).ok_or_else(|| {
+                        CodegenError::InvalidIR("pack canonical(mem)→flat-gc: missing ptr slot".into())
+                    })?;
+                    let len_slot = slots.get(2).ok_or_else(|| {
+                        CodegenError::InvalidIR("pack canonical(mem)→flat-gc: missing len slot".into())
+                    })?;
+                    func.instruction(&Instruction::LocalGet(addr_local));
+                    let ptr_abs = base_offset + ptr_slot.offset;
+                    if ptr_abs != 0 {
+                        func.instruction(&Instruction::I32Const(ptr_abs as i32));
+                        func.instruction(&Instruction::I32Add);
+                    }
+                    func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
+                    func.instruction(&Instruction::LocalGet(addr_local));
+                    let len_abs = base_offset + len_slot.offset;
+                    if len_abs != 0 {
+                        func.instruction(&Instruction::I32Const(len_abs as i32));
+                        func.instruction(&Instruction::I32Add);
+                    }
+                    func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
+                    func.instruction(&Instruction::Call(unmat_fn));
+                    func.instruction(&Instruction::StructNew(case_sub_idx));
+                } else {
+                    // Scalar payload: typed load at slot[1], case-natural width.
+                    let payload_slot = slots.get(1).ok_or_else(|| {
+                        CodegenError::InvalidIR(
+                            "pack canonical(mem)→flat-gc: missing payload slot".into(),
+                        )
+                    })?;
+                    func.instruction(&Instruction::LocalGet(addr_local));
+                    let payload_abs = base_offset + payload_slot.offset;
+                    if payload_abs != 0 {
+                        func.instruction(&Instruction::I32Const(payload_abs as i32));
+                        func.instruction(&Instruction::I32Add);
+                    }
+                    self.emit_typed_field_load(func, payload_ty);
+                    func.instruction(&Instruction::StructNew(case_sub_idx));
+                }
+            } else {
+                func.instruction(&Instruction::StructNewDefault(case_sub_idx));
+            }
+            func.instruction(&Instruction::Else);
+            nesting += 1;
+        }
+        let case0_sub_idx = *self
+            .record_gc_types
+            .flat_gc_case_idx
+            .get(&(ty, 0))
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "pack canonical(mem)→flat-gc: missing case_idx for ({:?}, 0)",
                     ty
                 ))
             })?;
@@ -6862,17 +6847,19 @@ fn gc_list_elem_canonical_info(
                 (4, 4)
             }
         }
-        // A tuple element uses its canonical-ABI memory layout size/align
-        // (same treatment as records) — the list buffer stride must be the
-        // full tuple width, not the 4-byte scalar fallback.
-        InternedTyKind::Tuple(_) => {
-            let l = layout_ctx.layout_of(elem_ty);
-            (l.size, l.align)
-        }
         // Phase 5e.2: lists (and strings) at canonical ABI are
         // 8 bytes (ptr i32 + len i32), align 4.
         InternedTyKind::List(_) | InternedTyKind::String => (8, 4),
-        _ => (4, 4),
+        // Every other element (tuple, option/result/variant flat-gc, enum, …)
+        // uses its canonical-ABI memory layout size/align — the list buffer
+        // stride must be the full element width, not the 4-byte scalar
+        // fallback. A wrong stride here silently corrupts the post-return
+        // dealloc walk (`emit_free_region`), which frees garbage pointers and
+        // hangs `$free`.
+        _ => {
+            let l = layout_ctx.layout_of(elem_ty);
+            (l.size, l.align)
+        }
     }
 }
 

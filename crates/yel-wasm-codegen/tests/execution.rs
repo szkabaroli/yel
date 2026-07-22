@@ -4541,6 +4541,129 @@ fn option_tuple_collapse_roundtrip() {
     }
 }
 
+/// Boundary round-trip for a `list<flat-gc-with-composite-payload>` signal:
+/// `list<result<option<string>, string>>` and `list<option<result<s32,
+/// string>>>`. Each element is a FlatGcStruct whose active case's payload is
+/// itself a composite (a nested flat-gc / string). The list materializer routes
+/// the per-element lift through `emit_flat_gc_lift` and the un-materializer
+/// through `emit_pack_canonical_to_flat_gc_from_memory`, so composite payloads
+/// serialise/rebuild correctly — previously the inline copy loops handled only
+/// scalar + string payloads (`i32.store` of a ref / `struct.new` of an i32).
+#[test]
+fn list_of_flat_gc_composite_payload_roundtrip() {
+    let source = r#"
+        package yel:listfgc@0.1.0;
+        export component App {
+            ros: list<result<option<string>, string>> = [err("x")];
+            ors: list<option<result<s32, string>>> = [some(ok(1))];
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:listfgc/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+
+    // ros := [Ok(Some("hi")), Ok(None), Err("bad")]
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "ros",
+        &r,
+        Val::List(vec![
+            Val::Result(Ok(Some(Box::new(Val::Option(Some(Box::new(Val::String(
+                "hi".into(),
+            )))))))),
+            Val::Result(Ok(Some(Box::new(Val::Option(None))))),
+            Val::Result(Err(Some(Box::new(Val::String("bad".into()))))),
+        ]),
+    );
+    let get_ros = get_func(&mut h, iface, "[method]app.get-ros");
+    let mut out = [Val::Bool(false)];
+    get_ros
+        .call(&mut h.store, &[Val::Resource(r)], &mut out)
+        .expect("get-ros");
+    match &out[0] {
+        Val::List(e) => {
+            assert_eq!(e.len(), 3, "ros len");
+            match &e[0] {
+                Val::Result(Ok(Some(inner))) => match &**inner {
+                    Val::Option(Some(s)) => match &**s {
+                        Val::String(g) => assert_eq!(&**g, "hi"),
+                        o => panic!("ros[0] inner string {:?}", o),
+                    },
+                    o => panic!("ros[0] inner option {:?}", o),
+                },
+                o => panic!("ros[0] {:?}", o),
+            }
+            match &e[1] {
+                Val::Result(Ok(Some(inner))) => match &**inner {
+                    Val::Option(None) => {}
+                    o => panic!("ros[1] inner should be None, {:?}", o),
+                },
+                o => panic!("ros[1] {:?}", o),
+            }
+            match &e[2] {
+                Val::Result(Err(Some(s))) => match &**s {
+                    Val::String(g) => assert_eq!(&**g, "bad"),
+                    o => panic!("ros[2] err string {:?}", o),
+                },
+                o => panic!("ros[2] {:?}", o),
+            }
+        }
+        o => panic!("get-ros non-list {:?}", o),
+    }
+
+    // ors := [Some(Ok(42)), Some(Err("no")), None]
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "ors",
+        &r,
+        Val::List(vec![
+            Val::Option(Some(Box::new(Val::Result(Ok(Some(Box::new(Val::S32(42)))))))),
+            Val::Option(Some(Box::new(Val::Result(Err(Some(Box::new(Val::String(
+                "no".into(),
+            )))))))),
+            Val::Option(None),
+        ]),
+    );
+    let get_ors = get_func(&mut h, iface, "[method]app.get-ors");
+    let mut out = [Val::Bool(false)];
+    get_ors
+        .call(&mut h.store, &[Val::Resource(r)], &mut out)
+        .expect("get-ors");
+    match &out[0] {
+        Val::List(e) => {
+            assert_eq!(e.len(), 3, "ors len");
+            match &e[0] {
+                Val::Option(Some(inner)) => match &**inner {
+                    Val::Result(Ok(Some(v))) => assert!(matches!(&**v, Val::S32(42)), "ors[0] {:?}", v),
+                    o => panic!("ors[0] inner {:?}", o),
+                },
+                o => panic!("ors[0] {:?}", o),
+            }
+            match &e[1] {
+                Val::Option(Some(inner)) => match &**inner {
+                    Val::Result(Err(Some(s))) => match &**s {
+                        Val::String(g) => assert_eq!(&**g, "no"),
+                        o => panic!("ors[1] err string {:?}", o),
+                    },
+                    o => panic!("ors[1] inner {:?}", o),
+                },
+                o => panic!("ors[1] {:?}", o),
+            }
+            match &e[2] {
+                Val::Option(None) => {}
+                o => panic!("ors[2] should be None, {:?}", o),
+            }
+        }
+        o => panic!("get-ors non-list {:?}", o),
+    }
+}
+
 /// Boundary round-trip for a `list<tuple>` signal. The getter routes the
 /// direct list signal through the tuple-aware materializer
 /// (`emit_tuple_lift_to_memory`) instead of the inline scalar copy loop
