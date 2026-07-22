@@ -1,0 +1,32 @@
+package yel:optdisc@0.1.0;
+
+interface shared-types {
+  variant v {
+    a(s32),
+    b(s64),
+    c,
+  }
+}
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-str: func() -> option<string>;
+    set-str: func(value: option<string>);
+    get-res: func() -> option<result<s32, s64>>;
+    set-res: func(value: option<result<s32, s64>>);
+    get-var: func() -> option<v>;
+    set-var: func(value: option<v>);
+    get-nest-opt: func() -> option<option<s32>>;
+    set-nest-opt: func(value: option<option<s32>>);
+  }
+}
+
+world optdisc {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

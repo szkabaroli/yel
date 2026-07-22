@@ -1,0 +1,21 @@
+// FlatGcStruct options (option<T> where T does not collapse to a bare ref:
+// string, result, variant-with-payload, nested option) had an inverted
+// boundary discriminant: yel orders option cases [some=0, none=1] but the
+// canonical-ABI / WIT option is none=0, some=1, so every such option was
+// stored/read with some and none swapped (a host `some(..)` came back as
+// none/zeros). Fixed by mapping the case index to the WIT discriminant
+// (flat_gc_wit_disc) at every flat-gc disc store/test site.
+//
+// Also exercises nested mixed-width payloads (option<result<s32, s64>>), whose
+// inner Ok(s32) must be narrowed (i32.wrap_i64) from the joined i64 slot.
+// Round-trips pinned by option_string_flatgc_roundtrip and
+// nested_option_result_mixed_width_roundtrip in tests/execution.rs.
+package yel:optdisc@0.1.0;
+variant V { a(s32), b(s64), c, }
+export component App {
+    str: option<string> = some("hi");
+    res: option<result<s32, s64>> = some(ok(1));
+    var: option<V> = some(V.a(2));
+    nestOpt: option<option<s32>> = some(some(3));
+    VStack { Text { "ok" } }
+}

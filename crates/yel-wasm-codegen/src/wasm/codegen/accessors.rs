@@ -1906,7 +1906,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 for k in 0..case_count {
                     // disc == k ?
                     func.instruction(&Instruction::LocalGet(1));
-                    func.instruction(&Instruction::I32Const(k as i32));
+                    func.instruction(&Instruction::I32Const(self.flat_gc_wit_disc(ty, k) as i32));
                     func.instruction(&Instruction::I32Eq);
                     func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
 
@@ -2806,7 +2806,9 @@ impl<'a> WasmPackageBuilder<'a> {
                     func.instruction(&Instruction::I32Const(inner_disc_outer_slot.offset as i32));
                     func.instruction(&Instruction::I32Add);
                 }
-                func.instruction(&Instruction::I32Const(inner_k as i32));
+                func.instruction(&Instruction::I32Const(
+                    self.flat_gc_wit_disc(payload_ty, inner_k) as i32,
+                ));
                 func.instruction(&Instruction::I32Store8(super::scratch::mem_arg(0, 0)));
                 // If inner case has payload, recursively lift it.
                 if let Some(inner_payload_ty) =
@@ -3170,7 +3172,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     func.instruction(&Instruction::I32Add);
                 }
                 func.instruction(&Instruction::I32Load8U(super::scratch::mem_arg(0, 0)));
-                func.instruction(&Instruction::I32Const(k as i32));
+                func.instruction(&Instruction::I32Const(self.flat_gc_wit_disc(elem_ty, k) as i32));
                 func.instruction(&Instruction::I32Eq);
                 func.instruction(&Instruction::If(result_ty));
                 // Build case k.
@@ -4457,7 +4459,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::I32Const(disc_off));
                 func.instruction(&Instruction::I32Add);
             }
-            func.instruction(&Instruction::I32Const(k as i32));
+            func.instruction(&Instruction::I32Const(self.flat_gc_wit_disc(elem_ty, k) as i32));
             func.instruction(&Instruction::I32Store8(super::scratch::mem_arg(0, 0)));
             // Payload write.
             if let Some(payload_ty) = case_payload_ty(self.ctx, elem_ty, k) {
@@ -4583,6 +4585,21 @@ impl<'a> WasmPackageBuilder<'a> {
     /// `<self>.<prefix-chain>.<final struct.get>` pattern (matching
     /// the rest of `emit_getter_lift_dtr_record`'s read shape) and
     /// dispatches on case via `ref.test`.
+    /// Map a yel flat-gc case index to its canonical-ABI / WIT discriminant.
+    /// yel orders `option` as `[some=0, none=1]`, but the WIT/component-model
+    /// `option<T>` is `none=0, some=1` — so swap those two at the boundary.
+    /// `result` (ok=0, err=1) and user variants already match the WIT case
+    /// order, so their index passes through. Applied wherever a case index is
+    /// written as (getter) or matched against (setter) the boundary
+    /// discriminant.
+    fn flat_gc_wit_disc(&self, ty: Ty, case_idx: u32) -> u32 {
+        if matches!(self.ctx.ty_kind(ty), InternedTyKind::Option(_)) {
+            1 - case_idx
+        } else {
+            case_idx
+        }
+    }
+
     fn emit_flat_gc_dtr_field_lift(
         &mut self,
         func: &mut Function,
@@ -4654,7 +4671,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::I32Const(disc_abs as i32));
                 func.instruction(&Instruction::I32Add);
             }
-            func.instruction(&Instruction::I32Const(k as i32));
+            func.instruction(&Instruction::I32Const(self.flat_gc_wit_disc(field_ty, k) as i32));
             func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
 
             if let Some(payload_ty) = super::super::gc_types::case_payload_ty(self.ctx, field_ty, k)
@@ -5329,7 +5346,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
             // disc == k ?
             func.instruction(&Instruction::LocalGet(disc_param));
-            func.instruction(&Instruction::I32Const(k as i32));
+            func.instruction(&Instruction::I32Const(self.flat_gc_wit_disc(field_ty, k) as i32));
             func.instruction(&Instruction::I32Eq);
             func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
 
@@ -5618,7 +5635,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 })?;
             // Test disc == k
             func.instruction(&Instruction::LocalGet(disc_param));
-            func.instruction(&Instruction::I32Const(k as i32));
+            func.instruction(&Instruction::I32Const(self.flat_gc_wit_disc(ty, k) as i32));
             func.instruction(&Instruction::I32Eq);
             func.instruction(&Instruction::If(result_ty));
             // Build case k subtype.
@@ -5636,8 +5653,18 @@ impl<'a> WasmPackageBuilder<'a> {
                     func.instruction(&Instruction::StructNew(case_sub_idx));
                 } else {
                     let payload_flat = self.canonical_flat_valtypes(payload_ty);
-                    for i in 0..payload_flat.len() as u32 {
-                        func.instruction(&Instruction::LocalGet(payload_start + i));
+                    // The params carry `ty`'s JOINED payload valtypes (the
+                    // canonical-ABI `join` across `ty`'s cases may have widened
+                    // a slot, e.g. result<s32, s64> joins to i64). Bridge each
+                    // back to this case's payload valtype before struct.new —
+                    // otherwise a narrow case (Ok(s32)) sees an i64 where its
+                    // i32 field is expected. Mirrors emit_flat_gc_setter_pack_field.
+                    let parent_canonical = self.canonical_flat_valtypes(ty);
+                    for (i, vt_payload) in payload_flat.iter().enumerate() {
+                        func.instruction(&Instruction::LocalGet(payload_start + i as u32));
+                        let vt_joined =
+                            parent_canonical.get(1 + i).copied().unwrap_or(*vt_payload);
+                        emit_canonical_reinterpret(func, vt_joined, *vt_payload)?;
                     }
                     // strings-to-GC: a string payload builds a `$str_bytes`
                     // ref from canonical (ptr, len). Every valid list is a
@@ -5913,7 +5940,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::I32Const(disc_abs as i32));
                 func.instruction(&Instruction::I32Add);
             }
-            func.instruction(&Instruction::I32Const(k as i32));
+            func.instruction(&Instruction::I32Const(self.flat_gc_wit_disc(field_ty, k) as i32));
             func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
 
             // Payload (if any) — use the same fat_box / typed-slot

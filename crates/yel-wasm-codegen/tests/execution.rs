@@ -3981,6 +3981,119 @@ fn result_mixed_width_join_roundtrip() {
 /// builds the tuple from canonical params on Some and the getter lowers it
 /// (via the recursive tuple lift). Verifies Some and None both round-trip.
 #[test]
+fn nested_option_result_mixed_width_roundtrip() {
+    // option<result<s32, s64>>: nested flat-gc whose inner result has
+    // mixed-width cases. Needs BOTH (a) the option some/none disc mapping and
+    // (b) the setter width narrow (i32.wrap_i64) for the inner Ok(s32).
+    let source = r#"
+        package yel:noptres@0.1.0;
+        export component App {
+            m: option<result<s32, s64>> = none;
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:noptres/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+    let get_m = get_func(&mut h, iface, "[method]app.get-m");
+    let read = |h: &mut Harness, res: &ResourceAny| -> Val {
+        let mut out = [Val::Bool(false)];
+        get_m
+            .call(&mut h.store, &[Val::Resource(*res)], &mut out)
+            .expect("get-m");
+        std::mem::replace(&mut out[0], Val::Bool(false))
+    };
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "m",
+        &r,
+        Val::Option(Some(Box::new(Val::Result(Ok(Some(Box::new(Val::S32(42)))))))),
+    );
+    match read(&mut h, &r) {
+        Val::Option(Some(inner)) => match *inner {
+            Val::Result(Ok(Some(v))) => {
+                assert!(matches!(*v, Val::S32(42)), "Ok must be 42, got {:?}", v)
+            }
+            other => panic!("expected Some(Ok(42)), got {:?}", other),
+        },
+        other => panic!("expected Some(Ok(..)), got {:?}", other),
+    }
+    let big: i64 = 9_000_000_000;
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "m",
+        &r,
+        Val::Option(Some(Box::new(Val::Result(Err(Some(Box::new(Val::S64(big)))))))),
+    );
+    match read(&mut h, &r) {
+        Val::Option(Some(inner)) => match *inner {
+            Val::Result(Err(Some(v))) => {
+                assert!(matches!(*v, Val::S64(x) if x == big), "Err must be {}, got {:?}", big, v)
+            }
+            other => panic!("expected Some(Err({})), got {:?}", big, other),
+        },
+        other => panic!("expected Some(Err(..)), got {:?}", other),
+    }
+    call_setter(&mut h, iface, "app", "m", &r, Val::Option(None));
+    match read(&mut h, &r) {
+        Val::Option(None) => {}
+        other => panic!("expected None, got {:?}", other),
+    }
+}
+
+#[test]
+fn option_string_flatgc_roundtrip() {
+    // option<string> is a FlatGcStruct (it does NOT collapse — a null
+    // $str_bytes would alias none). The cleanest FlatGcStruct-option: verifies
+    // the some/none discriminant convention at the WIT boundary (WIT option is
+    // none=0, some=1).
+    let source = r#"
+        package yel:optstr@0.1.0;
+        export component App {
+            m: option<string> = none;
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:optstr/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+    let get_m = get_func(&mut h, iface, "[method]app.get-m");
+    let read = |h: &mut Harness, res: &ResourceAny| -> Val {
+        let mut out = [Val::Bool(false)];
+        get_m
+            .call(&mut h.store, &[Val::Resource(*res)], &mut out)
+            .expect("get-m");
+        std::mem::replace(&mut out[0], Val::Bool(false))
+    };
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "m",
+        &r,
+        Val::Option(Some(Box::new(Val::String("hi".into())))),
+    );
+    match read(&mut h, &r) {
+        Val::Option(Some(v)) => match *v {
+            Val::String(ref s) => assert_eq!(&**s, "hi", "some payload"),
+            other => panic!("some payload must be a string, got {:?}", other),
+        },
+        other => panic!("expected Some(\"hi\"), got {:?}", other),
+    }
+    call_setter(&mut h, iface, "app", "m", &r, Val::Option(None));
+    match read(&mut h, &r) {
+        Val::Option(None) => {}
+        other => panic!("expected None, got {:?}", other),
+    }
+}
+
+#[test]
 fn record_with_mixed_width_result_field_roundtrip() {
     // A record field that is a mixed-width result (`result<s32, s64>`): the
     // record pack must narrow the joined i64 param to the Ok case's i32 field
