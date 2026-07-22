@@ -3822,6 +3822,100 @@ fn nested_gc_variant_deep_and_list_payload_roundtrip() {
     }
 }
 
+/// Mixed-width join across a **nested flat-gc** payload. `variant M {
+/// a(result<s32,s32>), b(s64) }` joins its cases: `a`'s nested result flattens
+/// to `[i32 inner-disc, i32 value]`, `b`'s payload is `[i64]`; the canonical
+/// `join` widens payload slot 0 to **i64**. So M's setter params are
+/// `(self, disc, i64, i32)`. The pack must NARROW the joined i64 param down to
+/// the nested result's natural i32 inner-disc before rebuilding it (the
+/// setter used to read the i64 param where i32 was expected → "expected i32,
+/// found i64"); the getter must WIDEN it back. A wrong bridge silently
+/// corrupts the value, so this asserts the exact `Val` round-trips for both
+/// the nested-flat-gc case (`a`) and the wide-scalar case (`b`).
+#[test]
+fn nested_flat_gc_mixed_width_join_roundtrip() {
+    let source = r#"
+        package yel:mwjoin@0.1.0;
+        variant M {
+            a(result<s32, s32>),
+            b(s64),
+        }
+        export component App {
+            e: M = M.b(1);
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let iface = "yel:mwjoin/app-component@0.1.0";
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let r = ctor_and_mount(&mut h, iface, "app");
+    let getter = get_func(&mut h, iface, "[method]app.get-e");
+    let read = |h: &mut Harness| {
+        let mut out = [Val::Bool(false)];
+        getter
+            .call(&mut h.store, &[Val::Resource(r)], &mut out)
+            .expect("get-e");
+        out[0].clone()
+    };
+
+    // e := M.a(ok(9)) — nested result, ok payload s32=9 through the i64 slot.
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "e",
+        &r,
+        Val::Variant(
+            "a".into(),
+            Some(Box::new(Val::Result(Ok(Some(Box::new(Val::S32(9))))))),
+        ),
+    );
+    assert_eq!(
+        read(&mut h),
+        Val::Variant(
+            "a".into(),
+            Some(Box::new(Val::Result(Ok(Some(Box::new(Val::S32(9)))))))
+        ),
+        "M.a(ok(9)) should round-trip through the i64-widened slot"
+    );
+
+    // e := M.a(err(-3)) — err arm of the nested result.
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "e",
+        &r,
+        Val::Variant(
+            "a".into(),
+            Some(Box::new(Val::Result(Err(Some(Box::new(Val::S32(-3))))))),
+        ),
+    );
+    assert_eq!(
+        read(&mut h),
+        Val::Variant(
+            "a".into(),
+            Some(Box::new(Val::Result(Err(Some(Box::new(Val::S32(-3)))))))
+        ),
+        "M.a(err(-3)) should round-trip"
+    );
+
+    // e := M.b(5) — the wide s64 case that forced the i64 join.
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "e",
+        &r,
+        Val::Variant("b".into(), Some(Box::new(Val::S64(5)))),
+    );
+    assert_eq!(
+        read(&mut h),
+        Val::Variant("b".into(), Some(Box::new(Val::S64(5)))),
+        "M.b(5) should round-trip"
+    );
+}
+
 /// Regression: a `func`-typed callback property with parameters
 /// (`cb: func(a: s32, b: u16)`) invoked from an event handler. The callback's
 /// `FunctionDef` was built with an empty `params` list (the interned `Func`

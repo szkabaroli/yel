@@ -1165,10 +1165,12 @@ impl<'a> WasmPackageBuilder<'a> {
                 super::super::repr::InternalRepr::GcVariant(_)
             ) {
                 self.emit_self_ref(&mut func, comp_idx)?;
+                let declared_vts = self.canonical_flat_valtypes(ty);
                 self.emit_pack_canonical_to_gc_variant(
                     &mut func,
                     ty,
                     CanonicalSource::Params { first_param: 1 },
+                    &declared_vts,
                 )?;
                 func.instruction(&Instruction::StructSet {
                     struct_type_index: struct_ty,
@@ -1755,6 +1757,9 @@ impl<'a> WasmPackageBuilder<'a> {
                             address_local: elem_addr_local,
                             offset: 0,
                         },
+                        // Memory-sourced: each case reads its payload at its
+                        // natural width from its own offset — no bridging.
+                        &[],
                     )?;
                     func.instruction(&Instruction::ArraySet(arr_type_idx));
                     Ok(())
@@ -3221,7 +3226,11 @@ impl<'a> WasmPackageBuilder<'a> {
         source: CanonicalSource,
     ) -> Result<(), CodegenError> {
         if self.is_gc_variant(ty) {
-            return self.emit_pack_canonical_to_gc_variant(func, ty, source);
+            // Record/tuple members are laid out at their own natural canonical
+            // width (fields are not width-joined), so the declared param
+            // valtypes equal this value's own canonical valtypes.
+            let declared_vts = self.canonical_flat_valtypes(ty);
+            return self.emit_pack_canonical_to_gc_variant(func, ty, source, &declared_vts);
         }
         // Collapsed option: canonical [disc, ...inner]; disc != 0 builds the
         // inner ref, else a typed null.
@@ -3317,16 +3326,24 @@ impl<'a> WasmPackageBuilder<'a> {
     /// left on the stack, via an `if disc == k … else … else
     /// struct.new_default(case0)` cascade.
     ///
-    /// Param-sourced packs bridge each payload slot from the parent's JOINED
-    /// canonical valtype back to the case's own width (the canonical-ABI
-    /// `join` may widen, e.g. `result<s32, s64>` joins the payload slot to
-    /// i64). Memory-sourced packs read each case's payload at its natural
-    /// width, so no reinterpret is needed.
+    /// Param-sourced packs bridge each canonical slot from the **declared**
+    /// param valtype back to this value's own natural width. `declared_vts`
+    /// gives the actual declared valtypes of this value's canonical slots
+    /// `[disc, ...payload]`. At the top level these equal the value's own
+    /// canonical valtypes, but when this value is a **nested flat-gc payload**
+    /// of a wider parent variant, the parent's `join` may have widened shared
+    /// slots (e.g. `variant { a(result<s32,s32>), b(s64) }` widens slot 0 to
+    /// i64, so the nested result's disc param is declared i64 and must be
+    /// narrowed to i32). The recursion threads the parent's payload region
+    /// (`declared_vts[1..]`) down so every nesting level bridges its own
+    /// shared slots. Memory-sourced packs read each case's payload at its
+    /// natural width from its own offset, so `declared_vts` is unused there.
     fn emit_pack_canonical_to_gc_variant(
         &mut self,
         func: &mut Function,
         ty: Ty,
         source: CanonicalSource,
+        declared_vts: &[wasm_encoder::ValType],
     ) -> Result<(), CodegenError> {
         let slots = self.flatten_core_slots(ty);
         let disc_slot_offset = slots.first().map(|s| s.offset).unwrap_or(0);
@@ -3373,6 +3390,12 @@ impl<'a> WasmPackageBuilder<'a> {
             match source {
                 CanonicalSource::Params { first_param } => {
                     func.instruction(&Instruction::LocalGet(first_param));
+                    // The disc slot is naturally i32, but a wider parent may
+                    // have declared this shared slot at a joined width — narrow
+                    // it back down before the i32 comparison.
+                    if let Some(&vt_declared) = declared_vts.first() {
+                        emit_canonical_reinterpret(func, vt_declared, wasm_encoder::ValType::I32)?;
+                    }
                 }
                 CanonicalSource::Memory {
                     address_local,
@@ -3412,9 +3435,19 @@ impl<'a> WasmPackageBuilder<'a> {
                     self.internal_repr(payload_ty),
                     super::super::repr::InternalRepr::GcVariant(_)
                 ) {
-                    // Nested gc-variant payload: recurse; its canonical
-                    // representation shares the outer payload region.
-                    self.emit_pack_canonical_to_gc_variant(func, payload_ty, payload_source)?;
+                    // Nested gc-variant payload: recurse. Its canonical slots
+                    // share the outer payload region, so the actual declared
+                    // param valtypes for the child are this variant's payload
+                    // region (`declared_vts[1..]`) — pass them so the child
+                    // bridges each slot the outer `join` widened.
+                    let child_declared: &[wasm_encoder::ValType] =
+                        declared_vts.get(1..).unwrap_or(&[]);
+                    self.emit_pack_canonical_to_gc_variant(
+                        func,
+                        payload_ty,
+                        payload_source,
+                        child_declared,
+                    )?;
                     func.instruction(&Instruction::StructNew(case_sub_idx));
                 } else {
                     let is_ptr_len_payload = matches!(
@@ -3427,14 +3460,15 @@ impl<'a> WasmPackageBuilder<'a> {
                             .contains_key(&payload_ty));
                     match payload_source {
                         CanonicalSource::Params { first_param } => {
-                            // Push each payload slot, bridging joined widths.
+                            // Push each payload slot, bridging the declared
+                            // (possibly parent-joined) width down to the case's
+                            // own natural width.
                             let payload_flat = self.canonical_flat_valtypes(payload_ty);
-                            let parent_canonical = self.canonical_flat_valtypes(ty);
                             for (i, vt_payload) in payload_flat.iter().enumerate() {
                                 func.instruction(&Instruction::LocalGet(first_param + i as u32));
-                                let vt_joined =
-                                    parent_canonical.get(1 + i).copied().unwrap_or(*vt_payload);
-                                emit_canonical_reinterpret(func, vt_joined, *vt_payload)?;
+                                let vt_declared =
+                                    declared_vts.get(1 + i).copied().unwrap_or(*vt_payload);
+                                emit_canonical_reinterpret(func, vt_declared, *vt_payload)?;
                             }
                         }
                         CanonicalSource::Memory { .. } => {
