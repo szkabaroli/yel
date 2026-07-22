@@ -826,7 +826,7 @@ impl WasmPackageBuilder<'_> {
                                     self.emit_self_handle_load(func, component)?;
                                 }
                                 for arg in args {
-                                    self.emit_expr(func, component.get_expr(*arg), component)?;
+                                    self.emit_callback_arg(func, component.get_expr(*arg), component)?;
                                 }
 
                                 if uses_indirect_return {
@@ -2500,6 +2500,77 @@ impl WasmPackageBuilder<'_> {
     ///   using its declared load-width.
     ///
     /// Returns the number of stack slots produced.
+    /// Push a callback argument onto the stack in the **canonical-ABI flat**
+    /// shape the host import expects (built from `canonical_flat_valtypes` in
+    /// codegen/build.rs), rather than the value's internal GC representation.
+    ///
+    /// For a scalar the two coincide, so `emit_expr` is enough. A composite
+    /// argument diverges: the import declares a `list<scalar>` / `string` param
+    /// as its canonical `(ptr, len)` pair, but `emit_expr` yields a single GC
+    /// array / `$str_bytes` ref — pushing that ref where two i32s are expected
+    /// is the `expected i32, found (ref …)` mismatch. Materialize those to
+    /// `(ptr, len)` here.
+    ///
+    /// Composite arguments that flatten to more than a `(ptr, len)` pair
+    /// (option / result / variant / record / tuple) are not yet lowered on the
+    /// argument side; emit a loud error rather than push a wrong shape.
+    pub(super) fn emit_callback_arg(
+        &mut self,
+        func: &mut Function,
+        arg: &LirExpr,
+        component: &LirResource,
+    ) -> Result<(), CodegenError> {
+        use super::repr::InternalRepr;
+        // A typed-array list argument: emit the array ref, then materialize it
+        // to canonical `(ptr, len)` via the per-array materializer.
+        if matches!(self.ctx.ty_kind(arg.ty), InternedTyKind::List(_))
+            && let InternalRepr::GcArrayRef(arr_idx) = self.internal_repr(arg.ty)
+        {
+            let mat_fn = *self
+                .gc_list_materializer_fn_indices
+                .get(&arr_idx)
+                .ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "callback arg: missing list materializer for arr {arr_idx}"
+                    ))
+                })?;
+            self.emit_expr(func, arg, component)?;
+            func.instruction(&Instruction::Call(mat_fn));
+            return Ok(());
+        }
+        // A string argument: emit the `$str_bytes` ref, then materialize to
+        // canonical `(ptr, len)`.
+        if matches!(self.ctx.ty_kind(arg.ty), InternedTyKind::String) {
+            let arr_idx = self.record_gc_types.str_bytes_array_idx.ok_or_else(|| {
+                CodegenError::InvalidIR("callback arg: $str_bytes array not registered".into())
+            })?;
+            let mat_fn = *self
+                .gc_list_materializer_fn_indices
+                .get(&arr_idx)
+                .ok_or_else(|| {
+                    CodegenError::InvalidIR("callback arg: missing $str_bytes materializer".into())
+                })?;
+            self.emit_expr(func, arg, component)?;
+            func.instruction(&Instruction::Call(mat_fn));
+            return Ok(());
+        }
+        // Composite argument that isn't a single (ptr, len) pair — the import
+        // wants its full canonical flattening, which the argument side does not
+        // yet lower. Fail loud instead of pushing the internal ref.
+        let canonical = self.canonical_flat_valtypes(arg.ty);
+        if canonical.len() > 1 && !matches!(self.internal_repr(arg.ty), InternalRepr::Scalar(_)) {
+            return Err(CodegenError::InvalidIR(format!(
+                "callback arg: composite argument of type {:?} not yet lowered to \
+                 canonical-ABI params (flattens to {} slots)",
+                arg.ty,
+                canonical.len()
+            )));
+        }
+        // Scalar (internal repr == canonical): push as-is.
+        self.emit_expr(func, arg, component)?;
+        Ok(())
+    }
+
     pub(super) fn emit_cb_indirect_return_call(
         &mut self,
         func: &mut Function,

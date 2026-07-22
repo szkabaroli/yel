@@ -3850,6 +3850,32 @@ fn callback_with_params_compiles() {
     assert!(!bytes.is_empty(), "param'd-callback component should encode");
 }
 
+/// Regression: a callback invoked with a *composite* argument (list / string).
+/// The call site pushed the argument's internal GC ref (a typed array /
+/// `$str_bytes` ref), but the host import declares those params in their
+/// canonical-ABI `(ptr, len)` shape — so a `list<s32>` / `string` argument
+/// produced `expected i32, found (ref …)` at core validation. The argument is
+/// now materialized to `(ptr, len)` before the call, matching the import.
+#[test]
+fn callback_with_composite_args_compiles() {
+    let source = r#"
+        package yel:cbargs@0.1.0;
+        export component App {
+            on_data: func(items: list<s32>, label: string);
+            VStack {
+                Button {
+                    clicked: { on_data([1, 2, 3], "hello"); }
+                }
+                Text { "ok" }
+            }
+        }
+    "#;
+    // The bug was a validation failure (ref where the import wants (ptr,len)),
+    // which validation catches — a successful encode is the guard.
+    let bytes = compile_to_component(source);
+    assert!(!bytes.is_empty(), "composite-arg callback should encode");
+}
+
 /// Regression: a `let` binding of a non-i32 scalar in an event handler.
 /// The lowering allocated a default *i32* slot with `Ptr` binding mode, so an
 /// `f32` / `f64` / `s64` value failed core validation ("expected i32, found
