@@ -5353,6 +5353,18 @@ impl<'a> WasmPackageBuilder<'a> {
             // Build the case subtype.
             if let Some(payload_ty) = super::super::gc_types::case_payload_ty(self.ctx, field_ty, k)
             {
+                if matches!(
+                    self.internal_repr(payload_ty),
+                    super::super::repr::InternalRepr::FlatGcStruct(_)
+                ) {
+                    // Nested flat-gc payload (option<result>, option<option>,
+                    // result<variant>, …): recursively build the inner
+                    // supertype ref from its canonical params, then wrap it in
+                    // this case subtype — the field-pack twin of what the
+                    // direct signal setter does.
+                    self.emit_pack_canonical_to_flat_gc(func, payload_ty, payload_start_param)?;
+                    func.instruction(&Instruction::StructNew(case_sub_idx));
+                } else {
                 let typed_list_arr_idx =
                     if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_)) {
                         self.record_gc_types
@@ -5410,6 +5422,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 // the case struct.new below. String (str_bytes) and typed
                 // lists were handled above; nothing boxes into $fat_value.
                 func.instruction(&Instruction::StructNew(case_sub_idx));
+                }
             } else {
                 func.instruction(&Instruction::StructNewDefault(case_sub_idx));
             }

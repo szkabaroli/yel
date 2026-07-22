@@ -3981,6 +3981,75 @@ fn result_mixed_width_join_roundtrip() {
 /// builds the tuple from canonical params on Some and the getter lowers it
 /// (via the recursive tuple lift). Verifies Some and None both round-trip.
 #[test]
+fn record_with_nested_flat_gc_field_roundtrip() {
+    // A record field that is a 2-deep nested flat-gc (option<result<s32,s64>>):
+    // the field pack must recurse into the inner result via
+    // emit_pack_canonical_to_flat_gc (build the inner ref, then wrap in the
+    // option Some case), and the field lift recurses back. Verifies
+    // Some(Ok(narrow)) survives set→get through the record field.
+    let source = r#"
+        package yel:recnest@0.1.0;
+        record R { v: option<result<s32, s64>>, }
+        export component App {
+            r: R = { v: none };
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:recnest/app-component@0.1.0";
+    let res = ctor_and_mount(&mut h, iface, "app");
+    let get_r = get_func(&mut h, iface, "[method]app.get-r");
+    let read_v = |h: &mut Harness, r: &ResourceAny| -> Val {
+        let mut out = [Val::Bool(false)];
+        get_r
+            .call(&mut h.store, &[Val::Resource(*r)], &mut out)
+            .expect("get-r");
+        match std::mem::replace(&mut out[0], Val::Bool(false)) {
+            Val::Record(mut f) => f
+                .drain(..)
+                .find(|(n, _)| n == "v")
+                .map(|(_, v)| v)
+                .expect("field v"),
+            other => panic!("get-r non-record {:?}", other),
+        }
+    };
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "r",
+        &res,
+        Val::Record(vec![(
+            "v".into(),
+            Val::Option(Some(Box::new(Val::Result(Ok(Some(Box::new(Val::S32(42)))))))),
+        )]),
+    );
+    match read_v(&mut h, &res) {
+        Val::Option(Some(inner)) => match *inner {
+            Val::Result(Ok(Some(v))) => {
+                assert!(matches!(*v, Val::S32(42)), "Ok must be 42, got {:?}", v)
+            }
+            other => panic!("expected Some(Ok(42)), got {:?}", other),
+        },
+        other => panic!("expected Some(Ok(..)), got {:?}", other),
+    }
+    // None also round-trips.
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "r",
+        &res,
+        Val::Record(vec![("v".into(), Val::Option(None))]),
+    );
+    match read_v(&mut h, &res) {
+        Val::Option(None) => {}
+        other => panic!("expected None, got {:?}", other),
+    }
+}
+
+#[test]
 fn nested_option_result_mixed_width_roundtrip() {
     // option<result<s32, s64>>: nested flat-gc whose inner result has
     // mixed-width cases. Needs BOTH (a) the option some/none disc mapping and
