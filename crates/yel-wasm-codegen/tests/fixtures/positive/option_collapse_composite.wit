@@ -1,0 +1,33 @@
+package yel:optcollapse@0.1.0;
+
+interface shared-types {
+  record item {
+    n: s32,
+    label: string,
+  }
+}
+
+interface app-component {
+  resource app {
+    constructor();
+    mount: func(root: u32);
+    unmount: func();
+    get-rec: func() -> option<item>;
+    set-rec: func(value: option<item>);
+    get-rec-none: func() -> option<item>;
+    set-rec-none: func(value: option<item>);
+    get-tup: func() -> option<tuple<s32, string>>;
+    set-tup: func(value: option<tuple<s32, string>>);
+    get-nested: func() -> option<tuple<s32, item>>;
+    set-nested: func(value: option<tuple<s32, item>>);
+    get-lst: func() -> option<list<s32>>;
+    set-lst: func(value: option<list<s32>>);
+  }
+}
+
+world optcollapse {
+  import shared-types;
+  import yel:ui/dom@0.1.0;
+  export app-component;
+  export yel:ui/dispatch@0.1.0;
+}

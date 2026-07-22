@@ -3976,6 +3976,132 @@ fn result_mixed_width_join_roundtrip() {
     }
 }
 
+/// Boundary round-trip for a collapsed `option<tuple<s32, string>>`. The
+/// option collapses to a single nullable tuple ref (none = null); the setter
+/// builds the tuple from canonical params on Some and the getter lowers it
+/// (via the recursive tuple lift). Verifies Some and None both round-trip.
+#[test]
+fn option_record_collapse_roundtrip() {
+    // Guards the pre-existing collapse-path discriminant bug: the collapsed
+    // option getter/setter used `ref.is_null` directly (some=0), inverting the
+    // canonical-ABI convention (some=1), so every host `some(record)` was
+    // stored as none and read back as none/zeros. Now fixed.
+    let source = r#"
+        package yel:optrec@0.1.0;
+        record Item { n: s32, label: string, }
+        export component App {
+            maybe: option<Item> = none;
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:optrec/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+    let get_m = get_func(&mut h, iface, "[method]app.get-maybe");
+    let read = |h: &mut Harness, res: &ResourceAny| -> Val {
+        let mut out = [Val::Bool(false)];
+        get_m
+            .call(&mut h.store, &[Val::Resource(*res)], &mut out)
+            .expect("get-maybe");
+        std::mem::replace(&mut out[0], Val::Bool(false))
+    };
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "maybe",
+        &r,
+        Val::Option(Some(Box::new(Val::Record(vec![
+            ("n".into(), Val::S32(88)),
+            ("label".into(), Val::String("hi".into())),
+        ])))),
+    );
+    match read(&mut h, &r) {
+        Val::Option(Some(v)) => match *v {
+            Val::Record(ref f) => {
+                let g = |k: &str| f.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+                assert!(matches!(g("n"), Some(Val::S32(88))), "n, got {:?}", g("n"));
+                match g("label") {
+                    Some(Val::String(s)) => assert_eq!(&**s, "hi"),
+                    other => panic!("label: {:?}", other),
+                }
+            }
+            other => panic!("Some payload must be record, got {:?}", other),
+        },
+        other => panic!("expected Some(record), got {:?}", other),
+    }
+    call_setter(&mut h, iface, "app", "maybe", &r, Val::Option(None));
+    match read(&mut h, &r) {
+        Val::Option(None) => {}
+        other => panic!("expected None, got {:?}", other),
+    }
+}
+
+#[test]
+fn option_tuple_collapse_roundtrip() {
+    let source = r#"
+        package yel:opttup@0.1.0;
+        export component App {
+            maybe: option<tuple<s32, string>> = none;
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:opttup/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+
+    let get_m = get_func(&mut h, iface, "[method]app.get-maybe");
+    let read = |h: &mut Harness, res: &ResourceAny| -> Val {
+        let mut out = [Val::Bool(false)];
+        get_m
+            .call(&mut h.store, &[Val::Resource(*res)], &mut out)
+            .expect("get-maybe");
+        std::mem::replace(&mut out[0], Val::Bool(false))
+    };
+
+    // Some((7, "hi"))
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "maybe",
+        &r,
+        Val::Option(Some(Box::new(Val::Tuple(vec![
+            Val::S32(7),
+            Val::String("hi".into()),
+        ])))),
+    );
+    match read(&mut h, &r) {
+        Val::Option(Some(v)) => match *v {
+            Val::Tuple(ref e) => {
+                assert!(matches!(&e[0], Val::S32(7)), "tuple.0, got {:?}", e[0]);
+                match &e[1] {
+                    Val::String(s) => assert_eq!(&**s, "hi"),
+                    other => panic!("tuple.1 must round-trip, got {:?}", other),
+                }
+            }
+            other => panic!("Some payload must be a tuple, got {:?}", other),
+        },
+        other => panic!("expected Some, got {:?}", other),
+    }
+
+    // None
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "maybe",
+        &r,
+        Val::Option(None),
+    );
+    match read(&mut h, &r) {
+        Val::Option(None) => {}
+        other => panic!("expected None, got {:?}", other),
+    }
+}
+
 /// Phase 0 regression-guard: nested record field access through two
 /// levels: `state.user.addr.city`. Pins multi-level offset loads today
 /// and chained `struct.get` post-Phase 4.

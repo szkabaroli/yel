@@ -1,0 +1,23 @@
+// Collapsed option payloads: `option<T>` where T has a single-GC-ref repr
+// (record / tuple / scalar-list) stores as one nullable ref (none = null).
+// Two bugs fixed here:
+//   1. The collapse getter/setter used `ref.is_null` directly as the
+//      discriminant (some=0), inverting the canonical-ABI convention
+//      (some=1) — every host `some(...)` was stored as none and read back as
+//      none. Now `disc = !ref.is_null` on the getter and `disc != 0 => some`
+//      on the setter.
+//   2. The option<record> getter used an inline record lift that panicked on
+//      a string field; it now uses the complete recursive record lift.
+// option<tuple> is newly supported (recursive pack/lift). Round-trips pinned
+// by option_record_collapse_roundtrip / option_tuple_collapse_roundtrip in
+// tests/execution.rs.
+package yel:optcollapse@0.1.0;
+record Item { n: s32, label: string, }
+export component App {
+    rec: option<Item> = some({ n: 1, label: "a" });
+    recNone: option<Item> = none;
+    tup: option<tuple<s32, string>> = some((2, "b"));
+    nested: option<tuple<s32, Item>> = some((3, { n: 4, label: "c" }));
+    lst: option<list<s32>> = some([5, 6]);
+    VStack { Text { "ok" } }
+}

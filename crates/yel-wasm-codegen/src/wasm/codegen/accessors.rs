@@ -1761,16 +1761,19 @@ impl<'a> WasmPackageBuilder<'a> {
                 };
                 let arr_idx = self.option_collapses_to_ref(ty).unwrap();
                 self.emit_self_ref(&mut func, comp_idx)?;
-                // disc is param 1 — branch.
+                // disc is param 1 — canonical-ABI option: 1 = some, 0 = none
+                // (standard WIT convention). Take the Some branch on disc != 0;
+                // the else branch stores a typed null ref for none. (No
+                // i32.eqz: that inverts to some=0 and mis-stores every host
+                // Some as none.)
                 func.instruction(&Instruction::LocalGet(1));
-                func.instruction(&Instruction::I32Eqz);
                 func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
                     ValType::Ref(wasm_encoder::RefType {
                         nullable: true,
                         heap_type: wasm_encoder::HeapType::Concrete(arr_idx),
                     }),
                 )));
-                // disc==0 (Some): build inner from canonical params 2..
+                // disc==1 (Some): build inner from canonical params 2..
                 match self.ctx.ty_kind(inner_ty) {
                     InternedTyKind::Adt(d)
                         if matches!(
@@ -1813,6 +1816,12 @@ impl<'a> WasmPackageBuilder<'a> {
                         func.instruction(&Instruction::LocalGet(2));
                         func.instruction(&Instruction::LocalGet(3));
                         self.emit_str_bytes_unmaterialize(&mut func)?;
+                    }
+                    InternedTyKind::Tuple(_) => {
+                        // option<tuple> Some payload — build the tuple GC
+                        // struct from canonical params 2.. (recursively).
+                        let mut next_param: u32 = 2;
+                        self.emit_setter_pack_tuple(&mut func, inner_ty, &mut next_param)?;
                     }
                     _ => {
                         return Err(CodegenError::InvalidIR(format!(
@@ -2284,7 +2293,12 @@ impl<'a> WasmPackageBuilder<'a> {
         self.emit_signal_struct_read_for_lift(func, ci, sig_idx)?;
         func.instruction(&Instruction::LocalSet(inner_ref_local));
 
-        // disc = ref.is_null(inner_ref_local).
+        // Canonical-ABI option/result discriminant: 0 = none, 1 = some — the
+        // standard WIT convention the host expects (matching the direct
+        // GC-list option getter). The collapsed ref is null for none, so
+        // `disc = !ref.is_null` (some = non-null = 1). (Do NOT use bare
+        // ref.is_null here: that stores the inverted some=0 convention and the
+        // host reads every Some back as None.)
         func.instruction(&Instruction::LocalGet(scratch_ptr_local));
         if disc_offset != 0 {
             func.instruction(&Instruction::I32Const(disc_offset));
@@ -2292,6 +2306,7 @@ impl<'a> WasmPackageBuilder<'a> {
         }
         func.instruction(&Instruction::LocalGet(inner_ref_local));
         func.instruction(&Instruction::RefIsNull);
+        func.instruction(&Instruction::I32Eqz);
         func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
 
         // Conditional payload lift.
@@ -2308,15 +2323,27 @@ impl<'a> WasmPackageBuilder<'a> {
                     yel_core::definitions::DefKind::Record(_)
                 ) =>
             {
+                // The collapsed ref IS the record GC struct, stored directly
+                // in the signal field. Reach it via the signal-field prefix
+                // and lower each field with the complete recursive record lift
+                // (handles string / list / nested-record / flat-gc fields) —
+                // the older `emit_inline_record_lift_from_anyref` panics on a
+                // string field.
                 let record_def_id = *d;
-                self.emit_inline_record_lift_from_anyref(
+                let struct_ty = self.gc_layouts[ci].component_struct_type_idx.ok_or_else(|| {
+                    CodegenError::InvalidIR(
+                        "option<record> lift: missing component_struct_type_idx".into(),
+                    )
+                })?;
+                let field_path = self.components[ci].signal_layout.signal_field_path(sig_idx);
+                let prefix: Vec<(u32, u32)> = vec![(struct_ty, field_path[0])];
+                self.emit_getter_lift_dtr_record(
                     func,
+                    ci,
                     record_def_id,
-                    inner_ref_local,
-                    scratch_ptr_local,
                     payload_slots[0].offset,
-                    mat_ptr_local,
-                    mat_len_local,
+                    scratch_ptr_local,
+                    &prefix,
                 )?;
             }
             InternedTyKind::List(_)
@@ -2398,6 +2425,30 @@ impl<'a> WasmPackageBuilder<'a> {
                 }
                 func.instruction(&Instruction::LocalGet(mat_len_local));
                 len_slot.store.emit_store(func);
+            }
+            InternedTyKind::Tuple(_) => {
+                // The collapsed ref IS the tuple GC struct, stored directly in
+                // the signal field. We're already inside the non-null (Some)
+                // branch, so reach the tuple via the signal-field prefix and
+                // lower each element to canonical at the payload base.
+                let struct_ty = self.gc_layouts[ci].component_struct_type_idx.ok_or_else(|| {
+                    CodegenError::InvalidIR(
+                        "option<tuple> lift: missing component_struct_type_idx".into(),
+                    )
+                })?;
+                let field_path = self.components[ci].signal_layout.signal_field_path(sig_idx);
+                let base = payload_slots[0].offset;
+                let prefix: Vec<(u32, u32)> = vec![(struct_ty, field_path[0])];
+                self.emit_getter_lift_tuple(
+                    func,
+                    ci,
+                    inner_ty,
+                    base,
+                    scratch_ptr_local,
+                    mat_ptr_local,
+                    mat_len_local,
+                    &prefix,
+                )?;
             }
             _ => {
                 return Err(CodegenError::InvalidIR(format!(
