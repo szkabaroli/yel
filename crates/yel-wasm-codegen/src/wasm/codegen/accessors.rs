@@ -501,8 +501,14 @@ impl<'a> WasmPackageBuilder<'a> {
                 // rather than the legacy inline `$fat_value` unbox below.
                 // A collapsed-option element (`list<option<record|tuple|list>>`)
                 // likewise needs the dedicated per-element lift.
+                // A tuple element is a typed GC struct ref; the shared
+                // materializer serialises each tuple to canonical memory
+                // (emit_tuple_lift_to_memory) exactly like flat-gc/record —
+                // inlining the scalar copy loop below would `i32.store` the
+                // raw tuple ref (expected i32, found ref).
                 let delegate_to_materializer = elem_is_flat_gc
                     || matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::String)
+                    || matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::Tuple(_))
                     || self.elem_option_collapses(elem_ty).is_some();
                 if delegate_to_materializer {
                     let local_decls: Vec<(u32, ValType)> = vec![
@@ -1323,6 +1329,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 // $str_bytes refs) just like flat-gc, not the inline copy.
                 let delegate_to_unmaterializer = elem_is_flat_gc
                     || matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::String)
+                    || matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::Tuple(_))
                     || self.elem_option_collapses(elem_ty).is_some();
                 if delegate_to_unmaterializer {
                     let unmat_fn = *self
@@ -3324,6 +3331,42 @@ impl<'a> WasmPackageBuilder<'a> {
             func.instruction(&wasm_encoder::Instruction::End);
             func.instruction(&wasm_encoder::Instruction::End);
         }
+        // Tuple element — build each tuple GC ref from its canonical-flat
+        // bytes via `emit_tuple_pack_from_memory` and `arr.set` it (the tuple
+        // twin of the record branch below).
+        if matches!(self.ctx.ty_kind(elem_ty), yel_core::types::InternedTyKind::Tuple(_))
+            && self.record_gc_types.tuple_struct_type_idx.contains_key(&elem_ty)
+        {
+            let elem_size = self.layout_ctx.size_of(elem_ty) as i32;
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::LocalSet(idx_local));
+            func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+            func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+            func.instruction(&Instruction::LocalGet(idx_local));
+            func.instruction(&Instruction::LocalGet(len_local));
+            func.instruction(&Instruction::I32GeU);
+            func.instruction(&Instruction::BrIf(1));
+            func.instruction(&Instruction::LocalGet(ptr_local));
+            func.instruction(&Instruction::LocalGet(idx_local));
+            func.instruction(&Instruction::I32Const(elem_size));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalSet(elem_addr_local));
+            func.instruction(&Instruction::LocalGet(arr_local));
+            func.instruction(&Instruction::LocalGet(idx_local));
+            self.emit_tuple_pack_from_memory(&mut func, elem_ty, elem_addr_local, 0)?;
+            func.instruction(&Instruction::ArraySet(arr_type_idx));
+            func.instruction(&Instruction::LocalGet(idx_local));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Add);
+            func.instruction(&Instruction::LocalSet(idx_local));
+            func.instruction(&Instruction::Br(0));
+            func.instruction(&Instruction::End); // loop
+            func.instruction(&Instruction::End); // block
+            func.instruction(&Instruction::LocalGet(arr_local));
+            func.instruction(&Instruction::End); // function
+            return Ok(func);
+        }
         // Phase 7: record element — for each canonical-flat record at
         // `ptr + idx * elem_size`, build a typed `(ref null $<rec>)`
         // via `emit_record_pack_from_memory` and `arr.set` it. Without
@@ -4166,6 +4209,80 @@ impl<'a> WasmPackageBuilder<'a> {
                 elem_ty,
                 inner_ty,
             );
+        }
+        // Tuple element: each array slot is a tuple GC struct ref. Per element,
+        // lift the tuple to canonical memory at its slot (the tuple twin of the
+        // record branch below).
+        if matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::Tuple(_))
+            && let Some(&tup_idx) = self.record_gc_types.tuple_struct_type_idx.get(&elem_ty)
+        {
+            let (elem_size, elem_align) =
+                gc_list_elem_canonical_info(self.ctx, &mut self.layout_ctx, elem_ty);
+            let mut func = Function::new([
+                (1, ValType::I32), // len
+                (1, ValType::I32), // data_ptr
+                (1, ValType::I32), // idx
+                (1, ValType::I32), // elem_addr
+                (
+                    1,
+                    ValType::Ref(wasm_encoder::RefType {
+                        nullable: true,
+                        heap_type: wasm_encoder::HeapType::Concrete(tup_idx),
+                    }),
+                ), // elem_ref (typed tuple ref)
+                (1, ValType::I32), // mat_ptr
+                (1, ValType::I32), // mat_len
+            ]);
+            let arr_local: u32 = 0;
+            let len_local: u32 = 1;
+            let data_ptr_local: u32 = 2;
+            let idx_local: u32 = 3;
+            let elem_addr_local: u32 = 4;
+            let elem_ref_local: u32 = 5;
+            let mat_ptr_local: u32 = 6;
+            let mat_len_local: u32 = 7;
+            func.instruction(&wasm_encoder::Instruction::LocalGet(arr_local));
+            func.instruction(&wasm_encoder::Instruction::ArrayLen);
+            func.instruction(&wasm_encoder::Instruction::LocalSet(len_local));
+            super::scratch::emit_cabi_realloc_array(&mut func, len_local, elem_size, elem_align, cabi_realloc);
+            func.instruction(&wasm_encoder::Instruction::LocalSet(data_ptr_local));
+            func.instruction(&wasm_encoder::Instruction::I32Const(0));
+            func.instruction(&wasm_encoder::Instruction::LocalSet(idx_local));
+            func.instruction(&wasm_encoder::Instruction::Block(wasm_encoder::BlockType::Empty));
+            func.instruction(&wasm_encoder::Instruction::Loop(wasm_encoder::BlockType::Empty));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(len_local));
+            func.instruction(&wasm_encoder::Instruction::I32GeU);
+            func.instruction(&wasm_encoder::Instruction::BrIf(1));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(data_ptr_local));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));
+            func.instruction(&wasm_encoder::Instruction::I32Const(elem_size as i32));
+            func.instruction(&wasm_encoder::Instruction::I32Mul);
+            func.instruction(&wasm_encoder::Instruction::I32Add);
+            func.instruction(&wasm_encoder::Instruction::LocalSet(elem_addr_local));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(arr_local));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));
+            func.instruction(&wasm_encoder::Instruction::ArrayGet(arr_type_idx));
+            func.instruction(&wasm_encoder::Instruction::LocalSet(elem_ref_local));
+            self.emit_tuple_lift_to_memory(
+                &mut func,
+                elem_ty,
+                elem_ref_local,
+                elem_addr_local,
+                0,
+                Some((mat_ptr_local, mat_len_local)),
+            )?;
+            func.instruction(&wasm_encoder::Instruction::LocalGet(idx_local));
+            func.instruction(&wasm_encoder::Instruction::I32Const(1));
+            func.instruction(&wasm_encoder::Instruction::I32Add);
+            func.instruction(&wasm_encoder::Instruction::LocalSet(idx_local));
+            func.instruction(&wasm_encoder::Instruction::Br(0));
+            func.instruction(&wasm_encoder::Instruction::End); // loop
+            func.instruction(&wasm_encoder::Instruction::End); // block
+            func.instruction(&wasm_encoder::Instruction::LocalGet(data_ptr_local));
+            func.instruction(&wasm_encoder::Instruction::LocalGet(len_local));
+            func.instruction(&wasm_encoder::Instruction::End);
+            return Ok(func);
         }
         let elem_record_def: Option<DefId> = match self.ctx.ty_kind(elem_ty) {
             InternedTyKind::Adt(d) if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) => {
@@ -6045,6 +6162,98 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(())
     }
 
+    /// Build a tuple GC ref from canonical-ABI bytes at `base_addr_local +
+    /// base_offset` (each element loaded at its tuple layout offset), leaving
+    /// `(ref null $tuple)` on the stack. The tuple twin of
+    /// [`Self::emit_record_pack_from_memory`] — used by the list
+    /// un-materializer for `list<tuple>`. Handles scalar / string / scalar-
+    /// list / nested record & tuple elements.
+    fn emit_tuple_pack_from_memory(
+        &mut self,
+        func: &mut Function,
+        tuple_ty: Ty,
+        base_addr_local: u32,
+        base_offset: u32,
+    ) -> Result<(), CodegenError> {
+        let elements: Vec<Ty> = match self.ctx.ty_kind(tuple_ty) {
+            InternedTyKind::Tuple(els) => els.to_vec(),
+            _ => {
+                return Err(CodegenError::InvalidIR(
+                    "tuple_pack_from_memory: not a tuple ty".into(),
+                ));
+            }
+        };
+        let tup_idx = self
+            .record_gc_types
+            .tuple_struct_type_idx
+            .get(&tuple_ty)
+            .copied()
+            .ok_or_else(|| {
+                CodegenError::InvalidIR("tuple_pack_from_memory: missing tuple_struct_type_idx".into())
+            })?;
+        let mut offset = 0u32;
+        for &elem_ty in &elements {
+            let elem_layout = self.layout_ctx.layout_of(elem_ty);
+            offset = (offset + elem_layout.align - 1) & !(elem_layout.align - 1);
+            let abs_off = base_offset + offset;
+            match self.ctx.ty_kind(elem_ty) {
+                InternedTyKind::Adt(d)
+                    if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) =>
+                {
+                    self.emit_record_pack_from_memory(func, *d, base_addr_local, abs_off)?;
+                }
+                InternedTyKind::Tuple(_) => {
+                    self.emit_tuple_pack_from_memory(func, elem_ty, base_addr_local, abs_off)?;
+                }
+                InternedTyKind::List(_)
+                    if self.record_gc_types.list_array_type_idx.contains_key(&elem_ty) =>
+                {
+                    let arr_idx = self.record_gc_types.list_array_type_idx[&elem_ty];
+                    let unmat_fn = *self
+                        .gc_list_unmaterializer_fn_indices
+                        .get(&arr_idx)
+                        .ok_or_else(|| {
+                            CodegenError::InvalidIR(
+                                "tuple_pack_from_memory: missing list un-materializer".into(),
+                            )
+                        })?;
+                    func.instruction(&Instruction::LocalGet(base_addr_local));
+                    func.instruction(&Instruction::I32Const(abs_off as i32));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
+                    func.instruction(&Instruction::LocalGet(base_addr_local));
+                    func.instruction(&Instruction::I32Const((abs_off + 4) as i32));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
+                    func.instruction(&Instruction::Call(unmat_fn));
+                }
+                InternedTyKind::String => {
+                    func.instruction(&Instruction::LocalGet(base_addr_local));
+                    func.instruction(&Instruction::I32Const(abs_off as i32));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
+                    func.instruction(&Instruction::LocalGet(base_addr_local));
+                    func.instruction(&Instruction::I32Const((abs_off + 4) as i32));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Load(super::scratch::mem_arg(0, 2)));
+                    self.emit_str_bytes_unmaterialize(func)?;
+                }
+                _ => {
+                    // Primitive / enum element — typed load.
+                    func.instruction(&Instruction::LocalGet(base_addr_local));
+                    if abs_off != 0 {
+                        func.instruction(&Instruction::I32Const(abs_off as i32));
+                        func.instruction(&Instruction::I32Add);
+                    }
+                    self.emit_typed_field_load(func, elem_ty);
+                }
+            }
+            offset += elem_layout.size;
+        }
+        func.instruction(&Instruction::StructNew(tup_idx));
+        Ok(())
+    }
+
     /// Phase 5e.1: write a record GC ref's fields to canonical-ABI
     /// memory at `base_addr_local + base_offset`. The ref must be on
     /// top of the stack on entry; this consumes it. For each field:
@@ -6442,6 +6651,132 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(())
     }
 
+    /// Lift a tuple GC struct held in `tuple_ref_local` to its canonical-ABI
+    /// memory representation at `base_addr_local + base_offset`. The tuple twin
+    /// of [`Self::emit_record_lift_to_memory`] — used by the list materializer
+    /// for `list<tuple>`. Handles scalar / string / scalar-list / flat-gc
+    /// elements; a nested record/tuple element needs its own ref local and is
+    /// a clean error for now.
+    fn emit_tuple_lift_to_memory(
+        &mut self,
+        func: &mut Function,
+        tuple_ty: Ty,
+        tuple_ref_local: u32,
+        base_addr_local: u32,
+        base_offset: u32,
+        scratch_ptr_len: Option<(u32, u32)>,
+    ) -> Result<(), CodegenError> {
+        let elements: Vec<Ty> = match self.ctx.ty_kind(tuple_ty) {
+            InternedTyKind::Tuple(els) => els.to_vec(),
+            _ => {
+                return Err(CodegenError::InvalidIR(
+                    "tuple_lift_to_memory: not a tuple ty".into(),
+                ));
+            }
+        };
+        let tup_idx = self
+            .record_gc_types
+            .tuple_struct_type_idx
+            .get(&tuple_ty)
+            .copied()
+            .ok_or_else(|| {
+                CodegenError::InvalidIR("tuple_lift_to_memory: missing tuple_struct_type_idx".into())
+            })?;
+        let mut offset = 0u32;
+        for (i, &elem_ty) in elements.iter().enumerate() {
+            let elem_layout = self.layout_ctx.layout_of(elem_ty);
+            offset = (offset + elem_layout.align - 1) & !(elem_layout.align - 1);
+            let abs_off = base_offset + offset;
+            let gc_field_idx = i as u32;
+            if self.flat_gc_migrated(elem_ty) {
+                self.emit_flat_gc_field_lift(
+                    func,
+                    tuple_ref_local,
+                    tup_idx,
+                    gc_field_idx,
+                    elem_ty,
+                    base_addr_local,
+                    abs_off,
+                )?;
+                offset += elem_layout.size;
+                continue;
+            }
+            // string / scalar-list element → materialize the GC array ref to
+            // canonical (ptr, len) and store the 8-byte slot.
+            let arr_idx: Option<u32> =
+                if matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::String) {
+                    self.record_gc_types.str_bytes_array_idx
+                } else if matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::List(_)) {
+                    self.record_gc_types.list_array_type_idx.get(&elem_ty).copied()
+                } else {
+                    None
+                };
+            if let Some(arr_idx) = arr_idx {
+                let mat_fn = *self
+                    .gc_list_materializer_fn_indices
+                    .get(&arr_idx)
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR(
+                            "tuple_lift_to_memory: missing materializer for array element".into(),
+                        )
+                    })?;
+                let (scratch_ptr, scratch_len) = scratch_ptr_len.ok_or_else(|| {
+                    CodegenError::InvalidIR(
+                        "tuple_lift_to_memory: string/list element requires scratch i32 locals"
+                            .into(),
+                    )
+                })?;
+                func.instruction(&Instruction::LocalGet(tuple_ref_local));
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: tup_idx,
+                    field_index: gc_field_idx,
+                });
+                func.instruction(&Instruction::Call(mat_fn));
+                func.instruction(&Instruction::LocalSet(scratch_len));
+                func.instruction(&Instruction::LocalSet(scratch_ptr));
+                func.instruction(&Instruction::LocalGet(base_addr_local));
+                if abs_off != 0 {
+                    func.instruction(&Instruction::I32Const(abs_off as i32));
+                    func.instruction(&Instruction::I32Add);
+                }
+                func.instruction(&Instruction::LocalGet(scratch_ptr));
+                func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+                func.instruction(&Instruction::LocalGet(base_addr_local));
+                func.instruction(&Instruction::I32Const((abs_off + 4) as i32));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::LocalGet(scratch_len));
+                func.instruction(&Instruction::I32Store(super::scratch::mem_arg(0, 2)));
+                offset += elem_layout.size;
+                continue;
+            }
+            // scalar element → typed store.
+            if matches!(
+                self.internal_repr(elem_ty),
+                super::super::repr::InternalRepr::Scalar(_)
+            ) {
+                func.instruction(&Instruction::LocalGet(base_addr_local));
+                if abs_off != 0 {
+                    func.instruction(&Instruction::I32Const(abs_off as i32));
+                    func.instruction(&Instruction::I32Add);
+                }
+                func.instruction(&Instruction::LocalGet(tuple_ref_local));
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: tup_idx,
+                    field_index: gc_field_idx,
+                });
+                self.emit_typed_field_store(func, elem_ty);
+                offset += elem_layout.size;
+                continue;
+            }
+            return Err(CodegenError::InvalidIR(format!(
+                "tuple_lift_to_memory: element {:?} not yet supported (nested record/tuple \
+                 elements need their own ref local)",
+                elem_ty
+            )));
+        }
+        Ok(())
+    }
+
     /// Emit a typed memory load for a primitive/enum field type.
     /// Address is on the stack; result is the loaded value.
     fn emit_typed_field_load(&self, func: &mut Function, ty: yel_core::Ty) {
@@ -6526,6 +6861,13 @@ fn gc_list_elem_canonical_info(
             } else {
                 (4, 4)
             }
+        }
+        // A tuple element uses its canonical-ABI memory layout size/align
+        // (same treatment as records) — the list buffer stride must be the
+        // full tuple width, not the 4-byte scalar fallback.
+        InternedTyKind::Tuple(_) => {
+            let l = layout_ctx.layout_of(elem_ty);
+            (l.size, l.align)
         }
         // Phase 5e.2: lists (and strings) at canonical ABI are
         // 8 bytes (ptr i32 + len i32), align 4.

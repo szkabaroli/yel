@@ -4541,6 +4541,100 @@ fn option_tuple_collapse_roundtrip() {
     }
 }
 
+/// Boundary round-trip for a `list<tuple>` signal. The getter routes the
+/// direct list signal through the tuple-aware materializer
+/// (`emit_tuple_lift_to_memory`) instead of the inline scalar copy loop
+/// (which would `i32.store` the raw tuple ref), and the setter routes
+/// through the tuple un-materializer (`emit_tuple_pack_from_memory`).
+/// Covers scalar, string, and scalar-list tuple elements.
+#[test]
+fn list_of_tuples_setter_getter_roundtrip() {
+    let source = r#"
+        package yel:listtup@0.1.0;
+        export component App {
+            pairs: list<tuple<s32, s32>> = [(1, 2), (3, 4)];
+            labelled: list<tuple<s32, string>> = [(1, "a")];
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:listtup/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+
+    // pairs := [(10, 20), (30, 40), (50, 60)]
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "pairs",
+        &r,
+        Val::List(vec![
+            Val::Tuple(vec![Val::S32(10), Val::S32(20)]),
+            Val::Tuple(vec![Val::S32(30), Val::S32(40)]),
+            Val::Tuple(vec![Val::S32(50), Val::S32(60)]),
+        ]),
+    );
+    let get_pairs = get_func(&mut h, iface, "[method]app.get-pairs");
+    let mut out = [Val::Bool(false)];
+    get_pairs
+        .call(&mut h.store, &[Val::Resource(r)], &mut out)
+        .expect("get-pairs");
+    match &out[0] {
+        Val::List(elems) => {
+            let expected = [(10, 20), (30, 40), (50, 60)];
+            assert_eq!(elems.len(), expected.len(), "pairs len");
+            for (i, (a, b)) in expected.iter().enumerate() {
+                match &elems[i] {
+                    Val::Tuple(t) => {
+                        assert!(matches!(&t[0], Val::S32(x) if x == a), "pairs[{i}].0 got {:?}", t[0]);
+                        assert!(matches!(&t[1], Val::S32(x) if x == b), "pairs[{i}].1 got {:?}", t[1]);
+                    }
+                    other => panic!("pairs[{i}] non-tuple {:?}", other),
+                }
+            }
+        }
+        other => panic!("get-pairs returned non-list {:?}", other),
+    }
+
+    // labelled := [(7, "hi"), (8, "yo")]
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "labelled",
+        &r,
+        Val::List(vec![
+            Val::Tuple(vec![Val::S32(7), Val::String("hi".into())]),
+            Val::Tuple(vec![Val::S32(8), Val::String("yo".into())]),
+        ]),
+    );
+    let get_lab = get_func(&mut h, iface, "[method]app.get-labelled");
+    let mut out = [Val::Bool(false)];
+    get_lab
+        .call(&mut h.store, &[Val::Resource(r)], &mut out)
+        .expect("get-labelled");
+    match &out[0] {
+        Val::List(elems) => {
+            let expected = [(7, "hi"), (8, "yo")];
+            assert_eq!(elems.len(), expected.len(), "labelled len");
+            for (i, (a, s)) in expected.iter().enumerate() {
+                match &elems[i] {
+                    Val::Tuple(t) => {
+                        assert!(matches!(&t[0], Val::S32(x) if x == a), "labelled[{i}].0 got {:?}", t[0]);
+                        match &t[1] {
+                            Val::String(got) => assert_eq!(&**got, *s, "labelled[{i}].1"),
+                            other => panic!("labelled[{i}].1 non-string {:?}", other),
+                        }
+                    }
+                    other => panic!("labelled[{i}] non-tuple {:?}", other),
+                }
+            }
+        }
+        other => panic!("get-labelled returned non-list {:?}", other),
+    }
+}
+
 /// Phase 0 regression-guard: nested record field access through two
 /// levels: `state.user.addr.city`. Pins multi-level offset loads today
 /// and chained `struct.get` post-Phase 4.
