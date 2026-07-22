@@ -79,6 +79,30 @@ impl<'a> WasmPackageBuilder<'a> {
         let f = ValType::F32;
         let d = ValType::F64;
         let g = ValType::I64;
+
+        // Intern one `concat` type per distinct arity the program uses.
+        // Interpolations lower to a `concat` call whose arity is the number
+        // of string pieces, so there is no fixed upper bound. Mirror the
+        // normalization in the runtime body-gen loop (dedup + always keep
+        // arity 2 so the empty-program default at build time has a type).
+        let concat_types = {
+            let mut arities: Vec<usize> = self.concat_arities.clone();
+            arities.push(2);
+            arities.sort();
+            arities.dedup();
+            arities
+                .into_iter()
+                .map(|arity| {
+                    let idx = intern_type(
+                        vec![i; 2 * arity],
+                        vec![i, i],
+                        format!("concat{}", arity),
+                    );
+                    (arity, idx)
+                })
+                .collect::<std::collections::HashMap<usize, u32>>()
+        };
+
         let func_types = FuncTypes {
             alloc: intern_type(vec![i, i], vec![i], "alloc".into()),
             free: intern_type(vec![i, i], vec![], "free".into()),
@@ -104,15 +128,7 @@ impl<'a> WasmPackageBuilder<'a> {
             fanout: intern_type(vec![], vec![], "fanout".into()),
             cabi_post: intern_type(vec![i], vec![], "cabi-post".into()),
             setter_spill: intern_type(vec![i], vec![], "setter-spill".into()),
-            concat: [
-                intern_type(vec![i; 4], vec![i, i], "concat2".into()),
-                intern_type(vec![i; 6], vec![i, i], "concat3".into()),
-                intern_type(vec![i; 8], vec![i, i], "concat4".into()),
-                intern_type(vec![i; 10], vec![i, i], "concat5".into()),
-                intern_type(vec![i; 12], vec![i, i], "concat6".into()),
-                intern_type(vec![i; 14], vec![i, i], "concat7".into()),
-                intern_type(vec![i; 16], vec![i, i], "concat8".into()),
-            ],
+            concat: concat_types,
         };
         self.func_types = func_types;
 
@@ -1121,8 +1137,12 @@ impl<'a> WasmPackageBuilder<'a> {
         }
         // concat<n> for each required arity (uses cabi_realloc)
         for &arity in &concat_arities {
-            // concat2 = type 17, concat3 = type 18, concat4 = type 19, etc.
-            let type_idx = self.func_types.concat[(arity - 2) as usize];
+            // One interned type per arity (see the `concat_types` map built
+            // in the type section). The map is keyed over the same
+            // normalized arity set this loop iterates, so the lookup hits.
+            let type_idx = *self.func_types.concat.get(&arity).unwrap_or_else(|| {
+                panic!("concat type for arity {} not interned", arity)
+            });
             functions.function(type_idx);
         }
         if runtime_needs.store_fat_ptr {
@@ -1285,7 +1305,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 // MAX_FLAT_RESULTS=1 — in which case they must be returned
                 // directly as the matching flat valtype (e.g.
                 // `record R { a: f32 }` -> `(i32) -> f32`, not `(i32) -> i32`).
-                let ft = self.func_types;
+                let ft = &self.func_types;
                 let getter_type: u32 = match self.ctx.ty_kind(signal.ty) {
                     InternedTyKind::F32 => ft.getter_f32,
                     InternedTyKind::F64 => ft.getter_f64,

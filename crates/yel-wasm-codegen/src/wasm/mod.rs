@@ -708,7 +708,7 @@ impl MemoryLayout {
 /// each role gets its own type so the WAT shows the role and a later
 /// optimisation pass is free to dedup or specialise. Indices are pure
 /// allocation artifacts.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct FuncTypes {
     // Allocator runtime functions.
     pub alloc: u32,           // (i32, i32) -> i32
@@ -741,8 +741,10 @@ pub(crate) struct FuncTypes {
     // Canonical-ABI post-return trampolines.
     pub cabi_post: u32,       // (i32) -> ()
     pub setter_spill: u32,    // (i32) -> ()
-    // String `concat`, indexed by `arity - 2` (concat2..concat8).
-    pub concat: [u32; 7],     // (i32 * 2n) -> (i32, i32)
+    // String `concat`, keyed by arity. One type per distinct arity the
+    // program actually uses (interpolations lower to a `concat` call whose
+    // arity is the number of pieces, so there is no fixed upper bound).
+    pub concat: std::collections::HashMap<usize, u32>, // (i32 * 2n) -> (i32, i32)
 }
 // (Record/list ctors and signal setters intern their own per-shape types
 //  in the precompute pass, so they need no fixed entry here.)

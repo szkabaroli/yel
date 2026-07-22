@@ -1,0 +1,15 @@
+// Regression: a string interpolation lowers to a `concat` call whose arity is
+// the number of pieces. The interned concat function types were a fixed array
+// covering only arities 2..=8, so an interpolation with more pieces panicked
+// in build_core_module with "index out of bounds" (concat[(arity-2)]). Fixed
+// by interning one concat type per distinct arity the program actually uses
+// (keyed by arity, no fixed upper bound). This Text has 10 interpolations
+// interleaved with literal text -> a high-arity concat.
+package yel:concatn@0.1.0;
+export component App {
+    a: s32 = 1;
+    b: s32 = 2;
+    VStack {
+        Text { "a={a} b={b} a={a} b={b} a={a} b={b} a={a} b={b} a={a} b={b}" }
+    }
+}
