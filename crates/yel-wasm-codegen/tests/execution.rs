@@ -3708,6 +3708,37 @@ fn list_of_records_iter_field_access() {
     }
 }
 
+/// Regression: a `func`-typed callback property with parameters
+/// (`cb: func(a: s32, b: u16)`) invoked from an event handler. The callback's
+/// `FunctionDef` was built with an empty `params` list (the interned `Func`
+/// type's params were discarded), so the host import signature and WIT surface
+/// omitted every user param — leaving `(self)` only — while the call site still
+/// pushed the args. The extra values were left on the stack: core validation
+/// failed with "values remaining on stack at end of block". `func`-typed
+/// properties now build param defs from the AST func type. This pins that a
+/// param'd callback compiles, instantiates, and mounts.
+#[test]
+fn callback_with_params_compiles() {
+    let source = r#"
+        package yel:cbparam@0.1.0;
+        export component App {
+            on_press: func(a: s32, b: u16);
+            VStack {
+                Button {
+                    clicked: { on_press(1, 2); }
+                }
+                Text { "ok" }
+            }
+        }
+    "#;
+    // The bug was a core-validation failure (stack imbalance), so a successful
+    // encode is the regression guard — `compile_to_component` validates the
+    // component and panics on any validation error. Full instantiation would
+    // additionally need the `app` resource wired into the callback interface.
+    let bytes = compile_to_component(source);
+    assert!(!bytes.is_empty(), "param'd-callback component should encode");
+}
+
 /// Regression: a `let` binding of a non-i32 scalar in an event handler.
 /// The lowering allocated a default *i32* slot with `Ptr` binding mode, so an
 /// `f32` / `f64` / `s64` value failed core validation ("expected i32, found

@@ -228,6 +228,36 @@ impl<'ctx> HirLowering<'ctx> {
         self.ctx.defs.set_type(def_id, record_ty);
     }
 
+    /// Build `ParameterDef`s for a callback declared as a `func`-typed
+    /// property (`cb: func(a: s32, ...)`). The interned `InternedTyKind::Func`
+    /// keeps only param *types*, so the names come from the AST func type.
+    /// Callers set each param's `owner` to the resulting function def id.
+    fn build_callback_params(&mut self, ast_ty: &ast::TyKind, span: Span) -> Vec<DefId> {
+        let ast::TyKind::Func { params, .. } = ast_ty else {
+            return Vec::new();
+        };
+        params
+            .iter()
+            .enumerate()
+            .map(|(idx, (param_name, param_ty))| {
+                let pname = self.ctx.intern(param_name);
+                let pty = self.ctx.intern_ast_ty(&param_ty.kind);
+                let param_id = self.ctx.defs.alloc(
+                    pname,
+                    DefKind::Parameter(ParameterDef {
+                        owner: DefId::INVALID, // caller updates to the func def id
+                        name: pname,
+                        ty: pty,
+                        idx: crate::ids::ParamIdx::new(idx as u32),
+                    }),
+                    span,
+                );
+                self.ctx.defs.set_type(param_id, pty);
+                param_id
+            })
+            .collect()
+    }
+
     fn register_enum(&mut self, enum_decl: &ast::Enum, span: Span) {
         let name = self.ctx.intern(&enum_decl.name);
         let def_id = self.ctx.defs.alloc(
@@ -510,21 +540,36 @@ impl<'ctx> HirLowering<'ctx> {
             let prop_name = self.ctx.intern(&prop.node.name);
             let prop_ty = self.ctx.intern_ast_ty(&prop.node.ty.kind);
 
-            // func-typed properties are functions, same as components
-            if let InternedTyKind::Func { params: _, ret } = self.ctx.ty_kind(prop_ty) {
+            // func-typed properties are functions, same as components.
+            // Extract the return type first so the `self.ctx` borrow ends
+            // before the `&mut self` param build.
+            let callback_ret = match self.ctx.ty_kind(prop_ty) {
+                InternedTyKind::Func { ret, .. } => Some(ret.unwrap_or(Ty::UNIT)),
+                _ => None,
+            };
+            if let Some(ret_ty) = callback_ret {
+                // Build param defs from the AST func type (see the component
+                // callback path for why an empty list breaks the import
+                // signature / WIT surface).
+                let params = self.build_callback_params(&prop.node.ty.kind, prop.span);
                 let func_id = self.ctx.defs.alloc(
                     prop_name,
                     DefKind::Function(FunctionDef {
                         def_id: DefId::INVALID,
                         name: prop_name,
-                        params: vec![],
-                        ret_ty: ret.unwrap_or(Ty::UNIT),
+                        params: params.clone(),
+                        ret_ty,
                         is_export: false,
                     }),
                     prop.span,
                 );
                 if let DefKind::Function(f) = &mut self.ctx.defs.get_mut(func_id).kind {
                     f.def_id = func_id;
+                }
+                for param_id in &params {
+                    if let DefKind::Parameter(p) = &mut self.ctx.defs.get_mut(*param_id).kind {
+                        p.owner = func_id;
+                    }
                 }
                 self.ctx.defs.set_type(func_id, prop_ty);
                 func_from_props.push(func_id);
@@ -701,23 +746,40 @@ impl<'ctx> HirLowering<'ctx> {
             let prop_name = self.ctx.intern(&prop.node.name);
             let prop_ty = self.ctx.intern_ast_ty(&prop.node.ty.kind);
 
-            // Function-typed properties are callbacks (imported from host)
-            if let InternedTyKind::Func { params: _, ret } = self.ctx.ty_kind(prop_ty) {
+            // Function-typed properties are callbacks (imported from host).
+            // Extract the return type as an owned value first so the
+            // `self.ctx` borrow ends before the `&mut self` param build below.
+            let callback_ret = match self.ctx.ty_kind(prop_ty) {
+                InternedTyKind::Func { ret, .. } => Some(ret.unwrap_or(Ty::UNIT)),
+                _ => None,
+            };
+            if let Some(ret_ty) = callback_ret {
+                // Build parameter defs from the AST func type. The interned
+                // `Func` drops param names, and an empty `params` list makes
+                // both the WIT surface and the host import signature omit every
+                // user param (leaving `(self)` only) while call sites still push
+                // the args — a stack imbalance that fails core validation.
+                let params = self.build_callback_params(&prop.node.ty.kind, prop.span);
                 // Create as DefKind::Function, not Signal
                 let func_id = self.ctx.defs.alloc(
                     prop_name,
                     DefKind::Function(FunctionDef {
                         def_id: DefId::INVALID,
                         name: prop_name,
-                        params: vec![], // Callback params are implicit in the type
-                        ret_ty: ret.unwrap_or(Ty::UNIT),
+                        params: params.clone(),
+                        ret_ty,
                         is_export: true, // Callbacks are imported from host
                     }),
                     prop.span,
                 );
-                // Update function def_id
+                // Update function def_id + param owners.
                 if let DefKind::Function(f) = &mut self.ctx.defs.get_mut(func_id).kind {
                     f.def_id = func_id;
+                }
+                for param_id in &params {
+                    if let DefKind::Parameter(p) = &mut self.ctx.defs.get_mut(*param_id).kind {
+                        p.owner = func_id;
+                    }
                 }
                 self.ctx.defs.set_type(func_id, prop_ty);
                 callback_prop_ids.push(func_id);
