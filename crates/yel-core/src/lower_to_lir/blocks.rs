@@ -5000,29 +5000,29 @@ impl<'a> BlockLowering<'a> {
                 })));
             }
             LirStatement::Let { local_id, value } => {
-                // Check if value type is a fat pointer (list or string) - needs two slots
-                let is_fat_ptr = matches!(
-                    self.ctx.ty_kind(value.ty),
-                    InternedTyKind::List(_) | InternedTyKind::String
-                );
-
-                // Allocate slot(s) for the local variable
-                let local_slot = self.alloc_temp_slot_named("local_slot");
-                if is_fat_ptr {
-                    // Allocate second slot for len (consecutive to ptr slot)
-                    self.alloc_temp_slot_named("local_slot_len");
-                }
+                // Allocate one slot with the value's real valtype. Post-GC-
+                // migration every value is a single slot: scalars unboxed
+                // (i32 / i64 / f32 / f64), and list / string / record / tuple /
+                // option / result / variant a single GC ref. The slot holds the
+                // value directly, so the local is bound `Value` (read = plain
+                // `local.get`).
+                //
+                // The old path allocated a default *i32* slot with `Ptr` mode:
+                // an f32 / f64 / i64 / ref value then failed to store into the
+                // i32 slot, and the `Ptr`-mode read emitted a memory load
+                // (`F32Load` etc.) that treated the value as an address —
+                // validate-but-wrong for ints, a hard validation error
+                // ("expected i32, found f32") for floats.
+                let val_ty = self.ty_to_slot_val_type(value.ty);
+                let local_slot = self.alloc_temp_slot_typed_named(val_ty, "local_slot");
 
                 let value_expr = self.intern_expr(value);
                 self.emit(LirOp::EvalExpr {
                     expr: value_expr,
                     result: local_slot,
                 });
-                // Store the local_id -> slot mapping for expression reference.
-                // `Let`-bound locals always materialize their value into a
-                // memory-backed slot today, so register with `BindingMode::Ptr`.
                 self.local_bindings
-                    .insert(*local_id, (local_slot, value.ty, LirBindingMode::Ptr));
+                    .insert(*local_id, (local_slot, value.ty, LirBindingMode::Value));
                 // Track this local as belonging to the current block
                 self.current_block_locals.push(*local_id);
             }

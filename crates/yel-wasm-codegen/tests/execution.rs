@@ -3708,6 +3708,39 @@ fn list_of_records_iter_field_access() {
     }
 }
 
+/// Regression: a `let` binding of a non-i32 scalar in an event handler.
+/// The lowering allocated a default *i32* slot with `Ptr` binding mode, so an
+/// `f32` / `f64` / `s64` value failed core validation ("expected i32, found
+/// f32") — the value couldn't store into the i32 slot, and the `Ptr`-mode read
+/// emitted a memory load treating the value as a pointer. `let` now allocates
+/// the slot with the value's real valtype and binds it `Value` (plain
+/// local.get). This pins that a float `let` compiles, instantiates, and mounts.
+#[test]
+fn let_binding_float_scalar_compiles() {
+    let source = r#"
+        package yel:letflt@0.1.0;
+        export component App {
+            v: f32 = 0.0;
+            VStack {
+                Button {
+                    clicked: { let x = 1.5; v = x; }
+                }
+                Text { "ok" }
+            }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, dom) = instantiate(&bytes, &[]);
+    ctor_and_mount(&mut h, "yel:letflt/app-component@0.1.0", "app");
+    let ops = dom.lock().unwrap().ops.clone();
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, DomOp::CreateText { content, .. } if content == "ok")),
+        "float `let` component should mount without trapping. Ops: {:?}",
+        ops
+    );
+}
+
 /// Phase 0 regression-guard: tuple signal with a literal default. Pins
 /// tuple ctor + tuple init under the migration.
 ///
