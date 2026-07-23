@@ -126,7 +126,14 @@ impl WasmPackageBuilder<'_> {
             // `none` stay distinct. Other ref inners (records / lists) have
             // no such ambiguity and still collapse.
             let inner_is_gc_string = matches!(self.ctx.ty_kind(inner_ty), InternedTyKind::String);
-            if !inner_is_gc_string {
+            // `option<option<..>>` does NOT collapse: the inner option's own
+            // `none` is a meaningful value, so a single nullable ref cannot
+            // distinguish `none` / `some(none)` / `some(some(..))`. Keep the
+            // outer option a GcVariant with an explicit disc (its `some` case
+            // carries the inner option ref as a payload). Mirrors yel-core
+            // `collapsed_ref_slot_val_ty`.
+            let inner_is_option = matches!(self.ctx.ty_kind(inner_ty), InternedTyKind::Option(_));
+            if !inner_is_gc_string && !inner_is_option {
                 match self.internal_repr(inner_ty) {
                     InternalRepr::GcRef(idx) => return InternalRepr::GcRef(idx),
                     InternalRepr::GcArrayRef(idx) => return InternalRepr::GcArrayRef(idx),
@@ -413,32 +420,24 @@ impl WasmPackageBuilder<'_> {
                 DefKind::Variant(_) => self.is_gc_variant_inner(ty, visiting),
                 _ => false,
             },
-            InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
-                self.is_gc_variant_inner(ty, visiting)
+            // An `option<inner>` payload is storable as a single ref — either
+            // it collapses to the inner's ref (`inner` is a record / tuple /
+            // scalar-list, structurally, matching `is_gc_variant_inner`'s own
+            // collapse test) or it is itself a gc-variant (`option<string>`,
+            // `option<scalar>`, `option<option<..>>`). Both admissible.
+            // `result<..>` never collapses → admissible iff it is a gc-variant.
+            // Mirrors yel-core `is_gc_variant_payload_ty_struct`.
+            InternedTyKind::Option(inner) => {
+                let inner = *inner;
+                let collapses = self.is_scalar_list_ty(inner)
+                    || matches!(self.ctx.ty_kind(inner), InternedTyKind::Tuple(_))
+                    || matches!(self.ctx.ty_kind(inner), InternedTyKind::Adt(d)
+                        if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)));
+                collapses || self.is_gc_variant_inner(ty, visiting)
             }
+            InternedTyKind::Result { .. } => self.is_gc_variant_inner(ty, visiting),
             _ => false,
         }
-    }
-
-    /// A **lossy** nested collapsing-option: `option<T>` whose internal repr
-    /// collapses to a single nullable ref (`internal_repr` is `GcRef` /
-    /// `GcArrayRef`) but which `option_collapses_to_ref` does NOT recognise —
-    /// i.e. the inner `T` is itself a collapsing option. Then the outer `none`
-    /// (null) and `some(none)` (also null, the inner's own `none`) are
-    /// indistinguishable: three states, one nullable ref. This representation
-    /// silently loses `some(none)`. Codegen refuses to generate getters/setters
-    /// for such signals (a loud `CodegenError`) rather than round-trip a
-    /// corrupted value; the correct fix is a non-collapsing gc-variant repr
-    /// with an explicit discriminant (needs gc-variant composite payloads).
-    pub(crate) fn is_lossy_nested_collapsing_option(&self, ty: Ty) -> bool {
-        if !matches!(self.ctx.ty_kind(ty), InternedTyKind::Option(_)) {
-            return false;
-        }
-        let collapses = matches!(
-            self.internal_repr(ty),
-            InternalRepr::GcRef(_) | InternalRepr::GcArrayRef(_)
-        );
-        collapses && self.option_collapses_to_ref(ty).is_none()
     }
 
     pub(crate) fn option_collapses_to_ref(&self, ty: Ty) -> Option<u32> {

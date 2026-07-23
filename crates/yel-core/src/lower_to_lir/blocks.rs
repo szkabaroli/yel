@@ -128,7 +128,13 @@ fn collapsed_ref_slot_val_ty(
                 None
             }
         }
-        InternedTyKind::Option(next) => collapsed_ref_slot_val_ty(ctx, *next),
+        // `option<option<..>>` does NOT collapse: the inner option's own
+        // `none` is a meaningful value (`some(none)` != `none`), and a single
+        // nullable ref cannot distinguish the three states. The outer option
+        // instead becomes a non-collapsing gc-variant with an explicit disc
+        // (its `some` case carries the inner option as a payload). Falls
+        // through to `None` so `ty_to_slot_val_type`'s gc-variant arm wins.
+        InternedTyKind::Option(_) => None,
         _ => None,
     }
 }
@@ -311,9 +317,16 @@ fn is_gc_variant_payload_ty_struct(
             DefKind::Variant(_) => is_gc_variant_ty_struct_inner(ctx, ty, visiting),
             _ => false,
         },
-        InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
-            is_gc_variant_ty_struct_inner(ctx, ty, visiting)
+        // An `option<T>` payload is storable as a single ref — either it
+        // collapses to the inner's ref (`option<record|tuple|scalar-list>`) or
+        // it is itself a gc-variant (`option<string>`, `option<scalar>`,
+        // `option<option<..>>`). Both are admissible. `result<..>` never
+        // collapses, so it is admissible iff it is a gc-variant.
+        InternedTyKind::Option(inner) => {
+            collapsed_ref_slot_val_ty(ctx, *inner).is_some()
+                || is_gc_variant_ty_struct_inner(ctx, ty, visiting)
         }
+        InternedTyKind::Result { .. } => is_gc_variant_ty_struct_inner(ctx, ty, visiting),
         _ => false,
     }
 }

@@ -545,19 +545,6 @@ impl<'a> WasmPackageBuilder<'a> {
         sig_idx: usize,
         comp_idx: Option<usize>,
     ) -> Result<Function, CodegenError> {
-        // A lossy nested collapsing-option (option<option<record|tuple|list>>)
-        // collapses to a single nullable ref that cannot distinguish `none`
-        // from `some(none)`. Refuse loudly rather than emit a getter that
-        // round-trips a corrupted value (or the misleading "no materializer
-        // for GC list" the storage-field walk would otherwise raise).
-        if self.is_lossy_nested_collapsing_option(signal_ty) {
-            return Err(CodegenError::InvalidIR(format!(
-                "getter: {:?} is a nested collapsing option whose single-ref storage \
-                 loses `some(none)` vs `none`; a non-collapsing gc-variant repr (needs \
-                 gc-variant composite payloads) is required",
-                signal_ty
-            )));
-        }
         // GC-struct-migrated signal — return value is computed from
         // struct.get instead of memory.load. Single-slot canonical-ABI
         // returns push the value directly; multi-slot returns lift into a
@@ -1016,17 +1003,6 @@ impl<'a> WasmPackageBuilder<'a> {
         let signal_def_id = signal.def_id;
 
         let ty = signal.ty;
-
-        // Mirror the getter guard: a lossy nested collapsing-option cannot be
-        // stored without losing `some(none)` vs `none`. Refuse loudly.
-        if self.is_lossy_nested_collapsing_option(ty) {
-            return Err(CodegenError::InvalidIR(format!(
-                "setter: {:?} is a nested collapsing option whose single-ref storage \
-                 loses `some(none)` vs `none`; a non-collapsing gc-variant repr (needs \
-                 gc-variant composite payloads) is required",
-                ty
-            )));
-        }
 
         // Write each canonical-ABI flat param into its backing struct
         // field. The setter signature is `(self: i32, flat_0, flat_1, ...)`;

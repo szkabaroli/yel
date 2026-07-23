@@ -1599,7 +1599,22 @@ fn is_gc_variant_payload_admissible(
             DefKind::Variant(_) => is_is_gc_variant_recursive(ctx, ty, registry, visiting),
             _ => false,
         },
-        InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
+        // An `option<inner>` payload is storable as a single ref — either it
+        // collapses to the inner's ref (`inner` is a record / tuple /
+        // scalar-list) or it is itself a gc-variant (`option<string>`,
+        // `option<scalar>`, `option<option<..>>`). Both admissible.
+        // `result<..>` never collapses → admissible iff it is a gc-variant.
+        // Mirrors yel-core `is_gc_variant_payload_ty_struct` and codegen
+        // `gc_variant_payload_admissible`.
+        InternedTyKind::Option(inner) => {
+            let inner = *inner;
+            let collapses = is_gc_eligible_list_ty(ctx, inner)
+                || matches!(ctx.ty_kind(inner), InternedTyKind::Tuple(_))
+                || matches!(ctx.ty_kind(inner), InternedTyKind::Adt(d)
+                    if matches!(ctx.defs.kind(*d), DefKind::Record(_)));
+            collapses || is_is_gc_variant_recursive(ctx, ty, registry, visiting)
+        }
+        InternedTyKind::Result { .. } => {
             is_is_gc_variant_recursive(ctx, ty, registry, visiting)
         }
         _ => false,

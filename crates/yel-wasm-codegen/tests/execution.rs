@@ -174,59 +174,6 @@ fn compile_to_component(source: &str) -> Vec<u8> {
     codegen::generate_wasm_module(&module, compiler.context(), &opts).expect("wasm codegen")
 }
 
-/// Like `compile_to_component` but returns the codegen `Result` (rendered to a
-/// String) instead of panicking, so negative tests can assert a loud
-/// `CodegenError`. Front-end errors still panic (they are not under test).
-fn try_compile_to_component(source: &str) -> Result<Vec<u8>, String> {
-    let mut compiler = Compiler::new();
-    let file = compiler.parse(source).expect("parse");
-    let hir = compiler.lower_to_hir(&file);
-    assert!(!compiler.has_errors(), "HIR errors");
-    let mut lir_components = Vec::new();
-    let mut global_thir_defaults: std::collections::HashMap<
-        yel_core::DefId,
-        yel_core::thir::ThirExpr,
-    > = std::collections::HashMap::new();
-    for item in &hir {
-        match compiler.type_check(item) {
-            yel_core::thir::ThirItem::Component(thir) => {
-                assert!(!compiler.has_errors(), "typeck errors");
-                lir_components.push(compiler.lower_to_lir(&thir));
-            }
-            yel_core::thir::ThirItem::Global(global) => {
-                assert!(!compiler.has_errors(), "global typeck errors");
-                global_thir_defaults.extend(global.signal_defaults);
-            }
-        }
-    }
-    let (lir_globals, lir_global_default_exprs) =
-        compiler.lower_globals_to_lir(&global_thir_defaults);
-    let (namespace, name, version) = match file.package {
-        Some(ref pkg) => (
-            pkg.namespace.clone(),
-            pkg.name.clone(),
-            pkg.version.clone().unwrap_or_else(|| "0.1.0".to_string()),
-        ),
-        None => ("yel".into(), "app".into(), "0.1.0".into()),
-    };
-    let interfaces = compiler.build_import_interfaces();
-    let module = yel_core::lir::LirModule {
-        resources: lir_components,
-        global_defaults: lir_globals.clone(),
-        global_default_exprs: lir_global_default_exprs.clone(),
-        interfaces,
-        package: file.package.clone(),
-    };
-    let opts = codegen::WasmWithWitOptions {
-        namespace,
-        name,
-        version,
-        global_defaults: lir_globals,
-        global_default_exprs: lir_global_default_exprs,
-        wasm_opt_args: None,
-    };
-    codegen::generate_wasm_module(&module, compiler.context(), &opts).map_err(|e| format!("{e:?}"))
-}
 
 // ============================================================================
 // Wasmtime wiring
@@ -3916,41 +3863,14 @@ fn option_empty_record_roundtrips() {
     }
 }
 
-/// Bug B guard: a nested collapsing-option signal (`option<option<record>>`)
-/// collapses to a single nullable ref that cannot distinguish `none` from
-/// `some(none)` — three states, one nullable ref. Codegen must refuse this
-/// loudly (a clear `CodegenError`) instead of emitting a getter that
-/// round-trips a corrupted value or raising the misleading "no materializer
-/// for GC list" the storage-field walk would otherwise hit. This pins the
-/// guard; the lossless fix (a non-collapsing gc-variant repr, which needs
-/// gc-variant composite payloads) would replace it — see the ignored
-/// `nested_collapsing_option_distinguishes_some_none` below.
+/// A nested collapsing-option signal (`option<option<record>>`) must round-trip
+/// all THREE states distinctly — `none`, `some(none)`, `some(some({..}))`.
+/// Previously it collapsed to a single nullable ref (lossy: `none` and
+/// `some(none)` both became null). It is now a non-collapsing gc-variant whose
+/// `some` case carries the inner `option<record>` (a collapsed record ref) as a
+/// payload, giving each state a distinct representation. A lossy collapse would
+/// fail the `some(none)` != `none` assertion.
 #[test]
-fn nested_collapsing_option_rejected_loudly() {
-    let source = r#"
-        package yel:nco@0.1.0;
-        record R1 { x: s32 }
-        export component App {
-            label: option<option<R1>>;
-            VStack { Text { "ok" } }
-        }
-    "#;
-    let err = try_compile_to_component(source)
-        .expect_err("nested collapsing option must be rejected, not miscompiled");
-    assert!(
-        err.contains("nested collapsing option"),
-        "expected a clear nested-collapsing-option error, got: {err}"
-    );
-}
-
-/// Target behaviour for the lossless fix of Bug B: an `option<option<record>>`
-/// signal must round-trip all THREE states distinctly — `none`, `some(none)`,
-/// `some(some({..}))`. Ignored until `option<T>` stops collapsing when `T` is
-/// itself a collapsing option (a non-collapsing gc-variant repr with an
-/// explicit discriminant, which requires gc-variant composite payloads —
-/// currently unimplemented; see `nested_collapsing_option_rejected_loudly`).
-#[test]
-#[ignore = "needs non-collapsing gc-variant repr for nested options (gc-variant composite payloads)"]
 fn nested_collapsing_option_distinguishes_some_none() {
     let source = r#"
         package yel:ncord@0.1.0;
