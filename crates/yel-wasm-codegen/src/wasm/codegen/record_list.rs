@@ -594,4 +594,123 @@ impl<'a> WasmPackageBuilder<'a> {
         let _ = elem_ty; // referenced only for the type-section param shape upstream
         Ok(func)
     }
+
+    /// Generate `list_get_$listTy(src, idx) -> option<T>`.
+    ///
+    /// Bounds-checked read: `some(src[idx])` when `0 <= idx < len`, else
+    /// `none`. The unsigned compare `(u32)idx < len` folds the negative case
+    /// into out-of-range with one instruction. A null `src` traps in
+    /// `array.len`, matching append / index.
+    ///
+    /// Signature: `(ref null $list_arr, i32) -> <option repr valtype>`.
+    /// The option is built in whichever representation `internal_repr` assigns
+    /// it: a `GcVariant` (struct.new of the some/none case subtype) or a
+    /// nullable-ref collapse (the element ref itself for some, ref.null for
+    /// none).
+    pub(super) fn generate_list_get_function(
+        &mut self,
+        list_ty: Ty,
+        option_ty: Ty,
+    ) -> Result<Function, CodegenError> {
+        use super::super::repr::InternalRepr;
+
+        let arr_type_idx = *self
+            .record_gc_types
+            .list_array_type_idx
+            .get(&list_ty)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "list-get: missing list_array_type_idx for {:?}",
+                    list_ty
+                ))
+            })?;
+
+        let opt_repr = self.internal_repr(option_ty);
+        let result_vt = match self.signal_storage_valtypes(option_ty).as_slice() {
+            [vt] => *vt,
+            other => {
+                return Err(CodegenError::InvalidIR(format!(
+                    "list-get: option result {:?} is not a single-slot ref (got {} slots)",
+                    option_ty,
+                    other.len()
+                )));
+            }
+        };
+
+        // Params: 0 = src (ref null $arr), 1 = idx (i32). No extra locals.
+        let mut func = Function::new(Vec::new());
+
+        // if ((u32)idx < array.len(src)) { some } else { none }
+        func.instruction(&Instruction::LocalGet(1)); // idx
+        func.instruction(&Instruction::LocalGet(0)); // src
+        func.instruction(&Instruction::ArrayLen); // len
+        func.instruction(&Instruction::I32LtU);
+        func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(result_vt)));
+
+        // some branch
+        match opt_repr {
+            InternalRepr::GcVariant(_) => {
+                // some case (idx 0) carries the element as its single field.
+                let some_sub = *self
+                    .record_gc_types
+                    .gc_variant_case_idx
+                    .get(&(option_ty, 0))
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR(format!(
+                            "list-get: missing some-case subtype for {:?}",
+                            option_ty
+                        ))
+                    })?;
+                func.instruction(&Instruction::LocalGet(0));
+                func.instruction(&Instruction::LocalGet(1));
+                func.instruction(&Instruction::ArrayGet(arr_type_idx));
+                func.instruction(&Instruction::StructNew(some_sub));
+            }
+            InternalRepr::GcRef(_) | InternalRepr::GcArrayRef(_) => {
+                // Nullable-ref collapse: some(x) == x, so the element ref is
+                // the option value directly.
+                func.instruction(&Instruction::LocalGet(0));
+                func.instruction(&Instruction::LocalGet(1));
+                func.instruction(&Instruction::ArrayGet(arr_type_idx));
+            }
+            other => {
+                return Err(CodegenError::InvalidIR(format!(
+                    "list-get: unexpected option repr {:?} for {:?}",
+                    other, option_ty
+                )));
+            }
+        }
+
+        func.instruction(&Instruction::Else);
+
+        // none branch
+        match opt_repr {
+            InternalRepr::GcVariant(_) => {
+                let none_sub = *self
+                    .record_gc_types
+                    .gc_variant_case_idx
+                    .get(&(option_ty, 1))
+                    .ok_or_else(|| {
+                        CodegenError::InvalidIR(format!(
+                            "list-get: missing none-case subtype for {:?}",
+                            option_ty
+                        ))
+                    })?;
+                func.instruction(&Instruction::StructNewDefault(none_sub));
+            }
+            InternalRepr::GcRef(idx) | InternalRepr::GcArrayRef(idx) => {
+                func.instruction(&Instruction::RefNull(wasm_encoder::HeapType::Concrete(idx)));
+            }
+            other => {
+                return Err(CodegenError::InvalidIR(format!(
+                    "list-get: unexpected option repr {:?} for {:?}",
+                    other, option_ty
+                )));
+            }
+        }
+
+        func.instruction(&Instruction::End); // end if
+        func.instruction(&Instruction::End); // end function
+        Ok(func)
+    }
 }

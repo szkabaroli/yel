@@ -439,6 +439,16 @@ impl<'a> WasmPackageBuilder<'a> {
             for (list_ty, func_idx) in sorted_appends {
                 func_names.append(func_idx, &format!("list_append_{}", list_ty.0));
             }
+            // Same monotonic-key requirement for list_gets.
+            let mut sorted_gets: Vec<(Ty, u32)> = runtime_funcs
+                .list_gets
+                .iter()
+                .map(|(&ty, &fi)| (ty, fi))
+                .collect();
+            sorted_gets.sort_by_key(|(_, fi)| *fi);
+            for (list_ty, func_idx) in sorted_gets {
+                func_names.append(func_idx, &format!("list_get_{}", list_ty.0));
+            }
             let mut sorted_filters: Vec<(usize, u32)> = runtime_funcs
                 .filter_indices
                 .iter()

@@ -87,6 +87,11 @@ pub struct RuntimeFunctions {
     /// `append` call site.
     pub list_appends: HashMap<Ty, u32>,
 
+    /// Map of list type -> function index for the per-list-Ty `list_get`
+    /// helper. Signature: `(src: ref null $list_arr, idx: i32) -> <option repr>`.
+    /// One function per unique `list<T>` referenced by a `get` call site.
+    pub list_gets: HashMap<Ty, u32>,
+
     /// pack_fat_ptr_to_i64 function index: (ptr, len) -> i64
     /// Packs fat pointer (ptr, len) into canonical ABI i64 format: (ptr << 32) | len
     pub pack_fat_ptr_to_i64: Option<u32>,
@@ -115,6 +120,7 @@ impl RuntimeFunctions {
         record_types: &[DefId],
         list_constructs: &[(Ty, usize)],
         list_appends: &[Ty],
+        list_gets: &[(Ty, Ty)],
         filter_count: usize,
     ) -> Self {
         let mut idx = base;
@@ -176,6 +182,14 @@ impl RuntimeFunctions {
             idx += 1;
         }
 
+        // List get helpers (one per unique list type). Keyed by list_ty; the
+        // paired option_ty is consumed only during generation.
+        let mut list_gets_map = std::collections::HashMap::new();
+        for &(list_ty, _option_ty) in list_gets {
+            list_gets_map.insert(list_ty, idx);
+            idx += 1;
+        }
+
         // Fat pointer packing helper.
         let pack_fat_ptr_to_i64 = alloc_if(&mut idx, needs.pack_fat_ptr_to_i64);
 
@@ -201,6 +215,7 @@ impl RuntimeFunctions {
             record_ctors_at,
             list_ctors,
             list_appends: list_appends_map,
+            list_gets: list_gets_map,
             pack_fat_ptr_to_i64,
             filter_indices,
             count: idx - base,
@@ -230,6 +245,11 @@ impl RuntimeFunctions {
     /// Get the function index for the per-list-Ty append helper.
     pub fn list_append(&self, list_ty: Ty) -> Option<u32> {
         self.list_appends.get(&list_ty).copied()
+    }
+
+    /// Get the function index for the per-list-Ty get helper.
+    pub fn list_get(&self, list_ty: Ty) -> Option<u32> {
+        self.list_gets.get(&list_ty).copied()
     }
 
     /// Get the function index for filter with the given call ID.

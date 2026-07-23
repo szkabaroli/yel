@@ -6050,3 +6050,128 @@ fn record_global_roundtrip_through_core_globals() {
         "global-write fanout must re-render the observer with the new record"
     );
 }
+
+/// `list.get(idx) -> option<T>` reintroduced on the typed-GC-array foundation
+/// (was `invalid IR: list-get builtin removed in Phase 7`). The helper
+/// bounds-checks with an unsigned compare and builds the option: for a
+/// **gc-variant** option (`option<s32>`) via struct.new of the some/none case
+/// subtype. Two derived signals read a fixed in-bounds and out-of-bounds index
+/// off the same list, so a single list write drives both — asserting some(v)
+/// for in-range, none past the end, and none on the empty list.
+#[test]
+fn list_get_gc_variant_option_roundtrip() {
+    let source = r#"
+        package yel:lgetv@0.1.0;
+        export component App {
+            xs: list<s32> = [10, 20, 30];
+            at1: option<s32> = xs.get(1);
+            at9: option<s32> = xs.get(9);
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let iface = "yel:lgetv/app-component@0.1.0";
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let r = ctor_and_mount(&mut h, iface, "app");
+    let get_at1 = get_func(&mut h, iface, "[method]app.get-at1");
+    let get_at9 = get_func(&mut h, iface, "[method]app.get-at9");
+    let read = |h: &mut Harness, f: &wasmtime::component::Func| -> Val {
+        let mut out = [Val::Bool(false)];
+        f.call(&mut h.store, &[Val::Resource(r)], &mut out)
+            .expect("get");
+        std::mem::replace(&mut out[0], Val::Bool(false))
+    };
+
+    // Initial: get(1) = some(20), get(9) = none.
+    assert_eq!(
+        read(&mut h, &get_at1),
+        Val::Option(Some(Box::new(Val::S32(20)))),
+        "get(1) of [10,20,30] must be some(20)"
+    );
+    assert_eq!(
+        read(&mut h, &get_at9),
+        Val::Option(None),
+        "get(9) out of bounds must be none"
+    );
+
+    // xs := [7, 8] → get(1) = some(8), get(9) still none. Reactivity through
+    // the derived signals.
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "xs",
+        &r,
+        Val::List(vec![Val::S32(7), Val::S32(8)]),
+    );
+    assert_eq!(
+        read(&mut h, &get_at1),
+        Val::Option(Some(Box::new(Val::S32(8)))),
+        "after set, get(1) of [7,8] must be some(8)"
+    );
+    assert_eq!(read(&mut h, &get_at9), Val::Option(None));
+
+    // xs := [] → get(1) now out of bounds → none.
+    call_setter(&mut h, iface, "app", "xs", &r, Val::List(vec![]));
+    assert_eq!(
+        read(&mut h, &get_at1),
+        Val::Option(None),
+        "get(1) of [] must be none"
+    );
+}
+
+/// The other `list.get` representation: the result `option<list<s32>>`
+/// **collapses to a nullable ref**, so the helper returns the element ref
+/// directly for some and `ref.null` for none — no struct wrapper. Asserts an
+/// in-bounds inner list round-trips and an out-of-bounds index is none.
+#[test]
+fn list_get_collapsed_option_roundtrip() {
+    let source = r#"
+        package yel:lgetc@0.1.0;
+        export component App {
+            xss: list<list<s32>> = [[1, 2], [3, 4, 5]];
+            first: option<list<s32>> = xss.get(0);
+            gone: option<list<s32>> = xss.get(7);
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let iface = "yel:lgetc/app-component@0.1.0";
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let r = ctor_and_mount(&mut h, iface, "app");
+    let get_first = get_func(&mut h, iface, "[method]app.get-first");
+    let get_gone = get_func(&mut h, iface, "[method]app.get-gone");
+    let read = |h: &mut Harness, f: &wasmtime::component::Func| -> Val {
+        let mut out = [Val::Bool(false)];
+        f.call(&mut h.store, &[Val::Resource(r)], &mut out)
+            .expect("get");
+        std::mem::replace(&mut out[0], Val::Bool(false))
+    };
+
+    assert_eq!(
+        read(&mut h, &get_first),
+        Val::Option(Some(Box::new(Val::List(vec![Val::S32(1), Val::S32(2)])))),
+        "get(0) must be some([1,2])"
+    );
+    assert_eq!(
+        read(&mut h, &get_gone),
+        Val::Option(None),
+        "get(7) out of bounds must be none"
+    );
+
+    // xss := [[9]] → get(0) = some([9]), get(7) still none.
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "xss",
+        &r,
+        Val::List(vec![Val::List(vec![Val::S32(9)])]),
+    );
+    assert_eq!(
+        read(&mut h, &get_first),
+        Val::Option(Some(Box::new(Val::List(vec![Val::S32(9)])))),
+        "after set, get(0) must be some([9])"
+    );
+    assert_eq!(read(&mut h, &get_gone), Val::Option(None));
+}

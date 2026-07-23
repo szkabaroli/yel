@@ -523,16 +523,29 @@ impl WasmPackageBuilder<'_> {
                         }
                     }
                     "list-get" => {
-                        // Phase 7 cleanup: the safe `list.get(idx)` builtin
-                        // was backed by the `list_get_opt` runtime helper,
-                        // which has been deleted. Re-introduce as a typed
-                        // `array.len`-bounded helper if/when the YEL surface
-                        // syntax exposes it.
-                        return Err(CodegenError::InvalidIR(
-                            "list-get builtin: removed in Phase 7 cleanup; \
-                             reintroduce on a typed-GC-array foundation"
-                                .into(),
-                        ));
+                        // list.get(idx) -> option<T> → call per-list-Ty helper.
+                        // Signature `(ref null $arr, i32) -> <option repr>`; the
+                        // helper bounds-checks and builds some/none. See
+                        // `generate_list_get_function`.
+                        if args.len() != 2 {
+                            return Err(CodegenError::InvalidIR(
+                                "list-get requires 2 args: list, index".to_string(),
+                            ));
+                        }
+                        let list_ty = component.get_expr(args[0]).ty;
+                        // Push src list (ref null $arr) and the index (i32).
+                        self.emit_expr(func, component.get_expr(args[0]), component)?;
+                        self.emit_expr(func, component.get_expr(args[1]), component)?;
+                        let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
+                            CodegenError::InvalidIR("Runtime functions not initialized".to_string())
+                        })?;
+                        let get_fn_idx = runtime_funcs.list_get(list_ty).ok_or_else(|| {
+                            CodegenError::InvalidIR(format!(
+                                "list-get: no list_get helper registered for {:?}",
+                                list_ty
+                            ))
+                        })?;
+                        func.instruction(&Instruction::Call(get_fn_idx));
                     }
                     "starts-with" | "starts_with" => {
                         // string.starts-with(prefix) -> bool

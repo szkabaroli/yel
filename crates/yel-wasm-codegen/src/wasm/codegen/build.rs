@@ -213,6 +213,9 @@ impl<'a> WasmPackageBuilder<'a> {
         // See the late-intern block below.
         let mut list_append_types: std::collections::HashMap<Ty, u32> =
             std::collections::HashMap::new();
+        // List-get helper type indices, interned in the same late block.
+        let mut list_get_types: std::collections::HashMap<Ty, u32> =
+            std::collections::HashMap::new();
 
         // Precompute callback import type indices. Every callback takes the
         // component's resource handle as the implicit first `i32` param,
@@ -615,6 +618,42 @@ impl<'a> WasmPackageBuilder<'a> {
             self.function_type_names
                 .push((idx, format!("type-list-append-{}", list_ty.0)));
             list_append_types.insert(list_ty, idx);
+        }
+
+        // List-get helper types: `(ref null $list_arr, i32) -> <option repr>`.
+        // The result valtype is the single-slot repr of the call's `option<T>`.
+        for &(list_ty, option_ty) in &self.list_gets.clone() {
+            let arr_type_idx = *self
+                .record_gc_types
+                .list_array_type_idx
+                .get(&list_ty)
+                .ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "list_get type registration: missing list_array_type_idx for {:?}",
+                        list_ty
+                    ))
+                })?;
+            let arr_ref = ValType::Ref(wasm_encoder::RefType {
+                nullable: true,
+                heap_type: wasm_encoder::HeapType::Concrete(arr_type_idx),
+            });
+            let option_vt = match self.signal_storage_valtypes(option_ty).as_slice() {
+                [vt] => *vt,
+                other => {
+                    return Err(CodegenError::InvalidIR(format!(
+                        "list_get type registration: option result {:?} is not a \
+                         single-slot ref (got {} slots)",
+                        option_ty,
+                        other.len()
+                    )));
+                }
+            };
+            types.ty().function([arr_ref, ValType::I32], [option_vt]);
+            let idx = cursor;
+            cursor += 1;
+            self.function_type_names
+                .push((idx, format!("type-list-get-{}", list_ty.0)));
+            list_get_types.insert(list_ty, idx);
         }
 
         for component in self.components.iter() {
@@ -1156,6 +1195,7 @@ impl<'a> WasmPackageBuilder<'a> {
         let filter_count = self.filter_calls.len();
         let runtime_needs = self.runtime_needs;
         let list_appends_clone = self.list_appends.clone();
+        let list_gets_clone = self.list_gets.clone();
         let runtime_funcs = RuntimeFunctions::new(
             import_layout.num_imports + 3,
             runtime_needs,
@@ -1163,6 +1203,7 @@ impl<'a> WasmPackageBuilder<'a> {
             &self.record_types,
             &self.list_constructs,
             &list_appends_clone,
+            &list_gets_clone,
             filter_count,
         );
         self.runtime_funcs = Some(runtime_funcs.clone());
@@ -1245,6 +1286,16 @@ impl<'a> WasmPackageBuilder<'a> {
             let type_idx = *list_append_types.get(&list_ty).ok_or_else(|| {
                 CodegenError::InternalError(format!(
                     "missing list append type idx for {:?}",
+                    list_ty
+                ))
+            })?;
+            functions.function(type_idx);
+        }
+        // 10c. List get helpers (one per unique list type).
+        for &(list_ty, _option_ty) in &self.list_gets {
+            let type_idx = *list_get_types.get(&list_ty).ok_or_else(|| {
+                CodegenError::InternalError(format!(
+                    "missing list get type idx for {:?}",
                     list_ty
                 ))
             })?;
@@ -2056,6 +2107,11 @@ impl<'a> WasmPackageBuilder<'a> {
         let list_appends_clone = self.list_appends.clone();
         for list_ty in list_appends_clone {
             code.function(&self.generate_list_append_function(list_ty)?);
+        }
+        // 10c. List get helpers
+        let list_gets_clone = self.list_gets.clone();
+        for (list_ty, option_ty) in list_gets_clone {
+            code.function(&self.generate_list_get_function(list_ty, option_ty)?);
         }
         if runtime_needs.pack_fat_ptr_to_i64 {
             code.function(&runtime::emit_pack_fat_ptr_to_i64());

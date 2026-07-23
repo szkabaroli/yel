@@ -1075,6 +1075,12 @@ pub(crate) struct WasmPackageBuilder<'a> {
     /// Each entry triggers `generate_list_append_function(list_ty)` and
     /// gets a `RuntimeFunctions::list_append` index.
     pub list_appends: Vec<Ty>,
+    /// `(list_ty, option_ty)` pairs for each `list.get(idx)` call site.
+    /// `option_ty` is the call's result type (`option<T>`), captured here
+    /// because codegen holds `&ctx` and can't intern it later. Each unique
+    /// `list_ty` triggers `generate_list_get_function` and gets a
+    /// `RuntimeFunctions::list_get` index.
+    pub list_gets: Vec<(Ty, Ty)>,
     /// Per-block layouts for migrated `global Foo { ... }` blocks. One
     /// entry per `defs.globals()` in declaration order. Holds the GC
     /// struct type index, self-global index, and per-property field
@@ -1330,6 +1336,7 @@ impl<'a> WasmPackageBuilder<'a> {
             current_block_local_modes: None,
             list_constructs: Vec::new(),
             list_appends: Vec::new(),
+            list_gets: Vec::new(),
             filter_calls: Vec::new(),
             filter_call_index: HashMap::new(),
             runtime_needs: runtime::RuntimeNeeds::default(),
@@ -1569,6 +1576,17 @@ impl<'a> WasmPackageBuilder<'a> {
                         let list_ty = exprs[receiver.0 as usize].ty;
                         if !self.list_appends.contains(&list_ty) {
                             self.list_appends.push(list_ty);
+                        }
+                    }
+                }
+                "list-get" => {
+                    // list.get(idx) -> option<T>. Receiver (args[0]) carries
+                    // the list type; the call's own type is the option result.
+                    if let Some(receiver) = args.first() {
+                        let list_ty = exprs[receiver.0 as usize].ty;
+                        let key = (list_ty, expr.ty);
+                        if !self.list_gets.contains(&key) {
+                            self.list_gets.push(key);
                         }
                     }
                 }
