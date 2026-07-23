@@ -657,11 +657,71 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                 field_idx,
                 field_def: _,
             } => {
-                // For now, treat optional field same as regular field
-                // TODO: Desugar to match expression
-                LirExprKind::Field {
-                    base: self.lower_child(base),
-                    field_idx: *field_idx,
+                // Desugar `base?.field` (base: option<Inner>, result:
+                // option<FieldTy>) into a guarded field access:
+                //   base is Some ? some(<some payload>.field) : none
+                // Lowering it to a bare `Field` on the option base was wrong —
+                // codegen rejects a field access whose base is an option
+                // ("base of FieldAccess is not a record type").
+                // Option case convention (matches VariantCtor/IsCase): 0 = Some,
+                // 1 = None. The Some payload is a single field at index 0.
+                let option_def = self.ctx.known.builtin_types.option();
+                let base_id = self.lower_child(base);
+                let inner_ty = match self.ctx.ty_kind(base.ty) {
+                    crate::types::InternedTyKind::Option(t) => *t,
+                    _ => Ty::ERROR,
+                };
+                let field_ty = match self.ctx.ty_kind(expr.ty) {
+                    crate::types::InternedTyKind::Option(t) => *t,
+                    _ => Ty::ERROR,
+                };
+                // <base>.<some payload> : Inner
+                let payload = self.intern(LirExpr::new(
+                    LirExprKind::VariantField {
+                        base: base_id,
+                        case_idx: 0,
+                        field_idx: 0,
+                    },
+                    inner_ty,
+                ));
+                // <payload>.field : FieldTy
+                let payload_field = self.intern(LirExpr::new(
+                    LirExprKind::Field {
+                        base: payload,
+                        field_idx: *field_idx,
+                    },
+                    field_ty,
+                ));
+                // some(<payload>.field) : option<FieldTy>
+                let some_result = self.intern(LirExpr::new(
+                    LirExprKind::VariantCtor {
+                        ty_def: option_def,
+                        case_idx: 0,
+                        payload: Some(payload_field),
+                    },
+                    expr.ty,
+                ));
+                // none : option<FieldTy>
+                let none_result = self.intern(LirExpr::new(
+                    LirExprKind::VariantCtor {
+                        ty_def: option_def,
+                        case_idx: 1,
+                        payload: None,
+                    },
+                    expr.ty,
+                ));
+                // base is Some ?
+                let condition = self.intern(LirExpr::new(
+                    LirExprKind::IsCase {
+                        base: base_id,
+                        case_idx: 0,
+                    },
+                    Ty::BOOL,
+                ));
+                LirExprKind::Ternary {
+                    condition,
+                    then_expr: some_result,
+                    else_expr: none_result,
                 }
             }
 

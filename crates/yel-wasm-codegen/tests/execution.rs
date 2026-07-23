@@ -5041,6 +5041,62 @@ fn option_record_collapse_roundtrip() {
     }
 }
 
+/// Optional chaining (`maybe?.n`). Lowering treated `base?.field` as a plain
+/// field access on the option base, which codegen rejected. It now desugars to
+/// `base is Some ? some(<some payload>.field) : none`, and the collapsed-option
+/// `IsCase` (null-check) / `VariantField` (payload = the ref) paths back it.
+/// This round-trip pins the *values*: `some(record).n` → `some(n)`, `none` →
+/// `none` — a swapped some/none or wrong payload extraction would validate but
+/// return the wrong value here.
+#[test]
+fn optional_chaining_roundtrip() {
+    let source = r#"
+        package yel:optchain@0.1.0;
+        record Item { n: s32, label: string, }
+        export component App {
+            maybe: option<Item> = none;
+            picked: option<s32> = maybe?.n;
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let iface = "yel:optchain/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+    let get_picked = get_func(&mut h, iface, "[method]app.get-picked");
+    let read = |h: &mut Harness| -> Val {
+        let mut out = [Val::Bool(false)];
+        get_picked
+            .call(&mut h.store, &[Val::Resource(r)], &mut out)
+            .expect("get-picked");
+        std::mem::replace(&mut out[0], Val::Bool(false))
+    };
+
+    // maybe := some({ n: 42, .. }) → picked = some(42)
+    call_setter(
+        &mut h,
+        iface,
+        "app",
+        "maybe",
+        &r,
+        Val::Option(Some(Box::new(Val::Record(vec![
+            ("n".into(), Val::S32(42)),
+            ("label".into(), Val::String("x".into())),
+        ])))),
+    );
+    match read(&mut h) {
+        Val::Option(Some(v)) => assert!(matches!(*v, Val::S32(42)), "picked, got {:?}", v),
+        other => panic!("expected picked = some(42), got {:?}", other),
+    }
+
+    // maybe := none → picked = none (chain propagates none)
+    call_setter(&mut h, iface, "app", "maybe", &r, Val::Option(None));
+    match read(&mut h) {
+        Val::Option(None) => {}
+        other => panic!("expected picked = none, got {:?}", other),
+    }
+}
+
 #[test]
 fn option_tuple_collapse_roundtrip() {
     let source = r#"

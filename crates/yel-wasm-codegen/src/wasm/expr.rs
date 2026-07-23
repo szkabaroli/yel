@@ -1636,6 +1636,21 @@ impl WasmPackageBuilder<'_> {
 
             LirExprKind::IsCase { base, case_idx } => {
                 let base = component.get_expr(*base);
+                // Collapsed option (`option<record | tuple | scalar-list |
+                // collapsing-option>`) is stored as one nullable ref — there is
+                // no case subtype to `ref.test`. `Some` = non-null, `None` =
+                // null (case 0 = Some, 1 = None). Null-check the ref.
+                if matches!(self.ctx.ty_kind(base.ty), InternedTyKind::Option(_))
+                    && self.option_collapses_to_ref(base.ty).is_some()
+                {
+                    self.emit_expr(func, base, component)?;
+                    func.instruction(&Instruction::RefIsNull); // 1 = null = None
+                    if *case_idx == 0 {
+                        // Some: invert (non-null).
+                        func.instruction(&Instruction::I32Eqz);
+                    }
+                    return Ok(1);
+                }
                 // Phase 5e.5: discriminant test on a migrated parent —
                 // emit `ref.test (ref $<parent>_<case>)`. For non-migrated
                 // parents we fall through to the legacy "load disc slot,
@@ -1690,6 +1705,17 @@ impl WasmPackageBuilder<'_> {
                 field_idx,
             } => {
                 let base = component.get_expr(*base);
+                // Collapsed option: the `Some` payload IS the ref itself (the
+                // inner value; `None` = null). The caller has discriminated
+                // `Some` (via IsCase), so the ref is non-null — hand it back
+                // as a non-null ref for a following `Field`/struct.get.
+                if matches!(self.ctx.ty_kind(base.ty), InternedTyKind::Option(_))
+                    && self.option_collapses_to_ref(base.ty).is_some()
+                {
+                    self.emit_expr(func, base, component)?;
+                    func.instruction(&Instruction::RefAsNonNull);
+                    return Ok(1);
+                }
                 // Phase 5e.5: payload extraction from a known case —
                 // `ref.cast (ref $<parent>_<case>); struct.get_<u|s>?
                 // $<parent>_<case> <field_idx>`.
