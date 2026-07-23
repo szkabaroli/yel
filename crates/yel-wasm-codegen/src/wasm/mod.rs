@@ -28,7 +28,7 @@ use wit_parser::{ManglingAndAbi, Resolve, WorldId};
 use yel_core::context::CompilerContext;
 use yel_core::ids::{BlockId, DefId, LocalId};
 use yel_core::lir::{LirBindingMode, LirLayoutContext, LirLiteral, LirSlotKind, align_to};
-use yel_core::lir::{LirExpr, LirExprKind, LirModule, LirResource, LirSlotId};
+use yel_core::lir::{LirExpr, LirExprId, LirExprKind, LirModule, LirResource, LirSlotId};
 use yel_core::types::Ty;
 use yel_core::{definitions::DefKind, types::InternedTyKind};
 
@@ -1117,6 +1117,16 @@ pub(crate) struct WasmPackageBuilder<'a> {
     /// (e.g. a `.filter(...)` in a global-singleton default).
     pub filter_calls: Vec<FilterCallEntry>,
 
+    /// Maps a filter call's identity — `(owning component, source-list expr id,
+    /// predicate-closure expr id)` — to its index in `filter_calls`. Emission
+    /// looks up the index by identity instead of a positional counter, so it
+    /// stays correct when a filter is emitted more than once (a signal-default
+    /// filter emitted in init plus a body filter in mount/update) or when
+    /// emission order diverges from the collection (arena) order. The
+    /// `(list, closure)` expr-id pair uniquely identifies a filter call within
+    /// its component (identical calls dedup to the same interned exprs).
+    pub filter_call_index: HashMap<(Option<usize>, LirExprId, LirExprId), usize>,
+
     /// Demand-driven runtime helper flags. Populated by
     /// [`collect_runtime_needs`] before the type/function/code section
     /// build pass. Drives both index allocation in
@@ -1156,8 +1166,6 @@ pub(crate) struct WasmPackageBuilder<'a> {
     /// `struct.new` / `struct.get` / `struct.set` site. See
     /// `gc_types::RecordGcTypes` for the full layout.
     pub record_gc_types: gc_types::RecordGcTypes,
-    /// Current filter call index (incremented during emit_expr to match collection order)
-    pub current_filter_call_idx: usize,
     /// Mapping from DefId to local index for captured signals in current filter function
     /// Used by emit_predicate_expr to handle SignalRead
     pub current_filter_captured_signals: Option<HashMap<DefId, (u32, bool)>>, // (local_idx, is_fat_ptr)
@@ -1326,13 +1334,13 @@ impl<'a> WasmPackageBuilder<'a> {
             list_constructs: Vec::new(),
             list_appends: Vec::new(),
             filter_calls: Vec::new(),
+            filter_call_index: HashMap::new(),
             runtime_needs: runtime::RuntimeNeeds::default(),
             ternary_block_types: HashMap::new(),
             gc_layouts: Vec::new(),
             shared_handle_type_idx: None,
             shared_handle_arr_type_idx: None,
             record_gc_types: gc_types::RecordGcTypes::default(),
-            current_filter_call_idx: 0,
             current_filter_captured_signals: None,
             cb_return_scratch_addr: None,
             cb_pointer_stash_addr: None,
@@ -1681,6 +1689,12 @@ impl<'a> WasmPackageBuilder<'a> {
                 if let Some(yel_core::lir::expr::LirStatement::Expr(predicate)) = body.last()
                     && let Some(param) = params.first()
                 {
+                    // Record the identity → index mapping so emission resolves
+                    // the filter by identity, not by emission order. A filter
+                    // that dedups to the same interned call maps to the same
+                    // index (correct); `insert` is idempotent for it.
+                    self.filter_call_index
+                        .insert((comp_idx, args[0], args[1]), self.filter_calls.len());
                     self.filter_calls.push((
                         comp_idx,
                         list_expr.ty,

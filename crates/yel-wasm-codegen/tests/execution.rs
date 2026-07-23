@@ -4055,6 +4055,31 @@ fn callback_with_composite_args_compiles() {
     assert!(!bytes.is_empty(), "composite-arg callback should encode");
 }
 
+/// Regression: a `.filter()` call nested inside a signal *default* expression
+/// (`= some(list.filter(..))` / `ok(..)` / a tuple). Filters were matched
+/// between the collection pass and emission by a positional counter; a filter
+/// emitted in a default (init) — plus another in mount/update, or emitted more
+/// than once — desynced the counter from the collection index, so emission
+/// asked for a filter id that didn't exist (`Filter N not found in
+/// filter_calls`). Filters are now resolved by identity (component + list expr
+/// id + closure expr id). A successful encode is the guard.
+#[test]
+fn filter_in_signal_default_compiles() {
+    let source = r#"
+        package yel:fltdef@0.1.0;
+        export component App {
+            label: list<s32>;
+            picked: option<list<s32>> = some(label.filter({ p: s32 -> (p == 7) }));
+            other: list<s32> = label.filter({ q: s32 -> (q > 0) });
+            VStack {
+                for x in label.filter({ r: s32 -> (r == 2) }) { Text { "y" } }
+            }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    assert!(!bytes.is_empty(), "filter-in-default component should encode");
+}
+
 /// Regression: a callback invoked with a *composite* argument (option /
 /// result / tuple / record) must push the argument's canonical-ABI
 /// flattening — what the host import declares — not the value's internal GC

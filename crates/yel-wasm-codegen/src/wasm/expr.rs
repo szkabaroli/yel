@@ -739,18 +739,23 @@ impl WasmPackageBuilder<'_> {
                                 "filter requires 2 args: list, predicate closure".to_string(),
                             ));
                         }
-                        let filter_id = self.current_filter_call_idx;
-                        self.current_filter_call_idx += 1;
-                        let predicate = self
-                            .filter_calls
-                            .get(filter_id)
-                            .map(|(_, _, _, _, pred)| pred.clone())
-                            .ok_or_else(|| {
-                                CodegenError::InvalidIR(format!(
-                                    "Filter {} not found in filter_calls",
-                                    filter_id
-                                ))
-                            })?;
+                        // Resolve the filter by IDENTITY (owning component +
+                        // source-list expr id + predicate-closure expr id), not
+                        // a positional emission counter. The counter desynced
+                        // when a filter was emitted more than once (e.g. a
+                        // signal-default filter emitted in init AND the same or
+                        // another filter in mount/update) or when emission order
+                        // diverged from the collection order — producing a
+                        // wrong / out-of-range index ("Filter N not found").
+                        let comp_idx = self.comp_idx_of(component);
+                        let key = (comp_idx, args[0], args[1]);
+                        let filter_id = *self.filter_call_index.get(&key).ok_or_else(|| {
+                            CodegenError::InvalidIR(format!(
+                                "filter call {:?} not registered in filter_call_index",
+                                key
+                            ))
+                        })?;
+                        let predicate = self.filter_calls[filter_id].4.clone();
                         let mut captured_signals: Vec<(DefId, Ty)> = Vec::new();
                         self.extract_signal_reads(&predicate, &component.exprs, &mut captured_signals);
 
