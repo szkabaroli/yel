@@ -68,8 +68,29 @@ pub struct YelModule {
     pub records: Vec<RecordDef>,
     pub enums: Vec<EnumDef>,
     pub variants: Vec<VariantDef>,
+    pub elements: Vec<ElementDecl>,
     pub globals: Vec<GlobalDef>,
     pub components: Vec<ComponentDef>,
+}
+
+/// A user-defined `element Name { prop: type; ... }` declaration — a runtime UI
+/// primitive. Properties are limited to attribute-value-safe scalar types
+/// (the values become `set-attribute` calls at the use site).
+#[derive(Debug, Clone)]
+pub struct ElementDecl {
+    pub name: String,
+    pub properties: Vec<(String, TypeRef)>,
+}
+
+impl ElementDecl {
+    fn to_source(&self) -> String {
+        let mut out = format!("element {} {{\n", self.name);
+        for (prop, ty) in &self.properties {
+            out.push_str(&format!("    {}: {};\n", prop, ty.to_source()));
+        }
+        out.push_str("}\n");
+        out
+    }
 }
 
 impl YelModule {
@@ -98,6 +119,13 @@ impl YelModule {
         let num_variants: usize = u.int_in_range(0..=config.max_types)?;
         let variants: Vec<_> = (0..num_variants)
             .map(|_| ctx.arbitrary_variant(u))
+            .collect::<Result<_>>()?;
+
+        // Generate user-defined element declarations (runtime UI primitives).
+        // Registered so components can instantiate them as leaf nodes.
+        let num_elements: usize = u.int_in_range(0..=2)?;
+        let elements: Vec<_> = (0..num_elements)
+            .map(|_| ctx.arbitrary_element_decl(u))
             .collect::<Result<_>>()?;
 
         // Generate global blocks (before components so components can read them
@@ -141,6 +169,7 @@ impl YelModule {
             records,
             enums,
             variants,
+            elements,
             globals,
             components,
         })
@@ -173,6 +202,12 @@ impl YelModule {
         // Variants
         for variant in &self.variants {
             out.push_str(&variant.to_source());
+            out.push_str("\n\n");
+        }
+
+        // Element declarations
+        for element in &self.elements {
+            out.push_str(&element.to_source());
             out.push_str("\n\n");
         }
 
@@ -1077,6 +1112,9 @@ struct GenerationContext {
     /// Names of container components (those with an `@children` slot). Callers
     /// may instantiate these as elements and splice child nodes into them.
     containers: Vec<String>,
+    /// User-defined element declarations: name -> attribute-safe property
+    /// schema. Instantiated as leaf nodes with their properties set.
+    element_decls: Vec<(String, Vec<(String, TypeRef)>)>,
     /// Counter for unique names.
     name_counter: usize,
 }
@@ -1092,6 +1130,7 @@ impl GenerationContext {
             callbacks: Vec::new(),
             globals: BTreeMap::new(),
             containers: Vec::new(),
+            element_decls: Vec::new(),
             name_counter: 0,
         }
     }
@@ -1423,6 +1462,33 @@ impl GenerationContext {
         }
     }
 
+    /// A user-defined `element Name { prop: type; ... }` declaration. Property
+    /// types are restricted to attribute-value-safe scalars — the value at a
+    /// use site becomes a `set-attribute` call, and compound types (list,
+    /// tuple, option, record) have no `AttributeValue` case.
+    fn arbitrary_element_decl(&mut self, u: &mut Unstructured) -> Result<ElementDecl> {
+        let name = self.arbitrary_pascal_ident("Element");
+        let prop_names = ["label", "count", "value", "size", "active", "tag"];
+        let attr_types = [
+            TypeRef::String,
+            TypeRef::S32,
+            TypeRef::Bool,
+            TypeRef::F32,
+            TypeRef::U32,
+            TypeRef::S64,
+            TypeRef::Char,
+            TypeRef::Color,
+        ];
+        let num_props: usize = u.int_in_range(1..=3.min(prop_names.len()))?;
+        let mut properties = Vec::new();
+        for pname in prop_names.iter().take(num_props) {
+            let ty = attr_types[u.int_in_range(0..=attr_types.len() - 1)?].clone();
+            properties.push((pname.to_string(), ty));
+        }
+        self.element_decls.push((name.clone(), properties.clone()));
+        Ok(ElementDecl { name, properties })
+    }
+
     /// A container component: its body wraps an `@children` slot (optionally
     /// inside a builtin layout element), and its name is registered so callers
     /// can instantiate it with children. Kept intentionally simple — no props
@@ -1568,6 +1634,30 @@ impl GenerationContext {
                 &TypeRef::String,
                 0,
             )?));
+        }
+
+        // ~20% chance to instantiate a user-defined element as a leaf node,
+        // setting a subset of its attribute-safe properties.
+        if !self.element_decls.is_empty() && u.int_in_range(0..=4)? == 0 {
+            let idx = u.int_in_range(0..=self.element_decls.len() - 1)?;
+            let (name, props) = self.element_decls[idx].clone();
+            let mut bindings = Vec::new();
+            for (prop_name, prop_ty) in &props {
+                // Set each property ~half the time (all are optional).
+                if u.arbitrary::<bool>()? {
+                    let value = self.arbitrary_expr_of_type(u, prop_ty, 0)?;
+                    bindings.push(Binding {
+                        name: prop_name.clone(),
+                        value,
+                    });
+                }
+            }
+            return Ok(Node::Element {
+                name,
+                bindings,
+                handlers: Vec::new(),
+                children: Vec::new(),
+            });
         }
 
         // ~20% chance to instantiate a defined container component, splicing
