@@ -6051,6 +6051,58 @@ fn record_global_roundtrip_through_core_globals() {
     );
 }
 
+/// A user-defined `element Foo { ... }` declaration is a runtime UI primitive:
+/// using it lowers to `create-element(tag)` + `set-attribute` per property, NOT
+/// a component mount (which panicked in `lifecycle_inline` — the decl never gets
+/// lifecycle blocks). Asserts the element is created with its own tag and its
+/// static attributes reach the host DOM.
+#[test]
+fn user_element_lowers_to_create_element_with_attributes() {
+    let source = r#"
+        package yel:uelem@0.1.0;
+        element Card {
+            title: string;
+            count: s32;
+        }
+        export component App {
+            VStack {
+                Card { title: "hello", count: 7 }
+            }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, dom) = instantiate(&bytes, &[]);
+    let _ = ctor_and_mount(&mut h, "yel:uelem/app-component@0.1.0", "app");
+
+    let ops = dom.lock().unwrap().ops.clone();
+    // The user element is created with its own tag via create-element.
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, DomOp::CreateElement { tag, .. } if tag == "Card")),
+        "user element `Card` must lower to create-element(\"Card\"), got {:?}",
+        ops
+    );
+    // Both properties reach the DOM as set-attribute calls carrying their values.
+    let attr = |name: &str| -> Option<String> {
+        ops.iter().rev().find_map(|op| match op {
+            DomOp::SetAttribute { name: n, value, .. } if n == name => Some(value.clone()),
+            _ => None,
+        })
+    };
+    let title = attr("title").expect("title attribute must be set");
+    assert!(
+        title.contains("hello"),
+        "title attribute must carry \"hello\", got {}",
+        title
+    );
+    let count = attr("count").expect("count attribute must be set");
+    assert!(
+        count.contains('7'),
+        "count attribute must carry 7, got {}",
+        count
+    );
+}
+
 /// `list.get(idx) -> option<T>` reintroduced on the typed-GC-array foundation
 /// (was `invalid IR: list-get builtin removed in Phase 7`). The helper
 /// bounds-checks with an unsigned compare and builds the option: for a

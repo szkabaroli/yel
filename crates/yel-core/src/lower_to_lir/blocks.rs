@@ -41,7 +41,6 @@ use crate::{BlockDebugName, NodeId};
 pub(crate) enum InlineResult {
     NotHandled,
     Handled,
-    HandledAndTriggered,
 }
 
 /// Convert a yel `Ty` into the matching `LirSlotValType` — the
@@ -2238,13 +2237,6 @@ impl<'a> BlockLowering<'a> {
         // added AFTER the stamp-implicit_self pass above.
         synth_export_lifecycle_blocks(self.ctx, &mut component);
 
-        // Phase 1.1c-l (#97): synthesize per-(this-component, global-signal)
-        // fanout blocks for the gc-only scalar shape. Writer-side
-        // (`inline_signal_write_or_init_from_expr` Path B) consults the
-        // ctx-side table at write time; missing entries mean the writer
-        // falls back to the legacy `LirOp::TriggerEffects` path.
-        synth_global_fanout_blocks(self.ctx, &mut component);
-
         // Register this component's lifecycle BlockIds in the ctx
         // so parents that mount it can resolve callee BlockIds at
         // lowering time. (BlockId is now module-wide unique, so a
@@ -2333,8 +2325,17 @@ impl<'a> BlockLowering<'a> {
             } => {
                 // Check if this is a user-defined component (not a builtin element like VStack, Text)
                 if let Some(component_def) = component {
-                    // Only emit MountComponent for user-defined components, not builtin elements
-                    if !self.ctx.known.elements.is_builtin(*component_def) {
+                    // User-defined `element Foo { ... }` declarations are runtime
+                    // UI primitives (LANGUAGE grammar: "intrinsic UI primitives
+                    // provided by the runtime"), not mountable components — they
+                    // never get lifecycle blocks. Lower their *use* like a
+                    // builtin element: `create-element(tag)` + attribute sets via
+                    // the branch below, not `lower_mount_component` (which would
+                    // panic looking up nonexistent lifecycle blocks).
+                    let is_user_element =
+                        matches!(self.ctx.defs.kind(*component_def), DefKind::Element(_));
+                    // Only emit MountComponent for user-defined components, not builtin/user elements
+                    if !self.ctx.known.elements.is_builtin(*component_def) && !is_user_element {
                         // Container components: allocate a slot to receive
                         // the children-root id returned from `mount`, then
                         // lower caller's children under that slot.
@@ -4958,15 +4959,7 @@ impl<'a> BlockLowering<'a> {
                         signal_ty.map(|t| self.ctx.ty_kind(t))
                     );
                 }
-                // Phase 1.1c-l (#97): skip trigger if Path B already
-                // emitted inline `CallBlock`s to per-observer fanout
-                // blocks (otherwise the legacy `LirOp::TriggerEffects`
-                // would call the legacy fanout helper on top → double
-                // fire). For `Handled` / `NotHandled` the trigger still
-                // emits as before.
-                if !matches!(inlined, InlineResult::HandledAndTriggered) {
-                    self.emit_trigger_for_signal(*signal);
-                }
+                self.emit_trigger_for_signal(*signal);
             }
             LirStatement::If {
                 condition,
@@ -5388,11 +5381,7 @@ impl<'a> BlockLowering<'a> {
                 signal_ty.map(|t| self.ctx.ty_kind(t))
             );
         }
-        // See SignalWrite call site above for the
-        // `HandledAndTriggered` suppression rationale.
-        if !matches!(inlined, InlineResult::HandledAndTriggered) {
-            self.emit_trigger_for_signal(d.target);
-        }
+        self.emit_trigger_for_signal(d.target);
         let _ = self.finish_block_with_name(d.debug_name);
     }
 
@@ -5411,6 +5400,15 @@ impl<'a> BlockLowering<'a> {
     /// so the global-fanout helper in `signal_emit.rs` continues to
     /// fire.
     fn emit_trigger_for_signal(&mut self, signal: DefId) {
+        // Global-block-owned signal: emit the `TriggerEffects`
+        // placeholder — the module-level post-pass expands it into
+        // `CallBlock`s to every observing component's fanout block
+        // once all components are lowered (see
+        // `resolve_global_triggers`).
+        if self.ctx.defs.owning_global_block(signal).is_some() {
+            self.emit(LirOp::TriggerEffects { signal });
+            return;
+        }
         if self.signal_to_update_blocks.is_some() {
             let blocks_opt = self
                 .signal_to_update_blocks
@@ -5428,20 +5426,20 @@ impl<'a> BlockLowering<'a> {
                         result: None,
                     });
                 }
-                return;
             }
-            // Not in the component-local dispatch map — must be a
-            // global (or a signal with no observers). Keep
-            // `TriggerEffects` so the global-fanout helper still fires.
-            self.emit(LirOp::TriggerEffects { signal });
+            // Absent from the map ⇒ no effect observes this local
+            // signal (the map is built from every effect's full
+            // dependency list) — a trigger would be a runtime no-op,
+            // so emit nothing.
             return;
         }
-        // Pre-deferred-phase fallback. Phase 1.1c-d aims to eliminate
-        // this path entirely (only globals should still emit
-        // TriggerEffects, and those flow through the same helper above),
-        // but leave the safety net in place so structural emits that
-        // somehow reach here don't silently drop the trigger.
-        self.emit(LirOp::TriggerEffects { signal });
+        // Every local-signal write site runs in the deferred phase
+        // (handler / derived bodies), where the dispatch map exists.
+        todo!(
+            "trigger emitted outside the deferred phase for component-local \
+             signal {:?} — no dispatch map to resolve update blocks",
+            signal
+        );
     }
 
     /// Phase 1.1c-d: lazily-allocated shared dummy-i32 parent slot
@@ -5707,30 +5705,11 @@ impl<'a> BlockLowering<'a> {
                         }
                 }
         }
-        // Global fanout gate: for global-block-owned signals, `Some`
-        // means every observing component has a synthesized inline
-        // fanout block (see `synth_global_fanout_blocks`) — Path B
-        // then emits `CallBlock`s per observer and returns
-        // `HandledAndTriggered`. `None` (including the empty-vec
-        // collapse: gate passed but no observer effects matched)
-        // means Path B still inlines the write but returns `Handled`
-        // so the caller emits `LirOp::TriggerEffects` — the §1.4
-        // residue that goes away with the §1.5 globals migration.
-        let local_idx_probe = self.tree_signals.iter().position(|s| s.def_id == signal_def);
-        let global_block_probe = self.ctx.defs.owning_global_block(signal_def);
-        let fanout_blocks: Option<Vec<(DefId, BlockId)>> = if global_block_probe.is_some() {
-            match collect_global_fanout_blocks_if_ready(self.ctx, signal_def, signal_ty, value) {
-                Some(blocks) if blocks.is_empty() => None,
-                other => other,
-            }
-        } else {
-            // Component-local signal: no fanout blocks (those are a
-            // global-signal mechanism); Path A below handles the
-            // write/init inline and the caller keeps ownership of the
-            // trigger (direct CallBlock via emit_trigger_for_signal).
-            let _ = (local_idx_probe, global_block_probe);
-            None
-        };
+        // Triggering is uniformly the caller's job: locals dispatch via
+        // direct `CallBlock`s in `emit_trigger_for_signal`; globals emit
+        // the `TriggerEffects` placeholder that the module-level
+        // `resolve_global_triggers` pass expands once every component
+        // (and its fanout blocks) exists.
         let local_idx = self.tree_signals.iter().position(|s| s.def_id == signal_def);
         let global_block = self.ctx.defs.owning_global_block(signal_def);
 
@@ -5941,29 +5920,9 @@ impl<'a> BlockLowering<'a> {
                 });
             }
 
-            // Phase 1.1c-l (#97): emit a `CallBlock` to each observing
-            // component's synthesized fanout block. The dummy-i32 parent
-            // slot satisfies the fanout block's `(i32)->()` wasm signature;
-            // the fanout body walks the observer's registry and dispatches
-            // to live instance update_blocks. Returning
-            // `HandledAndTriggered` suppresses the caller's
-            // `emit_trigger_for_signal` (which would otherwise emit the
-            // legacy `LirOp::TriggerEffects` and double-fire).
-            //
-            // Task #103: when no fanout blocks were synthesized, the
-            // inline write above still ran; return `Handled` so the
-            // caller emits `LirOp::TriggerEffects` (legacy fanout).
-            if let Some(blocks) = &fanout_blocks {
-                let dummy_parent = self.deferred_dummy_parent_slot();
-                for (_observer_comp, fanout_block_id) in blocks {
-                    self.emit(LirOp::CallBlock {
-                        block: *fanout_block_id,
-                        args: vec![dummy_parent],
-                        result: None,
-                    });
-                }
-                return InlineResult::HandledAndTriggered;
-            }
+            // Trigger emission stays with the caller — it emits the
+            // `TriggerEffects` placeholder that `resolve_global_triggers`
+            // expands into per-observer fanout `CallBlock`s post-lowering.
             return InlineResult::Handled;
         }
 
@@ -6763,59 +6722,17 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
     }
 }
 
-/// Phase 1.1c-l (#97): writer-side gate predicate. Returns `Some(observer_list)`
-/// when every component that *could* observe `signal_def` has already been
-/// lowered AND (either has a registered fanout block for this signal OR
-/// has no qualifying observers). The returned list contains only the
-/// components with a registered fanout BlockId — those whose update
-/// blocks the writer must call.
+/// Synthesize per-(observing-component, global-signal) fanout
+/// LirBlocks. One block is registered for each `(this component,
+/// global_signal)` pair where the signal is a non-unit global
+/// property. The synthesized block walks this component's registry
+/// array and calls each observing effect's update_block with
+/// `(inst, ...)` — boundary-ref params are resolved by an inline
+/// chain walk (`BindBoundaryLocal`), i32 params get dummy zeros.
 ///
-/// Returns `None` when:
-///   * the signal is not a gc-only scalar global (other shapes still
-///     route through the legacy `LirOp::TriggerEffects` path);
-///   * `value` is `None` (default-init writes aren't supported in Path B);
-///   * any component in `ctx.defs.components()` has NOT yet been lowered
-///     (no `component_lifecycle_blocks` entry), in which case we can't
-///     determine whether it observes the signal — bail to legacy.
-fn collect_global_fanout_blocks_if_ready(
-    ctx: &CompilerContext,
-    signal_def: DefId,
-    signal_ty: Ty,
-    value: Option<LirExprId>,
-) -> Option<Vec<(DefId, BlockId)>> {
-    value?;
-    if !is_inlineable_global(ctx, signal_def, signal_ty) {
-        return None;
-    }
-    let mut blocks: Vec<(DefId, BlockId)> = Vec::new();
-    for comp_def in ctx.defs.components() {
-        // If this component hasn't finished lowering yet, we can't
-        // tell whether it observes the signal — bail.
-        ctx.lookup_component_lifecycle_blocks(comp_def)?;
-        if let Some(bid) = ctx.lookup_global_fanout_block(comp_def, signal_def) {
-            blocks.push((comp_def, bid));
-        }
-    }
-    Some(blocks)
-}
-
-/// Phase 1.1c-l (#97): synthesize per-(observing-component, global-signal)
-/// fanout LirBlocks. One block is registered for each `(this component,
-/// global_signal)` pair where:
-///   * the signal is a scalar `gc-only` global (i32/i64/f32/f64);
-///   * every effect of this component that observes the signal has
-///     "simple shape" (empty `params` AND empty `boundary_param_slots`).
-///
-/// Otherwise the pair is skipped — the writer side will fall back to
-/// emitting `LirOp::TriggerEffects` (legacy fanout helper).
-///
-/// The synthesized block walks this component's registry array (same
-/// shape as `generate_global_fanout_for` in codegen) and calls each
-/// observing effect's update_block with `(inst, dummy_parent)`.
-///
-/// Mirror of `synth_internal_constructor_block`'s per-component
-/// invocation: runs from `lower_component` after the user-effect blocks
-/// have been finalized so `effects` / `effects_by_signal` are stable.
+/// Runs from the module-level `resolve_global_triggers` pass, after
+/// EVERY component is lowered, so writer components lowered before
+/// their observers still resolve the full observer set.
 pub(crate) fn synth_global_fanout_blocks(
     ctx: &CompilerContext,
     component: &mut LirResource,
@@ -6835,7 +6752,10 @@ pub(crate) fn synth_global_fanout_blocks(
     observed_globals.sort_by_key(|(sig, _)| sig.0);
 
     for (signal_def, effect_ids) in observed_globals {
-        // Gate 1: signal must be gc-only scalar (i32/i64/f32/f64).
+        // Unit-typed globals have no storage and no observable value —
+        // an effect cannot meaningfully depend on one, so skip. (If a
+        // write to one is ever observed, `resolve_global_triggers`
+        // fails loudly on the missing fanout block.)
         let signal_ty = match ctx.defs.type_of(signal_def) {
             Some(t) => t,
             None => continue,
@@ -6844,52 +6764,60 @@ pub(crate) fn synth_global_fanout_blocks(
             continue;
         }
 
-        // Gate 2: every observing effect's update block params must be
-        // all-i32 (each slot has val_ty == I32). i32 params become
-        // `i32.const 0` placeholders in the fanout call — mirrors what
-        // the legacy `generate_global_fanout_for` does. Non-i32 params
-        // (typed refs, f32, etc.) require real values and would need a
-        // separate resolution path; bail.
-        let mut all_simple = true;
+        // The fanout call passes `i32.const 0` dummies for the callee's
+        // `params` slots (update blocks read real state from `$self`),
+        // so every param must be i32. Non-i32 params would need real
+        // values the fanout loop cannot supply — fail loudly instead of
+        // silently skipping (there is no legacy fallback anymore).
         for &eid in &effect_ids {
-            let effect = match component.effects.iter().find(|e| e.id == eid) {
-                Some(e) => e,
-                None => {
-                    all_simple = false;
-                    break;
-                }
-            };
+            let effect = component
+                .effects
+                .iter()
+                .find(|e| e.id == eid)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "synth_global_fanout_blocks: effects_by_signal references \
+                         effect id {} missing from component {:?}",
+                        eid, component.def_id
+                    )
+                });
             let update_block = component
                 .blocks
                 .iter()
-                .find(|b| b.id == effect.update_block);
-            let simple = match update_block {
-                Some(b) => b.params.iter().all(|slot_id| {
-                    // Task #105 B2: dispatch on the slot-id variant —
-                    // Block-variant params live on the update block's own
-                    // slots vec.
-                    let val_ty = match slot_id {
-                        LirSlotId::Block { idx, .. } => {
-                            b.slots.get(*idx as usize).map(|s| s.val_ty)
-                        }
-                        LirSlotId::Resource { idx } => {
-                            component.slots.get(*idx as usize).map(|s| s.val_ty)
-                        }
-                    };
-                    matches!(val_ty, Some(crate::lir::block::LirSlotValType::I32))
-                }),
-                None => false,
-            };
-            if !simple {
-                all_simple = false;
-                break;
+                .find(|b| b.id == effect.update_block)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "synth_global_fanout_blocks: effect {}'s update block {:?} \
+                         missing from component {:?}",
+                        eid, effect.update_block, component.def_id
+                    )
+                });
+            for slot_id in &update_block.params {
+                // Task #105 B2: dispatch on the slot-id variant —
+                // Block-variant params live on the update block's own
+                // slots vec.
+                let val_ty = match slot_id {
+                    LirSlotId::Block { idx, .. } => {
+                        update_block.slots.get(*idx as usize).map(|s| s.val_ty)
+                    }
+                    LirSlotId::Resource { idx } => {
+                        component.slots.get(*idx as usize).map(|s| s.val_ty)
+                    }
+                };
+                if !matches!(val_ty, Some(crate::lir::block::LirSlotValType::I32)) {
+                    todo!(
+                        "global-fanout dispatch to update block {:?} with non-i32 \
+                         param {:?} ({:?}) — the fanout loop can only pass dummy \
+                         i32 zeros",
+                        effect.update_block,
+                        slot_id,
+                        val_ty
+                    );
+                }
             }
         }
-        if !all_simple {
-            continue;
-        }
 
-        // All gates passed — synthesize the fanout block. Allocate the
+        // Synthesize the fanout block. Allocate the
         // typed scratch slots and emit the loop.
         let fanout_block_id = ctx.alloc_block_id();
         synth_one_global_fanout_block(
