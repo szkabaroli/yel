@@ -286,6 +286,11 @@ pub enum TypeRef {
     U64,
     F32,
     F64,
+    /// `int` — surface alias for `s32`. Rendered as `int`; behaves as `s32`
+    /// everywhere via [`TypeRef::canonical`], exercising alias resolution.
+    Int,
+    /// `float` — surface alias for `f32`.
+    Float,
     String,
     Char,
     // Compound
@@ -309,9 +314,30 @@ pub enum TypeRef {
 }
 
 impl TypeRef {
+    /// Resolve surface aliases (`int`→`s32`, `float`→`f32`) to their canonical
+    /// primitive, recursing through compound types. Applied at every point a
+    /// type drives expression generation or type-equality, so aliases affect
+    /// only the rendered annotation — never the value shape.
+    fn canonical(&self) -> TypeRef {
+        match self {
+            TypeRef::Int => TypeRef::S32,
+            TypeRef::Float => TypeRef::F32,
+            TypeRef::List(inner) => TypeRef::List(Box::new(inner.canonical())),
+            TypeRef::Option(inner) => TypeRef::Option(Box::new(inner.canonical())),
+            TypeRef::Result { ok, err } => TypeRef::Result {
+                ok: ok.as_ref().map(|t| Box::new(t.canonical())),
+                err: err.as_ref().map(|t| Box::new(t.canonical())),
+            },
+            TypeRef::Tuple(elems) => TypeRef::Tuple(elems.iter().map(|t| t.canonical()).collect()),
+            other => other.clone(),
+        }
+    }
+
     fn to_source(&self) -> String {
         match self {
             TypeRef::Bool => "bool".into(),
+            TypeRef::Int => "int".into(),
+            TypeRef::Float => "float".into(),
             TypeRef::S8 => "s8".into(),
             TypeRef::S16 => "s16".into(),
             TypeRef::S32 => "s32".into(),
@@ -795,7 +821,21 @@ impl Expr {
             Expr::Int(v) => v.to_string(),
             Expr::Float(v) => format!("{:.2}", v),
             Expr::String(s) => format!("\"{}\"", s.replace('"', "\\\"")),
-            Expr::Char(c) => format!("'{}'", c),
+            Expr::Char(c) => {
+                // Render the escape sequences the grammar recognises
+                // (`escape_seq`: n r t \ ' " 0) rather than a raw control char,
+                // which would break the `'...'` literal.
+                let rendered = match c {
+                    '\n' => "\\n".to_string(),
+                    '\r' => "\\r".to_string(),
+                    '\t' => "\\t".to_string(),
+                    '\\' => "\\\\".to_string(),
+                    '\'' => "\\'".to_string(),
+                    '\0' => "\\0".to_string(),
+                    other => other.to_string(),
+                };
+                format!("'{}'", rendered)
+            }
             Expr::Bool(b) => b.to_string(),
             Expr::Color(c) => c.clone(),
             Expr::Unit(v, u) => format!("{}{}", v, u),
@@ -1160,13 +1200,27 @@ impl GenerationContext {
             0 => TypeRef::Bool,
             1 => TypeRef::S8,
             2 => TypeRef::S16,
-            3 => TypeRef::S32,
+            // ~1/4 of s32 / f32 picks render as the `int` / `float` surface
+            // aliases (identical types, exercises alias resolution).
+            3 => {
+                if u.int_in_range(0..=3)? == 0 {
+                    TypeRef::Int
+                } else {
+                    TypeRef::S32
+                }
+            }
             4 => TypeRef::S64,
             5 => TypeRef::U8,
             6 => TypeRef::U16,
             7 => TypeRef::U32,
             8 => TypeRef::U64,
-            9 => TypeRef::F32,
+            9 => {
+                if u.int_in_range(0..=3)? == 0 {
+                    TypeRef::Float
+                } else {
+                    TypeRef::F32
+                }
+            }
             10 => TypeRef::F64,
             11 => TypeRef::String,
             _ => TypeRef::Char,
@@ -1198,7 +1252,7 @@ impl GenerationContext {
                 // so components can read them (`GlobalName.prop`). `out` is
                 // component→host, still emitted but not offered as a read source.
                 if dir != "out" {
-                    prop_types.insert(prop_name.clone(), ty.clone());
+                    prop_types.insert(prop_name.clone(), ty.canonical());
                 }
                 properties.push(PropertyDef {
                     name: prop_name,
@@ -1210,7 +1264,7 @@ impl GenerationContext {
                 // In-tree shared state: always defaulted so the block is
                 // self-contained, and readable from components.
                 let default = self.arbitrary_literal_of_type(u, &ty)?;
-                prop_types.insert(prop_name.clone(), ty.clone());
+                prop_types.insert(prop_name.clone(), ty.canonical());
                 properties.push(PropertyDef {
                     name: prop_name,
                     ty,
@@ -1442,7 +1496,9 @@ impl GenerationContext {
                 } else {
                     None
                 };
-                self.properties.insert(prop_name.clone(), ty.clone());
+                // Store the canonical type for lookups/equality; keep the
+                // (possibly aliased) `ty` on the PropertyDef for rendering.
+                self.properties.insert(prop_name.clone(), ty.canonical());
                 Ok(PropertyDef {
                     name: prop_name,
                     ty,
@@ -1468,7 +1524,9 @@ impl GenerationContext {
                 let params: Vec<(String, TypeRef)> = (0..num_params)
                     .map(|p| Ok((cb_param_names[p].to_string(), self.arbitrary_simple_type(u)?)))
                     .collect::<Result<_>>()?;
-                let param_types: Vec<TypeRef> = params.iter().map(|(_, t)| t.clone()).collect();
+                // Store canonical param types (aliases resolved) for call-arg
+                // generation; `params` keeps the aliased types for rendering.
+                let param_types: Vec<TypeRef> = params.iter().map(|(_, t)| t.canonical()).collect();
                 self.callbacks.push((cb_name.clone(), param_types));
                 let has_return: bool = u.arbitrary()?;
                 let return_ty = if has_return {
@@ -1820,8 +1878,9 @@ impl GenerationContext {
             }));
         }
 
-        // 20% chance to generate if statement (only at depth 0 to avoid deep nesting)
-        if depth == 0 && u.int_in_range(0..=9)? < 2 {
+        // 20% chance to generate an if statement, nested up to depth 2 so
+        // handler bodies exercise nested/else control flow (not just top-level).
+        if depth <= 2 && u.int_in_range(0..=9)? < 2 {
             let condition = self.arbitrary_expr_of_type(u, &TypeRef::Bool, 0)?;
             let num_then: usize = u.int_in_range(1..=2)?;
             let then_body: Vec<_> = (0..num_then)
@@ -1912,6 +1971,10 @@ impl GenerationContext {
         ty: &TypeRef,
         depth: usize,
     ) -> Result<Expr> {
+        // Resolve `int`/`float` aliases up front so all matching, recursion,
+        // and type-equality below sees only canonical primitives.
+        let canon = ty.canonical();
+        let ty = &canon;
         if depth >= self.config.max_expr_depth {
             return self.arbitrary_literal_of_type(u, ty);
         }
@@ -2028,6 +2091,11 @@ impl GenerationContext {
 
         // Generate based on type
         match ty {
+            // `int`/`float` are resolved to `s32`/`f32` by the `canonical()`
+            // shadow at fn entry, so they never reach this match.
+            TypeRef::Int | TypeRef::Float => {
+                unreachable!("int/float aliases are canonicalized at fn entry")
+            }
             TypeRef::Bool => {
                 let choice: u8 = u.int_in_range(0..=2)?;
                 match choice {
@@ -2036,6 +2104,13 @@ impl GenerationContext {
                         // Comparison. Vary the operand type across signed/unsigned
                         // widths so codegen emits `lt_s`/`lt_u` and both i32/i64
                         // comparison instructions, not just the s32 path.
+                        //
+                        // Bare integer literals are always s32 and do NOT coerce
+                        // to a wider/unsigned operand in a comparison (yel has no
+                        // implicit numeric coercion). So a non-s32 comparison is
+                        // only well-typed when *both* sides carry the width — use
+                        // property vars of that exact type, and fall back to s32
+                        // (where literals are safe) when none exist.
                         let operand_types = [
                             TypeRef::S32,
                             TypeRef::U32,
@@ -2045,9 +2120,32 @@ impl GenerationContext {
                             TypeRef::S16,
                         ];
                         let operand_ty =
-                            &operand_types[u.int_in_range(0..=operand_types.len() - 1)?];
-                        let lhs = self.arbitrary_expr_of_type(u, operand_ty, depth + 1)?;
-                        let rhs = self.arbitrary_expr_of_type(u, operand_ty, depth + 1)?;
+                            operand_types[u.int_in_range(0..=operand_types.len() - 1)?].clone();
+                        let (lhs, rhs) = if operand_ty == TypeRef::S32 {
+                            (
+                                self.arbitrary_expr_of_type(u, &TypeRef::S32, depth + 1)?,
+                                self.arbitrary_expr_of_type(u, &TypeRef::S32, depth + 1)?,
+                            )
+                        } else {
+                            // Collect width-carrying receivers: properties of the
+                            // exact operand type.
+                            let vars: Vec<String> = self
+                                .properties
+                                .iter()
+                                .filter(|(_, t)| **t == operand_ty)
+                                .map(|(n, _)| n.clone())
+                                .collect();
+                            if vars.is_empty() {
+                                (
+                                    self.arbitrary_expr_of_type(u, &TypeRef::S32, depth + 1)?,
+                                    self.arbitrary_expr_of_type(u, &TypeRef::S32, depth + 1)?,
+                                )
+                            } else {
+                                let l = vars[u.int_in_range(0..=vars.len() - 1)?].clone();
+                                let r = vars[u.int_in_range(0..=vars.len() - 1)?].clone();
+                                (Expr::Var(l), Expr::Var(r))
+                            }
+                        };
                         let ops = [
                             BinaryOp::Eq,
                             BinaryOp::Ne,
@@ -2117,6 +2215,26 @@ impl GenerationContext {
                 match choice {
                     0 => Ok(Expr::String(self.arbitrary_string(u)?)),
                     _ => {
+                        // Interpolate an arbitrary numeric/bool expression,
+                        // exercising the interpolation + to-string codegen for
+                        // varied types (not just a bare string var). Only
+                        // non-string exprs are interpolated so nested quotes
+                        // can't break the `"..."` literal.
+                        if depth < 2 && u.arbitrary::<bool>()? {
+                            let scalar = match u.int_in_range(0..=4)? {
+                                0 => TypeRef::S32,
+                                1 => TypeRef::Bool,
+                                2 => TypeRef::U32,
+                                3 => TypeRef::F32,
+                                _ => TypeRef::S64,
+                            };
+                            let e = self.arbitrary_expr_of_type(u, &scalar, depth + 1)?;
+                            let parts = vec![
+                                InterpolationPart::Literal("v=".into()),
+                                InterpolationPart::Expr(e),
+                            ];
+                            return Ok(Expr::Interpolation(parts));
+                        }
                         // Use variable interpolation if we have string properties
                         let string_prop = self
                             .properties
@@ -2137,7 +2255,12 @@ impl GenerationContext {
                 }
             }
             TypeRef::Char => {
-                let chars = ['a', 'b', 'c', 'x', 'y', 'z', '0', '1', '!', '@'];
+                // Include the escape sequences the grammar recognises so the
+                // char-literal escape path is exercised, not just printables.
+                let chars = [
+                    'a', 'b', 'c', 'x', 'y', 'z', '0', '1', '!', '@', '\n', '\t', '\r', '\\', '\'',
+                    '\0',
+                ];
                 Ok(Expr::Char(chars[u.int_in_range(0..=chars.len() - 1)?]))
             }
             TypeRef::Length => {
@@ -2326,6 +2449,8 @@ impl GenerationContext {
     }
 
     fn arbitrary_literal_of_type(&self, u: &mut Unstructured, ty: &TypeRef) -> Result<Expr> {
+        let canon = ty.canonical();
+        let ty = &canon;
         Ok(match ty {
             TypeRef::Bool => Expr::Bool(u.arbitrary()?),
             TypeRef::S32 | TypeRef::S8 | TypeRef::S16 | TypeRef::S64 => {
@@ -2380,6 +2505,48 @@ impl GenerationContext {
                     payload,
                 }
             }
+            // User-defined record/enum/variant. Without this, the `_` fallback
+            // emitted `0` where a composite was expected (e.g. a record element
+            // of a tuple pushed past max_expr_depth) — invalid Yel.
+            TypeRef::Named(name) => {
+                if let Some(fields) = self.records.get(name).cloned() {
+                    let field_exprs: Vec<_> = fields
+                        .iter()
+                        .map(|(fname, fty)| {
+                            (
+                                fname.clone(),
+                                self.arbitrary_literal_of_type(u, fty)
+                                    .unwrap_or(Expr::Int(0)),
+                            )
+                        })
+                        .collect();
+                    Expr::Record {
+                        ty_name: name.clone(),
+                        fields: field_exprs,
+                    }
+                } else if let Some(cases) = self.enums.get(name).cloned() {
+                    let case = &cases[u.int_in_range(0..=cases.len() - 1)?];
+                    Expr::EnumCase {
+                        enum_name: name.clone(),
+                        case: case.clone(),
+                    }
+                } else if let Some(cases) = self.variants.get(name).cloned() {
+                    let case = &cases[u.int_in_range(0..=cases.len() - 1)?];
+                    let payload = case.payload.as_ref().map(|pty| {
+                        Box::new(
+                            self.arbitrary_literal_of_type(u, pty)
+                                .unwrap_or(Expr::Int(0)),
+                        )
+                    });
+                    Expr::VariantCtor {
+                        variant: name.clone(),
+                        case: case.name.clone(),
+                        payload,
+                    }
+                } else {
+                    Expr::Int(0)
+                }
+            }
             _ => Expr::Int(0),
         })
     }
@@ -2415,6 +2582,8 @@ impl GenerationContext {
         ty: &TypeRef,
         depth: usize,
     ) -> Result<Option<Expr>> {
+        let canon = ty.canonical();
+        let ty = &canon;
         match ty {
             // list<T> methods: build from a same-typed list property receiver.
             TypeRef::List(elem) => {
@@ -2432,18 +2601,20 @@ impl GenerationContext {
                 }
                 let elem = (**elem).clone();
                 if u.arbitrary::<bool>()? {
-                    // append(elem)
+                    // append(elem) — receiver may itself be a chained list call.
+                    let recv = self.arbitrary_list_receiver(u, list_name, &elem, depth)?;
                     let arg = self.arbitrary_expr_of_type(u, &elem, depth + 1)?;
                     Ok(Some(Expr::MethodCall {
-                        receiver: Box::new(Expr::Var(list_name)),
+                        receiver: Box::new(recv),
                         method: "append".into(),
                         args: vec![arg],
                     }))
                 } else {
                     // filter({ p: elem -> <bool predicate over p> })
+                    let recv = self.arbitrary_list_receiver(u, list_name, &elem, depth)?;
                     let predicate = self.arbitrary_filter_predicate(u, &elem)?;
                     Ok(Some(Expr::MethodCall {
-                        receiver: Box::new(Expr::Var(list_name)),
+                        receiver: Box::new(recv),
                         method: "filter".into(),
                         args: vec![predicate],
                     }))
@@ -2476,24 +2647,27 @@ impl GenerationContext {
                     .properties
                     .iter()
                     .find(|(_, t)| matches!(t, TypeRef::List(_) | TypeRef::String))
-                    .map(|(n, _)| n.clone());
-                let Some(recv_name) = recv else {
+                    .map(|(n, t)| (n.clone(), t.clone()));
+                let Some((recv_name, recv_ty)) = recv else {
                     return Ok(None);
                 };
                 if u.arbitrary::<bool>()? {
                     return Ok(None);
                 }
+                // For a list receiver, allow a chained list call under the len.
+                let receiver = match recv_ty {
+                    TypeRef::List(elem) => {
+                        self.arbitrary_list_receiver(u, recv_name, &elem, depth)?
+                    }
+                    _ => Expr::Var(recv_name),
+                };
                 Ok(Some(Expr::MethodCall {
-                    receiver: Box::new(Expr::Var(recv_name)),
+                    receiver: Box::new(receiver),
                     method: "len".into(),
                     args: vec![],
                 }))
             }
             // list<T>.get(idx) -> option<T>.
-            // Currently exposes a front-end/back-end mismatch: typeck accepts
-            // this but codegen returns `invalid IR: list-get builtin: removed in
-            // Phase 7 cleanup`. Kept generated so the fuzzer keeps flagging the
-            // gap — either typeck should reject it or codegen should support it.
             TypeRef::Option(inner) => {
                 let want = TypeRef::List(inner.clone());
                 let list_prop = self
@@ -2507,14 +2681,47 @@ impl GenerationContext {
                 if u.arbitrary::<bool>()? {
                     return Ok(None);
                 }
+                let receiver = self.arbitrary_list_receiver(u, list_name, inner, depth)?;
                 let index = Expr::Int(u.int_in_range(0..=3)?);
                 Ok(Some(Expr::MethodCall {
-                    receiver: Box::new(Expr::Var(list_name)),
+                    receiver: Box::new(receiver),
                     method: "get".into(),
                     args: vec![index],
                 }))
             }
             _ => Ok(None),
+        }
+    }
+
+    /// A `list<elem>`-typed receiver expression: usually the bare property var,
+    /// but ~1/3 of the time (bounded by depth) that var wrapped in a
+    /// list-producing method call (`.append(e)` / `.filter(pred)`), so chains
+    /// like `xs.filter(p).len()` and `xs.append(e).get(0)` get generated.
+    fn arbitrary_list_receiver(
+        &mut self,
+        u: &mut Unstructured,
+        list_name: String,
+        elem: &TypeRef,
+        depth: usize,
+    ) -> Result<Expr> {
+        let base = Expr::Var(list_name);
+        if depth >= 2 || u.int_in_range(0..=2)? != 0 {
+            return Ok(base);
+        }
+        if u.arbitrary::<bool>()? {
+            let arg = self.arbitrary_expr_of_type(u, elem, depth + 1)?;
+            Ok(Expr::MethodCall {
+                receiver: Box::new(base),
+                method: "append".into(),
+                args: vec![arg],
+            })
+        } else {
+            let predicate = self.arbitrary_filter_predicate(u, elem)?;
+            Ok(Expr::MethodCall {
+                receiver: Box::new(base),
+                method: "filter".into(),
+                args: vec![predicate],
+            })
         }
     }
 
@@ -2525,6 +2732,8 @@ impl GenerationContext {
         u: &mut Unstructured,
         elem: &TypeRef,
     ) -> Result<Expr> {
+        let canon = elem.canonical();
+        let elem = &canon;
         let param = "p".to_string();
         let body = match elem {
             // Signed integers: `(p OP rhs)`. A bare int literal infers as s32
