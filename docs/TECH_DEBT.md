@@ -35,22 +35,31 @@ Temp references panic loudly in codegen (`scratch::slot_info`). The
 `Display`). No flat index lookups survive. Measured on the complex fuzz fixture: 136,756 →
 1,573 declared locals; dev component 3.0 MB → 77 KB.
 
-### 1.2 `tree_shape` side-channel + `BoundaryField` chain walk
-`LirResource.tree_shape` is a parallel representation that codegen reads to emit
-GC types and resolve `LirSlotKind::BoundaryField { boundary_id, field_idx }`
-symbolically — a runtime **chain walk** over `current_boundary_locals`
-(`lir/boundary_rewrite.rs:102,618`, `lir/function.rs`). The
-[`lir-resource-flatten`](../plans/lir-resource-flatten.md) plan replaces this
-with explicit `StructGet`/`StructSet` ops + typed struct-ref params, deleting the
-walk. Until then, boundary-field reads/writes are indirect and hard to follow.
+### 1.2 `tree_shape` side-channel + `BoundaryField` chain walk — RESOLVED (IR level)
+The IR no longer carries the side-channel: `LirResource.tree_shape` is
+deleted (the resource holds only the `struct_types` / `array_types`
+registry, which codegen exclusively reads), `LirSlotKind::BoundaryField`
+and the symbolic chain walk are gone (boundary-field access is explicit
+`StructGet`/`StructSet` resolved by `lir/boundary_rewrite.rs`), and the
+`boundary_params: Vec<TreeBoundaryId>` field is deleted — blocks carry
+typed `boundary_param_slots` allocated by `LirBlock::set_boundary_params`,
+and ids derive from the slots' `RefNullForBoundary` val_tys.
+What remains is internal to the YEL-only synthesis pass: `tree_shape.rs`'s
+`ComponentTreeShape`/`TreeBoundary`/`TreeFieldDecl` survive as the
+synthesizer's scratch representation (projected into the registry by
+`struct_types::project_tree_shape` before the resource is built), and the
+lowerer's ~30 `self.tree_shape` reads consume that scratch. Collapsing
+synthesize+project so the registry is built directly (and `node_field`
+becomes a standalone lowering map) is the remaining — purely internal —
+cleanup; see `plans/lir-resource-flatten.md` Stage 5e.
 
-### 1.3 `LirComponent` → `LirResource` rename (partial)
-The type is `LirResource` now, but framing/comments still assume "a component"
-(`lir/arena.rs` calls the trait `LirComponentArena`; docs say "acts like a
-component"). UI-only fields on the resource are "still read by codegen during the
-transitional phases" and "disappear as THIR→LIR lowers them inline"
-(`lir/arena.rs:165`). Mixed mental model: a `LirResource` is sometimes a UI
-component, sometimes a generic function body.
+### 1.3 `LirComponent` → `LirResource` rename — RESOLVED (naming)
+The trait is `LirResourceArena` and the generic-layer docs (`lir/arena.rs`,
+`lir/node.rs`) frame a `LirResource` as a frontend-agnostic multi-block
+compilation unit (UI: a component; flow: a function package). What remains
+is §1.2's substance, not naming: the UI-only fields on the resource are
+still read by codegen during the transitional phases and disappear as
+THIR→LIR lowers them inline.
 
 ### 1.4 Legacy reactivity emission path
 `context.rs:65` gates a "legacy `LirOp::TriggerEffects` emission" — the signal

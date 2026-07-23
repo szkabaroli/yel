@@ -80,11 +80,11 @@ pub fn rewrite_struct_field_ops(component: &mut LirResource) -> usize {
         // came from a function param resolve at the LIR layer too.
         let mut current = HashMap::new();
         for (b_id, slot) in component.blocks[bi]
-            .boundary_params
-            .iter()
-            .zip(component.blocks[bi].boundary_param_slots.iter())
+            .boundary_param_ids()
+            .zip(component.blocks[bi].boundary_param_slots.iter().copied())
+            .collect::<Vec<_>>()
         {
-            current.insert(*b_id, *slot);
+            current.insert(b_id, slot);
         }
 
         // Stage 5e-1 pre-pass: scan for BoundaryField uses whose
@@ -619,46 +619,37 @@ mod stage4_tests {
 
     #[test]
     fn seed_from_boundary_param_slots() {
-        // A block whose only "binding" is a boundary_param + parallel
-        // slot — no BindBoundaryLocal or AllocBoundary in the ops.
-        // Stage 4's seeding makes the rewrite fire anyway.
+        // A block whose only "binding" is a boundary-param mirror slot
+        // (allocated by `set_boundary_params`) — no BindBoundaryLocal or
+        // AllocBoundary in the ops. The seeding makes the rewrite fire
+        // anyway.
         let mut comp = LirResource::empty_module_carrier(Name(0));
         comp.slots = vec![
-            // slot 0 = boundary param ref slot
+            // slot 0 = result
             LirSlotInfo {
                 id: LirSlotId::resource(0),
                 kind: LirSlotKind::Temp { local_idx: 0 },
-                val_ty: LirSlotValType::RefNullForBoundary(TreeBoundaryId(0)),
-                name: None,
-            },
-            // slot 1 = result
-            LirSlotInfo {
-                id: LirSlotId::resource(1),
-                kind: LirSlotKind::Temp { local_idx: 1 },
                 val_ty: LirSlotValType::I32,
                 name: None,
             },
         ];
-        comp.blocks = vec![LirBlock {
-            id: BlockId(0),
-            ops: vec![LirOp::StructFieldGet {
-                struct_ty: TreeBoundaryId(0),
-                field_idx: 5,
-                result: LirSlotId::resource(1),
-            }],
-            boundary_params: vec![TreeBoundaryId(0)],
-            boundary_param_slots: vec![LirSlotId::resource(0)],
-            ..LirBlock::new(BlockId(0))
+        let mut block = LirBlock::new(BlockId(0));
+        block.set_boundary_params(vec![TreeBoundaryId(0)]);
+        block.ops = vec![LirOp::StructFieldGet {
+            struct_ty: TreeBoundaryId(0),
+            field_idx: 5,
+            result: LirSlotId::resource(0),
         }];
+        comp.blocks = vec![block];
 
         let n = rewrite_struct_field_ops(&mut comp);
         assert_eq!(n, 1, "boundary_param_slot binding seeds the rewrite");
         assert!(matches!(
             comp.blocks[0].ops[0],
             LirOp::StructGet {
-                rec: LirSlotId::Resource { idx: 0 },
+                rec: LirSlotId::Block { block: BlockId(0), idx: 0 },
                 field_idx: 5,
-                result: LirSlotId::Resource { idx: 1 },
+                result: LirSlotId::Resource { idx: 0 },
             }
         ));
     }

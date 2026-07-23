@@ -1654,7 +1654,7 @@ impl<'a> BlockLowering<'a> {
                     bp.push(ib);
                 }
             }
-            b.boundary_params = bp;
+            b.set_boundary_params(bp);
         }
         block_id
     }
@@ -1837,7 +1837,6 @@ impl<'a> BlockLowering<'a> {
                 for_contexts: Vec::new(),
                 effects_by_signal: HashMap::new(),
                 body_tree: Vec::new(),
-                tree_shape: Default::default(),
                 struct_types: Vec::new(),
                 array_types: Vec::new(),
                 signal_layout: crate::lir::SignalLayout::default(),
@@ -2074,17 +2073,17 @@ impl<'a> BlockLowering<'a> {
             },
             effects_by_signal: HashMap::new(),
             body_tree: tree.body.clone(),
-            tree_shape: std::mem::take(&mut self.tree_shape),
-            // Stage 2: populated below from `tree_shape` via
-            // `struct_types::project_tree_shape`. Both representations
-            // coexist until Stage 3 rewrites consumers.
+            // Projected from the lowering-internal `self.tree_shape`
+            // below — the resource carries only the registry; the tree
+            // shape itself is synthesis scratch and never leaves the
+            // lowerer.
             struct_types: Vec::new(),
             array_types: Vec::new(),
             signal_layout: crate::lir::SignalLayout::default(),
             internal_lifecycle_scratch: crate::lir::InternalLifecycleScratch::default(),
             comp_struct_layout: crate::lir::node::ComponentStructLayout::default(),
         };
-        let (st, at) = crate::lir::struct_types::project_tree_shape(&component.tree_shape);
+        let (st, at) = crate::lir::struct_types::project_tree_shape(&self.tree_shape);
         component.struct_types = st;
         component.array_types = at;
 
@@ -2104,7 +2103,6 @@ impl<'a> BlockLowering<'a> {
         // param (not a `BindBoundaryLocal`-emitted op). Block-fn
         // codegen copies each WASM boundary-param local into its
         // slot at the function prologue.
-        allocate_boundary_param_slots(&mut component);
 
         // lir-resource-flatten Stage 5e-4: resolve every symbolic
         // `StructField{Get,Set,SetConst}` op (emitted by the lowerer with a
@@ -2858,7 +2856,7 @@ impl<'a> BlockLowering<'a> {
                 for &ib in self.for_iter_body_stack.iter().rev() {
                     bp.push(ib);
                 }
-                b.boundary_params = bp;
+                b.set_boundary_params(bp);
             }
             // Unmount block: IfBranch needed (Remove uses content).
             // When nested under a for, also include the iter-body so
@@ -2871,7 +2869,7 @@ impl<'a> BlockLowering<'a> {
                 for &ib in self.for_iter_body_stack.iter().rev() {
                     bp.push(ib);
                 }
-                b.boundary_params = bp;
+                b.set_boundary_params(bp);
             }
             branch_mount_unmount.push((mount, unmount));
         }
@@ -3246,7 +3244,7 @@ impl<'a> BlockLowering<'a> {
                     bp.push(ib);
                 }
             }
-            b.boundary_params = bp;
+            b.set_boundary_params(bp);
         }
         block
     }
@@ -4079,7 +4077,7 @@ impl<'a> BlockLowering<'a> {
             for &anc in stack[..stack.len() - 1].iter().rev() {
                 bp.push(anc);
             }
-            block.boundary_params = bp;
+            block.set_boundary_params(bp);
             block.captured_locals.insert(item, item_ptr_slot);
             block.local_to_slot = outer_loaded_slots.clone();
             // Phase 5b-v.3: item mode comes from the caller; outer modes
@@ -5246,7 +5244,6 @@ impl<'a> BlockLowering<'a> {
             mount_component_count: 0,
             mount_component_children: Vec::new(),
             callback_arg_composite_types: Vec::new(),
-            boundary_params: Vec::new(),
             boundary_param_slots: Vec::new(),
             implicit_self: None,
             slots: std::mem::take(&mut self.current_block_slots),
@@ -6345,60 +6342,7 @@ impl<'a> BlockLowering<'a> {
 
 use crate::lir::layout::{max_flat_counts, FlatValTypeCounts};
 
-/// Stage 4 of lir-resource-flatten: for every block whose
-/// `boundary_params` is non-empty and `boundary_param_slots` is still
-/// empty, allocate one typed temp slot per boundary id (val_ty =
-/// `RefNullForBoundary(b_id)`) and write the slot ids into
-/// `boundary_param_slots`. Codegen's per-block prologue
-/// (`block_fn.rs`) copies each WASM boundary-param local into the
-/// slot's local; the Stage 3 boundary-rewrite pass uses these slots
-/// to seed its `current_boundary_locals` map so every BoundaryField
-/// LoadHandle / StoreHandle reachable in the block resolves to an
-/// explicit `BoundaryStructGet` / `Set` op.
-pub(crate) fn allocate_boundary_param_slots(component: &mut LirResource) {
-    use crate::lir::block::{LirSlotInfo, LirSlotKind, LirSlotValType};
 
-    // Task #105 B2: each block's boundary-param mirror slots live on
-    // the block itself (Block-variant ids, per-block local_idx) — the
-    // slots are only ever read inside that block's function frame.
-    let block_ids_with_bp: Vec<usize> = component
-        .blocks
-        .iter()
-        .enumerate()
-        .filter_map(|(i, b)| {
-            if !b.boundary_params.is_empty() && b.boundary_param_slots.is_empty() {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for block_idx in block_ids_with_bp {
-        let bps = component.blocks[block_idx].boundary_params.clone();
-        let block = &mut component.blocks[block_idx];
-        let mut slot_ids: Vec<LirSlotId> = Vec::with_capacity(bps.len());
-        for b_id in bps {
-            let local_idx = block
-                .slots
-                .iter()
-                .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
-                .count() as u32;
-            let slot_id = LirSlotId::Block {
-                block: block.id,
-                idx: block.slots.len() as u16,
-            };
-            block.slots.push(LirSlotInfo {
-                id: slot_id,
-                kind: LirSlotKind::Temp { local_idx },
-                val_ty: LirSlotValType::RefNullForBoundary(b_id),
-                name: Some(format!("bp_ref_{}", b_id.0)),
-            });
-            slot_ids.push(slot_id);
-        }
-        block.boundary_param_slots = slot_ids;
-    }
-}
 
 /// Walks every block in `component` and fills in the structural metadata
 /// fields on each `LirBlock`.
@@ -6487,7 +6431,7 @@ pub(crate) fn populate_comp_struct_layout(component: &mut LirResource) {
 
     // 4. Tree-root field present iff component has a body tree.
     //    Mirrors codegen's `layout.tree_root_type_idx.map(...)`.
-    let has_tree_root = !component.tree_shape.boundaries.is_empty();
+    let has_tree_root = !component.struct_types.is_empty();
     let tree_root_field_idx = if has_tree_root {
         Some(self_handle_field_idx + 1)
     } else {
@@ -6555,14 +6499,23 @@ pub(crate) fn synth_internal_constructor_block(ctx: &CompilerContext, component:
     });
 
     // 3. Tree-root field init (only when component has a body tree).
+    //    The root boundary is the registry entry with kind == Root; its
+    //    TreeBoundaryId is its position in `struct_types`.
     if let Some(tree_root_field_idx) = component.comp_struct_layout.tree_root_field_idx {
-        let root_idx = component.tree_shape.root_idx as usize;
-        if let Some(root_boundary) = component.tree_shape.boundaries.get(root_idx) {
+        let root_position = component.struct_types.iter().position(|declaration| {
+            matches!(
+                declaration.kind,
+                crate::lir::block::TreeBoundaryKind::Root
+            )
+        });
+        if let Some(root_position) = root_position {
             ops.push(LirOp::StructSetNewDefault {
                 struct_ty: LirTypeRef::ComponentStruct,
                 field: tree_root_field_idx,
                 rec: self_ref_slot,
-                field_ty: LirTypeRef::TreeBoundary(root_boundary.id),
+                field_ty: LirTypeRef::TreeBoundary(crate::ids::TreeBoundaryId(
+                    root_position as u32,
+                )),
             });
         }
     }

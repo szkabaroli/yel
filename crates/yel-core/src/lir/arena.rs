@@ -2,14 +2,16 @@
 //! and string tables.
 //!
 //! Background. LIR was born inside the UI compiler, where every block
-//! lives inside a [`crate::lir::node::LirResource`] (one component) and
-//! every `LirExprId` / `StringId` indexes into that component's tables.
-//! Code-gen reaches for `&LirResource` whenever it has to dereference an
-//! id — directly into `resource.exprs[id]` and `resource.strings[id]`.
+//! lives inside a [`crate::lir::node::LirResource`] (for the UI frontend,
+//! one component) and every `LirExprId` / `StringId` indexes into that
+//! resource's tables. Code-gen reaches for `&LirResource` whenever it has
+//! to dereference an id — directly into `resource.exprs[id]` and
+//! `resource.strings[id]`.
 //!
-//! That coupling is fine for components but blocks new callers (notably
-//! the flow-graph frontend) from re-using the same body emitter when
-//! their interning lives elsewhere — e.g. per-function on a `FlowFunc`.
+//! That coupling is fine for the UI frontend but blocks new callers
+//! (notably the flow-graph frontend) from re-using the same body emitter
+//! when their interning lives elsewhere — e.g. per-function on a
+//! `FlowFunc`.
 //!
 //! This trait is the smallest abstraction that lets such a caller plug
 //! in: implement `expr` (and optionally `strings`) however you store
@@ -49,11 +51,11 @@ pub trait LirStringArena {
 }
 
 /// Read-only access to a slot-info table. `LirSlotId`s are interpreted
-/// against the implementor — UI components own their slots on
-/// `LirResource`; flow functions own them per-`FlowFunc`. The
-/// previous code-gen path read `&LirResource` everywhere it needed
-/// a slot; routing through this trait lets non-component callers
-/// (flow) reuse the same helpers.
+/// against the implementor — the UI frontend owns Resource-variant slots
+/// on `LirResource` (Block-variant slots live per-`LirBlock`); flow
+/// functions own them per-`FlowFunc`. The previous code-gen path read
+/// `&LirResource` everywhere it needed a slot; routing through this
+/// trait lets non-UI callers (flow) reuse the same helpers.
 pub trait LirSlotArena {
     fn slots(&self) -> &[LirSlotInfo];
 }
@@ -145,13 +147,14 @@ pub trait LirFunctionLike {
     }
 }
 
-/// Module-level view of a LIR component — every neutral accessor the
-/// wasm code generator needs to consume something that *acts like* a
-/// component (multi-block, owns slots/exprs/strings/GC-type tables,
-/// has an identity + export flag).
+/// Module-level view of a LIR resource — every neutral accessor the
+/// wasm code generator needs to consume a multi-block compilation unit
+/// that owns slots/exprs/strings/GC-type tables and has an identity +
+/// export flag. For the UI frontend a resource is a component; for the
+/// flow frontend it is a function package.
 ///
 /// `LirResource` implements this directly. The flow frontend's
-/// per-function adapter (one-block "component" packaging) also
+/// per-function adapter (one-block resource packaging) also
 /// implements it. Codegen reads through the trait so the
 /// `Vec<LirResource>` shape isn't baked in.
 ///
@@ -161,9 +164,9 @@ pub trait LirFunctionLike {
 /// THIR→LIR lowers them inline to plain LirOps. Once the UI fields
 /// are gone, this trait is the full read API and nothing reaches for
 /// concrete `LirResource` outside the lowering pass.
-pub trait LirComponentArena: LirExprArena + LirStringArena + LirSlotArena {
-    /// Stable identity of this component / function. Used by codegen
-    /// for export-name resolution and for `LirOp::CallFunction` target
+pub trait LirResourceArena: LirExprArena + LirStringArena + LirSlotArena {
+    /// Stable identity of this resource. Used by codegen for
+    /// export-name resolution and for `LirOp::CallFunction` target
     /// lookups across the module.
     fn def_id(&self) -> DefId;
 
@@ -171,11 +174,11 @@ pub trait LirComponentArena: LirExprArena + LirStringArena + LirSlotArena {
     /// compiler context's string table).
     fn name(&self) -> Name;
 
-    /// Whether this component is part of the WIT export surface.
+    /// Whether this resource is part of the WIT export surface.
     /// World-level free functions / exported UI components → `true`.
     fn is_export(&self) -> bool;
 
-    /// Every basic block belonging to this component. `BlockId(n)`
+    /// Every basic block belonging to this resource. `BlockId(n)`
     /// indexes into the returned slice — codegen relies on this
     /// ordering for `LirOp::CallBlock` resolution.
     fn blocks(&self) -> &[LirBlock];
@@ -185,7 +188,7 @@ pub trait LirComponentArena: LirExprArena + LirStringArena + LirSlotArena {
         &self.blocks()[id.0 as usize]
     }
 
-    /// GC struct types declared by this component (record / variant /
+    /// GC struct types declared by this resource (record / variant /
     /// component-instance layouts that the wasm GC type section
     /// emits up-front).
     fn struct_types(&self) -> &[LirStructTypeDecl];

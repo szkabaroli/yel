@@ -28,7 +28,7 @@ Public API re-exports are in `lib.rs`.
 - **Two-stage LIR**: `component.rs` builds a tree (`TreeLirResource`, discovers signals/effects), then `blocks.rs` flattens to blocks + allocates/interns. Strings dedup; **exprs do not yet** (`blocks.rs` `intern_expr`).
 - **Stable correlation ids** (`ForId`/`IfId`/`TreeBoundaryId`) must stay stable across tree→block lowering — later passes key off them.
 - **Determinism**: sort+dedup dependency lists before use (e.g. `collect_dependencies`); output must be byte-stable for snapshots.
-- **In-progress migrations** (expect mixed naming): `LirComponent`→`LirResource` + `tree_shape` flatten. (The typed `SlotId` ladder is done — per-block temps, no flat-index bridge.) See `docs/TECH_DEBT.md` §1 and `plans/lir-resource-flatten.md`.
+- **In-progress migrations**: `tree_shape` flatten (the `LirComponent`→`LirResource` rename and the typed `SlotId` ladder are done). See `docs/TECH_DEBT.md` §1 and `plans/lir-resource-flatten.md`.
 
 ## No Silent Fallbacks
 

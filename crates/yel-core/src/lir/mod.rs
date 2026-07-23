@@ -51,7 +51,7 @@ pub use block::{
 // function-shape so non-component callers (flow functions) can plug
 // into the same code-gen helpers.
 pub use arena::{
-    LirComponentArena, LirExprArena, LirFunctionLike, LirSlotArena, LirStringArena,
+    LirResourceArena, LirExprArena, LirFunctionLike, LirSlotArena, LirStringArena,
 };
 
 // Function metadata: identity (DefId vs BlockId) + calling convention

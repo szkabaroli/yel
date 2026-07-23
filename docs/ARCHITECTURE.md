@@ -25,12 +25,12 @@ or `yel-wasm-codegen`.
 - **Where we are:** the back-end was born inside the UI compiler. It still reads
   UI-component-specific state directly — the mount-tree `tree_shape`, symbolic
   `BoundaryField` slots, an implicit `(ref $Comp)` self-param, `yel:ui/dom`
-  assumptions. `LirResource` (recently renamed from `LirComponent`) still carries
+  assumptions. `LirResource` still carries
   UI-only fields that codegen consumes "during the transitional phases."
 - **Where we're going:** LIR becomes a neutral IR of typed slots, blocks, GC
   struct/array types, and plain `LirOp`s. Codegen reads everything through the
   **arena traits** in `lir/arena.rs` (`LirExprArena` / `LirStringArena` /
-  `LirSlotArena` / `LirComponentArena` / `LirFunctionLike`) so it never touches a
+  `LirSlotArena` / `LirResourceArena` / `LirFunctionLike`) so it never touches a
   concrete `LirResource`. The UI mount-tree synthesizer becomes *just one pass
   Yel chooses to run*, writing its output into the same generic structures a
   non-UI frontend uses. The flow frontend (`yel-flow-core`) already drives codegen
@@ -143,11 +143,11 @@ Two-stage lowering (`lower_to_lir/component.rs`):
 
 Key LIR data structures (`lir/`):
 - `LirModule { components: Vec<LirResource>, global_defaults: HashMap<DefId, LirExpr>, package }` (`lir/module.rs`) — the whole compilation unit.
-- `LirResource` (`lir/node.rs`) — one component/resource: `blocks`, `exprs` (interned), `strings` (interned + deduped), `slots`, `signals`, `effects`, `body_tree`, `tree_shape`, GC `struct_types`/`array_types`. (Renamed from `LirComponent`; see tech debt.)
+- `LirResource` (`lir/node.rs`) — one resource (UI: a component; flow: a function package): `blocks` (each owning its Temp slots), `exprs` (interned), `strings` (interned + deduped), `slots` (Memory + shared Temps), `signals`, `effects`, `body_tree`, `tree_shape`, GC `struct_types`/`array_types`.
 - `LirBlock` / `LirOp` (`lir/block.rs`, ~1.6k lines) — block = params + flat op stream. Ops reference exprs by `ExprId`, strings by `StringId`, values by `LirSlotId`.
 - `LirExpr { kind: LirExprKind, ty: Ty }` (`lir/expr.rs`).
 - `LirTypeRef` (`lir/block.rs`) — **symbolic** type references (`ComponentStruct`, `OtherComponentStruct(DefId)`, `TreeBoundary(TreeBoundaryId)`, `GlobalsStruct(DefId)`, `GcVariantCase(Ty, u32)`) resolved to concrete wasm type indices only in codegen.
-- Codegen reads LIR through **arena traits** (`lir/arena.rs`): `LirExprArena`, `LirStringArena`, `LirSlotArena`, aggregate `LirComponentArena`, and `LirFunctionLike` — so both `LirResource` and the flow frontend's per-function adapter feed the same emitter.
+- Codegen reads LIR through **arena traits** (`lir/arena.rs`): `LirExprArena`, `LirStringArena`, `LirSlotArena`, aggregate `LirResourceArena`, and `LirFunctionLike` — so both `LirResource` and the flow frontend's per-function adapter feed the same emitter.
 - Reactivity layout: `lir/signal.rs`, `lir/signal_layout.rs` (per-signal slot/memory layout), `lir/tree_shape.rs` (mount-tree boundaries), `lir/layout.rs` (~650 lines), `lir/struct_types.rs` (GC struct/array decls), `lir/boundary_rewrite.rs` (boundary-field slot resolution), `lir/dedupe.rs` (post-pass structural dedup of identical update blocks via slot-normalized hashing).
 
 ### 3.5 IDs, indices, interning (cross-cutting)
@@ -235,6 +235,6 @@ These are live migrations; expect mixed old/new naming. Details and call-site
 catalogs in [`docs/TECH_DEBT.md`](TECH_DEBT.md) and [`plans/`](../plans).
 
 1. **Typed `SlotId` ladder — DONE.** Slots are a typed `LirSlotId` enum (`Block` per-block temps / `Resource` component-wide), the allocator is per-block, and the `legacy_u32()` flat-index bridge is deleted. Cross-block Temp references panic loudly in codegen.
-2. **`LirComponent` → `LirResource` + flatten `tree_shape`** — make LIR frontend-agnostic: replace the `tree_shape` side-channel and symbolic `BoundaryField` slot resolution with explicit GC struct-type registrations and `StructGet`/`StructSet` ops. See `plans/lir-resource-flatten.md`.
+2. **Flatten `tree_shape`** — make LIR frontend-agnostic: replace the `tree_shape` side-channel and symbolic `BoundaryField` slot resolution with explicit GC struct-type registrations and `StructGet`/`StructSet` ops (the `LirComponent` → `LirResource` rename half is done). See `plans/lir-resource-flatten.md`.
 3. **WASM-GC representation migration** — move values from canonical-flat (decomposed flat ABI valtypes in slots/memory) to typed WASM-GC structs/arrays (single ref), with `wasm/repr.rs::InternalRepr` as the single source of truth. Half-migrated today (records/tuples/typed lists on GC; option/result/variant still partly flat). Goal: kill the internal canonical-flat bridges (`lir/layout.rs::canonical_flat_valtypes`) and keep flattening only at WIT boundaries; collapse the dual GC+memory signal storage. Detail + fragile invariants in [`TECH_DEBT.md §1.5`](TECH_DEBT.md). (Memory `project_typed_gc_migration_stage0`, `project_signal_storage_dual`.)
 4. **Inline lifecycle decomposition** — `MountComponent` etc. lowering to plain `LirOp`s; blockers tracked in memory `project_mount_component_wrappers`.

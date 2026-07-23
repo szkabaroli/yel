@@ -608,7 +608,7 @@ impl<'a> WasmPackageBuilder<'a> {
                         }
                     } else {
                         debug_assert!(
-                            callee.boundary_params.is_empty(),
+                            callee.boundary_param_slots.is_empty(),
                             "cross-component CallBlock target must have empty boundary_params"
                         );
                     }

@@ -305,19 +305,6 @@ pub struct LirBlock {
     /// whose internal repr is a GC struct/ref (scalars / lists / strings are
     /// handled inline). Deduped; order is first-occurrence.
     pub callback_arg_composite_types: Vec<Ty>,
-    /// Tree-boundary refs this block expects to receive as additional
-    /// WASM function parameters, AFTER the legacy i32 params declared in
-    /// `params`. When non-empty, the block opts into a dynamic per-block
-    /// function type whose signature is
-    /// `(ref $Comp, <i32 args from `params`...>, (ref null <boundary_0_struct>), ...) -> <return>`.
-    ///
-    /// Each entry is registered in `current_boundary_locals` at function
-    /// entry so subsequent `BoundaryField` slot accesses on those
-    /// boundaries resolve to a `local.get` on the param.
-    ///
-    /// Empty for blocks whose only inputs are i32 args (these stick to
-    /// the fixed `block_1param_type_idx` / `block_2param_*` shapes).
-    pub boundary_params: Vec<TreeBoundaryId>,
 
     /// Stage 4 of lir-resource-flatten: parallel slot ids for the
     /// trailing typed boundary-ref params. `boundary_param_slots[i]`
@@ -375,7 +362,6 @@ impl LirBlock {
             mount_component_count: 0,
             mount_component_children: Vec::new(),
             callback_arg_composite_types: Vec::new(),
-            boundary_params: Vec::new(),
             boundary_param_slots: Vec::new(),
             implicit_self: None,
             slots: Vec::new(),
@@ -389,6 +375,58 @@ impl LirBlock {
     /// migrated to this helper become independent of the
     /// `boundary_params` field, paving the way for Stage 5e to delete
     /// it.
+    /// Allocate the typed boundary-ref mirror slots for `ids` on this
+    /// block (Block-variant, per-block local_idx) and record them as
+    /// `boundary_param_slots`. Producers call this once, right after the
+    /// block is finished — there is no separate `boundary_params` id
+    /// list; the ids live on the slots' `RefNullForBoundary` val_tys.
+    pub fn set_boundary_params(&mut self, ids: Vec<TreeBoundaryId>) {
+        let mut slot_ids: Vec<LirSlotId> = Vec::with_capacity(ids.len());
+        for b_id in ids {
+            let local_idx = self
+                .slots
+                .iter()
+                .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
+                .count() as u32;
+            let slot_id = LirSlotId::Block {
+                block: self.id,
+                idx: self.slots.len() as u16,
+            };
+            self.slots.push(LirSlotInfo {
+                id: slot_id,
+                kind: LirSlotKind::Temp { local_idx },
+                val_ty: LirSlotValType::RefNullForBoundary(b_id),
+                name: Some(format!("bp_ref_{}", b_id.0)),
+            });
+            slot_ids.push(slot_id);
+        }
+        self.boundary_param_slots = slot_ids;
+    }
+
+    /// The ordered boundary ids of this block's boundary params, derived
+    /// from the mirror slots' `RefNullForBoundary` val_tys. Panics on a
+    /// Resource-variant slot — boundary-param mirrors are always
+    /// allocated on the block itself.
+    pub fn boundary_param_ids(&self) -> impl Iterator<Item = TreeBoundaryId> + '_ {
+        self.boundary_param_slots.iter().map(move |slot_id| {
+            let info = match slot_id {
+                LirSlotId::Block { idx, .. } => &self.slots[*idx as usize],
+                LirSlotId::Resource { .. } => panic!(
+                    "boundary_param_ids: Resource-variant boundary-param slot {:?} — \
+                     mirrors are allocated on the block itself",
+                    slot_id
+                ),
+            };
+            match info.val_ty {
+                LirSlotValType::RefNullForBoundary(b_id) => b_id,
+                other => panic!(
+                    "boundary_param_ids: slot {:?} has non-boundary val_ty {:?}",
+                    slot_id, other
+                ),
+            }
+        })
+    }
+
     pub fn boundary_param_ids_from_slots<'a>(
         &'a self,
         slots: &'a [LirSlotInfo],

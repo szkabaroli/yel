@@ -6,12 +6,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{BlockId, DefId, ForId, LocalId, NodeId};
 use crate::interner::Name;
-use crate::lir::block::{ComponentTreeShape, ForContext};
+use crate::lir::block::ForContext;
 use crate::lir::struct_types::{LirArrayTypeDecl, LirStructTypeDecl};
 use crate::source::Span;
 use crate::types::Ty;
 
-use super::arena::{LirComponentArena, LirExprArena, LirSlotArena, LirStringArena};
+use super::arena::{LirResourceArena, LirExprArena, LirSlotArena, LirStringArena};
 use super::block::{LirBlock, LirBlockEffect, LirSlotId, LirSlotInfo, StringId, LirExprId};
 use super::expr::{LirExpr, LirStatement};
 use super::signal::LirSignal;
@@ -64,7 +64,7 @@ impl LirSlotArena for LirResource {
     }
 }
 
-impl LirComponentArena for LirResource {
+impl LirResourceArena for LirResource {
     fn def_id(&self) -> DefId {
         self.def_id
     }
@@ -85,12 +85,15 @@ impl LirComponentArena for LirResource {
     }
 }
 
-/// A LIR component definition (ready for codegen).
+/// A LIR resource — one multi-block compilation unit, ready for
+/// codegen. For the UI frontend a resource is a component; for the
+/// flow frontend it packages a function.
 ///
 /// This is a block-based representation where:
-/// - UI operations are explicit instructions (LirOp in blocks)
-/// - Branches become separate blocks with mount/unmount operations
-/// - Storage is pre-allocated (SlotId for temps and memory)
+/// - Operations are explicit instructions (LirOp in blocks)
+/// - Branches become separate blocks (for UI: with mount/unmount ops)
+/// - Storage is pre-allocated (per-block Temp slots; component-wide
+///   Memory slots on the resource)
 /// - Strings and expressions are interned (StringId, LirExprId)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LirResource {
@@ -202,11 +205,6 @@ pub struct LirResource {
     /// the block ops.
     pub body_tree: Vec<LirNode>,
 
-    /// Concrete-typed mount-tree shape: one boundary per emitted GC
-    /// struct type for the component (root + each `if` anchor + each
-    /// `if` branch + each `for` anchor + each `for` iter-body).
-    /// Synthesized from `body_tree` by `tree_shape::synthesize`.
-    pub tree_shape: ComponentTreeShape,
 
     /// Stage 2 (lir-resource-flatten plan): flat-list registry of GC
     /// struct types this resource owns. Today populated alongside
@@ -339,7 +337,6 @@ impl LirResource {
             for_contexts: Vec::new(),
             effects_by_signal: HashMap::new(),
             body_tree: Vec::new(),
-            tree_shape: super::block::ComponentTreeShape::default(),
             struct_types: Vec::new(),
             array_types: Vec::new(),
             signal_layout: SignalLayout::default(),

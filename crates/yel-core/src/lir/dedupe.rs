@@ -1,7 +1,7 @@
 //! Bitwise structural dedupe of per-(boundary, signal) update
 //! blocks.
 //!
-//! Two `update_b<b>_s<s>` blocks with identical `(boundary_params, ops)`
+//! Two `update_b<b>_s<s>` blocks with identical `(boundary params, ops)`
 //! after canonicalising inner `CallBlock`/`CallBlock2` BlockId
 //! references and slot-id ordering should share one canonical block.
 //! Duplicate blocks are removed from `LirResource.blocks` and any
@@ -173,10 +173,11 @@ fn hash_block(
     let mut h = std::collections::hash_map::DefaultHasher::new();
     "lir_block_v1".hash(&mut h);
 
-    // Boundary params (literal — these encode the boundary kind/shape
-    // implicitly via the TreeBoundaryId).
-    block.boundary_params.len().hash(&mut h);
-    for b in &block.boundary_params {
+    // Boundary params (literal ids — these encode the boundary
+    // kind/shape implicitly via the TreeBoundaryId), derived from the
+    // mirror slots' val_tys.
+    block.boundary_param_slots.len().hash(&mut h);
+    for b in block.boundary_param_ids() {
         b.0.hash(&mut h);
     }
 
@@ -774,7 +775,7 @@ fn blocks_structurally_equal(
     b: &LirBlock,
     remap: &HashMap<BlockId, BlockId>,
 ) -> bool {
-    if a.boundary_params != b.boundary_params {
+    if !a.boundary_param_ids().eq(b.boundary_param_ids()) {
         return false;
     }
     if a.params.len() != b.params.len() {
