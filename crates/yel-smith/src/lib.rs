@@ -1872,9 +1872,21 @@ impl GenerationContext {
                 match choice {
                     0 => Ok(Expr::Bool(u.arbitrary()?)),
                     1 => {
-                        // Comparison
-                        let lhs = self.arbitrary_expr_of_type(u, &TypeRef::S32, depth + 1)?;
-                        let rhs = self.arbitrary_expr_of_type(u, &TypeRef::S32, depth + 1)?;
+                        // Comparison. Vary the operand type across signed/unsigned
+                        // widths so codegen emits `lt_s`/`lt_u` and both i32/i64
+                        // comparison instructions, not just the s32 path.
+                        let operand_types = [
+                            TypeRef::S32,
+                            TypeRef::U32,
+                            TypeRef::S64,
+                            TypeRef::U64,
+                            TypeRef::U8,
+                            TypeRef::S16,
+                        ];
+                        let operand_ty =
+                            &operand_types[u.int_in_range(0..=operand_types.len() - 1)?];
+                        let lhs = self.arbitrary_expr_of_type(u, operand_ty, depth + 1)?;
+                        let rhs = self.arbitrary_expr_of_type(u, operand_ty, depth + 1)?;
                         let ops = [
                             BinaryOp::Eq,
                             BinaryOp::Ne,
@@ -1898,8 +1910,8 @@ impl GenerationContext {
                 // Only for signed types since literals default to s32
                 if depth < 2 && u.int_in_range(0..=4)? == 0 {
                     let lhs = Expr::Int(u.int_in_range(1..=100)?);
-                    let rhs = Expr::Int(u.int_in_range(1..=10)?); // non-zero for modulo
-                    let ops = [BinaryOp::Add, BinaryOp::Sub, BinaryOp::Mul, BinaryOp::Mod];
+                    let rhs = Expr::Int(u.int_in_range(1..=10)?); // non-zero for modulo/div
+                    let ops = [BinaryOp::Add, BinaryOp::Sub, BinaryOp::Mul, BinaryOp::Div, BinaryOp::Mod];
                     let op = ops[u.int_in_range(0..=ops.len() - 1)?];
                     return Ok(Expr::Binary {
                         op,
@@ -1911,8 +1923,23 @@ impl GenerationContext {
                 Ok(Expr::Int(u.int_in_range(-100..=100)?))
             }
             TypeRef::U32 | TypeRef::U8 | TypeRef::U16 | TypeRef::U64 => {
-                // Skip binary ops for unsigned (literals are s32, no coercion to unsigned)
-                // TODO: Fix when type checker supports polymorphic integer literals
+                // Bidirectional typeck keeps integer literals polymorphic until the
+                // expected type is known, so unsigned arithmetic type-checks. This
+                // exercises the unsigned codegen paths (`div_u`/`rem_u`, and the i64
+                // variants for u64) that the signed branch never reaches.
+                if depth < 2 && u.int_in_range(0..=4)? == 0 {
+                    // lhs >= rhs keeps subtraction from wrapping to a huge value and
+                    // rhs is non-zero so `/` and `%` never divide by zero.
+                    let lhs = Expr::Int(u.int_in_range(10..=100)?);
+                    let rhs = Expr::Int(u.int_in_range(1..=10)?);
+                    let ops = [BinaryOp::Add, BinaryOp::Sub, BinaryOp::Mul, BinaryOp::Div, BinaryOp::Mod];
+                    let op = ops[u.int_in_range(0..=ops.len() - 1)?];
+                    return Ok(Expr::Binary {
+                        op,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    });
+                }
                 Ok(Expr::Int(u.int_in_range(0..=100)?))
             }
             TypeRef::F32 | TypeRef::F64 => {
