@@ -5,14 +5,14 @@
 
 use crate::context::CompilerContext;
 use crate::diagnostic::{Diagnostic, ErrorCode};
-use crate::hir::{lower_file, HirItem};
+use crate::hir::{HirItem, lower_file};
 use crate::ids::DefId;
-use crate::lir::{lower_component as lower_to_lir, lower_globals, LirExpr, LirResource};
+use crate::lir::{LirExpr, LirResource, lower_component as lower_to_lir, lower_globals};
 use crate::source::{SourceId, Span};
 use crate::stdlib_lookup::lookup_known_definitions;
 use crate::syntax::ast::File;
-use crate::syntax::parser::{parse_file_with_source_id, CatchedError, ParseError};
-use crate::thir::{type_check, ThirComponent, ThirExpr, ThirItem};
+use crate::syntax::parser::{CatchedError, ParseError, parse_file_with_source_id};
+use crate::thir::{ThirComponent, ThirExpr, ThirItem, type_check};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -107,8 +107,10 @@ fn parse_error_to_diagnostic(e: &ParseError, source_id: SourceId) -> Diagnostic 
                 diag
             }
         }
-        ParseError::Missing(what) => Diagnostic::error(format!("missing required element: {}", what))
-            .with_code(ErrorCode::MissingElement),
+        ParseError::Missing(what) => {
+            Diagnostic::error(format!("missing required element: {}", what))
+                .with_code(ErrorCode::MissingElement)
+        }
         ParseError::InvalidCallBase { span } => {
             let diag = Diagnostic::error(
                 "invalid call base: only identifiers and member expressions can be called",
@@ -286,6 +288,15 @@ impl Compiler {
         lower_to_lir(thir, &self.ctx)
     }
 
+    /// Module-level post-lowering pass: synthesize per-observer global
+    /// fanout blocks and expand every `LirOp::TriggerEffects`
+    /// placeholder into direct `CallBlock`s. MUST run after every
+    /// component has been lowered and before codegen — codegen rejects
+    /// any surviving `TriggerEffects`.
+    pub fn resolve_global_triggers(&self, resources: &mut [LirResource]) {
+        crate::lower_to_lir::resolve_global_triggers(&self.ctx, resources)
+    }
+
     /// Lower type-checked global property defaults to LIR.
     pub fn lower_globals_to_lir(
         &self,
@@ -386,7 +397,10 @@ mod tests {
         assert_eq!(hir.len(), 1, "Expected 1 component");
 
         // Type check
-        let thir = compiler.type_check(&hir[0]).into_component().expect("component");
+        let thir = compiler
+            .type_check(&hir[0])
+            .into_component()
+            .expect("component");
 
         // Lower to LIR
         let lir = compiler.lower_to_lir(&thir);
@@ -764,7 +778,10 @@ mod tests {
 
         assert!(!compiler.has_errors());
 
-        let thir = compiler.type_check(&hir[0]).into_component().expect("component");
+        let thir = compiler
+            .type_check(&hir[0])
+            .into_component()
+            .expect("component");
         assert!(
             !compiler.has_errors(),
             "Type check failed: {}",

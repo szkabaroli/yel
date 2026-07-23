@@ -143,6 +143,8 @@ fn compile_to_component(source: &str) -> Vec<u8> {
             }
         }
     }
+    compiler.resolve_global_triggers(&mut lir_components);
+
     let (lir_globals, lir_global_default_exprs) =
         compiler.lower_globals_to_lir(&global_thir_defaults);
 
@@ -173,7 +175,6 @@ fn compile_to_component(source: &str) -> Vec<u8> {
     };
     codegen::generate_wasm_module(&module, compiler.context(), &opts).expect("wasm codegen")
 }
-
 
 // ============================================================================
 // Wasmtime wiring
@@ -1423,7 +1424,7 @@ fn container_component_children_mount_under_returned_root() {
     let source = r#"
         package yel:ctnrrt@0.1.0;
 
-        component Card {
+        component Panel {
             VStack {
                 Text { "chrome" }
                 @children
@@ -1431,7 +1432,7 @@ fn container_component_children_mount_under_returned_root() {
         }
 
         export component App {
-            Card { Text { "payload" } }
+            Panel { Text { "payload" } }
         }
     "#;
     let bytes = compile_to_component(source);
@@ -3765,14 +3766,7 @@ fn nested_gc_variant_deep_and_list_payload_roundtrip() {
     }
 
     // deep := Some(Ok(Ok(42)))  (three levels, all leftmost)
-    call_setter(
-        &mut h,
-        iface,
-        "app",
-        "deep",
-        &r,
-        some(ok(ok(Val::S32(42)))),
-    );
+    call_setter(&mut h, iface, "app", "deep", &r, some(ok(ok(Val::S32(42)))));
     let mut out = [Val::Bool(false)];
     get_deep
         .call(&mut h.store, &[Val::Resource(r)], &mut out)
@@ -3780,7 +3774,9 @@ fn nested_gc_variant_deep_and_list_payload_roundtrip() {
     match &out[0] {
         Val::Option(Some(inner)) => match &**inner {
             Val::Result(Ok(Some(mid))) => match &**mid {
-                Val::Result(Ok(Some(v))) => assert!(matches!(&**v, Val::S32(42)), "deep leaf {:?}", v),
+                Val::Result(Ok(Some(v))) => {
+                    assert!(matches!(&**v, Val::S32(42)), "deep leaf {:?}", v)
+                }
                 o => panic!("deep mid {:?}", o),
             },
             o => panic!("deep inner {:?}", o),
@@ -3857,7 +3853,10 @@ fn option_empty_record_roundtrips() {
             .expect("get-label");
         out[0].clone()
     };
-    for v in [Val::Option(None), Val::Option(Some(Box::new(Val::Record(vec![]))))] {
+    for v in [
+        Val::Option(None),
+        Val::Option(Some(Box::new(Val::Record(vec![])))),
+    ] {
         call_setter(&mut h, iface, "app", "label", &r, v.clone());
         assert_eq!(read(&mut h), v);
     }
@@ -3894,9 +3893,9 @@ fn nested_collapsing_option_distinguishes_some_none() {
     };
     let none = Val::Option(None);
     let some_none = Val::Option(Some(Box::new(Val::Option(None))));
-    let some_some = Val::Option(Some(Box::new(Val::Option(Some(Box::new(Val::Record(vec![
-        ("x".into(), Val::S32(7)),
-    ])))))));
+    let some_some = Val::Option(Some(Box::new(Val::Option(Some(Box::new(Val::Record(
+        vec![("x".into(), Val::S32(7))],
+    )))))));
     for v in [none.clone(), some_none.clone(), some_some.clone()] {
         call_setter(&mut h, iface, "app", "label", &r, v.clone());
         assert_eq!(read(&mut h), v, "each state must round-trip distinctly");
@@ -4026,7 +4025,10 @@ fn callback_with_params_compiles() {
     // component and panics on any validation error. Full instantiation would
     // additionally need the `app` resource wired into the callback interface.
     let bytes = compile_to_component(source);
-    assert!(!bytes.is_empty(), "param'd-callback component should encode");
+    assert!(
+        !bytes.is_empty(),
+        "param'd-callback component should encode"
+    );
 }
 
 /// Regression: a callback invoked with a *composite* argument (list / string).
@@ -4077,7 +4079,10 @@ fn filter_in_signal_default_compiles() {
         }
     "#;
     let bytes = compile_to_component(source);
-    assert!(!bytes.is_empty(), "filter-in-default component should encode");
+    assert!(
+        !bytes.is_empty(),
+        "filter-in-default component should encode"
+    );
 }
 
 /// Regression: a callback invoked with a *composite* argument (option /
@@ -4092,11 +4097,7 @@ fn filter_in_signal_default_compiles() {
 fn callback_with_gc_composite_args_compiles() {
     for (pkg, arg_ty, call) in [
         ("yel:cbopt@0.1.0", "option<s32>", "on_data(some(1));"),
-        (
-            "yel:cbres@0.1.0",
-            "result<s32, string>",
-            "on_data(ok(1));",
-        ),
+        ("yel:cbres@0.1.0", "result<s32, string>", "on_data(ok(1));"),
         ("yel:cbtup@0.1.0", "tuple<s32, s32>", "on_data((1, 2));"),
     ] {
         let source = format!(
@@ -4395,7 +4396,11 @@ fn tuple_with_record_element_setter_getter_roundtrip() {
         .expect("get-entry");
     match &out[0] {
         Val::Tuple(elems) => {
-            assert!(matches!(&elems[0], Val::S32(9)), "tuple.0, got {:?}", elems[0]);
+            assert!(
+                matches!(&elems[0], Val::S32(9)),
+                "tuple.0, got {:?}",
+                elems[0]
+            );
             match &elems[1] {
                 Val::Record(fields) => {
                     let get = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v);
@@ -4453,7 +4458,11 @@ fn nested_tuple_setter_getter_roundtrip() {
         .expect("get-nested");
     match &out[0] {
         Val::Tuple(outer) => {
-            assert!(matches!(&outer[0], Val::S32(5)), "outer.0, got {:?}", outer[0]);
+            assert!(
+                matches!(&outer[0], Val::S32(5)),
+                "outer.0, got {:?}",
+                outer[0]
+            );
             match &outer[1] {
                 Val::Tuple(inner) => {
                     assert!(
@@ -4586,7 +4595,9 @@ fn record_with_nested_gc_variant_field_roundtrip() {
         &res,
         Val::Record(vec![(
             "v".into(),
-            Val::Option(Some(Box::new(Val::Result(Ok(Some(Box::new(Val::S32(42)))))))),
+            Val::Option(Some(Box::new(Val::Result(Ok(Some(Box::new(Val::S32(
+                42,
+            )))))))),
         )]),
     );
     match read_v(&mut h, &res) {
@@ -4643,7 +4654,9 @@ fn nested_option_result_mixed_width_roundtrip() {
         "app",
         "m",
         &r,
-        Val::Option(Some(Box::new(Val::Result(Ok(Some(Box::new(Val::S32(42)))))))),
+        Val::Option(Some(Box::new(Val::Result(Ok(Some(Box::new(Val::S32(
+            42,
+        )))))))),
     );
     match read(&mut h, &r) {
         Val::Option(Some(inner)) => match *inner {
@@ -4661,12 +4674,19 @@ fn nested_option_result_mixed_width_roundtrip() {
         "app",
         "m",
         &r,
-        Val::Option(Some(Box::new(Val::Result(Err(Some(Box::new(Val::S64(big)))))))),
+        Val::Option(Some(Box::new(Val::Result(Err(Some(Box::new(Val::S64(
+            big,
+        )))))))),
     );
     match read(&mut h, &r) {
         Val::Option(Some(inner)) => match *inner {
             Val::Result(Err(Some(v))) => {
-                assert!(matches!(*v, Val::S64(x) if x == big), "Err must be {}, got {:?}", big, v)
+                assert!(
+                    matches!(*v, Val::S64(x) if x == big),
+                    "Err must be {}, got {:?}",
+                    big,
+                    v
+                )
             }
             other => panic!("expected Some(Err({})), got {:?}", big, other),
         },
@@ -4792,7 +4812,12 @@ fn record_with_mixed_width_result_field_roundtrip() {
     );
     match read_v(&mut h, &res) {
         Val::Result(Err(Some(v))) => {
-            assert!(matches!(*v, Val::S64(x) if x == big), "Err must be {}, got {:?}", big, v)
+            assert!(
+                matches!(*v, Val::S64(x) if x == big),
+                "Err must be {}, got {:?}",
+                big,
+                v
+            )
         }
         other => panic!("expected Err({}), got {:?}", big, other),
     }
@@ -4870,7 +4895,11 @@ fn tuple_with_collapsed_option_element_roundtrip() {
     match read(&mut h, &r) {
         Val::Tuple(e) => {
             assert!(matches!(&e[0], Val::S32(9)), "tuple.0, got {:?}", e[0]);
-            assert!(matches!(&e[1], Val::Option(None)), "tuple.1 must be None, got {:?}", e[1]);
+            assert!(
+                matches!(&e[1], Val::Option(None)),
+                "tuple.1 must be None, got {:?}",
+                e[1]
+            );
         }
         other => panic!("get-pair non-tuple {:?}", other),
     }
@@ -5147,14 +5176,7 @@ fn option_tuple_collapse_roundtrip() {
     }
 
     // None
-    call_setter(
-        &mut h,
-        iface,
-        "app",
-        "maybe",
-        &r,
-        Val::Option(None),
-    );
+    call_setter(&mut h, iface, "app", "maybe", &r, Val::Option(None));
     match read(&mut h, &r) {
         Val::Option(None) => {}
         other => panic!("expected None, got {:?}", other),
@@ -5206,8 +5228,16 @@ fn list_of_float_first_tuples_roundtrip() {
             for (i, (f, n)) in expected.iter().enumerate() {
                 match &e[i] {
                     Val::Tuple(t) => {
-                        assert!(matches!(&t[0], Val::Float64(x) if x == f), "pts[{i}].0 got {:?}", t[0]);
-                        assert!(matches!(&t[1], Val::S32(x) if x == n), "pts[{i}].1 got {:?}", t[1]);
+                        assert!(
+                            matches!(&t[0], Val::Float64(x) if x == f),
+                            "pts[{i}].0 got {:?}",
+                            t[0]
+                        );
+                        assert!(
+                            matches!(&t[1], Val::S32(x) if x == n),
+                            "pts[{i}].1 got {:?}",
+                            t[1]
+                        );
                     }
                     other => panic!("pts[{i}] non-tuple {:?}", other),
                 }
@@ -5248,9 +5278,9 @@ fn list_of_gc_variant_composite_payload_roundtrip() {
         "ros",
         &r,
         Val::List(vec![
-            Val::Result(Ok(Some(Box::new(Val::Option(Some(Box::new(Val::String(
-                "hi".into(),
-            )))))))),
+            Val::Result(Ok(Some(Box::new(Val::Option(Some(Box::new(
+                Val::String("hi".into()),
+            ))))))),
             Val::Result(Ok(Some(Box::new(Val::Option(None))))),
             Val::Result(Err(Some(Box::new(Val::String("bad".into()))))),
         ]),
@@ -5299,10 +5329,12 @@ fn list_of_gc_variant_composite_payload_roundtrip() {
         "ors",
         &r,
         Val::List(vec![
-            Val::Option(Some(Box::new(Val::Result(Ok(Some(Box::new(Val::S32(42)))))))),
-            Val::Option(Some(Box::new(Val::Result(Err(Some(Box::new(Val::String(
-                "no".into(),
+            Val::Option(Some(Box::new(Val::Result(Ok(Some(Box::new(Val::S32(
+                42,
             )))))))),
+            Val::Option(Some(Box::new(Val::Result(Err(Some(Box::new(
+                Val::String("no".into()),
+            ))))))),
             Val::Option(None),
         ]),
     );
@@ -5316,7 +5348,9 @@ fn list_of_gc_variant_composite_payload_roundtrip() {
             assert_eq!(e.len(), 3, "ors len");
             match &e[0] {
                 Val::Option(Some(inner)) => match &**inner {
-                    Val::Result(Ok(Some(v))) => assert!(matches!(&**v, Val::S32(42)), "ors[0] {:?}", v),
+                    Val::Result(Ok(Some(v))) => {
+                        assert!(matches!(&**v, Val::S32(42)), "ors[0] {:?}", v)
+                    }
                     o => panic!("ors[0] inner {:?}", o),
                 },
                 o => panic!("ors[0] {:?}", o),
@@ -5386,8 +5420,16 @@ fn list_of_tuples_setter_getter_roundtrip() {
             for (i, (a, b)) in expected.iter().enumerate() {
                 match &elems[i] {
                     Val::Tuple(t) => {
-                        assert!(matches!(&t[0], Val::S32(x) if x == a), "pairs[{i}].0 got {:?}", t[0]);
-                        assert!(matches!(&t[1], Val::S32(x) if x == b), "pairs[{i}].1 got {:?}", t[1]);
+                        assert!(
+                            matches!(&t[0], Val::S32(x) if x == a),
+                            "pairs[{i}].0 got {:?}",
+                            t[0]
+                        );
+                        assert!(
+                            matches!(&t[1], Val::S32(x) if x == b),
+                            "pairs[{i}].1 got {:?}",
+                            t[1]
+                        );
                     }
                     other => panic!("pairs[{i}] non-tuple {:?}", other),
                 }
@@ -5420,7 +5462,11 @@ fn list_of_tuples_setter_getter_roundtrip() {
             for (i, (a, s)) in expected.iter().enumerate() {
                 match &elems[i] {
                     Val::Tuple(t) => {
-                        assert!(matches!(&t[0], Val::S32(x) if x == a), "labelled[{i}].0 got {:?}", t[0]);
+                        assert!(
+                            matches!(&t[0], Val::S32(x) if x == a),
+                            "labelled[{i}].0 got {:?}",
+                            t[0]
+                        );
                         match &t[1] {
                             Val::String(got) => assert_eq!(&**got, *s, "labelled[{i}].1"),
                             other => panic!("labelled[{i}].1 non-string {:?}", other),
@@ -5703,7 +5749,10 @@ fn aggregate_list_getter_post_return_frees_and_stays_correct() {
 fn nested_list_getter_post_return_frees_recursively() {
     const OUTER: u32 = 32;
     const INNER: u32 = 32;
-    let inner_lit = (0..INNER).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+    let inner_lit = (0..INNER)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     let outer_lit = (0..OUTER)
         .map(|_| format!("[{inner_lit}]"))
         .collect::<Vec<_>>()
@@ -5838,7 +5887,11 @@ fn list_of_record_getter_frees_buffer_but_not_aliased_strings() {
                     if let Val::Record(fields) = &items[idx] {
                         let label = fields.iter().find(|(k, _)| k == "label").map(|(_, v)| v);
                         let n = fields.iter().find(|(k, _)| k == "n").map(|(_, v)| v);
-                        assert_eq!(label, Some(&Val::String("item".into())), "label #{i}[{idx}]");
+                        assert_eq!(
+                            label,
+                            Some(&Val::String("item".into())),
+                            "label #{i}[{idx}]"
+                        );
                         assert_eq!(n, Some(&Val::U32(slot)), "n #{i}[{idx}]");
                     } else {
                         panic!("element {idx} not a record: {:?}", items[idx]);
@@ -5925,7 +5978,9 @@ fn wide_record_setter_spills_params_and_round_trips() {
     let (mut h, _dom) = instantiate(&bytes, &[]);
     let res = ctor_and_mount(&mut h, iface, "app");
 
-    let names = ["a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p"];
+    let names = [
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p",
+    ];
     // New values 100..115; set via the spilled setter (wasmtime lowers the
     // 17 flat params to a single pointer → our trampoline decodes it).
     let new_fields: Vec<(String, Val)> = names
@@ -5998,9 +6053,7 @@ fn record_global_roundtrip_through_core_globals() {
         .ops
         .iter()
         .find_map(|op| match op {
-            DomOp::CreateText { content, .. } if content.contains("y=") => {
-                Some(content.clone())
-            }
+            DomOp::CreateText { content, .. } if content.contains("y=") => Some(content.clone()),
             _ => None,
         })
         .expect("expected the y= text node at mount");
@@ -6060,13 +6113,13 @@ fn record_global_roundtrip_through_core_globals() {
 fn user_element_lowers_to_create_element_with_attributes() {
     let source = r#"
         package yel:uelem@0.1.0;
-        element Card {
+        element Gizmo {
             title: string;
             count: s32;
         }
         export component App {
             VStack {
-                Card { title: "hello", count: 7 }
+                Gizmo { title: "hello", count: 7 }
             }
         }
     "#;
@@ -6078,8 +6131,8 @@ fn user_element_lowers_to_create_element_with_attributes() {
     // The user element is created with its own tag via create-element.
     assert!(
         ops.iter()
-            .any(|op| matches!(op, DomOp::CreateElement { tag, .. } if tag == "Card")),
-        "user element `Card` must lower to create-element(\"Card\"), got {:?}",
+            .any(|op| matches!(op, DomOp::CreateElement { tag, .. } if tag == "Gizmo")),
+        "user element `Gizmo` must lower to create-element(\"Gizmo\"), got {:?}",
         ops
     );
     // Both properties reach the DOM as set-attribute calls carrying their values.

@@ -11,8 +11,8 @@ use crate::lir::struct_types::{LirArrayTypeDecl, LirStructTypeDecl};
 use crate::source::Span;
 use crate::types::Ty;
 
-use super::arena::{LirResourceArena, LirExprArena, LirSlotArena, LirStringArena};
-use super::block::{LirBlock, LirBlockEffect, LirSlotId, LirSlotInfo, StringId, LirExprId};
+use super::arena::{LirExprArena, LirResourceArena, LirSlotArena, LirStringArena};
+use super::block::{LirBlock, LirBlockEffect, LirExprId, LirSlotId, LirSlotInfo, StringId};
 use super::expr::{LirExpr, LirStatement};
 use super::signal::LirSignal;
 use super::signal_layout::SignalLayout;
@@ -205,7 +205,6 @@ pub struct LirResource {
     /// the block ops.
     pub body_tree: Vec<LirNode>,
 
-
     /// Stage 2 (lir-resource-flatten plan): flat-list registry of GC
     /// struct types this resource owns. Today populated alongside
     /// `tree_shape` (one entry per `TreeBoundary`); both are read by
@@ -290,15 +289,22 @@ impl LirResource {
     /// rewritten to a canonical survivor). Fall back to a linear
     /// scan when the fast-path index doesn't match.
     pub fn get_block(&self, id: BlockId) -> &LirBlock {
+        self.find_block(id)
+            .unwrap_or_else(|| panic!("get_block: BlockId {:?} not found in component", id))
+    }
+
+    /// Non-panicking [`Self::get_block`]. `None` when the id belongs to
+    /// a different resource — `BlockId`s are module-wide unique and
+    /// cross-resource `CallBlock`s exist (global-fanout dispatch), so
+    /// walkers that follow call targets must tolerate foreign ids.
+    pub fn find_block(&self, id: BlockId) -> Option<&LirBlock> {
         let idx = id.0 as usize;
         if let Some(b) = self.blocks.get(idx)
-            && b.id == id {
-                return b;
-            }
-        self.blocks
-            .iter()
-            .find(|b| b.id == id)
-            .unwrap_or_else(|| panic!("get_block: BlockId {:?} not found in component", id))
+            && b.id == id
+        {
+            return Some(b);
+        }
+        self.blocks.iter().find(|b| b.id == id)
     }
 
     /// An empty component used as a carrier for module-scope expression

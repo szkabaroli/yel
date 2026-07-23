@@ -120,6 +120,12 @@ pub fn lower_all<'a>(
         }));
     }
 
+    // Module-level pass: with every component lowered, synthesize the
+    // per-observer global fanout blocks and expand `TriggerEffects`
+    // placeholders into direct `CallBlock`s. Codegen rejects any
+    // surviving placeholder, so this must precede it.
+    compiler.resolve_global_triggers(&mut resources);
+
     let (global_defaults, global_default_exprs) =
         compiler.lower_globals_to_lir(&global_thir_defaults);
 

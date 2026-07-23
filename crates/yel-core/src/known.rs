@@ -41,26 +41,24 @@ pub struct KnownElements {
     pub text: Option<DefId>,
 
     // Input elements
-    pub button: Option<DefId>,
     pub text_field: Option<DefId>,
     pub text_input: Option<DefId>,
     pub integer_input: Option<DefId>,
     pub float_input: Option<DefId>,
-    pub checkbox: Option<DefId>,
-    pub select: Option<DefId>,
-    pub option: Option<DefId>,
 
     // Media elements
     pub image: Option<DefId>,
-    pub icon: Option<DefId>,
 
     // Utility elements
-    pub spacer: Option<DefId>,
-    pub divider: Option<DefId>,
-    pub badge: Option<DefId>,
     pub fragment: Option<DefId>,
     pub portal: Option<DefId>,
     pub group: Option<DefId>,
+
+    /// Additional builtin elements that don't need named codegen access
+    /// (e.g. the MeshX design-system components: `Card`, `Alert`, `Tabs`, …).
+    /// Registered as create-element primitives; membership here is what
+    /// `is_builtin` consults for them.
+    pub others: Vec<DefId>,
 }
 
 impl KnownElements {
@@ -92,10 +90,6 @@ impl KnownElements {
         self.text.expect("Text not initialized")
     }
 
-    pub fn button(&self) -> DefId {
-        self.button.expect("Button not initialized")
-    }
-
     pub fn text_field(&self) -> DefId {
         self.text_field.expect("TextField not initialized")
     }
@@ -112,36 +106,8 @@ impl KnownElements {
         self.float_input.expect("FloatInput not initialized")
     }
 
-    pub fn checkbox(&self) -> DefId {
-        self.checkbox.expect("Checkbox not initialized")
-    }
-
-    pub fn select(&self) -> DefId {
-        self.select.expect("Select not initialized")
-    }
-
-    pub fn option(&self) -> DefId {
-        self.option.expect("Option not initialized")
-    }
-
     pub fn image(&self) -> DefId {
         self.image.expect("Image not initialized")
-    }
-
-    pub fn icon(&self) -> DefId {
-        self.icon.expect("Icon not initialized")
-    }
-
-    pub fn spacer(&self) -> DefId {
-        self.spacer.expect("Spacer not initialized")
-    }
-
-    pub fn divider(&self) -> DefId {
-        self.divider.expect("Divider not initialized")
-    }
-
-    pub fn badge(&self) -> DefId {
-        self.badge.expect("Badge not initialized")
     }
 
     pub fn fragment(&self) -> DefId {
@@ -165,22 +131,15 @@ impl KnownElements {
             || self.scroll_view == Some(def_id)
             || self.r#box == Some(def_id)
             || self.text == Some(def_id)
-            || self.button == Some(def_id)
             || self.text_field == Some(def_id)
             || self.text_input == Some(def_id)
             || self.integer_input == Some(def_id)
             || self.float_input == Some(def_id)
-            || self.checkbox == Some(def_id)
-            || self.select == Some(def_id)
-            || self.option == Some(def_id)
             || self.image == Some(def_id)
-            || self.icon == Some(def_id)
-            || self.spacer == Some(def_id)
-            || self.divider == Some(def_id)
-            || self.badge == Some(def_id)
             || self.fragment == Some(def_id)
             || self.portal == Some(def_id)
             || self.group == Some(def_id)
+            || self.others.contains(&def_id)
     }
 }
 
@@ -345,7 +304,8 @@ impl KnownFunctions {
     }
 
     pub fn object_to_string(&self) -> DefId {
-        self.object_to_string.expect("object_to_string not initialized")
+        self.object_to_string
+            .expect("object_to_string not initialized")
     }
 
     pub fn len(&self) -> DefId {

@@ -103,9 +103,11 @@ pub fn generate_dot(
             // Two-way bind targets are written by codegen-only logic;
             // they won't appear in the op walk above.
             if let Some(&target) = comp.input_binding_handlers.get(&handler_block)
-                && !local_signals.contains(&target) && !global_refs.contains(&target) {
-                    global_refs.push(target);
-                }
+                && !local_signals.contains(&target)
+                && !global_refs.contains(&target)
+            {
+                global_refs.push(target);
+            }
         }
     }
 
@@ -544,11 +546,21 @@ fn render_call_chain(
     }
     path.push(entry_block);
 
-    let block = comp.get_block(entry_block);
+    let Some(block) = comp.find_block(entry_block) else {
+        path.pop();
+        return;
+    };
     let mut callees: Vec<BlockId> = Vec::new();
     collect_call_targets(&block.ops, &mut callees);
 
     for callee in callees {
+        // Skip cross-resource targets (global-fanout dispatch): the
+        // callee renders inside its own component's cluster; this
+        // caller's semantic link to it is already shown by the
+        // `writes` edge to the global signal.
+        if comp.find_block(callee).is_none() {
+            continue;
+        }
         let callee_node = fn_node_id(comp_idx, callee);
         let first_emit = seen.insert(callee.0);
         if first_emit {
@@ -579,18 +591,20 @@ fn render_call_chain(
         // callee node itself. Emit only on first emission so multi-caller
         // fan-in doesn't duplicate sinks/edges.
         if first_emit {
-            render_block_outputs(
-                out,
-                comp_idx,
-                comp,
-                ctx,
-                &callee_node,
-                callee,
-                options,
-            );
+            render_block_outputs(out, comp_idx, comp, ctx, &callee_node, callee, options);
         }
 
-        render_call_chain(out, comp_idx, comp, ctx, &callee_node, callee, seen, path, options);
+        render_call_chain(
+            out,
+            comp_idx,
+            comp,
+            ctx,
+            &callee_node,
+            callee,
+            seen,
+            path,
+            options,
+        );
     }
 
     path.pop();
@@ -727,8 +741,7 @@ fn inline_write_target(comp: &LirResource, ctx: &CompilerContext, op: &LirOp) ->
             let mut field_start: u32 = 0;
             for &prop_id in &global.properties {
                 let prop_ty = ctx.defs.type_of(prop_id).unwrap_or(Ty::ERROR);
-                let count =
-                    yel_core::lir::signal_layout::slot_count_for_signal_ty(ctx, prop_ty);
+                let count = yel_core::lir::signal_layout::slot_count_for_signal_ty(ctx, prop_ty);
                 if *field >= field_start && *field < field_start + count {
                     return Some(prop_id);
                 }
@@ -925,7 +938,12 @@ fn collect_effect_outputs(
     }
     visited.push(block_id);
 
-    let block = comp.get_block(block_id);
+    // Cross-resource CallBlock target (global-fanout dispatch into
+    // another component) — its work belongs to that component's own
+    // cluster, not this caller's summary.
+    let Some(block) = comp.find_block(block_id) else {
+        return (Vec::new(), Vec::new());
+    };
     let mut writes = Vec::new();
     let mut mutations = Vec::new();
     walk_ops(&block.ops, comp, ctx, visited, &mut writes, &mut mutations);

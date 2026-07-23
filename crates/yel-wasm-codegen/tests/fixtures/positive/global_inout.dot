@@ -21,5 +21,11 @@ digraph yel_signal_graph {
     "c0_handler_0" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on clicked", class="yel-handler"];
     "c0_elem_4" -> "c0_handler_0" [label="fires", color="#7e57c2", class="yel-fires"];
     "c0_handler_0" -> "global_sig_453" [label="writes", color="#cc3333", class="yel-writes"];
+    "c0_fn_9" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="global-fanout-s453 #9", class="yel-fn"];
+    "c0_handler_0" -> "c0_fn_9" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
+    "c0_fn_3" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="update-b0-s453 #3\nb0:root, set text", class="yel-fn"];
+    "c0_fn_9" -> "c0_fn_3" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
+    "c0_blk3_dom0" [shape=oval, style=filled, fillcolor="#e8f5e9", label="set text", class="yel-domsink"];
+    "c0_fn_3" -> "c0_blk3_dom0" [label="updates", color="#2e7d32", class="yel-updates"];
   }
 }

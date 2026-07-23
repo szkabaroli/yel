@@ -93,11 +93,8 @@ impl<'a> WasmPackageBuilder<'a> {
             arities
                 .into_iter()
                 .map(|arity| {
-                    let idx = intern_type(
-                        vec![i; 2 * arity],
-                        vec![i, i],
-                        format!("concat{}", arity),
-                    );
+                    let idx =
+                        intern_type(vec![i; 2 * arity], vec![i, i], format!("concat{}", arity));
                     (arity, idx)
                 })
                 .collect::<std::collections::HashMap<usize, u32>>()
@@ -125,7 +122,6 @@ impl<'a> WasmPackageBuilder<'a> {
             pack_fat_ptr: intern_type(vec![i, i], vec![g, i], "pack-fat-ptr".into()),
             starts_with: intern_type(vec![i, i, i, i], vec![i], "starts-with".into()),
             globals_init: intern_type(vec![], vec![], "globals-init".into()),
-            fanout: intern_type(vec![], vec![], "fanout".into()),
             cabi_post: intern_type(vec![i], vec![], "cabi-post".into()),
             setter_spill: intern_type(vec![i], vec![], "setter-spill".into()),
             concat: concat_types,
@@ -309,7 +305,6 @@ impl<'a> WasmPackageBuilder<'a> {
             global_callback_import_types.insert(cb_def_id, idx);
         }
 
-
         // Stage 6: filter type interning is deferred until after
         // `emit_program_record_types` populates `record_gc_types.
         // list_array_type_idx`. The filter signature is now
@@ -416,7 +411,11 @@ impl<'a> WasmPackageBuilder<'a> {
         // The downstream `gc_types` walker is HashSet-deduped, so
         // over-seeding is harmless.
         let mut extra_seed_tys: Vec<yel_core::Ty> = Vec::new();
-        fn walk_expr(e: &yel_core::lir::LirExpr, exprs: &[yel_core::lir::LirExpr], out: &mut Vec<yel_core::Ty>) {
+        fn walk_expr(
+            e: &yel_core::lir::LirExpr,
+            exprs: &[yel_core::lir::LirExpr],
+            out: &mut Vec<yel_core::Ty>,
+        ) {
             use yel_core::lir::LirExprKind as K;
             out.push(e.ty);
             match &e.kind {
@@ -968,9 +967,10 @@ impl<'a> WasmPackageBuilder<'a> {
         // Appended last so it never perturbs the list entries' indices.
         // Its body-emission is dispatched specially (String kind, not List).
         {
-            let str_bytes_idx = self.record_gc_types.str_bytes_array_idx.expect(
-                "gc_list_arr_type_idxs: $str_bytes array type must be registered",
-            );
+            let str_bytes_idx = self
+                .record_gc_types
+                .str_bytes_array_idx
+                .expect("gc_list_arr_type_idxs: $str_bytes array type must be registered");
             gc_list_arr_type_idxs.push((yel_core::Ty::STRING, str_bytes_idx));
         }
         let mut materializer_type_by_arr_idx: HashMap<u32, u32> = HashMap::new();
@@ -1233,9 +1233,11 @@ impl<'a> WasmPackageBuilder<'a> {
             // One interned type per arity (see the `concat_types` map built
             // in the type section). The map is keyed over the same
             // normalized arity set this loop iterates, so the lookup hits.
-            let type_idx = *self.func_types.concat.get(&arity).unwrap_or_else(|| {
-                panic!("concat type for arity {} not interned", arity)
-            });
+            let type_idx = *self
+                .func_types
+                .concat
+                .get(&arity)
+                .unwrap_or_else(|| panic!("concat type for arity {} not interned", arity));
             functions.function(type_idx);
         }
         if runtime_needs.store_fat_ptr {
@@ -1294,10 +1296,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // 10c. List get helpers (one per unique list type).
         for &(list_ty, _option_ty) in &self.list_gets {
             let type_idx = *list_get_types.get(&list_ty).ok_or_else(|| {
-                CodegenError::InternalError(format!(
-                    "missing list get type idx for {:?}",
-                    list_ty
-                ))
+                CodegenError::InternalError(format!("missing list get type idx for {:?}", list_ty))
             })?;
             functions.function(type_idx);
         }
@@ -1427,16 +1426,17 @@ impl<'a> WasmPackageBuilder<'a> {
                             // alias on i32 keeps the i32 getter correct.
                             ft.getter_i32
                         } else if self.ctx.defs.as_record(*def_id).is_some() {
-                            self.single_slot_getter_type(signal.ty)?.unwrap_or(ft.getter_i32)
+                            self.single_slot_getter_type(signal.ty)?
+                                .unwrap_or(ft.getter_i32)
                         } else {
                             // Enum (no payloads): discriminant stored as i32,
                             // returned directly as i32 — i32 getter is correct.
                             ft.getter_i32
                         }
                     }
-                    InternedTyKind::Tuple(_) => {
-                        self.single_slot_getter_type(signal.ty)?.unwrap_or(ft.getter_i32)
-                    }
+                    InternedTyKind::Tuple(_) => self
+                        .single_slot_getter_type(signal.ty)?
+                        .unwrap_or(ft.getter_i32),
                     _ => ft.getter_i32,
                 };
                 // Setter type: dynamically registered (self: i32, ...flatten(T)) -> ().
@@ -1572,43 +1572,10 @@ impl<'a> WasmPackageBuilder<'a> {
         let globals_init_func_idx = dispatch_func_idx + 1;
         functions.function(self.func_types.globals_init); // type 0: () -> ()
 
-        // Per-global-signal fanout helpers. One `() -> ()`
-        // function per global property whose mutation triggers effects.
-        // Body walks each observing component's registry array and
-        // calls every live instance's effect block. Index assigned
-        // here so call sites can reference it; body emitted in the
-        // code section pass below.
-        let mut global_signals_with_observers: Vec<DefId> = Vec::new();
-        {
-            // Derive the set of global property DefIds straight from the
-            // def table — we only need to know **which** DefIds are
-            // globals so we can register one
-            // fanout helper per observed-elsewhere global.
-            let mut seen: HashSet<DefId> = HashSet::new();
-            for global_def_id in self.ctx.defs.globals().collect::<Vec<_>>() {
-                let global = match self.ctx.defs.as_global(global_def_id) {
-                    Some(g) => g.clone(),
-                    None => continue,
-                };
-                for &prop_id in &global.properties {
-                    let observed_anywhere = self
-                        .components
-                        .iter()
-                        .any(|c| c.effects.iter().any(|e| e.dependencies.contains(&prop_id)));
-                    if observed_anywhere && seen.insert(prop_id) {
-                        global_signals_with_observers.push(prop_id);
-                    }
-                }
-            }
-            // Determinism: sort by raw u32 so the WAT diff is stable.
-            global_signals_with_observers.sort_by_key(|d| d.0);
-        }
-        for (next_fanout_idx, sig) in
-            (globals_init_func_idx + 1..).zip(global_signals_with_observers.iter())
-        {
-            functions.function(self.func_types.fanout); // () -> ()
-            self.global_fanout_func_idx.insert(*sig, next_fanout_idx);
-        }
+        // Global-signal fanout is served by per-component LIR blocks
+        // synthesized in yel-core's `resolve_global_triggers` pass —
+        // they are ordinary block functions, so no dedicated helper
+        // functions are registered here.
 
         // Gap 1 — post-return (`cabi_post_*`) functions. An exported getter
         // whose result is a multi-slot composite freshly materialised into
@@ -1619,8 +1586,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // them would be a use-after-free. These functions are appended at the
         // function-index tail (after the fanout helpers) so no existing index
         // shifts; the encoder auto-wires them by the `cabi_post_` name prefix.
-        let cabi_post_base =
-            globals_init_func_idx + 1 + global_signals_with_observers.len() as u32;
+        let cabi_post_base = globals_init_func_idx + 1;
         let mut cabi_post_plan: Vec<(u32, usize, usize, Ty)> = Vec::new();
         {
             let mut next = cabi_post_base;
@@ -2279,19 +2245,6 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Module start function — seeds global singleton property slots.
         code.function(&self.generate_globals_init()?);
-
-        // Per-global-signal fanout helpers — one `() -> ()` body per
-        // entry in `global_fanout_func_idx`, emitted in the same order
-        // they were assigned indices above (sorted by DefId.0).
-        let mut fanout_sigs: Vec<(DefId, u32)> = self
-            .global_fanout_func_idx
-            .iter()
-            .map(|(d, i)| (*d, *i))
-            .collect();
-        fanout_sigs.sort_by_key(|(_, idx)| *idx);
-        for (sig, _) in &fanout_sigs {
-            code.function(&self.generate_global_fanout_for(*sig)?);
-        }
 
         // Gap 1: post-return bodies, in the SAME order their indices/types
         // were assigned above. Each frees the freshly-materialised buffer

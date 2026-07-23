@@ -4,7 +4,9 @@
 //! definition tables during initialization.
 
 use crate::context::CompilerContext;
-use crate::definitions::{ComponentDef, DefKind, EnumDef, FieldDef, FunctionDef, Namespace, VariantCaseDef, VariantDef};
+use crate::definitions::{
+    ComponentDef, DefKind, EnumDef, FieldDef, FunctionDef, Namespace, VariantCaseDef, VariantDef,
+};
 use crate::dom_imports::register_dom_imports;
 use crate::ids::{DefId, FieldIdx, VariantIdx};
 use crate::source::Span;
@@ -143,7 +145,14 @@ fn register_builtin_enums(ctx: &mut CompilerContext) {
     ctx.known.enums.button_variant = Some(register_enum(
         ctx,
         "ButtonVariant",
-        &["default", "destructive", "outline", "secondary", "ghost", "link"],
+        &[
+            "default",
+            "destructive",
+            "outline",
+            "secondary",
+            "ghost",
+            "link",
+        ],
     ));
 
     ctx.known.enums.align = Some(register_enum(
@@ -155,13 +164,30 @@ fn register_builtin_enums(ctx: &mut CompilerContext) {
     ctx.known.enums.justify = Some(register_enum(
         ctx,
         "Justify",
-        &["start", "center", "end", "space-between", "space-around", "space-evenly"],
+        &[
+            "start",
+            "center",
+            "end",
+            "space-between",
+            "space-around",
+            "space-evenly",
+        ],
     ));
 
     ctx.known.enums.weight = Some(register_enum(
         ctx,
         "Weight",
-        &["thin", "extra-light", "light", "normal", "medium", "semi-bold", "bold", "extra-bold", "black"],
+        &[
+            "thin",
+            "extra-light",
+            "light",
+            "normal",
+            "medium",
+            "semi-bold",
+            "bold",
+            "extra-bold",
+            "black",
+        ],
     ));
 }
 
@@ -351,20 +377,10 @@ fn register_builtin_functions(ctx: &mut CompilerContext) {
     ));
 
     // min: func(s32, s32) -> s32
-    ctx.known.functions.min = Some(register_function(
-        ctx,
-        "min",
-        &[Ty::S32, Ty::S32],
-        Ty::S32,
-    ));
+    ctx.known.functions.min = Some(register_function(ctx, "min", &[Ty::S32, Ty::S32], Ty::S32));
 
     // max: func(s32, s32) -> s32
-    ctx.known.functions.max = Some(register_function(
-        ctx,
-        "max",
-        &[Ty::S32, Ty::S32],
-        Ty::S32,
-    ));
+    ctx.known.functions.max = Some(register_function(ctx, "max", &[Ty::S32, Ty::S32], Ty::S32));
 
     // filter: func(list<T>, func(T) -> bool) -> list<T>
     // Note: This is a generic function, type parameters are resolved at call site
@@ -408,25 +424,39 @@ fn register_builtin_elements(ctx: &mut CompilerContext) {
     ctx.known.elements.text = Some(register_text_element(ctx));
 
     // Input elements
-    ctx.known.elements.button = Some(register_button_element(ctx));
     ctx.known.elements.text_field = Some(register_text_field_element(ctx));
     ctx.known.elements.text_input = Some(register_text_input_element(ctx));
     ctx.known.elements.integer_input = Some(register_integer_input_element(ctx));
     ctx.known.elements.float_input = Some(register_float_input_element(ctx));
-    ctx.known.elements.checkbox = Some(register_checkbox_element(ctx));
-    ctx.known.elements.select = Some(register_select_element(ctx));
-    ctx.known.elements.option = Some(register_option_element(ctx));
 
     // Media elements
     ctx.known.elements.image = Some(register_image_element(ctx));
 
     // Utility elements
-    ctx.known.elements.spacer = Some(register_simple_element(ctx, "Spacer", &layout_props()));
-    ctx.known.elements.divider = Some(register_divider_element(ctx));
-    ctx.known.elements.badge = Some(register_badge_element(ctx));
     ctx.known.elements.fragment = Some(register_simple_element(ctx, "Fragment", &[]));
     ctx.known.elements.portal = Some(register_portal_element(ctx));
     ctx.known.elements.group = Some(register_simple_element(ctx, "Group", &[]));
+
+    register_design_system_elements(ctx);
+}
+
+// The MeshX design-system components (`@meshx-org/components`) are registered
+// as builtin create-element primitives. Property schemas mirror each
+// component's real API (tailwind-variants enums as `string`, boolean flags as
+// `bool`, …), restricted to attribute-value-safe scalar types and kebab-cased
+// to match the Yel surface. These supersede the removed hand-written core
+// builtins for `Button`/`Checkbox`/`Select`/`Badge`/`Icon`/`Separator`.
+//
+// `DESIGN_ELEMENTS: &[(&str, &[PropDesc])]` is generated from
+// `design-elements.json` by build.rs (the single source of truth shared with
+// yel-smith), regenerated whenever the JSON changes.
+include!(concat!(env!("OUT_DIR"), "/design_elements.rs"));
+
+fn register_design_system_elements(ctx: &mut CompilerContext) {
+    for (name, props) in DESIGN_ELEMENTS {
+        let def = register_element(ctx, name, props);
+        ctx.known.elements.others.push(def);
+    }
 }
 
 // ============================================================================
@@ -475,7 +505,8 @@ fn register_enum(ctx: &mut CompilerContext, name: &str, cases: &[&str]) -> DefId
     }
 
     // Register in namespace
-    ctx.defs.register_name(name_interned, Namespace::Type, enum_def_id);
+    ctx.defs
+        .register_name(name_interned, Namespace::Type, enum_def_id);
 
     // Create type for this enum
     let enum_ty = ctx.types.intern_adt(enum_def_id);
@@ -522,7 +553,8 @@ fn register_variant(ctx: &mut CompilerContext, name: &str, cases: &[(&str, Optio
     }
 
     // Register in namespace
-    ctx.defs.register_name(name_interned, Namespace::Type, variant_def_id);
+    ctx.defs
+        .register_name(name_interned, Namespace::Type, variant_def_id);
 
     // Create type for this variant
     let variant_ty = ctx.types.intern_adt(variant_def_id);
@@ -559,7 +591,8 @@ fn register_function(ctx: &mut CompilerContext, name: &str, params: &[Ty], ret_t
     }
 
     // Register in namespace
-    ctx.defs.register_name(name_interned, Namespace::Value, func_def_id);
+    ctx.defs
+        .register_name(name_interned, Namespace::Value, func_def_id);
     ctx.defs.set_type(func_def_id, func_ty);
 
     func_def_id
@@ -609,26 +642,68 @@ impl PropType {
 /// Common layout properties.
 fn layout_props() -> Vec<PropDesc> {
     vec![
-        PropDesc { name: "width", ty: PropType::Length },
-        PropDesc { name: "height", ty: PropType::Length },
-        PropDesc { name: "min-width", ty: PropType::Length },
-        PropDesc { name: "min-height", ty: PropType::Length },
-        PropDesc { name: "max-width", ty: PropType::Length },
-        PropDesc { name: "max-height", ty: PropType::Length },
-        PropDesc { name: "padding", ty: PropType::Length },
-        PropDesc { name: "margin", ty: PropType::Length },
-        PropDesc { name: "visible", ty: PropType::Bool },
-        PropDesc { name: "opacity", ty: PropType::F32 },
+        PropDesc {
+            name: "width",
+            ty: PropType::Length,
+        },
+        PropDesc {
+            name: "height",
+            ty: PropType::Length,
+        },
+        PropDesc {
+            name: "min-width",
+            ty: PropType::Length,
+        },
+        PropDesc {
+            name: "min-height",
+            ty: PropType::Length,
+        },
+        PropDesc {
+            name: "max-width",
+            ty: PropType::Length,
+        },
+        PropDesc {
+            name: "max-height",
+            ty: PropType::Length,
+        },
+        PropDesc {
+            name: "padding",
+            ty: PropType::Length,
+        },
+        PropDesc {
+            name: "margin",
+            ty: PropType::Length,
+        },
+        PropDesc {
+            name: "visible",
+            ty: PropType::Bool,
+        },
+        PropDesc {
+            name: "opacity",
+            ty: PropType::F32,
+        },
     ]
 }
 
 /// Common style properties.
 fn style_props() -> Vec<PropDesc> {
     vec![
-        PropDesc { name: "background", ty: PropType::Brush },
-        PropDesc { name: "border-color", ty: PropType::Color },
-        PropDesc { name: "border-width", ty: PropType::Length },
-        PropDesc { name: "corner-radius", ty: PropType::Length },
+        PropDesc {
+            name: "background",
+            ty: PropType::Brush,
+        },
+        PropDesc {
+            name: "border-color",
+            ty: PropType::Color,
+        },
+        PropDesc {
+            name: "border-width",
+            ty: PropType::Length,
+        },
+        PropDesc {
+            name: "corner-radius",
+            ty: PropType::Length,
+        },
     ]
 }
 
@@ -676,14 +751,22 @@ fn register_element(ctx: &mut CompilerContext, name: &str, props: &[PropDesc]) -
     }
 
     // Register in namespace
-    ctx.defs.register_name(name_interned, Namespace::Component, comp_def_id);
+    ctx.defs
+        .register_name(name_interned, Namespace::Component, comp_def_id);
 
     comp_def_id
 }
 
-fn register_simple_element(ctx: &mut CompilerContext, name: &str, extra_props: &[PropDesc]) -> DefId {
+fn register_simple_element(
+    ctx: &mut CompilerContext,
+    name: &str,
+    extra_props: &[PropDesc],
+) -> DefId {
     let mut props = layout_props();
-    props.extend(extra_props.iter().map(|p| PropDesc { name: p.name, ty: p.ty.clone() }));
+    props.extend(extra_props.iter().map(|p| PropDesc {
+        name: p.name,
+        ty: p.ty.clone(),
+    }));
     register_element(ctx, name, &props)
 }
 
@@ -693,10 +776,22 @@ fn register_simple_element(ctx: &mut CompilerContext, name: &str, extra_props: &
 
 fn register_stack_element(ctx: &mut CompilerContext, name: &str) -> DefId {
     let mut props = vec![
-        PropDesc { name: "spacing", ty: PropType::Length },
-        PropDesc { name: "gap", ty: PropType::Length },
-        PropDesc { name: "align", ty: PropType::Named("Align") },
-        PropDesc { name: "justify", ty: PropType::Named("Justify") },
+        PropDesc {
+            name: "spacing",
+            ty: PropType::Length,
+        },
+        PropDesc {
+            name: "gap",
+            ty: PropType::Length,
+        },
+        PropDesc {
+            name: "align",
+            ty: PropType::Named("Align"),
+        },
+        PropDesc {
+            name: "justify",
+            ty: PropType::Named("Justify"),
+        },
     ];
     props.extend(layout_props());
     props.extend(style_props());
@@ -704,9 +799,10 @@ fn register_stack_element(ctx: &mut CompilerContext, name: &str) -> DefId {
 }
 
 fn register_zstack_element(ctx: &mut CompilerContext, name: &str) -> DefId {
-    let mut props = vec![
-        PropDesc { name: "align", ty: PropType::Named("Align") },
-    ];
+    let mut props = vec![PropDesc {
+        name: "align",
+        ty: PropType::Named("Align"),
+    }];
     props.extend(layout_props());
     props.extend(style_props());
     register_element(ctx, name, &props)
@@ -714,9 +810,18 @@ fn register_zstack_element(ctx: &mut CompilerContext, name: &str) -> DefId {
 
 fn register_list_element(ctx: &mut CompilerContext) -> DefId {
     let mut props = vec![
-        PropDesc { name: "direction", ty: PropType::Named("Direction") },
-        PropDesc { name: "divide", ty: PropType::String },
-        PropDesc { name: "spacing", ty: PropType::Length },
+        PropDesc {
+            name: "direction",
+            ty: PropType::Named("Direction"),
+        },
+        PropDesc {
+            name: "divide",
+            ty: PropType::String,
+        },
+        PropDesc {
+            name: "spacing",
+            ty: PropType::Length,
+        },
     ];
     props.extend(layout_props());
     props.extend(style_props());
@@ -724,9 +829,10 @@ fn register_list_element(ctx: &mut CompilerContext) -> DefId {
 }
 
 fn register_scroll_view_element(ctx: &mut CompilerContext) -> DefId {
-    let mut props = vec![
-        PropDesc { name: "direction", ty: PropType::String },
-    ];
+    let mut props = vec![PropDesc {
+        name: "direction",
+        ty: PropType::String,
+    }];
     props.extend(layout_props());
     register_element(ctx, "ScrollView", &props)
 }
@@ -739,35 +845,53 @@ fn register_box_element(ctx: &mut CompilerContext, name: &str) -> DefId {
 
 fn register_text_element(ctx: &mut CompilerContext) -> DefId {
     let mut props = vec![
-        PropDesc { name: "content", ty: PropType::String },
-        PropDesc { name: "text", ty: PropType::String },
-        PropDesc { name: "line-clamp", ty: PropType::S32 },
-        PropDesc { name: "color", ty: PropType::Color },
-        PropDesc { name: "font-size", ty: PropType::Length },
-        PropDesc { name: "font-weight", ty: PropType::Named("Weight") },
-        PropDesc { name: "font-family", ty: PropType::String },
+        PropDesc {
+            name: "content",
+            ty: PropType::String,
+        },
+        PropDesc {
+            name: "text",
+            ty: PropType::String,
+        },
+        PropDesc {
+            name: "line-clamp",
+            ty: PropType::S32,
+        },
+        PropDesc {
+            name: "color",
+            ty: PropType::Color,
+        },
+        PropDesc {
+            name: "font-size",
+            ty: PropType::Length,
+        },
+        PropDesc {
+            name: "font-weight",
+            ty: PropType::Named("Weight"),
+        },
+        PropDesc {
+            name: "font-family",
+            ty: PropType::String,
+        },
     ];
     props.extend(layout_props());
     register_element(ctx, "Text", &props)
 }
 
-fn register_button_element(ctx: &mut CompilerContext) -> DefId {
-    let mut props = vec![
-        PropDesc { name: "label", ty: PropType::String },
-        PropDesc { name: "variant", ty: PropType::Named("ButtonVariant") },
-        PropDesc { name: "disabled", ty: PropType::Bool },
-    ];
-    props.extend(layout_props());
-    props.extend(style_props());
-    // TODO: Add clicked callback
-    register_element(ctx, "Button", &props)
-}
-
 fn register_text_field_element(ctx: &mut CompilerContext) -> DefId {
     let mut props = vec![
-        PropDesc { name: "value", ty: PropType::String },
-        PropDesc { name: "placeholder", ty: PropType::String },
-        PropDesc { name: "disabled", ty: PropType::Bool },
+        PropDesc {
+            name: "value",
+            ty: PropType::String,
+        },
+        PropDesc {
+            name: "placeholder",
+            ty: PropType::String,
+        },
+        PropDesc {
+            name: "disabled",
+            ty: PropType::Bool,
+        },
     ];
     props.extend(layout_props());
     // TODO: Add changed, submitted callbacks
@@ -776,9 +900,18 @@ fn register_text_field_element(ctx: &mut CompilerContext) -> DefId {
 
 fn register_text_input_element(ctx: &mut CompilerContext) -> DefId {
     let mut props = vec![
-        PropDesc { name: "value", ty: PropType::String },
-        PropDesc { name: "placeholder", ty: PropType::String },
-        PropDesc { name: "disabled", ty: PropType::Bool },
+        PropDesc {
+            name: "value",
+            ty: PropType::String,
+        },
+        PropDesc {
+            name: "placeholder",
+            ty: PropType::String,
+        },
+        PropDesc {
+            name: "disabled",
+            ty: PropType::Bool,
+        },
     ];
     props.extend(layout_props());
     register_element(ctx, "TextInput", &props)
@@ -786,9 +919,18 @@ fn register_text_input_element(ctx: &mut CompilerContext) -> DefId {
 
 fn register_integer_input_element(ctx: &mut CompilerContext) -> DefId {
     let mut props = vec![
-        PropDesc { name: "value", ty: PropType::S32 },
-        PropDesc { name: "placeholder", ty: PropType::String },
-        PropDesc { name: "disabled", ty: PropType::Bool },
+        PropDesc {
+            name: "value",
+            ty: PropType::S32,
+        },
+        PropDesc {
+            name: "placeholder",
+            ty: PropType::String,
+        },
+        PropDesc {
+            name: "disabled",
+            ty: PropType::Bool,
+        },
     ];
     props.extend(layout_props());
     register_element(ctx, "IntegerInput", &props)
@@ -796,79 +938,51 @@ fn register_integer_input_element(ctx: &mut CompilerContext) -> DefId {
 
 fn register_float_input_element(ctx: &mut CompilerContext) -> DefId {
     let mut props = vec![
-        PropDesc { name: "value", ty: PropType::F32 },
-        PropDesc { name: "placeholder", ty: PropType::String },
-        PropDesc { name: "disabled", ty: PropType::Bool },
+        PropDesc {
+            name: "value",
+            ty: PropType::F32,
+        },
+        PropDesc {
+            name: "placeholder",
+            ty: PropType::String,
+        },
+        PropDesc {
+            name: "disabled",
+            ty: PropType::Bool,
+        },
     ];
     props.extend(layout_props());
     register_element(ctx, "FloatInput", &props)
 }
 
-fn register_checkbox_element(ctx: &mut CompilerContext) -> DefId {
-    let mut props = vec![
-        PropDesc { name: "checked", ty: PropType::Bool },
-        PropDesc { name: "label", ty: PropType::String },
-        PropDesc { name: "disabled", ty: PropType::Bool },
-    ];
-    props.extend(layout_props());
-    // TODO: Add toggled callback
-    register_element(ctx, "Checkbox", &props)
-}
-
-fn register_select_element(ctx: &mut CompilerContext) -> DefId {
-    let mut props = vec![
-        PropDesc { name: "value", ty: PropType::S32 },
-        PropDesc { name: "size", ty: PropType::S32 },
-        PropDesc { name: "disabled", ty: PropType::Bool },
-    ];
-    props.extend(layout_props());
-    // TODO: Add changed callback
-    register_element(ctx, "Select", &props)
-}
-
-fn register_option_element(ctx: &mut CompilerContext) -> DefId {
-    let props = vec![
-        PropDesc { name: "value", ty: PropType::S32 },
-        PropDesc { name: "disabled", ty: PropType::Bool },
-    ];
-    register_element(ctx, "Option", &props)
-}
-
 fn register_image_element(ctx: &mut CompilerContext) -> DefId {
     let mut props = vec![
-        PropDesc { name: "source", ty: PropType::Image },
-        PropDesc { name: "src", ty: PropType::String },
-        PropDesc { name: "alt", ty: PropType::String },
-        PropDesc { name: "fit", ty: PropType::String },
+        PropDesc {
+            name: "source",
+            ty: PropType::Image,
+        },
+        PropDesc {
+            name: "src",
+            ty: PropType::String,
+        },
+        PropDesc {
+            name: "alt",
+            ty: PropType::String,
+        },
+        PropDesc {
+            name: "fit",
+            ty: PropType::String,
+        },
     ];
     props.extend(layout_props());
     register_element(ctx, "Image", &props)
 }
 
-fn register_divider_element(ctx: &mut CompilerContext) -> DefId {
-    let mut props = vec![
-        PropDesc { name: "orientation", ty: PropType::String },
-    ];
-    props.extend(layout_props());
-    props.extend(style_props());
-    register_element(ctx, "Divider", &props)
-}
-
-fn register_badge_element(ctx: &mut CompilerContext) -> DefId {
-    let mut props = vec![
-        PropDesc { name: "content", ty: PropType::String },
-        PropDesc { name: "text", ty: PropType::String },
-        PropDesc { name: "variant", ty: PropType::String },
-    ];
-    props.extend(layout_props());
-    props.extend(style_props());
-    register_element(ctx, "Badge", &props)
-}
-
 fn register_portal_element(ctx: &mut CompilerContext) -> DefId {
-    let props = vec![
-        PropDesc { name: "target", ty: PropType::String },
-    ];
+    let props = vec![PropDesc {
+        name: "target",
+        ty: PropType::String,
+    }];
     register_element(ctx, "Portal", &props)
 }
 

@@ -15,8 +15,9 @@ use super::component::TreeLirResource;
 use crate::context::CompilerContext;
 use crate::definitions::DefKind;
 use crate::lir::block::{
-    ArithOp, ArrayItemRepr, BinOperand, BoundaryDepIndex, CompareOp, LirExprId, LirBlock, LirBlockEffect, LirIf, LirOp, LirSlotId,
-    LirSlotInfo, LirSlotKind, LirSlotValType, PendingBinding, PendingBindingKind, StringId,
+    ArithOp, ArrayItemRepr, BinOperand, BoundaryDepIndex, CompareOp, LirBlock, LirBlockEffect,
+    LirExprId, LirIf, LirOp, LirSlotId, LirSlotInfo, LirSlotKind, LirSlotValType, PendingBinding,
+    PendingBindingKind, StringId,
 };
 use crate::lir::expr::{LirExpr, LirExprKind, LirStatement};
 use crate::lir::node::{LirHandler, LirNode, LirNodeKind, LirResource};
@@ -30,7 +31,7 @@ use crate::lir::block::{
     ComponentTreeShape, ForContext, TreeBoundary, TreeBoundaryKind, TreeFieldDecl,
 };
 use crate::lir::dedupe::dedupe_update_blocks;
-use crate::lir::tree_shape::{synthesize, IterSource};
+use crate::lir::tree_shape::{IterSource, synthesize};
 use crate::lir::{LirBindingMode, LirLayoutContext};
 use crate::ops::BinOp;
 use crate::types::{InternedTyKind, Ty};
@@ -82,9 +83,10 @@ pub fn ty_to_slot_val_type(
     // narrower `is_dtr_record_struct` predicate only gates the
     // option-of-record collapse, not the record's own repr.)
     if let InternedTyKind::Adt(d) = ctx.ty_kind(ty)
-        && matches!(ctx.defs.kind(*d), DefKind::Record(_)) {
-            return LirSlotValType::RefNullForRecord(ty);
-        }
+        && matches!(ctx.defs.kind(*d), DefKind::Record(_))
+    {
+        return LirSlotValType::RefNullForRecord(ty);
+    }
     // Phase 5e.5: option / result / variant migrated to W3C
     // subtype-hierarchy GC repr — single nullable supertype ref.
     if is_gc_variant_ty_struct(ctx, ty) {
@@ -256,9 +258,9 @@ fn is_gc_variant_ty_struct_inner(
             }
             if let InternedTyKind::Adt(d) = ctx.ty_kind(inner)
                 && matches!(ctx.defs.kind(*d), DefKind::Record(_))
-                {
-                    return false;
-                }
+            {
+                return false;
+            }
             is_gc_variant_payload_ty_struct(ctx, inner, visiting)
         }
         InternedTyKind::Result { ok, err } => {
@@ -378,7 +380,9 @@ fn is_single_slot_elem_struct(
     match ctx.ty_kind(elem) {
         // Unit / error / unknown lower to zero slots; callbacks are not
         // data values. None of these can be a GC-array element.
-        InternedTyKind::Unit | InternedTyKind::Error | InternedTyKind::Unknown
+        InternedTyKind::Unit
+        | InternedTyKind::Error
+        | InternedTyKind::Unknown
         | InternedTyKind::Func { .. } => false,
         // A nested list is single-slot iff it is itself a scalar list
         // (its element is single-slot). A non-scalar nested list stays a
@@ -1264,9 +1268,10 @@ impl<'a> BlockLowering<'a> {
             if migrated_binding_ids.contains(&e.id) {
                 if let Some(sig) = binding_to_signal.get(&e.id)
                     && signals_used.insert(*sig)
-                        && let Some(new_e) = new_by_signal.get(sig).cloned() {
-                            spliced.push(new_e);
-                        }
+                    && let Some(new_e) = new_by_signal.get(sig).cloned()
+                {
+                    spliced.push(new_e);
+                }
                 continue;
             }
             spliced.push(e);
@@ -1558,7 +1563,12 @@ impl<'a> BlockLowering<'a> {
                                 slot: idx_slot,
                                 value: 0,
                             });
-                            self.emit(LirOp::Compare { op: CompareOp::GeU, lhs: idx_slot, rhs: len_slot, result: break_cond });
+                            self.emit(LirOp::Compare {
+                                op: CompareOp::GeU,
+                                lhs: idx_slot,
+                                rhs: len_slot,
+                                result: break_cond,
+                            });
 
                             let iter_ref_slot = self.alloc_temp_slot_typed_named(
                                 LirSlotValType::RefNullForBoundary(iter_body_id),
@@ -1585,8 +1595,18 @@ impl<'a> BlockLowering<'a> {
                                     ],
                                     result: None,
                                 },
-                                LirOp::BinaryOp { op: ArithOp::Add, lhs: idx_slot, rhs: BinOperand::Const(1), result: idx_slot },
-                                LirOp::Compare { op: CompareOp::GeU, lhs: idx_slot, rhs: len_slot, result: break_cond },
+                                LirOp::BinaryOp {
+                                    op: ArithOp::Add,
+                                    lhs: idx_slot,
+                                    rhs: BinOperand::Const(1),
+                                    result: idx_slot,
+                                },
+                                LirOp::Compare {
+                                    op: CompareOp::GeU,
+                                    lhs: idx_slot,
+                                    rhs: len_slot,
+                                    result: break_cond,
+                                },
                             ];
                             self.emit(LirOp::Loop {
                                 break_cond,
@@ -1791,7 +1811,6 @@ impl<'a> BlockLowering<'a> {
         ty_to_slot_val_type(self.ctx, ty)
     }
 
-
     pub(crate) fn lower_component(&mut self, tree: &TreeLirResource) -> LirResource {
         // Phase 0.3p: allocate the resource-wide self-ref slot UP-FRONT
         // so every `CallBlock` emit site during per-block lowering can
@@ -1842,7 +1861,7 @@ impl<'a> BlockLowering<'a> {
                 signals: tree.signals.clone(),
                 children_root_slot: None,
                 input_binding_handlers: HashMap::new(),
-            payload_binding_handlers: HashMap::new(),
+                payload_binding_handlers: HashMap::new(),
                 for_contexts: Vec::new(),
                 effects_by_signal: HashMap::new(),
                 body_tree: Vec::new(),
@@ -1911,11 +1930,8 @@ impl<'a> BlockLowering<'a> {
                     // strings, gc-variant, and option-of-ref collapse). Keeping
                     // this in lockstep is what avoids the for-loop update
                     // `debug_assert!(is_gc_list)` panic.
-                    let elem_is_gc = is_scalar_list_ty_struct(
-                        ctx,
-                        iterable_expr.ty,
-                        &mut HashSet::new(),
-                    );
+                    let elem_is_gc =
+                        is_scalar_list_ty_struct(ctx, iterable_expr.ty, &mut HashSet::new());
                     if is_component_signal && elem_is_gc {
                         IterSource::ListGc
                     } else {
@@ -1954,7 +1970,10 @@ impl<'a> BlockLowering<'a> {
         // local per Temp slot in compacted `local_idx` order).
         let promoted_local_idx = match &self.slot_info(parent_slot).kind {
             LirSlotKind::Temp { local_idx } => *local_idx,
-            other => panic!("Phase 0.3i: parent_slot expected Temp kind, got {:?}", other),
+            other => panic!(
+                "Phase 0.3i: parent_slot expected Temp kind, got {:?}",
+                other
+            ),
         };
         self.slot_info_mut(parent_slot).kind = LirSlotKind::WasmParam { idx: 1 };
         // Task #105 B2: parent_slot lives in either the component slots
@@ -1965,16 +1984,18 @@ impl<'a> BlockLowering<'a> {
         let pack_temp_locals = |slots: &mut Vec<LirSlotInfo>, promoted: u32| {
             for s in slots.iter_mut() {
                 if let LirSlotKind::Temp { local_idx } = &mut s.kind
-                    && *local_idx > promoted {
-                        *local_idx -= 1;
-                    }
+                    && *local_idx > promoted
+                {
+                    *local_idx -= 1;
+                }
             }
         };
         pack_temp_locals(&mut self.slots, promoted_local_idx);
         if let LirSlotId::Block { block: bid, .. } = parent_slot
-            && let Some(b) = self.blocks.iter_mut().find(|b| b.id == bid) {
-                pack_temp_locals(&mut b.slots, promoted_local_idx);
-            }
+            && let Some(b) = self.blocks.iter_mut().find(|b| b.id == bid)
+        {
+            pack_temp_locals(&mut b.slots, promoted_local_idx);
+        }
         // Only decrement next_local_idx when parent_slot was the
         // component-Temp (Resource) case; per-block local space is
         // self-contained via current_block_local_idx (already reset on
@@ -2119,8 +2140,7 @@ impl<'a> BlockLowering<'a> {
         // against an in-scope boundary-ref slot, synthesizing
         // `BoundaryRefFromSelf` / ancestor-chain prologues as needed. The old
         // `BoundaryField` slot kind is gone; these ops carry the data directly.
-        let _rewrites =
-            crate::lir::boundary_rewrite::rewrite_struct_field_ops(&mut component);
+        let _rewrites = crate::lir::boundary_rewrite::rewrite_struct_field_ops(&mut component);
         // Invariant — ENFORCED: the rewriter resolves *every* symbolic
         // struct-field op, so zero may survive. Codegen has no fallback — a
         // surviving `StructField*` op `unreachable!`s. Assert it here so a
@@ -2129,8 +2149,7 @@ impl<'a> BlockLowering<'a> {
         // The whole lowering test suite runs in debug, so this is the
         // regression guard. `YEL_DEBUG_BOUNDARY_FIELD=1` prints per-resource
         // counts.
-        let remaining =
-            crate::lir::boundary_rewrite::count_remaining_struct_field_ops(&component);
+        let remaining = crate::lir::boundary_rewrite::count_remaining_struct_field_ops(&component);
         if std::env::var_os("YEL_DEBUG_BOUNDARY_FIELD").is_some() {
             eprintln!(
                 "[lir] resource {:?}: rewrote {} struct-field ops, {} remain",
@@ -2286,11 +2305,8 @@ impl<'a> BlockLowering<'a> {
                 // shapes the parent `struct.new_default $Comp` already
                 // zeroed the fields (helper returns Handled as a
                 // no-op); GcVariant shapes materialize case 0.
-                let unified_inlined = self.inline_signal_write_or_init_from_expr(
-                    signal.def_id,
-                    signal.ty,
-                    None,
-                );
+                let unified_inlined =
+                    self.inline_signal_write_or_init_from_expr(signal.def_id, signal.ty, None);
                 if matches!(unified_inlined, InlineResult::NotHandled) {
                     // §1.4: legacy LirOp::InitSignalDefault fallback removed.
                     todo!(
@@ -2407,14 +2423,18 @@ impl<'a> BlockLowering<'a> {
                     // `boundary_params`), so `BoundaryField` reads /
                     // writes resolve via `local.get` or a single
                     // `struct.get` walk.
-                    let (elem_struct_ty, elem_field_idx) =
-                        match self.tree_shape.node_field.get(&node.id).copied() {
-                            Some(nfr) => (nfr.owning_boundary, nfr.field_idx),
-                            None => unreachable!(
-                                "Element node {:?} missing tree_shape.node_field entry; synthesizer must allocate a struct field for every Element",
-                                node.id
-                            ),
-                        };
+                    let (elem_struct_ty, elem_field_idx) = match self
+                        .tree_shape
+                        .node_field
+                        .get(&node.id)
+                        .copied()
+                    {
+                        Some(nfr) => (nfr.owning_boundary, nfr.field_idx),
+                        None => unreachable!(
+                            "Element node {:?} missing tree_shape.node_field entry; synthesizer must allocate a struct field for every Element",
+                            node.id
+                        ),
+                    };
                     // Persist the DOM handle into the element's struct field.
                     self.emit(LirOp::StructFieldSet {
                         struct_ty: elem_struct_ty,
@@ -2572,14 +2592,18 @@ impl<'a> BlockLowering<'a> {
                 // `boundary_params` plumbing, so reads/writes resolve
                 // via `local.get` (in-scope) or a single `struct.get`
                 // walk via `parent_link`.
-                let (text_struct_ty, text_field_idx) =
-                    match self.tree_shape.node_field.get(&node.id).copied() {
-                        Some(nfr) => (nfr.owning_boundary, nfr.field_idx),
-                        None => unreachable!(
-                            "DynamicText node {:?} missing tree_shape.node_field entry; synthesizer must allocate a struct field for every DynamicText",
-                            node.id
-                        ),
-                    };
+                let (text_struct_ty, text_field_idx) = match self
+                    .tree_shape
+                    .node_field
+                    .get(&node.id)
+                    .copied()
+                {
+                    Some(nfr) => (nfr.owning_boundary, nfr.field_idx),
+                    None => unreachable!(
+                        "DynamicText node {:?} missing tree_shape.node_field entry; synthesizer must allocate a struct field for every DynamicText",
+                        node.id
+                    ),
+                };
                 let expr_id = self.intern_expr(&expr);
 
                 // Create text node with initial dynamic content.
@@ -2620,31 +2644,32 @@ impl<'a> BlockLowering<'a> {
                 // directly into the right boundary's update fn,
                 // looked up via `dyntext_binding_data`.
                 if let Some(deps) = dependencies
-                    && !deps.is_empty() {
-                        let pb_id = self.next_binding_id;
-                        self.next_binding_id += 1;
-                        let owning_boundary = self
-                            .tree_shape
-                            .node_field
-                            .get(&node.id)
-                            .map(|nfr| nfr.owning_boundary)
-                            .unwrap_or(TreeBoundaryId(u32::MAX));
-                        self.binding_collector.push(PendingBinding {
-                            owning_boundary,
-                            dependencies: deps.clone(),
-                            kind: PendingBindingKind::DynamicText,
-                            binding_id: pb_id,
-                        });
-                        self.dyntext_binding_data.insert(
-                            pb_id,
-                            DynTextBindingInfo {
-                                dependencies: deps,
-                                struct_ty: text_struct_ty,
-                                field_idx: text_field_idx,
-                                expr_id,
-                            },
-                        );
-                    }
+                    && !deps.is_empty()
+                {
+                    let pb_id = self.next_binding_id;
+                    self.next_binding_id += 1;
+                    let owning_boundary = self
+                        .tree_shape
+                        .node_field
+                        .get(&node.id)
+                        .map(|nfr| nfr.owning_boundary)
+                        .unwrap_or(TreeBoundaryId(u32::MAX));
+                    self.binding_collector.push(PendingBinding {
+                        owning_boundary,
+                        dependencies: deps.clone(),
+                        kind: PendingBindingKind::DynamicText,
+                        binding_id: pb_id,
+                    });
+                    self.dyntext_binding_data.insert(
+                        pb_id,
+                        DynTextBindingInfo {
+                            dependencies: deps,
+                            struct_ty: text_struct_ty,
+                            field_idx: text_field_idx,
+                            expr_id,
+                        },
+                    );
+                }
             }
 
             LirNodeKind::If {
@@ -2834,12 +2859,8 @@ impl<'a> BlockLowering<'a> {
         let mut branch_mount_unmount: Vec<(BlockId, BlockId)> =
             Vec::with_capacity(expected_branches);
         for (_, body, branch_id) in &flat_branches {
-            let (mount, unmount) = self.create_branch_with_tracking(
-                body,
-                parent_slot,
-                if_anchor_id,
-                *branch_id,
-            );
+            let (mount, unmount) =
+                self.create_branch_with_tracking(body, parent_slot, if_anchor_id, *branch_id);
             // Mount block: needs IfAnchor + IfBranch in scope. When
             // nested under a for, append the iter-body ref so loop-
             // variable reads resolve via BoundaryField in the branch
@@ -3129,7 +3150,12 @@ impl<'a> BlockLowering<'a> {
         // (old_active - 1) if old_active > 0, then mount target_idx
         // branch (allocating fresh IfBranch first) if target_idx > 0.
         let neq_slot = self.alloc_temp_slot_named("upd_neq");
-        self.emit(LirOp::Compare { op: CompareOp::Ne, lhs: old_active, rhs: target_slot, result: neq_slot });
+        self.emit(LirOp::Compare {
+            op: CompareOp::Ne,
+            lhs: old_active,
+            rhs: target_slot,
+            result: neq_slot,
+        });
 
         // Build switch ops: for each possible (old_active value) we
         // emit `if old_active == k: unmount branch k-1`. Same for
@@ -3618,10 +3644,20 @@ impl<'a> BlockLowering<'a> {
                     result: end_slot,
                 });
                 // Compute len = end - start
-                self.emit(LirOp::BinaryOp { op: ArithOp::Sub, lhs: end_slot, rhs: BinOperand::Slot(list_ptr), result: list_len });
+                self.emit(LirOp::BinaryOp {
+                    op: ArithOp::Sub,
+                    lhs: end_slot,
+                    rhs: BinOperand::Slot(list_ptr),
+                    result: list_len,
+                });
                 // For inclusive range, add 1 to len (start..=end has end-start+1 elements)
                 if *inclusive {
-                    self.emit(LirOp::BinaryOp { op: ArithOp::Add, lhs: list_len, rhs: BinOperand::Const(1), result: list_len });
+                    self.emit(LirOp::BinaryOp {
+                        op: ArithOp::Add,
+                        lhs: list_len,
+                        rhs: BinOperand::Const(1),
+                        result: list_len,
+                    });
                 }
             }
             IterableKind::Unsupported => {
@@ -3657,7 +3693,12 @@ impl<'a> BlockLowering<'a> {
             slot: index,
             value: 0,
         });
-        self.emit(LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: list_len, result: break_cond });
+        self.emit(LirOp::Compare {
+            op: CompareOp::GeU,
+            lhs: index,
+            rhs: list_len,
+            result: break_cond,
+        });
 
         // Initial-mount insertion anchor — starts at the for's
         // `<#comment>` anchor node so iter[0] inserts immediately
@@ -3685,7 +3726,12 @@ impl<'a> BlockLowering<'a> {
         let mut have_item_value = false;
         match (&iterable_kind, range_item_buf) {
             (IterableKind::Range { .. }, Some(item_buf)) => {
-                loop_body.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: list_ptr, rhs: BinOperand::Slot(index), result: item_value_for_record });
+                loop_body.push(LirOp::BinaryOp {
+                    op: ArithOp::Add,
+                    lhs: list_ptr,
+                    rhs: BinOperand::Slot(index),
+                    result: item_value_for_record,
+                });
                 have_item_value = true;
                 // Store item_value to the shared memory buffer; item_ptr
                 // is its address. Kept during cutover so in-body reads
@@ -3713,11 +3759,21 @@ impl<'a> BlockLowering<'a> {
                     mem_slot: string_item_buf.unwrap(),
                     result: item_ptr,
                 });
-                loop_body.push(LirOp::ArrayGetItem { arr: list_ref_slot.unwrap(), idx: index, list_ty: list_ty, repr: ArrayItemRepr::FatToMem { buf_addr: item_ptr } });
+                loop_body.push(LirOp::ArrayGetItem {
+                    arr: list_ref_slot.unwrap(),
+                    idx: index,
+                    list_ty: list_ty,
+                    repr: ArrayItemRepr::FatToMem { buf_addr: item_ptr },
+                });
             }
             _ if is_gc_list => {
                 // Phase 5b-v.3: GC-list item — read element directly.
-                loop_body.push(LirOp::ArrayGetItem { arr: list_ref_slot.unwrap(), idx: index, list_ty: list_ty, repr: ArrayItemRepr::Scalar { result: item_ptr } });
+                loop_body.push(LirOp::ArrayGetItem {
+                    arr: list_ref_slot.unwrap(),
+                    idx: index,
+                    list_ty: list_ty,
+                    repr: ArrayItemRepr::Scalar { result: item_ptr },
+                });
             }
             _ => {
                 // Stage 7: post Stage 6 the only iterables that aren't
@@ -3807,10 +3863,20 @@ impl<'a> BlockLowering<'a> {
         });
 
         // Increment index
-        loop_body.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: index, rhs: BinOperand::Const(1), result: index });
+        loop_body.push(LirOp::BinaryOp {
+            op: ArithOp::Add,
+            lhs: index,
+            rhs: BinOperand::Const(1),
+            result: index,
+        });
 
         // Check break condition for NEXT iteration: index >= list_len
-        loop_body.push(LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: list_len, result: break_cond });
+        loop_body.push(LirOp::Compare {
+            op: CompareOp::GeU,
+            lhs: index,
+            rhs: list_len,
+            result: break_cond,
+        });
 
         // Emit the loop
         self.emit(LirOp::Loop {
@@ -3858,7 +3924,6 @@ impl<'a> BlockLowering<'a> {
         let mut seen = HashSet::new();
         is_scalar_list_ty_struct(self.ctx, ty, &mut seen)
     }
-
 
     /// Compute the size of an element type in bytes.
     fn compute_element_size(&self, ty: Ty) -> u32 {
@@ -4261,9 +4326,19 @@ impl<'a> BlockLowering<'a> {
                         expr: *end,
                         result: end_slot,
                     });
-                    ops.push(LirOp::BinaryOp { op: ArithOp::Sub, lhs: end_slot, rhs: BinOperand::Slot(new_list_ptr), result: new_len });
+                    ops.push(LirOp::BinaryOp {
+                        op: ArithOp::Sub,
+                        lhs: end_slot,
+                        rhs: BinOperand::Slot(new_list_ptr),
+                        result: new_len,
+                    });
                     if *inclusive {
-                        ops.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: new_len, rhs: BinOperand::Const(1), result: new_len });
+                        ops.push(LirOp::BinaryOp {
+                            op: ArithOp::Add,
+                            lhs: new_len,
+                            rhs: BinOperand::Const(1),
+                            result: new_len,
+                        });
                     }
                 }
                 IterableKind::Unsupported => {
@@ -4277,7 +4352,12 @@ impl<'a> BlockLowering<'a> {
 
             let min_len = self.alloc_temp_slot_named("min_len");
             let old_lt_new = self.alloc_temp_slot_named("old_lt_new");
-            ops.push(LirOp::Compare { op: CompareOp::LtU, lhs: old_len, rhs: new_len, result: old_lt_new });
+            ops.push(LirOp::Compare {
+                op: CompareOp::LtU,
+                lhs: old_len,
+                rhs: new_len,
+                result: old_lt_new,
+            });
             ops.push(LirOp::If(Box::new(LirIf {
                 cond: old_lt_new,
                 then_ops: vec![LirOp::CopySlot {
@@ -4319,7 +4399,12 @@ impl<'a> BlockLowering<'a> {
                 from: min_len,
                 to: index,
             });
-            ops.push(LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: old_len, result: break_cond });
+            ops.push(LirOp::Compare {
+                op: CompareOp::GeU,
+                lhs: index,
+                rhs: old_len,
+                result: break_cond,
+            });
             let unmount_root = self.alloc_temp_slot_named("unmount_root");
             let unmount_iter_body = self.alloc_temp_slot_typed_named(
                 LirSlotValType::RefNullForBoundary(iter_body_id),
@@ -4349,8 +4434,18 @@ impl<'a> BlockLowering<'a> {
                     ],
                     result: None,
                 },
-                LirOp::BinaryOp { op: ArithOp::Add, lhs: index, rhs: BinOperand::Const(1), result: index },
-                LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: old_len, result: break_cond },
+                LirOp::BinaryOp {
+                    op: ArithOp::Add,
+                    lhs: index,
+                    rhs: BinOperand::Const(1),
+                    result: index,
+                },
+                LirOp::Compare {
+                    op: CompareOp::GeU,
+                    lhs: index,
+                    rhs: old_len,
+                    result: break_cond,
+                },
             ];
             ops.push(LirOp::Loop {
                 break_cond,
@@ -4402,7 +4497,12 @@ impl<'a> BlockLowering<'a> {
                 slot: index,
                 value: 0,
             });
-            ops.push(LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: min_len, result: break_cond });
+            ops.push(LirOp::Compare {
+                op: CompareOp::GeU,
+                lhs: index,
+                rhs: min_len,
+                result: break_cond,
+            });
             let walk_body = vec![
                 LirOp::ArrayGet {
                     array_type: self.for_anchor_array_idx(for_anchor_id),
@@ -4419,8 +4519,18 @@ impl<'a> BlockLowering<'a> {
                     field_idx: 1,
                     result: upd_insert_anchor,
                 },
-                LirOp::BinaryOp { op: ArithOp::Add, lhs: index, rhs: BinOperand::Const(1), result: index },
-                LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: min_len, result: break_cond },
+                LirOp::BinaryOp {
+                    op: ArithOp::Add,
+                    lhs: index,
+                    rhs: BinOperand::Const(1),
+                    result: index,
+                },
+                LirOp::Compare {
+                    op: CompareOp::GeU,
+                    lhs: index,
+                    rhs: min_len,
+                    result: break_cond,
+                },
             ];
             ops.push(LirOp::Loop {
                 break_cond,
@@ -4434,13 +4544,23 @@ impl<'a> BlockLowering<'a> {
                 from: min_len,
                 to: index,
             });
-            ops.push(LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: new_len, result: break_cond });
+            ops.push(LirOp::Compare {
+                op: CompareOp::GeU,
+                lhs: index,
+                rhs: new_len,
+                result: break_cond,
+            });
             let update_item_value = self.alloc_temp_slot_named("update_item_value");
             let mut update_have_item_value = false;
             let mut mount_body = Vec::new();
             match (iterable, range_item_buf) {
                 (IterableKind::Range { .. }, Some(item_buf)) => {
-                    mount_body.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: new_list_ptr, rhs: BinOperand::Slot(index), result: update_item_value });
+                    mount_body.push(LirOp::BinaryOp {
+                        op: ArithOp::Add,
+                        lhs: new_list_ptr,
+                        rhs: BinOperand::Slot(index),
+                        result: update_item_value,
+                    });
                     update_have_item_value = true;
                     mount_body.push(LirOp::StoreHandle {
                         slot: item_buf,
@@ -4460,10 +4580,20 @@ impl<'a> BlockLowering<'a> {
                         mem_slot: upd_string_buf,
                         result: item_ptr,
                     });
-                    mount_body.push(LirOp::ArrayGetItem { arr: new_list_ref_slot.unwrap(), idx: index, list_ty: list_ty, repr: ArrayItemRepr::FatToMem { buf_addr: item_ptr } });
+                    mount_body.push(LirOp::ArrayGetItem {
+                        arr: new_list_ref_slot.unwrap(),
+                        idx: index,
+                        list_ty: list_ty,
+                        repr: ArrayItemRepr::FatToMem { buf_addr: item_ptr },
+                    });
                 }
                 _ if is_gc_list => {
-                    mount_body.push(LirOp::ArrayGetItem { arr: new_list_ref_slot.unwrap(), idx: index, list_ty: list_ty, repr: ArrayItemRepr::Scalar { result: item_ptr } });
+                    mount_body.push(LirOp::ArrayGetItem {
+                        arr: new_list_ref_slot.unwrap(),
+                        idx: index,
+                        list_ty: list_ty,
+                        repr: ArrayItemRepr::Scalar { result: item_ptr },
+                    });
                 }
                 _ => {
                     unreachable!(
@@ -4529,8 +4659,18 @@ impl<'a> BlockLowering<'a> {
                 idx: index,
                 value: upd_iter_body,
             });
-            mount_body.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: index, rhs: BinOperand::Const(1), result: index });
-            mount_body.push(LirOp::Compare { op: CompareOp::GeU, lhs: index, rhs: new_len, result: break_cond });
+            mount_body.push(LirOp::BinaryOp {
+                op: ArithOp::Add,
+                lhs: index,
+                rhs: BinOperand::Const(1),
+                result: index,
+            });
+            mount_body.push(LirOp::Compare {
+                op: CompareOp::GeU,
+                lhs: index,
+                rhs: new_len,
+                result: break_cond,
+            });
             ops.push(LirOp::Loop {
                 break_cond,
                 body_ops: mount_body,
@@ -4627,7 +4767,12 @@ impl<'a> BlockLowering<'a> {
                     result: outer_len,
                 });
                 wrap.push(LirOp::SetSlot { slot: j, value: 0 });
-                wrap.push(LirOp::Compare { op: CompareOp::GeU, lhs: j, rhs: outer_len, result: outer_break });
+                wrap.push(LirOp::Compare {
+                    op: CompareOp::GeU,
+                    lhs: j,
+                    rhs: outer_len,
+                    result: outer_break,
+                });
 
                 let mut loop_body = Vec::new();
                 let anc_iter_body_id = self.iter_body_id_for(level.ancestor_id);
@@ -4665,8 +4810,18 @@ impl<'a> BlockLowering<'a> {
                     });
                 }
                 loop_body.extend(body);
-                loop_body.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: j, rhs: BinOperand::Const(1), result: j });
-                loop_body.push(LirOp::Compare { op: CompareOp::GeU, lhs: j, rhs: outer_len, result: outer_break });
+                loop_body.push(LirOp::BinaryOp {
+                    op: ArithOp::Add,
+                    lhs: j,
+                    rhs: BinOperand::Const(1),
+                    result: j,
+                });
+                loop_body.push(LirOp::Compare {
+                    op: CompareOp::GeU,
+                    lhs: j,
+                    rhs: outer_len,
+                    result: outer_break,
+                });
                 wrap.push(LirOp::Loop {
                     break_cond: outer_break,
                     body_ops: loop_body,
@@ -4898,7 +5053,8 @@ impl<'a> BlockLowering<'a> {
                 Some(LirSlotKind::Memory { offset, .. }) => *offset,
                 _ => unreachable!("alloc_memory_slot just pushed a Memory slot"),
             };
-            self.payload_binding_handlers.insert(block_id, offset as i32);
+            self.payload_binding_handlers
+                .insert(block_id, offset as i32);
             (Some(buf), Some(param))
         } else {
             (None, None)
@@ -5185,7 +5341,8 @@ impl<'a> BlockLowering<'a> {
                 .push(std::mem::take(&mut self.current_block_slots));
         }
         self.current_block_slots = Vec::new();
-        self.block_local_idx_stack.push(self.current_block_local_idx);
+        self.block_local_idx_stack
+            .push(self.current_block_local_idx);
         self.current_block_local_idx = 0;
     }
 
@@ -5337,10 +5494,8 @@ impl<'a> BlockLowering<'a> {
         // `payload` local reads the fat pointer dispatch wrote there.
         if let (Some(buf), Some(param)) = (d.payload_buf, d.payload_param) {
             let addr = self.alloc_temp_slot_named("payload_binding_address");
-            self.local_bindings.insert(
-                param,
-                (addr, crate::types::Ty::STRING, LirBindingMode::Ptr),
-            );
+            self.local_bindings
+                .insert(param, (addr, crate::types::Ty::STRING, LirBindingMode::Ptr));
             self.emit(LirOp::GetSlotAddress {
                 mem_slot: buf,
                 result: addr,
@@ -5580,144 +5735,133 @@ impl<'a> BlockLowering<'a> {
         {
             // Skip tuples (typed-ref shape today's helper can't express).
             if !matches!(self.ctx.ty_kind(signal_ty), InternedTyKind::Tuple(_))
-                && let Some(expr_id) = value {
-                    let local_idx_opt =
-                        self.tree_signals.iter().position(|s| s.def_id == signal_def);
-                    let is_global =
-                        self.ctx.defs.owning_global_block(signal_def).is_some();
-                    if let (Some(sig_idx), false) = (local_idx_opt, is_global)
-                        && let Some(storage) =
-                            self.signal_layout_early.signals.get(sig_idx).copied()
-                        {
-                            // Strict scalar-i32 predicate: only accept
-                            // primitive integer/bool/char scalars whose
-                            // wasm storage shape is exactly one i32.
-                            // Crucially we exclude `list<scalar>` even
-                            // though it's single-slot, because its
-                            // single slot is a typed-array ref, not an
-                            // i32 (the lir_slot_val_ty_for_signal_field
-                            // helper returns the I32 fallback for it).
-                            let kind = self.ctx.ty_kind(signal_ty);
-                            let is_scalar_i32 = matches!(
-                                kind,
-                                InternedTyKind::Bool
-                                    | InternedTyKind::S8
-                                    | InternedTyKind::S16
-                                    | InternedTyKind::S32
-                                    | InternedTyKind::U8
-                                    | InternedTyKind::U16
-                                    | InternedTyKind::U32
-                                    | InternedTyKind::Char
+                && let Some(expr_id) = value
+            {
+                let local_idx_opt = self
+                    .tree_signals
+                    .iter()
+                    .position(|s| s.def_id == signal_def);
+                let is_global = self.ctx.defs.owning_global_block(signal_def).is_some();
+                if let (Some(sig_idx), false) = (local_idx_opt, is_global)
+                    && let Some(storage) = self.signal_layout_early.signals.get(sig_idx).copied()
+                {
+                    // Strict scalar-i32 predicate: only accept
+                    // primitive integer/bool/char scalars whose
+                    // wasm storage shape is exactly one i32.
+                    // Crucially we exclude `list<scalar>` even
+                    // though it's single-slot, because its
+                    // single slot is a typed-array ref, not an
+                    // i32 (the lir_slot_val_ty_for_signal_field
+                    // helper returns the I32 fallback for it).
+                    let kind = self.ctx.ty_kind(signal_ty);
+                    let is_scalar_i32 = matches!(
+                        kind,
+                        InternedTyKind::Bool
+                            | InternedTyKind::S8
+                            | InternedTyKind::S16
+                            | InternedTyKind::S32
+                            | InternedTyKind::U8
+                            | InternedTyKind::U16
+                            | InternedTyKind::U32
+                            | InternedTyKind::Char
+                    );
+                    let is_scalar_f64 = matches!(kind, InternedTyKind::F64);
+                    let is_scalar_f32 = matches!(kind, InternedTyKind::F32);
+                    let is_scalar_i64 = matches!(kind, InternedTyKind::S64 | InternedTyKind::U64);
+                    let single_slot_gc = storage.gc.map(|gc| gc.field_count == 1).unwrap_or(false);
+                    // `single_slot_gc` already implies `gc.is_some()`, so the
+                    // `unwrap()` below is correlated through it (not flagged).
+                    if (is_scalar_i32 || is_scalar_f64 || is_scalar_f32 || is_scalar_i64)
+                        && single_slot_gc
+                    {
+                        let gc = storage.gc.unwrap();
+                        let (scratch_ty, scratch_name) = if is_scalar_f64 {
+                            (LirSlotValType::F64, "signal_scratch_f64")
+                        } else if is_scalar_f32 {
+                            (LirSlotValType::F32, "signal_scratch_f32")
+                        } else if is_scalar_i64 {
+                            (LirSlotValType::I64, "signal_scratch_i64")
+                        } else {
+                            (LirSlotValType::I32, "signal_scratch_i32")
+                        };
+                        let scratch = self.alloc_temp_slot_typed_named(scratch_ty, scratch_name);
+                        let self_ref = self
+                            .resource_self_ref_slot
+                            .expect("resource_self_ref_slot allocated at top of lower_component");
+                        self.emit(LirOp::EvalExpr {
+                            expr: expr_id,
+                            result: scratch,
+                        });
+                        self.emit(LirOp::StructSetSym {
+                            ty_ref: crate::lir::block::LirTypeRef::ComponentStruct,
+                            field: gc.field_start,
+                            rec: self_ref,
+                            value: scratch,
+                        });
+                        return InlineResult::Handled;
+                    }
+                    // Multi-slot gc-only fat-pointer (String,
+                    // non-typed-array list<T>). Restricted to
+                    // field_count == 2 so typed-array lists
+                    // (single ref slot) continue to fall through —
+                    // they need typed scratch the helper can't
+                    // express yet without a dedicated slot val_ty.
+                    let is_string = matches!(kind, InternedTyKind::String);
+                    let is_list = matches!(kind, InternedTyKind::List(_));
+                    let multi_slot_gc = storage.gc.map(|gc| gc.field_count == 2).unwrap_or(false);
+                    if (is_string || is_list) && multi_slot_gc {
+                        let gc = storage.gc.unwrap();
+                        let count = gc.field_count;
+                        let first_val_ty =
+                            crate::lir::signal_layout::lir_slot_val_ty_for_signal_field(
+                                self.ctx, signal_ty, 0,
                             );
-                            let is_scalar_f64 = matches!(kind, InternedTyKind::F64);
-                            let is_scalar_f32 = matches!(kind, InternedTyKind::F32);
-                            let is_scalar_i64 = matches!(
-                                kind,
-                                InternedTyKind::S64 | InternedTyKind::U64
+                        let dest_first = self.alloc_temp_slot_typed_named(
+                            first_val_ty,
+                            "signal_scratch_multi_first",
+                        );
+                        for i in 1..count {
+                            let vt = crate::lir::signal_layout::lir_slot_val_ty_for_signal_field(
+                                self.ctx, signal_ty, i,
                             );
-                            let single_slot_gc = storage
-                                .gc
-                                .map(|gc| gc.field_count == 1)
-                                .unwrap_or(false);
-                            // `single_slot_gc` already implies `gc.is_some()`, so the
-                            // `unwrap()` below is correlated through it (not flagged).
-                            if (is_scalar_i32 || is_scalar_f64 || is_scalar_f32 || is_scalar_i64)
-                                && single_slot_gc
-                            {
-                                let gc = storage.gc.unwrap();
-                                let (scratch_ty, scratch_name) = if is_scalar_f64 {
-                                    (LirSlotValType::F64, "signal_scratch_f64")
-                                } else if is_scalar_f32 {
-                                    (LirSlotValType::F32, "signal_scratch_f32")
-                                } else if is_scalar_i64 {
-                                    (LirSlotValType::I64, "signal_scratch_i64")
-                                } else {
-                                    (LirSlotValType::I32, "signal_scratch_i32")
-                                };
-                                let scratch = self.alloc_temp_slot_typed_named(
-                                    scratch_ty,
-                                    scratch_name,
-                                );
-                                let self_ref = self
-                                    .resource_self_ref_slot
-                                    .expect("resource_self_ref_slot allocated at top of lower_component");
-                                self.emit(LirOp::EvalExpr {
-                                    expr: expr_id,
-                                    result: scratch,
-                                });
-                                self.emit(LirOp::StructSetSym {
-                                    ty_ref: crate::lir::block::LirTypeRef::ComponentStruct,
-                                    field: gc.field_start,
-                                    rec: self_ref,
-                                    value: scratch,
-                                });
-                                return InlineResult::Handled;
-                            }
-                            // Multi-slot gc-only fat-pointer (String,
-                            // non-typed-array list<T>). Restricted to
-                            // field_count == 2 so typed-array lists
-                            // (single ref slot) continue to fall through —
-                            // they need typed scratch the helper can't
-                            // express yet without a dedicated slot val_ty.
-                            let is_string = matches!(kind, InternedTyKind::String);
-                            let is_list = matches!(kind, InternedTyKind::List(_));
-                            let multi_slot_gc = storage
-                                .gc
-                                .map(|gc| gc.field_count == 2)
-                                .unwrap_or(false);
-                            if (is_string || is_list)
-                                && multi_slot_gc
-                            {
-                                let gc = storage.gc.unwrap();
-                                let count = gc.field_count;
-                                let first_val_ty =
-                                    crate::lir::signal_layout::lir_slot_val_ty_for_signal_field(
-                                        self.ctx, signal_ty, 0,
-                                    );
-                                let dest_first = self.alloc_temp_slot_typed_named(
-                                    first_val_ty,
-                                    "signal_scratch_multi_first",
-                                );
-                                for i in 1..count {
-                                    let vt = crate::lir::signal_layout::lir_slot_val_ty_for_signal_field(
-                                        self.ctx, signal_ty, i,
-                                    );
-                                    let _ = self.alloc_temp_slot_typed(vt);
-                                }
-                                let self_ref = self
-                                    .resource_self_ref_slot
-                                    .expect("resource_self_ref_slot allocated at top of lower_component");
-                                self.emit(LirOp::EvalExprToSlots {
-                                    expr: expr_id,
-                                    dest_first_slot: dest_first,
-                                });
-                                for i in 0..count {
-                                    let val = dest_first.offset_by(i);
-                                    self.emit(LirOp::StructSetSym {
-                                        ty_ref: crate::lir::block::LirTypeRef::ComponentStruct,
-                                        field: gc.field_start + i,
-                                        rec: self_ref,
-                                        value: val,
-                                    });
-                                }
-                                return InlineResult::Handled;
-                            }
+                            let _ = self.alloc_temp_slot_typed(vt);
                         }
+                        let self_ref = self
+                            .resource_self_ref_slot
+                            .expect("resource_self_ref_slot allocated at top of lower_component");
+                        self.emit(LirOp::EvalExprToSlots {
+                            expr: expr_id,
+                            dest_first_slot: dest_first,
+                        });
+                        for i in 0..count {
+                            let val = dest_first.offset_by(i);
+                            self.emit(LirOp::StructSetSym {
+                                ty_ref: crate::lir::block::LirTypeRef::ComponentStruct,
+                                field: gc.field_start + i,
+                                rec: self_ref,
+                                value: val,
+                            });
+                        }
+                        return InlineResult::Handled;
+                    }
                 }
+            }
         }
         // Triggering is uniformly the caller's job: locals dispatch via
         // direct `CallBlock`s in `emit_trigger_for_signal`; globals emit
         // the `TriggerEffects` placeholder that the module-level
         // `resolve_global_triggers` pass expands once every component
         // (and its fanout blocks) exists.
-        let local_idx = self.tree_signals.iter().position(|s| s.def_id == signal_def);
+        let local_idx = self
+            .tree_signals
+            .iter()
+            .position(|s| s.def_id == signal_def);
         let global_block = self.ctx.defs.owning_global_block(signal_def);
 
         // Field-count (=ABI slot count) for the value's type. Same
         // source of truth on the codegen side — drives both the GC
         // struct field span and the EvalExprToSlots dest layout.
-        let field_count =
-            crate::lir::signal_layout::slot_count_for_signal_ty(self.ctx, signal_ty);
+        let field_count = crate::lir::signal_layout::slot_count_for_signal_ty(self.ctx, signal_ty);
         if field_count == 0 {
             // Unit-typed signal — nothing to write. The default-init
             // case is a no-op (struct.new_default already zeroed any
@@ -5862,9 +6006,7 @@ impl<'a> BlockLowering<'a> {
                     .defs
                     .type_of(prop_id)
                     .unwrap_or(crate::types::Ty::ERROR);
-                let count = crate::lir::signal_layout::slot_count_for_signal_ty(
-                    self.ctx, prop_ty,
-                );
+                let count = crate::lir::signal_layout::slot_count_for_signal_ty(self.ctx, prop_ty);
                 if prop_id == signal_def {
                     prop_slot_count = Some(count);
                     break;
@@ -6011,9 +6153,10 @@ impl<'a> BlockLowering<'a> {
     fn iter_body_id_for(&self, target: ForId) -> TreeBoundaryId {
         for b in &self.tree_shape.boundaries {
             if let TreeBoundaryKind::ForIterBody { for_id } = b.kind
-                && for_id == target {
-                    return b.id;
-                }
+                && for_id == target
+            {
+                return b.id;
+            }
         }
         panic!(
             "iter_body_id_for: no ForIterBody boundary in tree_shape for for_id {:?}",
@@ -6027,9 +6170,10 @@ impl<'a> BlockLowering<'a> {
     fn for_anchor_id_for(&self, target: ForId) -> TreeBoundaryId {
         for b in &self.tree_shape.boundaries {
             if let TreeBoundaryKind::ForAnchor { for_id, .. } = b.kind
-                && for_id == target {
-                    return b.id;
-                }
+                && for_id == target
+            {
+                return b.id;
+            }
         }
         panic!(
             "for_anchor_id_for: no ForAnchor boundary in tree_shape for for_id {:?}",
@@ -6049,9 +6193,7 @@ impl<'a> BlockLowering<'a> {
         });
         let parent = &self.tree_shape.boundaries[nfr.owning_boundary.index()];
         match parent.fields.get(nfr.field_idx as usize) {
-            Some(TreeFieldDecl::SubBoundary { target_idx, .. }) => {
-                TreeBoundaryId(*target_idx)
-            }
+            Some(TreeFieldDecl::SubBoundary { target_idx, .. }) => TreeBoundaryId(*target_idx),
             other => panic!(
                 "subboundary_target_for_node: parent boundary field at idx {} for NodeId {:?} is not a SubBoundary: {:?}",
                 nfr.field_idx, node_id, other
@@ -6087,7 +6229,12 @@ impl<'a> BlockLowering<'a> {
     ) -> crate::lir::struct_types::LirArrayTypeIdx {
         let n = self.tree_shape.boundaries[..anchor.index()]
             .iter()
-            .filter(|b| matches!(b.kind, crate::lir::block::TreeBoundaryKind::ForAnchor { .. }))
+            .filter(|b| {
+                matches!(
+                    b.kind,
+                    crate::lir::block::TreeBoundaryKind::ForAnchor { .. }
+                )
+            })
             .count();
         crate::lir::struct_types::LirArrayTypeIdx(n as u32)
     }
@@ -6099,7 +6246,10 @@ impl<'a> BlockLowering<'a> {
     /// per-type stringify op.
     fn wrap_as_string(&mut self, value_expr: LirExprId) -> LirExprId {
         let value_ty = self.get_expr(value_expr).ty;
-        if matches!(self.ctx.ty_kind(value_ty), crate::types::InternedTyKind::String) {
+        if matches!(
+            self.ctx.ty_kind(value_ty),
+            crate::types::InternedTyKind::String
+        ) {
             return value_expr;
         }
         let to_string = self.ctx.to_string_func_for(value_ty);
@@ -6183,9 +6333,7 @@ impl<'a> BlockLowering<'a> {
 // This pass runs after all blocks are constructed so we can borrow the
 // component's signals / exprs by reference while writing to each block.
 
-use crate::lir::layout::{max_flat_counts, FlatValTypeCounts};
-
-
+use crate::lir::layout::{FlatValTypeCounts, max_flat_counts};
 
 /// Walks every block in `component` and fills in the structural metadata
 /// fields on each `LirBlock`.
@@ -6203,8 +6351,13 @@ pub(crate) fn populate_block_structural_metadata(
     let mut metas: Vec<(FlatValTypeCounts, u32, Vec<DefId>, Vec<Ty>)> =
         Vec::with_capacity(component.blocks.len());
     for block in &component.blocks {
-        let scratch =
-            compute_flat_scratch_counts(&block.ops, &signals, &component.exprs, ctx, &mut layout_ctx);
+        let scratch = compute_flat_scratch_counts(
+            &block.ops,
+            &signals,
+            &component.exprs,
+            ctx,
+            &mut layout_ctx,
+        );
         let count = count_mount_sites(&block.ops);
         let mut children = Vec::new();
         collect_mount_children(&block.ops, &mut children);
@@ -6212,8 +6365,7 @@ pub(crate) fn populate_block_structural_metadata(
         collect_callback_arg_types(&block.ops, &component.exprs, &mut cb_arg_types);
         metas.push((scratch, count, children, cb_arg_types));
     }
-    for (block, (scratch, count, children, cb_arg_types)) in
-        component.blocks.iter_mut().zip(metas)
+    for (block, (scratch, count, children, cb_arg_types)) in component.blocks.iter_mut().zip(metas)
     {
         block.max_flat_scratch_counts = scratch;
         block.mount_component_count = count;
@@ -6346,10 +6498,7 @@ pub(crate) fn synth_internal_constructor_block(ctx: &CompilerContext, component:
     //    TreeBoundaryId is its position in `struct_types`.
     if let Some(tree_root_field_idx) = component.comp_struct_layout.tree_root_field_idx {
         let root_position = component.struct_types.iter().position(|declaration| {
-            matches!(
-                declaration.kind,
-                crate::lir::block::TreeBoundaryKind::Root
-            )
+            matches!(declaration.kind, crate::lir::block::TreeBoundaryKind::Root)
         });
         if let Some(root_position) = root_position {
             ops.push(LirOp::StructSetNewDefault {
@@ -6439,17 +6588,17 @@ pub(crate) fn synth_internal_unmount_block(ctx: &CompilerContext, component: &mu
     // per-block contiguous local_idx).
     let new_block_id = ctx.alloc_block_id();
     let mut new_block = LirBlock::new(new_block_id);
-    fn alloc_block_slot(
-        block: &mut LirBlock,
-        val_ty: LirSlotValType,
-    ) -> LirSlotId {
+    fn alloc_block_slot(block: &mut LirBlock, val_ty: LirSlotValType) -> LirSlotId {
         let local_idx = block
             .slots
             .iter()
             .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
             .count() as u32;
         let idx = block.slots.len() as u16;
-        let id = LirSlotId::Block { block: block.id, idx };
+        let id = LirSlotId::Block {
+            block: block.id,
+            idx,
+        };
         block.slots.push(LirSlotInfo {
             id,
             kind: LirSlotKind::Temp { local_idx },
@@ -6516,13 +6665,19 @@ pub(crate) fn synth_internal_unmount_block(ctx: &CompilerContext, component: &mu
             continue;
         }
         for (field_idx, field) in decl.fields.iter().enumerate() {
-            if matches!(field.role, crate::lir::struct_types::LirFieldRole::DomHandle) {
+            if matches!(
+                field.role,
+                crate::lir::struct_types::LirFieldRole::DomHandle
+            ) {
                 boundary_detaches.push((boundary_id, field_idx as u32));
             }
         }
     }
     for (boundary_id, field_idx) in boundary_detaches {
-        let ref_slot = alloc_block_slot(&mut new_block, LirSlotValType::RefNullForBoundary(boundary_id));
+        let ref_slot = alloc_block_slot(
+            &mut new_block,
+            LirSlotValType::RefNullForBoundary(boundary_id),
+        );
         let handle_slot = alloc_block_slot(&mut new_block, LirSlotValType::I32);
         ops.push(LirOp::BoundaryRefFromSelf {
             boundary_id,
@@ -6610,7 +6765,9 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
         };
         block.slots.push(LirSlotInfo {
             id,
-            kind: LirSlotKind::WasmParam { idx: wasm_param_idx },
+            kind: LirSlotKind::WasmParam {
+                idx: wasm_param_idx,
+            },
             val_ty,
             name: Some(name.to_string()),
         });
@@ -6633,24 +6790,43 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
         let block_id = ctx.alloc_block_id();
         let mut block = LirBlock::new(block_id);
         let self_ref = alloc_block_temp(
-            &mut block, LirSlotValType::RefNullForComponent(def_id), "export_ctor_self_ref",
+            &mut block,
+            LirSlotValType::RefNullForComponent(def_id),
+            "export_ctor_self_ref",
         );
         let handle = alloc_block_temp(&mut block, LirSlotValType::I32, "export_ctor_handle");
-        let idx_scratch = alloc_block_temp(&mut block, LirSlotValType::I32, "export_ctor_idx_scratch");
+        let idx_scratch =
+            alloc_block_temp(&mut block, LirSlotValType::I32, "export_ctor_idx_scratch");
         let arr_scratch = alloc_block_temp(
-            &mut block, LirSlotValType::RefNullForSharedHandleArray, "export_ctor_arr_scratch",
+            &mut block,
+            LirSlotValType::RefNullForSharedHandleArray,
+            "export_ctor_arr_scratch",
         );
-        let host_handle = alloc_block_temp(&mut block, LirSlotValType::I32, "export_ctor_host_handle");
+        let host_handle =
+            alloc_block_temp(&mut block, LirSlotValType::I32, "export_ctor_host_handle");
         let ops = vec![
-            LirOp::CallBlock { block: internal_ctor, args: Vec::new(), result: Some(self_ref) },
-            LirOp::RegistryAlloc {
-                component: def_id, ref_slot: self_ref,
-                idx_scratch, arr_scratch, result_handle: handle,
+            LirOp::CallBlock {
+                block: internal_ctor,
+                args: Vec::new(),
+                result: Some(self_ref),
             },
-            LirOp::CallResourceNew { component: def_id, handle, result: host_handle },
+            LirOp::RegistryAlloc {
+                component: def_id,
+                ref_slot: self_ref,
+                idx_scratch,
+                arr_scratch,
+                result_handle: handle,
+            },
+            LirOp::CallResourceNew {
+                component: def_id,
+                handle,
+                result: host_handle,
+            },
             LirOp::StructSetSym {
                 ty_ref: LirTypeRef::ComponentStruct,
-                field: self_handle_field, rec: self_ref, value: host_handle,
+                field: self_handle_field,
+                rec: self_ref,
+                value: host_handle,
             },
         ];
         block.ops = ops;
@@ -6670,22 +6846,33 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
         let root_param_idx =
             alloc_block_wasm_param(&mut block, 1, LirSlotValType::I32, "export_mount_root");
         let self_ref = alloc_block_temp(
-            &mut block, LirSlotValType::RefNullForComponent(def_id), "export_mount_self_ref",
+            &mut block,
+            LirSlotValType::RefNullForComponent(def_id),
+            "export_mount_self_ref",
         );
         let result_slot = if children_root.is_some() {
-            Some(alloc_block_temp(&mut block, LirSlotValType::I32, "export_mount_result"))
+            Some(alloc_block_temp(
+                &mut block,
+                LirSlotValType::I32,
+                "export_mount_result",
+            ))
         } else {
             None
         };
         let ops = vec![
             LirOp::RegistryLookupToSelfRef {
-                component: def_id, handle: handle_param_idx, result: self_ref,
+                component: def_id,
+                handle: handle_param_idx,
+                result: self_ref,
             },
             LirOp::GlobalSet {
-                gref: LirGlobalRef::CurrentHandle(def_id), value: handle_param_idx,
+                gref: LirGlobalRef::CurrentHandle(def_id),
+                value: handle_param_idx,
             },
             LirOp::CallBlock {
-                block: mount_block, args: vec![self_ref, root_param_idx], result: result_slot,
+                block: mount_block,
+                args: vec![self_ref, root_param_idx],
+                result: result_slot,
             },
         ];
         block.ops = ops;
@@ -6703,14 +6890,20 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
         let handle_param_idx =
             alloc_block_wasm_param(&mut block, 0, LirSlotValType::I32, "export_unmount_handle");
         let self_ref = alloc_block_temp(
-            &mut block, LirSlotValType::RefNullForComponent(def_id), "export_unmount_self_ref",
+            &mut block,
+            LirSlotValType::RefNullForComponent(def_id),
+            "export_unmount_self_ref",
         );
         let ops = vec![
             LirOp::RegistryLookupToSelfRef {
-                component: def_id, handle: handle_param_idx, result: self_ref,
+                component: def_id,
+                handle: handle_param_idx,
+                result: self_ref,
             },
             LirOp::CallBlock {
-                block: internal_unmount, args: vec![self_ref], result: None,
+                block: internal_unmount,
+                args: vec![self_ref],
+                result: None,
             },
         ];
         block.ops = ops;
@@ -6719,6 +6912,164 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
         block.return_slot = None;
         component.blocks.push(block);
         component.export_unmount_block = Some(block_id);
+    }
+}
+
+/// Module-level global-trigger resolution. Runs once after EVERY
+/// component is lowered (called from the driver's `lower_all` /
+/// equivalent), in two phases:
+///
+/// 1. Synthesize each component's per-observed-global fanout blocks
+///    (`synth_global_fanout_blocks`) — possible only now, because a
+///    writer component may be lowered before its observers exist.
+/// 2. Expand every `LirOp::TriggerEffects { signal }` placeholder into
+///    one `CallBlock` per observing component's fanout block (or into
+///    nothing when the global has no observers). `BlockId`s are
+///    module-wide unique, so cross-component `CallBlock`s resolve fine.
+///
+/// After this pass no `TriggerEffects` survives — the codegen arm for
+/// it is a hard error, so skipping the pass fails loudly.
+pub fn resolve_global_triggers(ctx: &CompilerContext, resources: &mut [LirResource]) {
+    use crate::lir::block::{LirOp, LirSlotInfo, LirSlotKind, LirSlotValType};
+
+    // Phase 1: synthesize fanout blocks for every observed global.
+    for resource in resources.iter_mut() {
+        synth_global_fanout_blocks(ctx, resource);
+    }
+
+    // signal → fanout blocks of every observing component, in resource
+    // declaration order (deterministic — resources is a Vec, and the
+    // per-resource signal list is sorted).
+    let mut fanout: std::collections::HashMap<DefId, Vec<BlockId>> =
+        std::collections::HashMap::new();
+    for resource in resources.iter() {
+        let mut observed: Vec<DefId> = resource
+            .effects_by_signal
+            .keys()
+            .copied()
+            .filter(|sig| ctx.defs.owning_global_block(*sig).is_some())
+            .collect();
+        observed.sort_by_key(|sig| sig.0);
+        for sig in observed {
+            let Some(block_id) = ctx.lookup_global_fanout_block(resource.def_id, sig) else {
+                // Only unit-typed globals are skipped by the synthesis
+                // gate, and nothing can observe those — reaching here
+                // means a write's trigger would be silently dropped.
+                panic!(
+                    "resolve_global_triggers: component {:?} observes global {:?} \
+                     but no fanout block was synthesized for the pair",
+                    resource.def_id, sig
+                );
+            };
+            fanout.entry(sig).or_default().push(block_id);
+        }
+    }
+
+    // Phase 2: expand the placeholders.
+    fn expansion_count(
+        ops: &[LirOp],
+        fanout: &std::collections::HashMap<DefId, Vec<BlockId>>,
+    ) -> usize {
+        ops.iter()
+            .map(|op| match op {
+                LirOp::TriggerEffects { signal } => {
+                    fanout.get(signal).map(|b| b.len()).unwrap_or(0)
+                }
+                LirOp::If(if_op) => {
+                    expansion_count(&if_op.then_ops, fanout)
+                        + expansion_count(&if_op.else_ops, fanout)
+                }
+                LirOp::Loop { body_ops, .. } => expansion_count(body_ops, fanout),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn rewrite_ops(
+        ctx: &CompilerContext,
+        ops: &mut Vec<LirOp>,
+        fanout: &std::collections::HashMap<DefId, Vec<BlockId>>,
+        dummy_parent: LirSlotId,
+    ) {
+        let mut i = 0;
+        while i < ops.len() {
+            match &mut ops[i] {
+                LirOp::If(if_op) => {
+                    rewrite_ops(ctx, &mut if_op.then_ops, fanout, dummy_parent);
+                    rewrite_ops(ctx, &mut if_op.else_ops, fanout, dummy_parent);
+                    i += 1;
+                }
+                LirOp::Loop { body_ops, .. } => {
+                    rewrite_ops(ctx, body_ops, fanout, dummy_parent);
+                    i += 1;
+                }
+                LirOp::TriggerEffects { signal } => {
+                    let sig = *signal;
+                    assert!(
+                        ctx.defs.owning_global_block(sig).is_some(),
+                        "TriggerEffects for component-local signal {:?} reached \
+                         resolve_global_triggers — locals dispatch via direct \
+                         CallBlocks at emit time",
+                        sig
+                    );
+                    let calls: Vec<LirOp> = fanout
+                        .get(&sig)
+                        .map(|blocks| {
+                            blocks
+                                .iter()
+                                .map(|b| LirOp::CallBlock {
+                                    block: *b,
+                                    args: vec![dummy_parent],
+                                    result: None,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let n = calls.len();
+                    ops.splice(i..i + 1, calls);
+                    i += n;
+                }
+                _ => i += 1,
+            }
+        }
+    }
+
+    for resource in resources.iter_mut() {
+        for block_index in 0..resource.blocks.len() {
+            let needs_dummy = expansion_count(&resource.blocks[block_index].ops, &fanout) > 0;
+            let block = &mut resource.blocks[block_index];
+            // Each fanout block's wasm signature is `(i32) -> ()`; the
+            // caller passes a dummy i32. Allocate one Block-variant
+            // temp on the calling block's own frame when needed.
+            let dummy_parent = if needs_dummy {
+                let local_idx = block
+                    .slots
+                    .iter()
+                    .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
+                    .count() as u32;
+                let id = LirSlotId::Block {
+                    block: block.id,
+                    idx: block.slots.len() as u16,
+                };
+                block.slots.push(LirSlotInfo {
+                    id,
+                    kind: LirSlotKind::Temp { local_idx },
+                    val_ty: LirSlotValType::I32,
+                    name: Some("fanout_dummy_parent".into()),
+                });
+                id
+            } else {
+                // No expansion produces a call — any placeholder in this
+                // block expands to nothing; the slot id is never emitted.
+                LirSlotId::Block {
+                    block: block.id,
+                    idx: u16::MAX,
+                }
+            };
+            let mut ops = std::mem::take(&mut block.ops);
+            rewrite_ops(ctx, &mut ops, &fanout, dummy_parent);
+            resource.blocks[block_index].ops = ops;
+        }
     }
 }
 
@@ -6733,10 +7084,7 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
 /// Runs from the module-level `resolve_global_triggers` pass, after
 /// EVERY component is lowered, so writer components lowered before
 /// their observers still resolve the full observer set.
-pub(crate) fn synth_global_fanout_blocks(
-    ctx: &CompilerContext,
-    component: &mut LirResource,
-) {
+pub(crate) fn synth_global_fanout_blocks(ctx: &CompilerContext, component: &mut LirResource) {
     if component.def_id == crate::ids::DefId::INVALID {
         return;
     }
@@ -6820,13 +7168,7 @@ pub(crate) fn synth_global_fanout_blocks(
         // Synthesize the fanout block. Allocate the
         // typed scratch slots and emit the loop.
         let fanout_block_id = ctx.alloc_block_id();
-        synth_one_global_fanout_block(
-            ctx,
-            component,
-            signal_def,
-            &effect_ids,
-            fanout_block_id,
-        );
+        synth_one_global_fanout_block(ctx, component, signal_def, &effect_ids, fanout_block_id);
         ctx.register_global_fanout_block(component.def_id, signal_def, fanout_block_id);
     }
 }
@@ -6838,11 +7180,7 @@ pub(crate) fn synth_global_fanout_blocks(
 /// B's `EvalExprToSlots` + `StructSetSym` loop against
 /// `LirTypeRef::GlobalsStruct(block_def)`, which is signal-type-agnostic
 /// (it just writes N fields starting at the property's field_start).
-fn is_inlineable_global(
-    ctx: &CompilerContext,
-    signal_def: DefId,
-    signal_ty: Ty,
-) -> bool {
+fn is_inlineable_global(ctx: &CompilerContext, signal_def: DefId, signal_ty: Ty) -> bool {
     if ctx.defs.owning_global_block(signal_def).is_none() {
         return false;
     }
@@ -6878,11 +7216,7 @@ fn synth_one_global_fanout_block(
     // Temp slots to the fanout block's own `slots` vec (Block-variant
     // ids, per-block contiguous local_idx from 0).
     let mut new_block = LirBlock::new(fanout_block_id);
-    fn alloc_slot(
-        block: &mut LirBlock,
-        val_ty: LirSlotValType,
-        name: Option<String>,
-    ) -> LirSlotId {
+    fn alloc_slot(block: &mut LirBlock, val_ty: LirSlotValType, name: Option<String>) -> LirSlotId {
         let local_idx = block
             .slots
             .iter()
@@ -6904,8 +7238,11 @@ fn synth_one_global_fanout_block(
     // Wasm param 0: dummy i32 parent (ignored, here for sig parity
     // with `block_1param`). The block has `implicit_self: None` and
     // no `params` vec — it's called as `(i32) -> ()` from the writer.
-    let dummy_parent =
-        alloc_slot(&mut new_block, LirSlotValType::I32, Some(format!("fanout_dummy_parent_s{}", signal_def.0)));
+    let dummy_parent = alloc_slot(
+        &mut new_block,
+        LirSlotValType::I32,
+        Some(format!("fanout_dummy_parent_s{}", signal_def.0)),
+    );
 
     // Loop scratch + cached values.
     let idx_slot = alloc_slot(
@@ -7201,7 +7538,12 @@ fn synth_one_global_fanout_block(
         gref: LirGlobalRef::RegistryLen(comp_def),
         result: len_slot,
     });
-    loop_body.push(LirOp::Compare { op: CompareOp::GeU, lhs: idx_slot, rhs: len_slot, result: break_cond });
+    loop_body.push(LirOp::Compare {
+        op: CompareOp::GeU,
+        lhs: idx_slot,
+        rhs: len_slot,
+        result: break_cond,
+    });
     // ArrayGetTyped (registry, idx) → entry. The array element type
     // is `ref null $handle` (shared), keyed by SharedHandleArray.
     loop_body.push(LirOp::ArrayGetTyped {
@@ -7223,7 +7565,12 @@ fn synth_one_global_fanout_block(
         name: Some(format!("fanout_s{}_entry_guard", signal_def.0)),
     })));
     // Increment idx.
-    loop_body.push(LirOp::BinaryOp { op: ArithOp::Add, lhs: idx_slot, rhs: BinOperand::Const(1), result: idx_slot });
+    loop_body.push(LirOp::BinaryOp {
+        op: ArithOp::Add,
+        lhs: idx_slot,
+        rhs: BinOperand::Const(1),
+        result: idx_slot,
+    });
 
     outer.push(LirOp::Loop {
         break_cond,
@@ -7543,10 +7890,9 @@ fn expr_contains_fat_ptr_load(expr: &LirExpr, exprs: &[LirExpr], ctx: &CompilerC
             expr_contains_fat_ptr_load(arena_expr(exprs, *base), exprs, ctx)
                 || expr_contains_fat_ptr_load(arena_expr(exprs, *index), exprs, ctx)
         }
-        LirExprKind::Call { args, .. } => {
-            args.iter()
-                .any(|a| expr_contains_fat_ptr_load(arena_expr(exprs, *a), exprs, ctx))
-        }
+        LirExprKind::Call { args, .. } => args
+            .iter()
+            .any(|a| expr_contains_fat_ptr_load(arena_expr(exprs, *a), exprs, ctx)),
         LirExprKind::Ternary {
             condition,
             then_expr,
@@ -7557,16 +7903,12 @@ fn expr_contains_fat_ptr_load(expr: &LirExpr, exprs: &[LirExpr], ctx: &CompilerC
                 || expr_contains_fat_ptr_load(arena_expr(exprs, *else_expr), exprs, ctx)
         }
         LirExprKind::ListConstruct { elements, .. }
-        | LirExprKind::TupleConstruct { elements, .. } => {
-            elements
-                .iter()
-                .any(|e| expr_contains_fat_ptr_load(arena_expr(exprs, *e), exprs, ctx))
-        }
-        LirExprKind::RecordConstruct { fields, .. } => {
-            fields
-                .iter()
-                .any(|f| expr_contains_fat_ptr_load(arena_expr(exprs, *f), exprs, ctx))
-        }
+        | LirExprKind::TupleConstruct { elements, .. } => elements
+            .iter()
+            .any(|e| expr_contains_fat_ptr_load(arena_expr(exprs, *e), exprs, ctx)),
+        LirExprKind::RecordConstruct { fields, .. } => fields
+            .iter()
+            .any(|f| expr_contains_fat_ptr_load(arena_expr(exprs, *f), exprs, ctx)),
         LirExprKind::Range { start, end, .. } => {
             expr_contains_fat_ptr_load(arena_expr(exprs, *start), exprs, ctx)
                 || expr_contains_fat_ptr_load(arena_expr(exprs, *end), exprs, ctx)
@@ -7598,10 +7940,9 @@ fn expr_contains_tuple_construct(expr: &LirExpr, exprs: &[LirExpr]) -> bool {
             expr_contains_tuple_construct(arena_expr(exprs, *base), exprs)
                 || expr_contains_tuple_construct(arena_expr(exprs, *index), exprs)
         }
-        LirExprKind::Call { args, .. } => {
-            args.iter()
-                .any(|a| expr_contains_tuple_construct(arena_expr(exprs, *a), exprs))
-        }
+        LirExprKind::Call { args, .. } => args
+            .iter()
+            .any(|a| expr_contains_tuple_construct(arena_expr(exprs, *a), exprs)),
         LirExprKind::Ternary {
             condition,
             then_expr,
@@ -7612,16 +7953,12 @@ fn expr_contains_tuple_construct(expr: &LirExpr, exprs: &[LirExpr]) -> bool {
                 || expr_contains_tuple_construct(arena_expr(exprs, *else_expr), exprs)
         }
         LirExprKind::ListConstruct { elements, .. }
-        | LirExprKind::TupleConstruct { elements, .. } => {
-            elements
-                .iter()
-                .any(|e| expr_contains_tuple_construct(arena_expr(exprs, *e), exprs))
-        }
-        LirExprKind::RecordConstruct { fields, .. } => {
-            fields
-                .iter()
-                .any(|f| expr_contains_tuple_construct(arena_expr(exprs, *f), exprs))
-        }
+        | LirExprKind::TupleConstruct { elements, .. } => elements
+            .iter()
+            .any(|e| expr_contains_tuple_construct(arena_expr(exprs, *e), exprs)),
+        LirExprKind::RecordConstruct { fields, .. } => fields
+            .iter()
+            .any(|f| expr_contains_tuple_construct(arena_expr(exprs, *f), exprs)),
         LirExprKind::Range { start, end, .. } => {
             expr_contains_tuple_construct(arena_expr(exprs, *start), exprs)
                 || expr_contains_tuple_construct(arena_expr(exprs, *end), exprs)
@@ -7656,10 +7993,9 @@ fn expr_contains_min_max_call(expr: &LirExpr, exprs: &[LirExpr], ctx: &CompilerC
             expr_contains_min_max_call(arena_expr(exprs, *base), exprs, ctx)
                 || expr_contains_min_max_call(arena_expr(exprs, *index), exprs, ctx)
         }
-        LirExprKind::Call { args, .. } => {
-            args.iter()
-                .any(|a| expr_contains_min_max_call(arena_expr(exprs, *a), exprs, ctx))
-        }
+        LirExprKind::Call { args, .. } => args
+            .iter()
+            .any(|a| expr_contains_min_max_call(arena_expr(exprs, *a), exprs, ctx)),
         LirExprKind::Ternary {
             condition,
             then_expr,
@@ -7670,16 +8006,12 @@ fn expr_contains_min_max_call(expr: &LirExpr, exprs: &[LirExpr], ctx: &CompilerC
                 || expr_contains_min_max_call(arena_expr(exprs, *else_expr), exprs, ctx)
         }
         LirExprKind::ListConstruct { elements, .. }
-        | LirExprKind::TupleConstruct { elements, .. } => {
-            elements
-                .iter()
-                .any(|e| expr_contains_min_max_call(arena_expr(exprs, *e), exprs, ctx))
-        }
-        LirExprKind::RecordConstruct { fields, .. } => {
-            fields
-                .iter()
-                .any(|f| expr_contains_min_max_call(arena_expr(exprs, *f), exprs, ctx))
-        }
+        | LirExprKind::TupleConstruct { elements, .. } => elements
+            .iter()
+            .any(|e| expr_contains_min_max_call(arena_expr(exprs, *e), exprs, ctx)),
+        LirExprKind::RecordConstruct { fields, .. } => fields
+            .iter()
+            .any(|f| expr_contains_min_max_call(arena_expr(exprs, *f), exprs, ctx)),
         LirExprKind::Range { start, end, .. } => {
             expr_contains_min_max_call(arena_expr(exprs, *start), exprs, ctx)
                 || expr_contains_min_max_call(arena_expr(exprs, *end), exprs, ctx)
@@ -7786,7 +8118,8 @@ fn expr_contains_composite_field_load(
 ) -> bool {
     match &expr.kind {
         LirExprKind::Field { base, field_idx } => {
-            if expr_contains_composite_field_load(arena_expr(exprs, *base), exprs, ctx, layout_ctx) {
+            if expr_contains_composite_field_load(arena_expr(exprs, *base), exprs, ctx, layout_ctx)
+            {
                 return true;
             }
             if let InternedTyKind::Adt(record_def_id) = ctx.ty_kind(arena_expr(exprs, *base).ty) {
@@ -7794,33 +8127,39 @@ fn expr_contains_composite_field_load(
                 if let Some(record_layout) = layout_ctx.record_layout_by_id(record_def_id)
                     && let Some((_, _, field_ty)) =
                         record_layout.field_offsets.get(field_idx.0 as usize)
-                    {
-                        let field_ty = *field_ty;
-                        match ctx.ty_kind(field_ty) {
-                            InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
-                                return true;
-                            }
-                            InternedTyKind::Adt(def_id) => {
-                                let def_id = *def_id;
-                                if let Some(v) = ctx.defs.as_variant(def_id) {
-                                    let cases = v.cases.clone();
-                                    for c in cases {
-                                        if let DefKind::VariantCase(case) = ctx.defs.kind(c)
-                                            && case.payload.is_some() {
-                                                return true;
-                                            }
+                {
+                    let field_ty = *field_ty;
+                    match ctx.ty_kind(field_ty) {
+                        InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
+                            return true;
+                        }
+                        InternedTyKind::Adt(def_id) => {
+                            let def_id = *def_id;
+                            if let Some(v) = ctx.defs.as_variant(def_id) {
+                                let cases = v.cases.clone();
+                                for c in cases {
+                                    if let DefKind::VariantCase(case) = ctx.defs.kind(c)
+                                        && case.payload.is_some()
+                                    {
+                                        return true;
                                     }
                                 }
                             }
-                            _ => {}
                         }
+                        _ => {}
                     }
+                }
             }
             false
         }
         LirExprKind::Binary { lhs, rhs, .. } => {
             expr_contains_composite_field_load(arena_expr(exprs, *lhs), exprs, ctx, layout_ctx)
-                || expr_contains_composite_field_load(arena_expr(exprs, *rhs), exprs, ctx, layout_ctx)
+                || expr_contains_composite_field_load(
+                    arena_expr(exprs, *rhs),
+                    exprs,
+                    ctx,
+                    layout_ctx,
+                )
         }
         LirExprKind::Unary { operand, .. } => {
             expr_contains_composite_field_load(arena_expr(exprs, *operand), exprs, ctx, layout_ctx)
@@ -7835,33 +8174,56 @@ fn expr_contains_composite_field_load(
                 return true;
             }
             expr_contains_composite_field_load(arena_expr(exprs, *base), exprs, ctx, layout_ctx)
-                || expr_contains_composite_field_load(arena_expr(exprs, *index), exprs, ctx, layout_ctx)
+                || expr_contains_composite_field_load(
+                    arena_expr(exprs, *index),
+                    exprs,
+                    ctx,
+                    layout_ctx,
+                )
         }
-        LirExprKind::Call { args, .. } => args
-            .iter()
-            .any(|a| expr_contains_composite_field_load(arena_expr(exprs, *a), exprs, ctx, layout_ctx)),
+        LirExprKind::Call { args, .. } => args.iter().any(|a| {
+            expr_contains_composite_field_load(arena_expr(exprs, *a), exprs, ctx, layout_ctx)
+        }),
         LirExprKind::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            expr_contains_composite_field_load(arena_expr(exprs, *condition), exprs, ctx, layout_ctx)
-                || expr_contains_composite_field_load(arena_expr(exprs, *then_expr), exprs, ctx, layout_ctx)
-                || expr_contains_composite_field_load(arena_expr(exprs, *else_expr), exprs, ctx, layout_ctx)
+            expr_contains_composite_field_load(
+                arena_expr(exprs, *condition),
+                exprs,
+                ctx,
+                layout_ctx,
+            ) || expr_contains_composite_field_load(
+                arena_expr(exprs, *then_expr),
+                exprs,
+                ctx,
+                layout_ctx,
+            ) || expr_contains_composite_field_load(
+                arena_expr(exprs, *else_expr),
+                exprs,
+                ctx,
+                layout_ctx,
+            )
         }
         LirExprKind::VariantCtor {
             payload: Some(p), ..
         } => expr_contains_composite_field_load(arena_expr(exprs, *p), exprs, ctx, layout_ctx),
         LirExprKind::ListConstruct { elements, .. }
-        | LirExprKind::TupleConstruct { elements, .. } => elements
-            .iter()
-            .any(|e| expr_contains_composite_field_load(arena_expr(exprs, *e), exprs, ctx, layout_ctx)),
-        LirExprKind::RecordConstruct { fields, .. } => fields
-            .iter()
-            .any(|f| expr_contains_composite_field_load(arena_expr(exprs, *f), exprs, ctx, layout_ctx)),
+        | LirExprKind::TupleConstruct { elements, .. } => elements.iter().any(|e| {
+            expr_contains_composite_field_load(arena_expr(exprs, *e), exprs, ctx, layout_ctx)
+        }),
+        LirExprKind::RecordConstruct { fields, .. } => fields.iter().any(|f| {
+            expr_contains_composite_field_load(arena_expr(exprs, *f), exprs, ctx, layout_ctx)
+        }),
         LirExprKind::Range { start, end, .. } => {
             expr_contains_composite_field_load(arena_expr(exprs, *start), exprs, ctx, layout_ctx)
-                || expr_contains_composite_field_load(arena_expr(exprs, *end), exprs, ctx, layout_ctx)
+                || expr_contains_composite_field_load(
+                    arena_expr(exprs, *end),
+                    exprs,
+                    ctx,
+                    layout_ctx,
+                )
         }
         LirExprKind::Closure { .. } => false,
         // Phase 5e.5: IsCase / VariantField on a migrated parent are

@@ -1,0 +1,234 @@
+{
+  "_comment": "Single source of truth for the MeshX design-system elements (@meshx-org/components) registered as builtin create-element primitives. Consumed at build time by crates/yel-core/build.rs (compiler stdlib) and crates/yel-smith/build.rs (fuzzer). Property types are attribute-value-safe scalars; names are kebab-case. Names already covered by core builtins (Button, Checkbox, Select, Badge) are intentionally omitted.",
+  "elements": [
+    {
+      "name": "Button",
+      "props": [
+        { "name": "variant", "type": "string" },
+        { "name": "size", "type": "string" },
+        { "name": "shape", "type": "string" },
+        { "name": "type", "type": "string" },
+        { "name": "href", "type": "string" },
+        { "name": "disabled", "type": "bool" }
+      ]
+    },
+    {
+      "name": "ButtonGroup",
+      "props": [{ "name": "orientation", "type": "string" }]
+    },
+    {
+      "name": "Checkbox",
+      "props": [
+        { "name": "checked", "type": "bool" },
+        { "name": "disabled", "type": "bool" }
+      ]
+    },
+    {
+      "name": "Select",
+      "props": [
+        { "name": "value", "type": "string" },
+        { "name": "placeholder", "type": "string" },
+        { "name": "name", "type": "string" },
+        { "name": "label", "type": "string" },
+        { "name": "disabled", "type": "bool" }
+      ]
+    },
+    {
+      "name": "Badge",
+      "props": [{ "name": "variant", "type": "string" }]
+    },
+    {
+      "name": "Toggle",
+      "props": [
+        { "name": "variant", "type": "string" },
+        { "name": "size", "type": "string" },
+        { "name": "pressed", "type": "bool" },
+        { "name": "disabled", "type": "bool" }
+      ]
+    },
+    { "name": "Label", "props": [{ "name": "text", "type": "string" }] },
+    {
+      "name": "Input",
+      "props": [
+        { "name": "value", "type": "string" },
+        { "name": "placeholder", "type": "string" },
+        { "name": "type", "type": "string" },
+        { "name": "disabled", "type": "bool" }
+      ]
+    },
+    {
+      "name": "InputGroup",
+      "props": [
+        { "name": "align", "type": "string" },
+        { "name": "size", "type": "string" }
+      ]
+    },
+    {
+      "name": "Textarea",
+      "props": [
+        { "name": "value", "type": "string" },
+        { "name": "placeholder", "type": "string" },
+        { "name": "disabled", "type": "bool" }
+      ]
+    },
+    {
+      "name": "Switch",
+      "props": [
+        { "name": "checked", "type": "bool" },
+        { "name": "disabled", "type": "bool" }
+      ]
+    },
+    {
+      "name": "RadioGroup",
+      "props": [
+        { "name": "value", "type": "string" },
+        { "name": "disabled", "type": "bool" }
+      ]
+    },
+    {
+      "name": "Field",
+      "props": [
+        { "name": "orientation", "type": "string" },
+        { "name": "message", "type": "string" },
+        { "name": "responsive", "type": "bool" }
+      ]
+    },
+    {
+      "name": "InputOtp",
+      "props": [
+        { "name": "value", "type": "string" },
+        { "name": "max-length", "type": "s32" }
+      ]
+    },
+    {
+      "name": "Calendar",
+      "props": [
+        { "name": "locale", "type": "string" },
+        { "name": "month-index", "type": "s32" },
+        { "name": "outside-month", "type": "bool" }
+      ]
+    },
+    {
+      "name": "RangeCalendar",
+      "props": [
+        { "name": "locale", "type": "string" },
+        { "name": "month-index", "type": "s32" },
+        { "name": "outside-month", "type": "bool" }
+      ]
+    },
+    { "name": "Alert", "props": [{ "name": "variant", "type": "string" }] },
+    {
+      "name": "InlineMessage",
+      "props": [
+        { "name": "variant", "type": "string" },
+        { "name": "icon", "type": "string" }
+      ]
+    },
+    { "name": "Spinner", "props": [{ "name": "size", "type": "string" }] },
+    { "name": "Skeleton", "props": [] },
+    {
+      "name": "EmptyState",
+      "props": [
+        { "name": "title", "type": "string" },
+        { "name": "description", "type": "string" },
+        { "name": "button-text", "type": "string" },
+        { "name": "secondary-text", "type": "string" },
+        { "name": "icon", "type": "string" },
+        { "name": "border", "type": "bool" },
+        { "name": "narrow", "type": "bool" },
+        { "name": "spacious", "type": "bool" }
+      ]
+    },
+    {
+      "name": "Toast",
+      "props": [
+        { "name": "title", "type": "string" },
+        { "name": "description", "type": "string" }
+      ]
+    },
+    {
+      "name": "Dialog",
+      "props": [
+        { "name": "open", "type": "bool" },
+        { "name": "show-close-button", "type": "bool" }
+      ]
+    },
+    {
+      "name": "Sheet",
+      "props": [
+        { "name": "side", "type": "string" },
+        { "name": "open", "type": "bool" }
+      ]
+    },
+    { "name": "Tooltip", "props": [{ "name": "text", "type": "string" }] },
+    {
+      "name": "DropdownMenu",
+      "props": [
+        { "name": "inset", "type": "bool" },
+        { "name": "active", "type": "bool" }
+      ]
+    },
+    {
+      "name": "Card",
+      "props": [
+        { "name": "title", "type": "string" },
+        { "name": "radius", "type": "string" },
+        { "name": "icon", "type": "string" },
+        { "name": "selected", "type": "bool" }
+      ]
+    },
+    {
+      "name": "Avatar",
+      "props": [
+        { "name": "label", "type": "string" },
+        { "name": "src", "type": "string" }
+      ]
+    },
+    {
+      "name": "Icon",
+      "props": [
+        { "name": "name", "type": "string" },
+        { "name": "size", "type": "string" },
+        { "name": "variant", "type": "string" },
+        { "name": "has-background", "type": "bool" }
+      ]
+    },
+    {
+      "name": "Separator",
+      "props": [{ "name": "orientation", "type": "string" }]
+    },
+    { "name": "Kbd", "props": [{ "name": "key", "type": "string" }] },
+    {
+      "name": "DataTable",
+      "props": [
+        { "name": "label", "type": "string" },
+        { "name": "loading", "type": "bool" },
+        { "name": "selectable", "type": "bool" },
+        { "name": "virtualize", "type": "bool" },
+        { "name": "inset", "type": "bool" }
+      ]
+    },
+    { "name": "Breadcrumb", "props": [] },
+    {
+      "name": "Tabs",
+      "props": [
+        { "name": "value", "type": "string" },
+        { "name": "icon-only", "type": "bool" }
+      ]
+    },
+    {
+      "name": "TreeView",
+      "props": [
+        { "name": "variant", "type": "string" },
+        { "name": "name", "type": "string" },
+        { "name": "depth", "type": "s32" },
+        { "name": "auto-expand", "type": "bool" },
+        { "name": "selected", "type": "bool" }
+      ]
+    },
+    {
+      "name": "NavigationMenu",
+      "props": [{ "name": "viewport", "type": "bool" }]
+    }
+  ]
+}

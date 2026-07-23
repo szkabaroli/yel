@@ -36,8 +36,8 @@ fn fixtures_dir() -> PathBuf {
 fn list_yel_fixtures(sub: &str) -> Vec<PathBuf> {
     let dir = fixtures_dir().join(sub);
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {}", dir.display(), e))
+    for entry in
+        std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot read {}: {}", dir.display(), e))
     {
         let path = entry.expect("directory entry").path();
         if path.extension().and_then(|s| s.to_str()) == Some("yel") {
@@ -88,6 +88,8 @@ fn compile_fixture(source: &str) -> Result<CompileOutputs, String> {
             }
         }
     }
+    compiler.resolve_global_triggers(&mut lir_components);
+
     let (lir_globals, lir_global_default_exprs) =
         compiler.lower_globals_to_lir(&global_thir_defaults);
 
@@ -161,11 +163,7 @@ fn read_file(path: &Path) -> Option<String> {
 fn positive_fixtures() {
     let mut failures: Vec<String> = Vec::new();
     for yel_path in list_yel_fixtures("positive") {
-        let name = yel_path
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        let name = yel_path.file_stem().unwrap().to_string_lossy().into_owned();
         let source = std::fs::read_to_string(&yel_path)
             .unwrap_or_else(|e| panic!("read {}: {}", yel_path.display(), e));
 
@@ -189,10 +187,7 @@ fn positive_fixtures() {
         // same auto-write / diff-on-mismatch / UPDATE_SNAPSHOTS=1 refresh
         // policy for both — they're both deterministic text renderings of
         // the same LIR, so the two snapshots move in lockstep.
-        for (ext, label, actual) in [
-            ("wit", "WIT", &outputs.wit),
-            ("dot", "DOT", &outputs.dot),
-        ] {
+        for (ext, label, actual) in [("wit", "WIT", &outputs.wit), ("dot", "DOT", &outputs.dot)] {
             let snapshot_path = yel_path.with_extension(ext);
             let existing = read_file(&snapshot_path);
             match existing {
@@ -216,8 +211,7 @@ fn positive_fixtures() {
                     );
                 }
                 Some(expected) => {
-                    let diff =
-                        pretty_assertions::StrComparison::new(&expected, actual).to_string();
+                    let diff = pretty_assertions::StrComparison::new(&expected, actual).to_string();
                     failures.push(format!(
                         "[{}] {} snapshot mismatch (rerun with UPDATE_SNAPSHOTS=1 to accept):\n{}",
                         name, label, diff
@@ -245,11 +239,7 @@ fn positive_fixtures() {
 fn known_bugs_fixtures() {
     let mut failures: Vec<String> = Vec::new();
     for yel_path in list_yel_fixtures("known_bugs") {
-        let name = yel_path
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        let name = yel_path.file_stem().unwrap().to_string_lossy().into_owned();
         let source = std::fs::read_to_string(&yel_path)
             .unwrap_or_else(|e| panic!("read {}: {}", yel_path.display(), e));
 
@@ -325,11 +315,7 @@ fn known_bugs_fixtures() {
 fn diagnostic_fixtures() {
     let mut failures: Vec<String> = Vec::new();
     for yel_path in list_yel_fixtures("diagnostics") {
-        let name = yel_path
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        let name = yel_path.file_stem().unwrap().to_string_lossy().into_owned();
         let source = std::fs::read_to_string(&yel_path)
             .unwrap_or_else(|e| panic!("read {}: {}", yel_path.display(), e));
 

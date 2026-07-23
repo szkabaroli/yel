@@ -815,17 +815,17 @@ pub enum LirOp {
     // `InitSignalDefault` deleted — every signal write and init is
     // lowered inline by `inline_signal_write_or_init_from_expr` to
     // generic ops (`EvalExprToSlots` + `StructSetSym` /
-    // `GlobalFieldSet`). Only `TriggerEffects` survives, as the
-    // global-signal fanout mechanism.
-
-    /// Trigger all effects that depend on signal.
-    ///
-    /// §1.4 residue: emitted only for global-block-owned signals whose
-    /// observers have no synthesized inline fanout blocks (see
-    /// `synth_global_fanout_blocks` and `global_fanout_blocks` in
-    /// `context.rs`). Component-local signals dispatch via direct
-    /// `CallBlock`s in `emit_trigger_for_signal`. Goes away once the
-    /// fanout-block synthesis covers every observer shape.
+    // `GlobalFieldSet`). `TriggerEffects` survives only as a
+    // lowering-internal placeholder (below).
+    /// Lowering-internal placeholder: "trigger every observer of this
+    /// global signal". Emitted by global-signal write sites (the full
+    /// observer set is unknowable mid-lowering — other components may
+    /// not be lowered yet); the module-level `resolve_global_triggers`
+    /// pass expands each one into direct `CallBlock`s to the observing
+    /// components' synthesized fanout blocks. MUST NOT reach codegen —
+    /// the codegen arm is a hard `InvalidIR` error. Component-local
+    /// signals never use this: they dispatch via direct `CallBlock`s
+    /// at emit time (`emit_trigger_for_signal`).
     TriggerEffects { signal: DefId },
 
     // === Constructor Operations ===
@@ -879,7 +879,6 @@ pub enum LirOp {
         name: Option<String>,
     },
 
-
     /// Integer arithmetic: `result = lhs <op> rhs`, where `lhs` is a slot
     /// value and `rhs` is a slot value or an immediate. Covers slot+slot,
     /// slot-slot, slot*const, and in-place increment (`Add` with
@@ -900,7 +899,6 @@ pub enum LirOp {
 
     /// Free memory: free(ptr, size)
     Free { ptr: LirSlotId, size: LirSlotId },
-
 
     /// Load a scalar of type `ty` from the linear-memory address in
     /// `addr` into `result`. Natural alignment per type (i32/f32 → 4,
@@ -942,7 +940,6 @@ pub enum LirOp {
     // `StructGet` / `StructSet` are now the generic struct-field ops further
     // down — they resolve the wasm struct-type index from `rec`'s `val_ty`
     // rather than carrying an explicit `ty_idx`.
-
     /// Phase 0.2: symbolic-ty companion of [`LirOp::StructNew`].
     /// `ty_ref` resolves to a wasm type-section index at codegen
     /// time via the component's `GcTypeLayout`. Field semantics are
@@ -1269,10 +1266,7 @@ pub enum LirOp {
     /// Phase 1.1c-l: `ref.is_null`. Emits `local.get from; ref.is_null;
     /// local.set result`. Used by the fanout block for null-guarding the
     /// registry array, individual handle entries, and the anyref inst.
-    RefIsNull {
-        from: LirSlotId,
-        result: LirSlotId,
-    },
+    RefIsNull { from: LirSlotId, result: LirSlotId },
 
     /// Phase 1.1c-l: typed-ref-keyed `array.get`. Differs from
     /// `ArrayGetItem` (keyed by `Ty`) in that it takes a `LirTypeRef`,

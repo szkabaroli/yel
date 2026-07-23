@@ -934,7 +934,12 @@ impl Expr {
                 args,
             } => {
                 let args_str: Vec<_> = args.iter().map(|a| a.to_source()).collect();
-                format!("{}.{}({})", receiver.to_source(), method, args_str.join(", "))
+                format!(
+                    "{}.{}({})",
+                    receiver.to_source(),
+                    method,
+                    args_str.join(", ")
+                )
             }
             Expr::VariantCtor {
                 variant,
@@ -1074,21 +1079,25 @@ struct ElementSchema {
     attributes: &'static [(&'static str, TypeRef)],
 }
 
-/// Built-in element schemas (based on stdlib.rs definitions)
-/// Note: Element attributes with unsupported types (Length, Color, Brush) are disabled
-/// until the compiler fully supports those types in codegen.
+// Built-in element schemas (from yel-core stdlib).
+// `DESIGN_ELEMENTS: &[(&str, &[(&str, TypeRef)])]`, generated from
+// `../yel-core/design-elements.json` by build.rs (single source of truth
+// shared with the compiler stdlib).
+include!(concat!(env!("OUT_DIR"), "/design_elements.rs"));
+
 fn get_element_schema(element: &str) -> Option<ElementSchema> {
-    // All element attributes use types like Length/Color/Brush that aren't fully
-    // supported in codegen yet. Return empty attribute lists for now.
+    // Core layout/text builtins: attributes use Length/Color types not yet
+    // fully exercised, so keep them attribute-free here.
     static EMPTY_ATTRS: &[(&str, TypeRef)] = &[];
 
     match element {
-        "VStack" | "HStack" | "ZStack" | "Box" | "Text" | "Button" | "List" => {
-            Some(ElementSchema {
-                attributes: EMPTY_ATTRS,
-            })
-        }
-        _ => None,
+        "VStack" | "HStack" | "ZStack" | "Box" | "Text" | "List" => Some(ElementSchema {
+            attributes: EMPTY_ATTRS,
+        }),
+        other => DESIGN_ELEMENTS
+            .iter()
+            .find(|(name, _)| *name == other)
+            .map(|(_, attrs)| ElementSchema { attributes: attrs }),
     }
 }
 
@@ -1588,7 +1597,12 @@ impl GenerationContext {
                 // callback-parameter codegen path (previously never emitted).
                 let num_params: usize = u.int_in_range(0..=cb_param_names.len())?;
                 let params: Vec<(String, TypeRef)> = (0..num_params)
-                    .map(|p| Ok((cb_param_names[p].to_string(), self.arbitrary_simple_type(u)?)))
+                    .map(|p| {
+                        Ok((
+                            cb_param_names[p].to_string(),
+                            self.arbitrary_simple_type(u)?,
+                        ))
+                    })
                     .collect::<Result<_>>()?;
                 // Store canonical param types (aliases resolved) for call-arg
                 // generation; `params` keeps the aliased types for rendering.
@@ -1692,10 +1706,19 @@ impl GenerationContext {
     }
 
     fn arbitrary_element(&mut self, u: &mut Unstructured, depth: usize) -> Result<Node> {
-        let elements = [
-            "VStack", "HStack", "ZStack", "Box", "Text", "Button", "List",
-        ];
-        let name = elements[u.int_in_range(0..=elements.len() - 1)?].to_string();
+        // Core layout/text/input builtins plus the MeshX design-system elements
+        // (attribute schemas via `get_element_schema`).
+        // Button/Checkbox/Select/Badge now come from DESIGN_ELEMENTS (with
+        // their attribute schemas); only the schema-free layout/text/list
+        // primitives remain here.
+        static CORE: &[&str] = &["VStack", "HStack", "ZStack", "Box", "Text", "List"];
+        let total = CORE.len() + DESIGN_ELEMENTS.len();
+        let pick = u.int_in_range(0..=total - 1)?;
+        let name = if pick < CORE.len() {
+            CORE[pick].to_string()
+        } else {
+            DESIGN_ELEMENTS[pick - CORE.len()].0.to_string()
+        };
 
         // Generate schema-aware bindings
         let bindings = if let Some(schema) = get_element_schema(&name) {
@@ -2021,20 +2044,21 @@ impl GenerationContext {
 
         // 30% chance to use compound assignment if we have a numeric property
         if let Some((name, ty)) = numeric_prop
-            && u.int_in_range(0..=9)? < 3 {
-                let op = match u.int_in_range(0..=3)? {
-                    0 => CompoundOp::AddAssign,
-                    1 => CompoundOp::SubAssign,
-                    2 => CompoundOp::MulAssign,
-                    _ => CompoundOp::DivAssign,
-                };
-                let value = self.arbitrary_expr_of_type(u, &ty, 0)?;
-                return Ok(Statement::CompoundAssign {
-                    target: Expr::Var(name),
-                    op,
-                    value,
-                });
-            }
+            && u.int_in_range(0..=9)? < 3
+        {
+            let op = match u.int_in_range(0..=3)? {
+                0 => CompoundOp::AddAssign,
+                1 => CompoundOp::SubAssign,
+                2 => CompoundOp::MulAssign,
+                _ => CompoundOp::DivAssign,
+            };
+            let value = self.arbitrary_expr_of_type(u, &ty, 0)?;
+            return Ok(Statement::CompoundAssign {
+                target: Expr::Var(name),
+                op,
+                value,
+            });
+        }
 
         // Regular assignment to any property
         let prop = self
@@ -2071,26 +2095,29 @@ impl GenerationContext {
 
         // Prefer variables of matching type
         if let Some((name, _)) = self.properties.iter().find(|(_, t)| *t == ty)
-            && u.arbitrary::<bool>()? {
-                return Ok(Expr::Var(name.clone()));
-            }
+            && u.arbitrary::<bool>()?
+        {
+            return Ok(Expr::Var(name.clone()));
+        }
 
         // 25% chance to read a global property of the matching type
         // (`GlobalName.prop`), exercising cross-block global signal reads.
         if let Some((global_name, prop_name)) = self.find_global_prop_of_type(ty)
-            && u.int_in_range(0..=3)? == 0 {
-                return Ok(Expr::Field {
-                    base: Box::new(Expr::Var(global_name)),
-                    field: prop_name,
-                });
-            }
+            && u.int_in_range(0..=3)? == 0
+        {
+            return Ok(Expr::Field {
+                base: Box::new(Expr::Var(global_name)),
+                field: prop_name,
+            });
+        }
 
         // Method calls, when the target type admits one. Kept before the other
         // random branches so they actually fire.
         if depth < 2
-            && let Some(expr) = self.try_arbitrary_method_call(u, ty, depth)? {
-                return Ok(expr);
-            }
+            && let Some(expr) = self.try_arbitrary_method_call(u, ty, depth)?
+        {
+            return Ok(expr);
+        }
 
         // 10% chance to generate ternary expression for simple non-string types
         // (String ternaries cause quote conflicts in interpolation contexts)
@@ -2141,17 +2168,18 @@ impl GenerationContext {
 
         // 10% chance to generate field access (record.field or record.field.subfield)
         if u.int_in_range(0..=9)? == 0
-            && let Some((prop_name, fields)) = self.find_chained_field_access(ty) {
-                // Build the chained field access expression
-                let mut expr = Expr::Var(prop_name);
-                for field in fields {
-                    expr = Expr::Field {
-                        base: Box::new(expr),
-                        field,
-                    };
-                }
-                return Ok(expr);
+            && let Some((prop_name, fields)) = self.find_chained_field_access(ty)
+        {
+            // Build the chained field access expression
+            let mut expr = Expr::Var(prop_name);
+            for field in fields {
+                expr = Expr::Field {
+                    base: Box::new(expr),
+                    field,
+                };
             }
+            return Ok(expr);
+        }
 
         // NOTE: Removed closure generation here - closures should only be used
         // in specific contexts like filter/map predicates, not as standalone expressions
@@ -2260,7 +2288,13 @@ impl GenerationContext {
                 if depth < 2 && u.int_in_range(0..=4)? == 0 {
                     let lhs = Expr::Int(u.int_in_range(1..=100)?);
                     let rhs = Expr::Int(u.int_in_range(1..=10)?); // non-zero for modulo/div
-                    let ops = [BinaryOp::Add, BinaryOp::Sub, BinaryOp::Mul, BinaryOp::Div, BinaryOp::Mod];
+                    let ops = [
+                        BinaryOp::Add,
+                        BinaryOp::Sub,
+                        BinaryOp::Mul,
+                        BinaryOp::Div,
+                        BinaryOp::Mod,
+                    ];
                     let op = ops[u.int_in_range(0..=ops.len() - 1)?];
                     return Ok(Expr::Binary {
                         op,
@@ -2281,7 +2315,13 @@ impl GenerationContext {
                     // rhs is non-zero so `/` and `%` never divide by zero.
                     let lhs = Expr::Int(u.int_in_range(10..=100)?);
                     let rhs = Expr::Int(u.int_in_range(1..=10)?);
-                    let ops = [BinaryOp::Add, BinaryOp::Sub, BinaryOp::Mul, BinaryOp::Div, BinaryOp::Mod];
+                    let ops = [
+                        BinaryOp::Add,
+                        BinaryOp::Sub,
+                        BinaryOp::Mul,
+                        BinaryOp::Div,
+                        BinaryOp::Mod,
+                    ];
                     let op = ops[u.int_in_range(0..=ops.len() - 1)?];
                     return Ok(Expr::Binary {
                         op,
@@ -2817,11 +2857,7 @@ impl GenerationContext {
 
     /// Build a `{ p: elem -> <bool> }` closure whose body is a valid boolean
     /// predicate over the parameter `p`.
-    fn arbitrary_filter_predicate(
-        &mut self,
-        u: &mut Unstructured,
-        elem: &TypeRef,
-    ) -> Result<Expr> {
+    fn arbitrary_filter_predicate(&mut self, u: &mut Unstructured, elem: &TypeRef) -> Result<Expr> {
         let canon = elem.canonical();
         let elem = &canon;
         let param = "p".to_string();
@@ -2868,13 +2904,15 @@ impl GenerationContext {
     fn find_option_record_prop_with_field(&self, inner_ty: &TypeRef) -> Option<(String, String)> {
         for (prop_name, prop_ty) in &self.properties {
             if let TypeRef::Option(inner) = prop_ty
-                && let TypeRef::Named(record_name) = inner.as_ref() {
-                    // Check if this record has a field of the target type
-                    if let Some(fields) = self.records.get(record_name)
-                        && fields.iter().any(|(_, fty)| fty == inner_ty) {
-                            return Some((prop_name.clone(), record_name.clone()));
-                        }
+                && let TypeRef::Named(record_name) = inner.as_ref()
+            {
+                // Check if this record has a field of the target type
+                if let Some(fields) = self.records.get(record_name)
+                    && fields.iter().any(|(_, fty)| fty == inner_ty)
+                {
+                    return Some((prop_name.clone(), record_name.clone()));
                 }
+            }
         }
         None
     }
@@ -2896,9 +2934,10 @@ impl GenerationContext {
     fn find_record_prop_with_field(&self, target_ty: &TypeRef) -> Option<(String, String)> {
         for (prop_name, prop_ty) in &self.properties {
             if let TypeRef::Named(record_name) = prop_ty
-                && let Some(field_name) = self.find_record_field_of_type(record_name, target_ty) {
-                    return Some((prop_name.clone(), field_name));
-                }
+                && let Some(field_name) = self.find_record_field_of_type(record_name, target_ty)
+            {
+                return Some((prop_name.clone(), field_name));
+            }
         }
         None
     }
@@ -2915,20 +2954,18 @@ impl GenerationContext {
         // Try depth 2: property -> field (record) -> subfield
         for (prop_name, prop_ty) in &self.properties {
             if let TypeRef::Named(record_name) = prop_ty
-                && let Some(fields) = self.records.get(record_name).cloned() {
-                    for (field_name, field_ty) in &fields {
-                        // Check if field_ty is a record with a subfield of target type
-                        if let TypeRef::Named(nested_record_name) = field_ty
-                            && let Some(subfield_name) =
-                                self.find_record_field_of_type(nested_record_name, target_ty)
-                            {
-                                return Some((
-                                    prop_name.clone(),
-                                    vec![field_name.clone(), subfield_name],
-                                ));
-                            }
+                && let Some(fields) = self.records.get(record_name).cloned()
+            {
+                for (field_name, field_ty) in &fields {
+                    // Check if field_ty is a record with a subfield of target type
+                    if let TypeRef::Named(nested_record_name) = field_ty
+                        && let Some(subfield_name) =
+                            self.find_record_field_of_type(nested_record_name, target_ty)
+                    {
+                        return Some((prop_name.clone(), vec![field_name.clone(), subfield_name]));
                     }
                 }
+            }
         }
         None
     }

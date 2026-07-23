@@ -61,6 +61,8 @@ fn compile_to_component(source: &str) -> Vec<u8> {
             }
         }
     }
+    compiler.resolve_global_triggers(&mut lir_components);
+
     let (lir_globals, lir_global_default_exprs) =
         compiler.lower_globals_to_lir(&global_thir_defaults);
 

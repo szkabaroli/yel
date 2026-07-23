@@ -1,7 +1,7 @@
 //! Central compiler context.
 
-use std::cell::RefCell;
 use rustc_hash::FxHashMap as HashMap;
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use crate::definitions::{Definitions, Namespace};
@@ -56,15 +56,13 @@ pub struct CompilerContext {
     /// before parents (which is the source/typeck-resolved order
     /// in current pipelines).
     component_lifecycle_blocks: RefCell<HashMap<DefId, ComponentLifecycleBlocks>>,
-    /// Phase 1.1c-l (#97): per-(observing component, global signal) fanout
-    /// block table. Populated by `synth_global_fanout_blocks` during each
-    /// observing component's lowering. Consulted by
-    /// `inline_signal_write_or_init_from_expr` when deciding whether to
-    /// inline a global signal write — if every component observing this
-    /// signal has registered a fanout block here (and the signal shape is
-    /// gc-only scalar), the writer emits `CallBlock` per observer and
-    /// suppresses the legacy `LirOp::TriggerEffects` emission. Otherwise
-    /// the writer falls through to the legacy path.
+    /// Per-(observing component, global signal) fanout block table.
+    /// Populated by `synth_global_fanout_blocks` when the module-level
+    /// `resolve_global_triggers` pass runs (after every component is
+    /// lowered). Read by that pass to expand `TriggerEffects`
+    /// placeholders into per-observer `CallBlock`s, and by codegen's
+    /// `emit_trigger_effects` for codegen-synthesized global writers
+    /// (binding setters).
     ///
     /// Key: `(observing_component_def_id, global_signal_def_id)`. Value:
     /// module-wide BlockId allocated via `alloc_block_id`.
@@ -286,7 +284,10 @@ impl CompilerContext {
             AstTyKind::Result { ok, err } => {
                 let ok_ty = ok.as_ref().map(|t| self.intern_ast_ty(&t.kind));
                 let err_ty = err.as_ref().map(|t| self.intern_ast_ty(&t.kind));
-                self.types.intern(InternedTyKind::Result { ok: ok_ty, err: err_ty })
+                self.types.intern(InternedTyKind::Result {
+                    ok: ok_ty,
+                    err: err_ty,
+                })
             }
             AstTyKind::Tuple(elems) => {
                 let elem_tys: Vec<_> = elems.iter().map(|t| self.intern_ast_ty(&t.kind)).collect();
@@ -304,8 +305,14 @@ impl CompilerContext {
             AstTyKind::Image => self.types.intern(InternedTyKind::Image),
             AstTyKind::Easing => self.types.intern(InternedTyKind::Easing),
 
-            AstTyKind::Func { params, return_type } => {
-                let param_tys: Vec<_> = params.iter().map(|(_, t)| self.intern_ast_ty(&t.kind)).collect();
+            AstTyKind::Func {
+                params,
+                return_type,
+            } => {
+                let param_tys: Vec<_> = params
+                    .iter()
+                    .map(|(_, t)| self.intern_ast_ty(&t.kind))
+                    .collect();
                 let ret_ty = return_type.as_ref().map(|t| self.intern_ast_ty(&t.kind));
                 self.types.intern_func(param_tys, ret_ty)
             }
@@ -495,24 +502,20 @@ impl CompilerContext {
 
     /// Register a structured debug name for a block. Interior
     /// mutability lets lowering passes name blocks while iterating.
-    pub fn set_block_name(
-        &self,
-        comp_def_id: DefId,
-        block_id: BlockId,
-        name: BlockDebugName,
-    ) {
-        self.block_names.borrow_mut().insert((comp_def_id, block_id), name);
+    pub fn set_block_name(&self, comp_def_id: DefId, block_id: BlockId, name: BlockDebugName) {
+        self.block_names
+            .borrow_mut()
+            .insert((comp_def_id, block_id), name);
     }
 
     /// Get the structured debug name for a block. Returns an owned
     /// clone (callers can't borrow into a RefCell across the
     /// inevitable subsequent `borrow_mut`).
-    pub fn get_block_name(
-        &self,
-        comp_def_id: DefId,
-        block_id: BlockId,
-    ) -> Option<BlockDebugName> {
-        self.block_names.borrow().get(&(comp_def_id, block_id)).cloned()
+    pub fn get_block_name(&self, comp_def_id: DefId, block_id: BlockId) -> Option<BlockDebugName> {
+        self.block_names
+            .borrow()
+            .get(&(comp_def_id, block_id))
+            .cloned()
     }
 
     // ========================================================================
@@ -547,7 +550,10 @@ impl CompilerContext {
         &self,
         def_id: DefId,
     ) -> Option<ComponentLifecycleBlocks> {
-        self.component_lifecycle_blocks.borrow().get(&def_id).copied()
+        self.component_lifecycle_blocks
+            .borrow()
+            .get(&def_id)
+            .copied()
     }
 
     /// Phase 1.1c-l (#97): register the synthesized fanout block for an

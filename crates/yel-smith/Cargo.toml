@@ -17,3 +17,6 @@ yel-core.workspace = true
 [dev-dependencies]
 libfuzzer-sys.workspace = true
 yel-wasm-codegen.workspace = true
+
+[build-dependencies]
+serde_json.workspace = true

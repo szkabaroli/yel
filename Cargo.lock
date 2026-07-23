@@ -3941,6 +3941,7 @@ dependencies = [
  "anyhow",
  "arbitrary",
  "libfuzzer-sys",
+ "serde_json",
  "yel-core",
  "yel-wasm-codegen",
 ]

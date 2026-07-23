@@ -1,11 +1,9 @@
-//! Signal storage helpers (struct.get/set, flat-slot stores), registry
-//! allocate/lookup, effect-trigger fan-out, and the per-global-signal
-//! fanout helper. All methods live on `WasmPackageBuilder<'a>` via an
-//! additional impl block.
+//! Self/boundary-ref resolution, registry allocate/lookup, and
+//! effect-trigger fan-out call sites. All methods live on
+//! `WasmPackageBuilder<'a>` via an additional impl block.
 
-use wasm_encoder::{Function, Instruction, ValType};
+use wasm_encoder::{Function, Instruction};
 use yel_core::DefId;
-use yel_core::ids::BlockId;
 use yel_core::lir::{LirExpr, LirResource};
 
 use super::super::CodegenError;
@@ -446,7 +444,6 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(())
     }
 
-
     /// Push every ABI slot of a migrated global property onto the
     /// WASM stack via `global.get $globals_<block>_self; struct.get
     /// $globals_<block> $field` per slot. Pushes one stack value per
@@ -576,14 +573,25 @@ impl<'a> WasmPackageBuilder<'a> {
     ) -> Result<(), CodegenError> {
         let is_global = self.ctx.defs.owning_global_block(signal).is_some();
         if is_global {
-            // Cross-component fan-out runs in a dedicated helper so the
-            // call site needs no scratch locals. The helper walks every
-            // observing component's registry array and calls each live
-            // instance's effect block with its typed self ref. If no
-            // helper was registered, the global has no observers and
-            // the trigger is a no-op.
-            if let Some(&fanout_idx) = self.global_fanout_func_idx.get(&signal) {
-                func.instruction(&Instruction::Call(fanout_idx));
+            // Cross-component fan-out: call each observing component's
+            // synthesized LIR fanout block (registered by yel-core's
+            // `resolve_global_triggers` pass; its wasm signature is
+            // `(i32) -> ()` with a dummy parent param). Components
+            // without observers have no registration — no call.
+            for comp in self.components {
+                let Some(block_id) = self.ctx.lookup_global_fanout_block(comp.def_id, signal)
+                else {
+                    continue;
+                };
+                let &fi = self.block_func_indices.get(&block_id).ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "global trigger: fanout block {:?} for (comp {:?}, signal {:?}) \
+                         has no function index",
+                        block_id, comp.def_id, signal
+                    ))
+                })?;
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::Call(fi));
             }
         } else {
             let component = &self.components[local_comp_idx];
@@ -643,353 +651,5 @@ impl<'a> WasmPackageBuilder<'a> {
             }
         }
         Ok(())
-    }
-
-    /// Emit the body of `$global_fanout_<signal>` — the per-global-signal
-    /// helper that walks each observing component's registry array and
-    /// calls every live instance's effect block. Signature is `() -> ()`.
-    ///
-    /// For each (component, effect) where `effect.dependencies` contains
-    /// `signal`, emit:
-    ///
-    /// ```wat
-    /// i32.const 0
-    /// local.set $idx
-    /// block $break
-    ///   loop $L
-    ///     ;; if $idx >= len, break
-    ///     local.get $idx
-    ///     global.get $registry_len_<comp>
-    ///     i32.ge_u
-    ///     br_if $break
-    ///     ;; if registry array is null, break (no instances ever allocated)
-    ///     global.get $registry_<comp>
-    ///     ref.is_null
-    ///     br_if $break
-    ///     ;; entry = arr[idx]
-    ///     global.get $registry_<comp>
-    ///     ref.as_non_null
-    ///     local.get $idx
-    ///     array.get $CompHandleArr_<comp>
-    ///     ;; if entry is null (shouldn't happen), skip
-    ///     ref.is_null
-    ///     if
-    ///       ;; nothing
-    ///     else
-    ///       ;; inst = entry.inst (load the ref)
-    ///       global.get $registry_<comp>
-    ///       ref.as_non_null
-    ///       local.get $idx
-    ///       array.get $CompHandleArr_<comp>
-    ///       ref.as_non_null
-    ///       struct.get $CompHandle_<comp> $inst
-    ///       ;; if inst is null (freed slot), skip
-    ///       ref.is_null
-    ///       if
-    ///       else
-    ///         ;; call effect(inst, 0)
-    ///         <re-load inst>
-    ///         i32.const 0
-    ///         call $effect_<i>
-    ///       end
-    ///     end
-    ///     ;; idx += 1; continue
-    ///     local.get $idx
-    ///     i32.const 1
-    ///     i32.add
-    ///     local.set $idx
-    ///     br $L
-    ///   end
-    /// end
-    /// ```
-    /// Inline emission of the parent-link chain to fetch a boundary
-    /// ref inside the global-fanout helper, where neither
-    /// `current_self_local` nor `current_boundary_locals` is
-    /// established. Re-loads the typed self ref from the registry
-    /// array entry on each call (matching the rest of the helper's
-    /// per-effect re-load pattern), then chains `struct.get`s through
-    /// `parent_link` to reach `boundary_id`.
-    #[allow(clippy::too_many_arguments)]
-    fn emit_boundary_chain_from_self_inline(
-        &self,
-        func: &mut Function,
-        comp_idx: usize,
-        boundary_id: yel_core::ids::TreeBoundaryId,
-        registry_g: u32,
-        idx_local: u32,
-        handle_arr_ty: u32,
-        handle_struct_ty: u32,
-        comp_struct_ty: u32,
-    ) -> Result<(), CodegenError> {
-        let component = &self.components[comp_idx];
-        let gc = &self.gc_layouts[comp_idx];
-
-        // Build the chain of (boundary, parent_field_idx) walks from
-        // boundary_id back up to root.
-        // Stage 5d: walk parent chain via the resource registry.
-        let mut chain: Vec<(yel_core::ids::TreeBoundaryId, u32)> = Vec::new();
-        let mut cur = boundary_id;
-        while let Some(p) = component
-            .struct_types
-            .get(cur.index())
-            .and_then(|s| s.parent)
-        {
-            chain.push((cur, p.field_idx));
-            cur = yel_core::ids::TreeBoundaryId(p.parent.0);
-        }
-        // `cur` is now the root.
-
-        // Push typed self ref by re-loading from registry[idx].
-        func.instruction(&Instruction::GlobalGet(registry_g));
-        func.instruction(&Instruction::RefAsNonNull);
-        func.instruction(&Instruction::LocalGet(idx_local));
-        func.instruction(&Instruction::ArrayGet(handle_arr_ty));
-        func.instruction(&Instruction::RefAsNonNull);
-        func.instruction(&Instruction::StructGet {
-            struct_type_index: handle_struct_ty,
-            field_index: 0,
-        });
-        func.instruction(&Instruction::RefAsNonNull);
-        func.instruction(&Instruction::RefCastNonNull(
-            wasm_encoder::HeapType::Concrete(comp_struct_ty),
-        ));
-
-        // self.tree → root struct ref.
-        let tree_field = gc.tree_root_field_idx.ok_or_else(|| {
-            CodegenError::InvalidIR(
-                "global fanout boundary chain: comp has no tree-root field".into(),
-            )
-        })?;
-        func.instruction(&Instruction::StructGet {
-            struct_type_index: comp_struct_ty,
-            field_index: tree_field,
-        });
-
-        // Walk down: chain is [innermost, ..., outermost]. Reverse to
-        // step from root toward boundary_id.
-        for (b, fidx) in chain.iter().rev() {
-            // We just pushed the parent-of-`b` ref. Fetch `b`'s ref
-            // from that parent's SubBoundary field.
-            // Stage 5d: parent link from registry.
-            let parent_link = component
-                .struct_types
-                .get(b.index())
-                .and_then(|s| s.parent)
-                .map(|p| (yel_core::ids::TreeBoundaryId(p.parent.0), p.field_idx));
-            let (parent_id, _) = parent_link.ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "global fanout boundary chain: missing parent_link for {}",
-                    b
-                ))
-            })?;
-            let parent_struct = *gc.tree_struct_type_idx.get(&parent_id).ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "global fanout: missing tree struct type for {}",
-                    parent_id
-                ))
-            })?;
-            func.instruction(&Instruction::RefAsNonNull);
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: parent_struct,
-                field_index: *fidx,
-            });
-        }
-        Ok(())
-    }
-
-    pub(super) fn generate_global_fanout_for(
-        &self,
-        signal: DefId,
-    ) -> Result<Function, CodegenError> {
-        // One i32 scratch local for the loop counter.
-        let mut func = Function::new([(1, ValType::I32)]);
-        let idx_local: u32 = 0;
-
-        for (ci, comp) in self.components.iter().enumerate() {
-            // Collect this component's effects that depend on the signal,
-            // via the precomputed inverted dep index. Each entry pairs
-            // the effect's WASM function index with the LIR `BlockId`
-            // so we can look up its `boundary_params` and emit the
-            // right call shape.
-            let observing_effects: Vec<(u32, BlockId)> = comp
-                .effects_by_signal
-                .get(&signal)
-                .map(|ids| ids.as_slice())
-                .unwrap_or(&[])
-                .iter()
-                .filter_map(|eid| {
-                    let effect = comp.effects.iter().find(|e| e.id == *eid)?;
-                    let fi = self.block_func_indices.get(&effect.update_block)?;
-                    Some((*fi, effect.update_block))
-                })
-                .collect();
-            if observing_effects.is_empty() {
-                continue;
-            }
-            let gc = &self.gc_layouts[ci];
-            let registry_g = gc.registry_global.ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "global fanout: component {} has no registry global",
-                    ci
-                ))
-            })?;
-            let len_g = gc.registry_len_global.ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "global fanout: component {} has no registry_len global",
-                    ci
-                ))
-            })?;
-            let handle_struct_ty = self.shared_handle_type_idx.ok_or_else(|| {
-                CodegenError::InvalidIR("global fanout: shared $handle type not emitted".into())
-            })?;
-            let handle_arr_ty = self.shared_handle_arr_type_idx.ok_or_else(|| {
-                CodegenError::InvalidIR(
-                    "global fanout: shared $handle-array type not emitted".into(),
-                )
-            })?;
-            let comp_struct_ty = gc.component_struct_type_idx.ok_or_else(|| {
-                CodegenError::InvalidIR(format!(
-                    "global fanout: component {} has no component struct type",
-                    ci
-                ))
-            })?;
-
-            // Reset idx = 0
-            func.instruction(&Instruction::I32Const(0));
-            func.instruction(&Instruction::LocalSet(idx_local));
-
-            // Outer block as break target, inner loop for iteration.
-            func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
-            func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
-
-            // if registry_<ci> is null → break (no array allocated yet)
-            func.instruction(&Instruction::GlobalGet(registry_g));
-            func.instruction(&Instruction::RefIsNull);
-            func.instruction(&Instruction::BrIf(1));
-
-            // if idx >= len → break
-            func.instruction(&Instruction::LocalGet(idx_local));
-            func.instruction(&Instruction::GlobalGet(len_g));
-            func.instruction(&Instruction::I32GeU);
-            func.instruction(&Instruction::BrIf(1));
-
-            // entry = arr[idx]; if entry is null → skip
-            func.instruction(&Instruction::GlobalGet(registry_g));
-            func.instruction(&Instruction::RefAsNonNull);
-            func.instruction(&Instruction::LocalGet(idx_local));
-            func.instruction(&Instruction::ArrayGet(handle_arr_ty));
-            func.instruction(&Instruction::RefIsNull);
-            func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
-            // null entry — fall through to increment
-            func.instruction(&Instruction::Else);
-
-            // inst = entry.inst (re-fetch for the load); if null → skip
-            func.instruction(&Instruction::GlobalGet(registry_g));
-            func.instruction(&Instruction::RefAsNonNull);
-            func.instruction(&Instruction::LocalGet(idx_local));
-            func.instruction(&Instruction::ArrayGet(handle_arr_ty));
-            func.instruction(&Instruction::RefAsNonNull);
-            func.instruction(&Instruction::StructGet {
-                struct_type_index: handle_struct_ty,
-                field_index: 0,
-            });
-            func.instruction(&Instruction::RefIsNull);
-            func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
-            // freed slot — skip
-            func.instruction(&Instruction::Else);
-
-            // For each observing effect, push the typed self-ref then
-            // call args matching the block's signature: legacy blocks
-            // get `(self, 0_i32)`; dynamic-typed blocks get `(self,
-            // <0 per LIR i32 param>, <boundary_ref per
-            // boundary_params>)`. Reload inst per effect (cheaper
-            // than reserving a typed per-component scratch local in
-            // this multi-comp fanout). To resolve boundary refs we
-            // temporarily set the self-local context so
-            // `emit_boundary_ref` can chain `struct.get`s from the
-            // freshly cast typed self ref.
-            //
-            // The typed self ref must already be in a WASM local
-            // before `emit_boundary_ref` runs — we reserve a
-            // function-scratch local lazily on first use.
-            for (effect_func_idx, block_id) in &observing_effects {
-                // Stage 5c: derive boundary-id list from slots.
-                let block = comp.blocks.iter().find(|b| b.id == *block_id);
-                let (n_i32_args, boundary_ids): (u32, Vec<_>) = match block {
-                    Some(b) if !b.params.is_empty() => (
-                        b.params.len() as u32,
-                        b.boundary_param_ids_from_slots(&comp.slots).collect(),
-                    ),
-                    Some(b) if !b.boundary_param_slots.is_empty() => {
-                        (0, b.boundary_param_ids_from_slots(&comp.slots).collect())
-                    }
-                    _ => (1, Vec::new()),
-                };
-
-                // Push self ref.
-                func.instruction(&Instruction::GlobalGet(registry_g));
-                func.instruction(&Instruction::RefAsNonNull);
-                func.instruction(&Instruction::LocalGet(idx_local));
-                func.instruction(&Instruction::ArrayGet(handle_arr_ty));
-                func.instruction(&Instruction::RefAsNonNull);
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: handle_struct_ty,
-                    field_index: 0,
-                });
-                func.instruction(&Instruction::RefAsNonNull);
-                func.instruction(&Instruction::RefCastNonNull(
-                    wasm_encoder::HeapType::Concrete(comp_struct_ty),
-                ));
-
-                // i32 LIR args (parent placeholders).
-                for _ in 0..n_i32_args {
-                    func.instruction(&Instruction::I32Const(0));
-                }
-
-                // Boundary refs: re-fetch from $self via the chain.
-                // We don't have `current_self_local` set here because
-                // this helper runs outside any per-component emit
-                // scope, so we inline the chain manually.
-                for &b_id in &boundary_ids {
-                    self.emit_boundary_chain_from_self_inline(
-                        &mut func,
-                        ci,
-                        b_id,
-                        registry_g,
-                        idx_local,
-                        handle_arr_ty,
-                        handle_struct_ty,
-                        comp_struct_ty,
-                    )?;
-                }
-
-                func.instruction(&Instruction::Call(*effect_func_idx));
-            }
-
-            // end inner-if (inst non-null arm)
-            func.instruction(&Instruction::End);
-            // end outer-if (entry non-null arm)
-            func.instruction(&Instruction::End);
-
-            // idx += 1; continue loop.
-            func.instruction(&Instruction::LocalGet(idx_local));
-            func.instruction(&Instruction::I32Const(1));
-            func.instruction(&Instruction::I32Add);
-            func.instruction(&Instruction::LocalSet(idx_local));
-            func.instruction(&Instruction::Br(0)); // continue loop $L
-
-            // end loop
-            func.instruction(&Instruction::End);
-            // end block (break target)
-            func.instruction(&Instruction::End);
-
-            // Suppress the unused warning on `comp_struct_ty` —
-            // referenced in the WAT comment but not used by the
-            // hand-emitted bytecode (struct_type_index is enough).
-            let _ = comp_struct_ty;
-        }
-
-        func.instruction(&Instruction::End);
-        Ok(func)
     }
 }

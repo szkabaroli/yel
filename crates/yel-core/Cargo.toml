@@ -38,3 +38,6 @@ parking_lot.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+
+[build-dependencies]
+serde_json.workspace = true

@@ -710,10 +710,7 @@ impl MemoryLayout {
             }
         }
 
-        MemoryLayout {
-            base,
-            size: offset,
-        }
+        MemoryLayout { base, size: offset }
     }
 }
 
@@ -728,9 +725,9 @@ impl MemoryLayout {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FuncTypes {
     // Allocator runtime functions.
-    pub alloc: u32,           // (i32, i32) -> i32
-    pub free: u32,            // (i32, i32) -> ()
-    pub cabi_realloc: u32,    // (i32, i32, i32, i32) -> i32
+    pub alloc: u32,        // (i32, i32) -> i32
+    pub free: u32,         // (i32, i32) -> ()
+    pub cabi_realloc: u32, // (i32, i32, i32, i32) -> i32
     // Component lifecycle.
     pub constructor: u32,     // () -> i32
     pub mount_container: u32, // (i32, i32) -> i32   (returns @children root)
@@ -738,26 +735,25 @@ pub(crate) struct FuncTypes {
     pub unmount: u32,         // (i32) -> ()
     pub resource_new: u32,    // (i32) -> i32        ([resource-new] host intrinsic)
     // Signal getters, by value type.
-    pub getter_i32: u32,      // (i32) -> i32
-    pub getter_f32: u32,      // (i32) -> f32
-    pub getter_f64: u32,      // (i32) -> f64
-    pub getter_i64: u32,      // (i32) -> i64
+    pub getter_i32: u32, // (i32) -> i32
+    pub getter_f32: u32, // (i32) -> f32
+    pub getter_f64: u32, // (i32) -> f64
+    pub getter_i64: u32, // (i32) -> i64
     // String-conversion runtime helpers.
-    pub s32_to_string: u32,   // (i32) -> (i32, i32)
-    pub bool_to_string: u32,  // (i32) -> (i32, i32)
-    pub f32_to_string: u32,   // (f32) -> (i32, i32)
-    pub s64_to_string: u32,   // (i64) -> (i32, i32)
+    pub s32_to_string: u32,  // (i32) -> (i32, i32)
+    pub bool_to_string: u32, // (i32) -> (i32, i32)
+    pub f32_to_string: u32,  // (f32) -> (i32, i32)
+    pub s64_to_string: u32,  // (i64) -> (i32, i32)
     // Fat-pointer runtime helpers.
-    pub store_fat_ptr: u32,   // (i32, i32, i32) -> ()
-    pub load_fat_ptr: u32,    // (i32) -> (i32, i32)
-    pub pack_fat_ptr: u32,    // (i32, i32) -> (i64, i32)
-    pub starts_with: u32,     // (i32, i32, i32, i32) -> i32
+    pub store_fat_ptr: u32, // (i32, i32, i32) -> ()
+    pub load_fat_ptr: u32,  // (i32) -> (i32, i32)
+    pub pack_fat_ptr: u32,  // (i32, i32) -> (i64, i32)
+    pub starts_with: u32,   // (i32, i32, i32, i32) -> i32
     // Module start function + global fanout helpers.
-    pub globals_init: u32,    // () -> ()
-    pub fanout: u32,          // () -> ()
+    pub globals_init: u32, // () -> ()
     // Canonical-ABI post-return trampolines.
-    pub cabi_post: u32,       // (i32) -> ()
-    pub setter_spill: u32,    // (i32) -> ()
+    pub cabi_post: u32,    // (i32) -> ()
+    pub setter_spill: u32, // (i32) -> ()
     // String `concat`, keyed by arity. One type per distinct arity the
     // program actually uses (interpolations lower to a `concat` call whose
     // arity is the number of pieces, so there is no fixed upper bound).
@@ -1103,16 +1099,6 @@ pub(crate) struct WasmPackageBuilder<'a> {
     pub global_handler_map: Vec<(u32, usize, BlockId)>,
     /// Function index of the standalone dispatch function in the core module.
     pub dispatch_func_idx: Option<u32>,
-    /// Per-global-signal fanout helper functions. For each global
-    /// property whose mutation must trigger effects in 1+ components,
-    /// we emit a `() -> ()` helper that walks each observing
-    /// component's registry array and calls each live instance's
-    /// effect block. Setters/handlers that mutate a global signal then
-    /// just `call $global_fanout_<sig>` — no inline scratch locals
-    /// needed at the call site, and the registry walk runs against the
-    /// **current** state of every component's registry, hitting all
-    /// live instances no matter how many.
-    pub global_fanout_func_idx: HashMap<DefId, u32>,
     /// Filter calls: (component_idx, elem_ty, elem_size, param, predicate) for function generation
     /// Index into Vec is the filter ID, maps to $filter_0, $filter_1, etc.
     /// Captured signals are extracted from predicate LIR on-demand (SignalRead nodes)
@@ -1327,7 +1313,6 @@ impl<'a> WasmPackageBuilder<'a> {
             global_default_exprs: Vec::new(),
             global_handler_map: Vec::new(),
             dispatch_func_idx: None,
-            global_fanout_func_idx: HashMap::new(),
             wit_package: None,
             current_block_local_offset: None,
             current_generated_block_id: None,
@@ -1832,12 +1817,13 @@ impl<'a> WasmPackageBuilder<'a> {
         // path keeps the multi-slot (ptr, len) shape required by the
         // WIT canonical ABI.
         if self.is_scalar_list_ty(ty)
-            && let Some(&arr_idx) = self.record_gc_types.list_array_type_idx.get(&ty) {
-                return vec![ValType::Ref(RefType {
-                    nullable: true,
-                    heap_type: HeapType::Concrete(arr_idx),
-                })];
-            }
+            && let Some(&arr_idx) = self.record_gc_types.list_array_type_idx.get(&ty)
+        {
+            return vec![ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(arr_idx),
+            })];
+        }
         // Option-of-ref collapse: option<T> where T's internal repr
         // is itself a GC ref becomes a single nullable ref slot.
         if let Some(arr_idx) = self.option_collapses_to_ref(ty) {
@@ -2391,5 +2377,4 @@ mod tests {
             "repeat intern must not grow the segment"
         );
     }
-
 }
