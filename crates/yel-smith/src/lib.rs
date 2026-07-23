@@ -107,20 +107,33 @@ impl YelModule {
             .map(|_| ctx.arbitrary_global(u))
             .collect::<Result<_>>()?;
 
+        // Generate container components first (those with an `@children` slot),
+        // registering their names so the main components — including the
+        // exported entry — can instantiate them and splice children in. This
+        // exercises the container/slot lowering path that has no other coverage.
+        let num_containers: usize = u.int_in_range(0..=1)?;
+        let container_defs: Vec<_> = (0..num_containers)
+            .map(|_| ctx.arbitrary_container_component(u))
+            .collect::<Result<_>>()?;
+
         // Generate components (ensure at least one is exported for valid WASM)
         let num_components: usize = u.int_in_range(1..=config.max_components)?;
         // The first component is the exported entry point; the rest are
         // internal. Decide this up front and pass it into generation so that
         // boundary-crossing type choices (tuples, etc.) can be gated on it.
-        let mut components: Vec<_> = (0..num_components)
+        let main_components: Vec<_> = (0..num_components)
             .map(|i| ctx.arbitrary_component(u, i == 0))
             .collect::<Result<_>>()?;
 
-        // Ensure exactly one component is exported (the first one)
-        // Note: Multiple exported components with callbacks require additional component model
-        // wiring that isn't yet implemented in yel-core
+        // Containers are emitted *before* the components that instantiate them:
+        // mount lowering resolves a child's lifecycle blocks and requires the
+        // child to be lowered before its parent. The exported entry is the
+        // first main component, which now sits at index `num_containers`.
+        let mut components = container_defs;
+        let entry_index = components.len();
+        components.extend(main_components);
         for (i, c) in components.iter_mut().enumerate() {
-            c.is_export = i == 0;
+            c.is_export = i == entry_index;
         }
 
         Ok(YelModule {
@@ -349,14 +362,25 @@ impl TypeRef {
 #[derive(Debug, Clone)]
 pub struct GlobalDef {
     pub name: String,
+    pub is_export: bool,
     pub properties: Vec<PropertyDef>,
+    /// Host-implemented `func`-typed members. Non-empty only for host-boundary
+    /// globals; forces WIT interface emission alongside directional properties.
+    pub funcs: Vec<CallbackDef>,
 }
 
 impl GlobalDef {
     fn to_source(&self) -> String {
-        let mut out = format!("global {} {{\n", self.name);
+        let mut out = String::new();
+        if self.is_export {
+            out.push_str("export ");
+        }
+        out.push_str(&format!("global {} {{\n", self.name));
         for prop in &self.properties {
             out.push_str(&format!("    {}\n", prop.to_source()));
+        }
+        for func in &self.funcs {
+            out.push_str(&format!("    {}\n", func.to_source()));
         }
         out.push_str("}\n");
         out
@@ -406,11 +430,20 @@ pub struct PropertyDef {
     pub name: String,
     pub ty: TypeRef,
     pub default: Option<Expr>,
+    /// Host-boundary direction for global properties (`in`/`out`/`in-out`).
+    /// `None` for component properties and in-tree globals. A directional
+    /// property carries no default — the host owns the value.
+    pub direction: Option<&'static str>,
 }
 
 impl PropertyDef {
     fn to_source(&self) -> String {
-        let mut s = format!("{}: {}", self.name, self.ty.to_source());
+        let mut s = String::new();
+        if let Some(dir) = self.direction {
+            s.push_str(dir);
+            s.push(' ');
+        }
+        s.push_str(&format!("{}: {}", self.name, self.ty.to_source()));
         if let Some(default) = &self.default {
             s.push_str(&format!(" = {}", default.to_source()));
         }
@@ -472,6 +505,9 @@ pub enum Node {
         key: Option<Expr>,
         body: Vec<Node>,
     },
+    /// `@children` slot marker — makes the enclosing component a container into
+    /// which a caller's child nodes splice.
+    Children,
 }
 
 impl Node {
@@ -590,6 +626,7 @@ impl Node {
                 out.push_str(&format!("{}}}\n", pad));
                 out
             }
+            Node::Children => format!("{}@children\n", pad),
         }
     }
 }
@@ -997,6 +1034,9 @@ struct GenerationContext {
     /// Defined globals: global name -> (property name -> type).
     /// Referenced from components as `GlobalName.prop`.
     globals: BTreeMap<String, BTreeMap<String, TypeRef>>,
+    /// Names of container components (those with an `@children` slot). Callers
+    /// may instantiate these as elements and splice child nodes into them.
+    containers: Vec<String>,
     /// Counter for unique names.
     name_counter: usize,
 }
@@ -1011,6 +1051,7 @@ impl GenerationContext {
             properties: BTreeMap::new(),
             callbacks: Vec::new(),
             globals: BTreeMap::new(),
+            containers: Vec::new(),
             name_counter: 0,
         }
     }
@@ -1139,24 +1180,81 @@ impl GenerationContext {
         let prop_names = ["count", "value", "label", "flag", "amount", "title"];
         let num_props: usize = u.int_in_range(1..=4.min(prop_names.len()))?;
 
+        // ~45% of globals are *host-boundary* blocks: `in`/`out`/`in-out`
+        // properties (no default — the host owns the value) plus optional
+        // host-implemented `func` members. These force WIT interface emission,
+        // exercising the global getter/setter canonical-ABI path that in-tree
+        // globals never reach.
+        let host_boundary = u.int_in_range(0..=9)? < 5;
+
         let mut prop_types: BTreeMap<String, TypeRef> = BTreeMap::new();
         let mut properties = Vec::new();
         for i in 0..num_props {
             let prop_name = prop_names[i].to_string();
-            // Globals carry no WIT boundary constraint on their own, but keep
-            // types simple + always defaulted so the block is self-contained.
             let ty = self.arbitrary_simple_type(u)?;
-            let default = self.arbitrary_literal_of_type(u, &ty)?;
-            prop_types.insert(prop_name.clone(), ty.clone());
-            properties.push(PropertyDef {
-                name: prop_name,
-                ty,
-                default: Some(default),
-            });
+            if host_boundary {
+                let dir = ["in", "out", "in-out"][u.int_in_range(0..=2)?];
+                // Only `in`/`in-out` are host→component readable; register those
+                // so components can read them (`GlobalName.prop`). `out` is
+                // component→host, still emitted but not offered as a read source.
+                if dir != "out" {
+                    prop_types.insert(prop_name.clone(), ty.clone());
+                }
+                properties.push(PropertyDef {
+                    name: prop_name,
+                    ty,
+                    default: None,
+                    direction: Some(dir),
+                });
+            } else {
+                // In-tree shared state: always defaulted so the block is
+                // self-contained, and readable from components.
+                let default = self.arbitrary_literal_of_type(u, &ty)?;
+                prop_types.insert(prop_name.clone(), ty.clone());
+                properties.push(PropertyDef {
+                    name: prop_name,
+                    ty,
+                    default: Some(default),
+                    direction: None,
+                });
+            }
         }
 
+        // Host-implemented func members (only for boundary blocks).
+        let mut funcs = Vec::new();
+        if host_boundary {
+            let func_names = ["update", "reset", "toggle", "commit", "refresh"];
+            let num_funcs: usize = u.int_in_range(0..=2)?;
+            for fname in func_names.iter().take(num_funcs) {
+                let num_params: usize = u.int_in_range(0..=2)?;
+                let params: Vec<(String, TypeRef)> = (0..num_params)
+                    .map(|p| Ok((format!("arg-{}", p), self.arbitrary_simple_type(u)?)))
+                    .collect::<Result<_>>()?;
+                let return_ty = if u.arbitrary::<bool>()? {
+                    Some(self.arbitrary_simple_type(u)?)
+                } else {
+                    None
+                };
+                funcs.push(CallbackDef {
+                    name: (*fname).to_string(),
+                    params,
+                    return_ty,
+                    is_export: false,
+                });
+            }
+        }
+
+        // A boundary block emits a WIT interface; `export` publishes it for
+        // other packages. Publish it ~70% of the time.
+        let is_export = host_boundary && u.int_in_range(0..=9)? < 7;
+
         self.globals.insert(name.clone(), prop_types);
-        Ok(GlobalDef { name, properties })
+        Ok(GlobalDef {
+            name,
+            is_export,
+            properties,
+            funcs,
+        })
     }
 
     fn arbitrary_simple_type(&self, u: &mut Unstructured) -> Result<TypeRef> {
@@ -1271,6 +1369,51 @@ impl GenerationContext {
         }
     }
 
+    /// A container component: its body wraps an `@children` slot (optionally
+    /// inside a builtin layout element), and its name is registered so callers
+    /// can instantiate it with children. Kept intentionally simple — no props
+    /// or handlers — so the only novel surface is the slot itself.
+    fn arbitrary_container_component(&mut self, u: &mut Unstructured) -> Result<ComponentDef> {
+        self.properties.clear();
+        self.callbacks.clear();
+
+        let name = self.arbitrary_pascal_ident("Container");
+
+        // Body: `@children` bare, or wrapped in one layout element, optionally
+        // with a sibling Text node alongside the slot.
+        let children_node = Node::Children;
+        let body = match u.int_in_range(0..=2)? {
+            0 => vec![children_node],
+            1 => {
+                let wrapper = ["VStack", "HStack", "ZStack", "Box"][u.int_in_range(0..=3)?];
+                vec![Node::Element {
+                    name: wrapper.to_string(),
+                    bindings: Vec::new(),
+                    handlers: Vec::new(),
+                    children: vec![children_node],
+                }]
+            }
+            _ => {
+                let wrapper = ["VStack", "HStack"][u.int_in_range(0..=1)?];
+                vec![Node::Element {
+                    name: wrapper.to_string(),
+                    bindings: Vec::new(),
+                    handlers: Vec::new(),
+                    children: vec![Node::Text(Expr::String("head".into())), children_node],
+                }]
+            }
+        };
+
+        self.containers.push(name.clone());
+        Ok(ComponentDef {
+            name,
+            is_export: false,
+            properties: Vec::new(),
+            callbacks: Vec::new(),
+            body,
+        })
+    }
+
     fn arbitrary_component(
         &mut self,
         u: &mut Unstructured,
@@ -1304,6 +1447,7 @@ impl GenerationContext {
                     name: prop_name,
                     ty,
                     default,
+                    direction: None,
                 })
             })
             .collect::<Result<_>>()?;
@@ -1366,6 +1510,23 @@ impl GenerationContext {
                 &TypeRef::String,
                 0,
             )?));
+        }
+
+        // ~20% chance to instantiate a defined container component, splicing
+        // freshly generated child nodes into its `@children` slot.
+        if !self.containers.is_empty() && u.int_in_range(0..=4)? == 0 {
+            let idx = u.int_in_range(0..=self.containers.len() - 1)?;
+            let name = self.containers[idx].clone();
+            let num_children: usize = u.int_in_range(1..=2)?;
+            let children: Vec<_> = (0..num_children)
+                .map(|_| self.arbitrary_node(u, depth + 1))
+                .collect::<Result<_>>()?;
+            return Ok(Node::Element {
+                name,
+                bindings: Vec::new(),
+                handlers: Vec::new(),
+                children,
+            });
         }
 
         let choice: u8 = u.int_in_range(0..=3)?;
@@ -2306,6 +2467,51 @@ impl GenerationContext {
                     receiver: Box::new(Expr::Var(str_name)),
                     method: "starts-with".into(),
                     args: vec![prefix],
+                }))
+            }
+            // list.len() / string.len() -> s32
+            TypeRef::S32 => {
+                // Any list-typed or string-typed property is a valid receiver.
+                let recv = self
+                    .properties
+                    .iter()
+                    .find(|(_, t)| matches!(t, TypeRef::List(_) | TypeRef::String))
+                    .map(|(n, _)| n.clone());
+                let Some(recv_name) = recv else {
+                    return Ok(None);
+                };
+                if u.arbitrary::<bool>()? {
+                    return Ok(None);
+                }
+                Ok(Some(Expr::MethodCall {
+                    receiver: Box::new(Expr::Var(recv_name)),
+                    method: "len".into(),
+                    args: vec![],
+                }))
+            }
+            // list<T>.get(idx) -> option<T>.
+            // Currently exposes a front-end/back-end mismatch: typeck accepts
+            // this but codegen returns `invalid IR: list-get builtin: removed in
+            // Phase 7 cleanup`. Kept generated so the fuzzer keeps flagging the
+            // gap — either typeck should reject it or codegen should support it.
+            TypeRef::Option(inner) => {
+                let want = TypeRef::List(inner.clone());
+                let list_prop = self
+                    .properties
+                    .iter()
+                    .find(|(_, t)| **t == want)
+                    .map(|(n, _)| n.clone());
+                let Some(list_name) = list_prop else {
+                    return Ok(None);
+                };
+                if u.arbitrary::<bool>()? {
+                    return Ok(None);
+                }
+                let index = Expr::Int(u.int_in_range(0..=3)?);
+                Ok(Some(Expr::MethodCall {
+                    receiver: Box::new(Expr::Var(list_name)),
+                    method: "get".into(),
+                    args: vec![index],
                 }))
             }
             _ => Ok(None),
