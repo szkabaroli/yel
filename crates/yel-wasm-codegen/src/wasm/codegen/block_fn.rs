@@ -297,16 +297,27 @@ impl<'a> WasmPackageBuilder<'a> {
                 // wasm param into it fails wasm validation. Skip the
                 // copy in that case — the slot will be initialized by
                 // its own emit op before any read.
-                let first_temp_is_i32 = component
-                    .slots
-                    .iter()
-                    .filter_map(|s| match s.kind {
-                        LirSlotKind::Temp { local_idx } => Some((local_idx, s.val_ty)),
-                        _ => None,
-                    })
-                    .min_by_key(|(idx, _)| *idx)
-                    .map(|(_, vt)| matches!(vt, yel_core::lir::LirSlotValType::I32))
-                    .unwrap_or(true);
+                // The first temp local (at `local_offset`) is the first
+                // Resource Temp when the component has any, else the first
+                // Block Temp (they're declared right after, so both occupy
+                // `local_offset + 0`). With no temps at all there is no
+                // local to copy into — skip (Task #105 B2: synth-pass temps
+                // moved onto their own blocks, so zero-resource-temp
+                // components exist now).
+                let first_temp_valtype = |slots: &[yel_core::lir::LirSlotInfo]| {
+                    slots
+                        .iter()
+                        .filter_map(|s| match s.kind {
+                            LirSlotKind::Temp { local_idx } => Some((local_idx, s.val_ty)),
+                            _ => None,
+                        })
+                        .min_by_key(|(idx, _)| *idx)
+                        .map(|(_, vt)| vt)
+                };
+                let first_temp_is_i32 = first_temp_valtype(&component.slots)
+                    .or_else(|| first_temp_valtype(&block.slots))
+                    .map(|vt| matches!(vt, yel_core::lir::LirSlotValType::I32))
+                    .unwrap_or(false);
                 if first_temp_is_i32 {
                     func.instruction(&Instruction::LocalGet(1));
                     func.instruction(&Instruction::LocalSet(local_offset));
@@ -362,6 +373,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Set captured locals, local_to_slot, and local_offset for expression emission
         self.current_block_local_offset = Some(local_offset);
+        self.current_generated_block_id = Some(block.id);
         let has_captures = !block.captured_locals.is_empty();
         if has_captures {
             // Resolve each captured SlotId → absolute WASM local index now.
@@ -432,6 +444,7 @@ impl<'a> WasmPackageBuilder<'a> {
         self.current_block_local_to_slot = None;
         self.current_block_local_modes = None;
         self.current_block_local_offset = None;
+        self.current_generated_block_id = None;
         self.current_init_scratch_start = None;
         self.current_flat_scratch = None;
         self.current_self_local = prev_self_local;

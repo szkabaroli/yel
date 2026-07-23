@@ -56,11 +56,6 @@ pub trait LirStringArena {
 /// (flow) reuse the same helpers.
 pub trait LirSlotArena {
     fn slots(&self) -> &[LirSlotInfo];
-
-    /// Convenience: look up one slot. Defaults to indexing `slots()`.
-    fn slot(&self, id: LirSlotId) -> &LirSlotInfo {
-        &self.slots()[id.legacy_u32() as usize]
-    }
 }
 
 /// Function-shaped object that the wasm body emitter can consume.

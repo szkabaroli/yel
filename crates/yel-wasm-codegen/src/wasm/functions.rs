@@ -463,11 +463,13 @@ pub fn generate_component(
             .iter()
             .enumerate()
             .map(|(j, ps)| {
-                input
-                    .resource
-                    .slots
-                    .get(ps.legacy_u32() as usize)
-                    .and_then(|s| s.name.clone())
+                let info = match ps {
+                    yel_core::lir::LirSlotId::Block { idx, .. } => block.slots.get(*idx as usize),
+                    yel_core::lir::LirSlotId::Resource { idx } => {
+                        input.resource.slots.get(*idx as usize)
+                    }
+                };
+                info.and_then(|s| s.name.clone())
                     .unwrap_or_else(|| format!("arg{j}"))
             })
             .collect();
@@ -481,11 +483,13 @@ pub fn generate_component(
             .params
             .iter()
             .map(|ps| {
-                input
-                    .resource
-                    .slots
-                    .get(ps.legacy_u32() as usize)
-                    .map(|s| scalar_yel_ty_from_val_ty(s.val_ty))
+                let info = match ps {
+                    yel_core::lir::LirSlotId::Block { idx, .. } => block.slots.get(*idx as usize),
+                    yel_core::lir::LirSlotId::Resource { idx } => {
+                        input.resource.slots.get(*idx as usize)
+                    }
+                };
+                info.map(|s| scalar_yel_ty_from_val_ty(s.val_ty))
                     .unwrap_or(yel_core::Ty::S32)
             })
             .collect();

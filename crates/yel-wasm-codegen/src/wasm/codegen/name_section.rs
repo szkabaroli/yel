@@ -118,7 +118,15 @@ impl<'a> WasmPackageBuilder<'a> {
                 };
                 type_names.append(ty_idx, &format!("{}-{}", comp_name, struct_decl.name));
             }
-            for (anchor_id, &arr_idx) in &gc_layout.tree_for_arr_type_idx {
+            // Determinism: HashMap — sort by the emitted type index.
+            let mut sorted_tree_for: Vec<(_, u32)> = gc_layout
+                .tree_for_arr_type_idx
+                .iter()
+                .map(|(&anchor_id, &arr_idx)| (anchor_id, arr_idx))
+                .collect();
+            sorted_tree_for.sort_by_key(|&(_, arr_idx)| arr_idx);
+            for (anchor_id, arr_idx) in sorted_tree_for {
+                let anchor_id = &anchor_id;
                 // Stage 5d: read kind from registry.
                 let Some(struct_decl) = comp.struct_types.get(anchor_id.0 as usize) else {
                     continue;
@@ -157,7 +165,15 @@ impl<'a> WasmPackageBuilder<'a> {
             // structurally identical signatures: a fresh type per
             // block keeps later optimisation passes free to mutate
             // one block's signature without touching another's.
-            for (block_id, &ty_idx) in &gc_layout.block_dynamic_type_idx {
+            // Determinism: HashMap — sort by the emitted type index.
+            let mut sorted_block_dynamic: Vec<(_, u32)> = gc_layout
+                .block_dynamic_type_idx
+                .iter()
+                .map(|(&block_id, &ty_idx)| (block_id, ty_idx))
+                .collect();
+            sorted_block_dynamic.sort_by_key(|&(_, ty_idx)| ty_idx);
+            for (block_id, ty_idx) in sorted_block_dynamic {
+                let block_id = &block_id;
                 let info = self
                     .ctx
                     .get_block_name(comp.def_id, *block_id)
@@ -372,18 +388,44 @@ impl<'a> WasmPackageBuilder<'a> {
             if let Some(idx) = runtime_funcs.starts_with {
                 func_names.append(idx, "starts_with");
             }
-            for (&arity, &func_idx) in &runtime_funcs.concat_indices {
+            // Determinism: these are HashMaps — sort each by func index so
+            // the name-map entry order (and the emitted bytes) is stable.
+            let mut sorted_concats: Vec<(usize, u32)> = runtime_funcs
+                .concat_indices
+                .iter()
+                .map(|(&arity, &fi)| (arity, fi))
+                .collect();
+            sorted_concats.sort_by_key(|&(_, fi)| fi);
+            for (arity, func_idx) in sorted_concats {
                 func_names.append(func_idx, &format!("concat{}", arity));
             }
-            for (&def_id, &func_idx) in &runtime_funcs.record_ctors {
+            let mut sorted_record_ctors: Vec<(_, u32)> = runtime_funcs
+                .record_ctors
+                .iter()
+                .map(|(&def_id, &fi)| (def_id, fi))
+                .collect();
+            sorted_record_ctors.sort_by_key(|&(_, fi)| fi);
+            for (def_id, func_idx) in sorted_record_ctors {
                 let name = self.ctx.str(self.ctx.defs.name(def_id)).to_string();
                 func_names.append(func_idx, &format!("record_ctor_{}", name));
             }
-            for (&def_id, &func_idx) in &runtime_funcs.record_ctors_at {
+            let mut sorted_record_ctors_at: Vec<(_, u32)> = runtime_funcs
+                .record_ctors_at
+                .iter()
+                .map(|(&def_id, &fi)| (def_id, fi))
+                .collect();
+            sorted_record_ctors_at.sort_by_key(|&(_, fi)| fi);
+            for (def_id, func_idx) in sorted_record_ctors_at {
                 let name = self.ctx.str(self.ctx.defs.name(def_id)).to_string();
                 func_names.append(func_idx, &format!("record_ctor_at_{}", name));
             }
-            for (&(_elem_ty, count), &func_idx) in &runtime_funcs.list_ctors {
+            let mut sorted_list_ctors: Vec<(usize, u32)> = runtime_funcs
+                .list_ctors
+                .iter()
+                .map(|(&(_elem_ty, count), &fi)| (count, fi))
+                .collect();
+            sorted_list_ctors.sort_by_key(|&(_, fi)| fi);
+            for (count, func_idx) in sorted_list_ctors {
                 func_names.append(func_idx, &format!("list_ctor_{}", count));
             }
             // Sort list_appends by func index so NameMap.append sees
@@ -397,7 +439,13 @@ impl<'a> WasmPackageBuilder<'a> {
             for (list_ty, func_idx) in sorted_appends {
                 func_names.append(func_idx, &format!("list_append_{}", list_ty.0));
             }
-            for (&call_id, &func_idx) in &runtime_funcs.filter_indices {
+            let mut sorted_filters: Vec<(usize, u32)> = runtime_funcs
+                .filter_indices
+                .iter()
+                .map(|(&call_id, &fi)| (call_id, fi))
+                .collect();
+            sorted_filters.sort_by_key(|&(_, fi)| fi);
+            for (call_id, func_idx) in sorted_filters {
                 func_names.append(func_idx, &format!("filter_{}", call_id));
             }
         }
@@ -477,7 +525,15 @@ impl<'a> WasmPackageBuilder<'a> {
         // `$for-item-mount-row` instead of `(func (;36;))`. Prefix
         // with the owning component so the same block kind in two
         // components doesn't collide.
-        for (block_id, &wasm_func_idx) in &self.block_func_indices {
+        // Determinism: HashMap — sort by the wasm function index.
+        let mut sorted_block_funcs: Vec<(_, u32)> = self
+            .block_func_indices
+            .iter()
+            .map(|(&block_id, &fi)| (block_id, fi))
+            .collect();
+        sorted_block_funcs.sort_by_key(|&(_, fi)| fi);
+        for (block_id, wasm_func_idx) in sorted_block_funcs {
+            let block_id = &block_id;
             // Phase 0.3q: locate the owning component (BlockIds are
             // module-wide unique so a linear scan suffices).
             let Some(component) = self
@@ -556,7 +612,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     LirSlotKind::Temp { local_idx } => local_idx,
                     _ => unreachable!(),
                 };
-                let name = s.name.clone().unwrap_or_else(|| format!("slot_{}", s.id.legacy_u32()));
+                let name = s.name.clone().unwrap_or_else(|| format!("slot_{}", s.id));
                 mount_locals.append(local_idx + 2, &name);
             }
             // Scratch locals (flat-slot signal-store helpers) come
@@ -619,7 +675,15 @@ impl<'a> WasmPackageBuilder<'a> {
         // (0..param_count), then one local per slot. The slot's
         // local index inside the function is `param_count + slot.id`
         // — see `generate_block_function` for the canonical layout.
-        for (block_id, &wasm_func_idx) in &self.block_func_indices {
+        // Determinism: HashMap — sort by the wasm function index.
+        let mut sorted_block_funcs: Vec<(_, u32)> = self
+            .block_func_indices
+            .iter()
+            .map(|(&block_id, &fi)| (block_id, fi))
+            .collect();
+        sorted_block_funcs.sort_by_key(|&(_, fi)| fi);
+        for (block_id, wasm_func_idx) in sorted_block_funcs {
+            let block_id = &block_id;
             let mut block_locals = NameMap::new();
             // Phase 0.3q: locate the owning component.
             let Some(component) = self
@@ -648,9 +712,18 @@ impl<'a> WasmPackageBuilder<'a> {
                 block_locals.append(1, "parent");
             } else {
                 for (i, slot) in block.params.iter().enumerate() {
-                    let name = component
-                        .slots
-                        .get(slot.legacy_u32() as usize)
+                    // Task #105 B2: Block-variant param slots live on the
+                    // block's own slots vec; Resource-variant on the
+                    // component's.
+                    let info = match slot {
+                        yel_core::lir::LirSlotId::Block { idx, .. } => {
+                            block.slots.get(*idx as usize)
+                        }
+                        yel_core::lir::LirSlotId::Resource { idx } => {
+                            component.slots.get(*idx as usize)
+                        }
+                    };
+                    let name = info
                         .and_then(|s| s.name.clone())
                         .unwrap_or_else(|| format!("param{}", i));
                     block_locals.append((i as u32) + 1, &name);

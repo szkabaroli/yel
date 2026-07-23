@@ -1046,6 +1046,10 @@ pub(crate) struct WasmPackageBuilder<'a> {
     pub wit_package: Option<(String, String, String)>,
     /// Current block's local variable offset (for block functions)
     pub current_block_local_offset: Option<u32>,
+    /// The block whose function body is currently being generated —
+    /// lets expression emission resolve Block-variant slot ids without
+    /// threading `&LirBlock` through every helper.
+    pub current_generated_block_id: Option<BlockId>,
     /// Mapping from LocalId to slot index for captured locals in current block
     /// Map: for-loop / filter-closure captured `LocalId` → the absolute WASM
     /// local index holding its backing value. For regular blocks this is the
@@ -1315,6 +1319,7 @@ impl<'a> WasmPackageBuilder<'a> {
             global_fanout_func_idx: HashMap::new(),
             wit_package: None,
             current_block_local_offset: None,
+            current_generated_block_id: None,
             current_block_captured_locals: None,
             current_block_local_to_slot: None,
             current_block_local_modes: None,

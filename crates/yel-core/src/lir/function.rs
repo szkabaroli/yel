@@ -242,7 +242,13 @@ pub fn ui_block_calling_conv(
     // nothing else is present at all.
     let mut implicit_post = Vec::new();
     for slot_id in &block.boundary_param_slots {
-        if let Some(info) = slots.get(slot_id.legacy_u32() as usize)
+        // Task #105 B2: dispatch on the slot-id variant — Block-variant
+        // ids index the block's own slots vec.
+        let info = match slot_id {
+            super::block::LirSlotId::Block { idx, .. } => block.slots.get(*idx as usize),
+            super::block::LirSlotId::Resource { idx } => slots.get(*idx as usize),
+        };
+        if let Some(info) = info
             && let LirSlotValType::RefNullForBoundary(b_id) = info.val_ty {
                 implicit_post.push(ImplicitParam::Boundary(b_id));
             }

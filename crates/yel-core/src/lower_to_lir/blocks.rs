@@ -646,11 +646,14 @@ struct DeferredHandlerBody {
     /// into `input_binding_handlers` keyed by `block_id`.
     input_binding_target: Option<DefId>,
     /// For a payload-binding handler (`drop: (payload) { … }`): the scratch
-    /// buffer memory slot and the slot that holds its address. At deferred
-    /// emit the block materializes the buffer address into `payload_addr`
-    /// (`GetSlotAddress`), which the `Ptr`-mode local reads through.
+    /// buffer memory slot and the payload param's LocalId. At deferred emit
+    /// the block allocates an address Temp in ITS OWN slot space (Task #105
+    /// B2: Temps are per-block, so the slot can't be allocated at capture
+    /// time inside the enclosing block's context), binds the param to it,
+    /// and materializes the buffer address (`GetSlotAddress`) for the
+    /// `Ptr`-mode local to read through.
     payload_buf: Option<LirSlotId>,
-    payload_addr: Option<LirSlotId>,
+    payload_param: Option<LocalId>,
     /// Env snapshot: `local_bindings` entries live at structural-walk
     /// time. Restored (additively) during deferred emission so for-loop
     /// loop-vars resolve identically.
@@ -1782,7 +1785,7 @@ impl<'a> BlockLowering<'a> {
                 id,
                 kind: LirSlotKind::WasmParam { idx: 0 },
                 val_ty: LirSlotValType::RefNullForComponent(tree.def_id),
-                name: Some(format!("self_ref_{}", id.legacy_u32())),
+                name: Some(format!("self_ref_{}", id)),
             });
             self.next_slot = self.slots.len() as u32;
             self.resource_self_ref_slot = Some(id);
@@ -4882,19 +4885,14 @@ impl<'a> BlockLowering<'a> {
         // whatever string the fired `event-value` carries. The binding goes
         // into `local_bindings` BEFORE the snapshot below so the deferred
         // body sees it.
-        let (payload_buf, payload_addr) = if let Some(param) = handler.param {
+        let (payload_buf, payload_param) = if let Some(param) = handler.param {
             let buf = self.alloc_memory_slot(8);
             let offset = match self.slots.last().map(|s| &s.kind) {
                 Some(LirSlotKind::Memory { offset, .. }) => *offset,
                 _ => unreachable!("alloc_memory_slot just pushed a Memory slot"),
             };
-            let addr = self.alloc_temp_slot_named("payload_binding_address");
-            self.local_bindings.insert(
-                param,
-                (addr, crate::types::Ty::STRING, LirBindingMode::Ptr),
-            );
             self.payload_binding_handlers.insert(block_id, offset as i32);
-            (Some(buf), Some(addr))
+            (Some(buf), Some(param))
         } else {
             (None, None)
         };
@@ -4904,7 +4902,7 @@ impl<'a> BlockLowering<'a> {
             body: handler.body.clone(),
             input_binding_target: handler.input_binding_target,
             payload_buf,
-            payload_addr,
+            payload_param,
             local_bindings: self.local_bindings.clone(),
             outer_item_field_slots: self.outer_item_field_slots.clone(),
             for_stack: self.for_stack.clone(),
@@ -5331,10 +5329,16 @@ impl<'a> BlockLowering<'a> {
 
         self.pending_block_id_override = Some(d.block_id);
         self.start_block();
-        // Payload-binding handler: materialize the scratch buffer's address
-        // into `payload_addr` so the `Ptr`-mode `payload` local reads the
-        // fat pointer dispatch wrote there.
-        if let (Some(buf), Some(addr)) = (d.payload_buf, d.payload_addr) {
+        // Payload-binding handler: allocate the address Temp in the
+        // handler block's own slot space, bind the param to it, and
+        // materialize the scratch buffer's address so the `Ptr`-mode
+        // `payload` local reads the fat pointer dispatch wrote there.
+        if let (Some(buf), Some(param)) = (d.payload_buf, d.payload_param) {
+            let addr = self.alloc_temp_slot_named("payload_binding_address");
+            self.local_bindings.insert(
+                param,
+                (addr, crate::types::Ty::STRING, LirBindingMode::Ptr),
+            );
             self.emit(LirOp::GetSlotAddress {
                 mem_slot: buf,
                 result: addr,
@@ -5447,7 +5451,7 @@ impl<'a> BlockLowering<'a> {
             id,
             kind: LirSlotKind::Temp { local_idx },
             val_ty: LirSlotValType::I32,
-            name: Some(format!("trigger_dispatch_parent_{}", id.legacy_u32())),
+            name: Some(format!("trigger_dispatch_parent_{}", id)),
         });
         self.deferred_dummy_parent_slot_cache = Some(id);
         id
@@ -5502,7 +5506,7 @@ impl<'a> BlockLowering<'a> {
     /// this at every semantic allocation site.
     pub(crate) fn alloc_temp_slot_named(&mut self, name: impl Into<String>) -> LirSlotId {
         let id = self.alloc_temp_slot_typed(LirSlotValType::I32);
-        let name_str = format!("{}_{}", name.into(), id.legacy_u32());
+        let name_str = format!("{}_{}", name.into(), id);
         self.slot_info_mut(id).name = Some(name_str);
         id
     }
@@ -5516,7 +5520,7 @@ impl<'a> BlockLowering<'a> {
         name: impl Into<String>,
     ) -> LirSlotId {
         let id = self.alloc_temp_slot_typed(val_ty);
-        let name_str = format!("{}_{}", name.into(), id.legacy_u32());
+        let name_str = format!("{}_{}", name.into(), id);
         self.slot_info_mut(id).name = Some(name_str);
         id
     }
@@ -5679,7 +5683,7 @@ impl<'a> BlockLowering<'a> {
                                     dest_first_slot: dest_first,
                                 });
                                 for i in 0..count {
-                                    let val = LirSlotId::resource(dest_first.legacy_u32() + i);
+                                    let val = dest_first.offset_by(i);
                                     self.emit(LirOp::StructSetSym {
                                         ty_ref: crate::lir::block::LirTypeRef::ComponentStruct,
                                         field: gc.field_start + i,
@@ -5870,7 +5874,7 @@ impl<'a> BlockLowering<'a> {
                     .resource_self_ref_slot
                     .expect("resource_self_ref_slot allocated at top of lower_component");
                 for i in 0..gc.field_count {
-                    let val = LirSlotId::resource(dest_first.legacy_u32() + i);
+                    let val = dest_first.offset_by(i);
                     self.emit(LirOp::StructSetSym {
                         ty_ref: crate::lir::block::LirTypeRef::ComponentStruct,
                         field: gc.field_start + i,
@@ -6035,7 +6039,7 @@ impl<'a> BlockLowering<'a> {
                 dest_first_slot: dest_first,
             });
             for i in 0..count {
-                let val = LirSlotId::resource(dest_first.legacy_u32() + i);
+                let val = dest_first.offset_by(i);
                 self.emit(LirOp::GlobalFieldSet {
                     block: block_def,
                     field: field_start + i,
@@ -6074,15 +6078,34 @@ impl<'a> BlockLowering<'a> {
     }
 
     fn alloc_temp_slot_typed(&mut self, val_ty: LirSlotValType) -> LirSlotId {
-        // Task #105 B2: per-block migration reverted again — landing
-        // alloc-side without ALSO migrating the synth-pass slot
-        // allocators (synth_internal_constructor_block,
-        // synth_one_global_fanout_block, etc., which push directly to
-        // component.slots) creates val-ty resolution failures during
-        // function-type registration (block.params slot val_tys not
-        // visible in component.slots when wasm types are built).
-        // Full migration requires updating synth passes as part of the
-        // same step.
+        // Task #105 B2 — the allocator flip. Inside a block context,
+        // Temps live on the block itself: Block-variant id, per-block
+        // local_idx from 0. Each generated function then declares only
+        // its own block's temps instead of every temp in the component.
+        // Outside any block (component-setup allocations), fall back to
+        // the component-wide Resource space — those few slots are
+        // declared in every function, which is correct for genuinely
+        // shared scratch.
+        //
+        // Codegen enforces the frame invariant loudly: a Block-variant
+        // slot referenced while generating a DIFFERENT block panics in
+        // `scratch::slot_info` (cross-block Temp references have no
+        // local in the foreign frame).
+        if let Some(&current_block) = self.pending_block_ids.last() {
+            let id = LirSlotId::Block {
+                block: current_block,
+                idx: self.current_block_slots.len() as u16,
+            };
+            let local_idx = self.current_block_local_idx;
+            self.current_block_local_idx += 1;
+            self.current_block_slots.push(LirSlotInfo {
+                id,
+                kind: LirSlotKind::Temp { local_idx },
+                val_ty,
+                name: None,
+            });
+            return id;
+        }
         let id = LirSlotId::resource(self.next_slot);
         self.next_slot += 1;
         let local_idx = self.next_local_idx;
@@ -6322,20 +6345,9 @@ use crate::lir::layout::{max_flat_counts, FlatValTypeCounts};
 pub(crate) fn allocate_boundary_param_slots(component: &mut LirResource) {
     use crate::lir::block::{LirSlotInfo, LirSlotKind, LirSlotValType};
 
-    // First, count the next free local_idx by walking existing Temp
-    // slots — we append new locals to the end of the LIR-frame's
-    // local space.
-    let mut next_local: u32 = component
-        .slots
-        .iter()
-        .filter_map(|s| match s.kind {
-            LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
-
-    // Allocate slots and patch up each block in turn.
+    // Task #105 B2: each block's boundary-param mirror slots live on
+    // the block itself (Block-variant ids, per-block local_idx) — the
+    // slots are only ever read inside that block's function frame.
     let block_ids_with_bp: Vec<usize> = component
         .blocks
         .iter()
@@ -6351,12 +6363,19 @@ pub(crate) fn allocate_boundary_param_slots(component: &mut LirResource) {
 
     for block_idx in block_ids_with_bp {
         let bps = component.blocks[block_idx].boundary_params.clone();
+        let block = &mut component.blocks[block_idx];
         let mut slot_ids: Vec<LirSlotId> = Vec::with_capacity(bps.len());
         for b_id in bps {
-            let slot_id = LirSlotId::resource(component.slots.len() as u32);
-            let local_idx = next_local;
-            next_local += 1;
-            component.slots.push(LirSlotInfo {
+            let local_idx = block
+                .slots
+                .iter()
+                .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
+                .count() as u32;
+            let slot_id = LirSlotId::Block {
+                block: block.id,
+                idx: block.slots.len() as u16,
+            };
+            block.slots.push(LirSlotInfo {
                 id: slot_id,
                 kind: LirSlotKind::Temp { local_idx },
                 val_ty: LirSlotValType::RefNullForBoundary(b_id),
@@ -6364,7 +6383,7 @@ pub(crate) fn allocate_boundary_param_slots(component: &mut LirResource) {
             });
             slot_ids.push(slot_id);
         }
-        component.blocks[block_idx].boundary_param_slots = slot_ids;
+        block.boundary_param_slots = slot_ids;
     }
 }
 
@@ -6750,22 +6769,19 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
         return;
     }
 
-    // Helper: next local_idx past current max Temp.
-    fn next_local_idx(component: &LirResource) -> u32 {
-        component
+    // Task #105 B2: synth-pass slot allocations land on each new block's
+    // own `slots` vec (Block-variant ids, per-block local_idx from 0).
+    fn alloc_block_temp(block: &mut LirBlock, val_ty: LirSlotValType, name: &str) -> LirSlotId {
+        let local_idx = block
             .slots
             .iter()
-            .filter_map(|s| match s.kind {
-                LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0)
-    }
-    fn alloc_temp(component: &mut LirResource, val_ty: LirSlotValType, name: &str) -> LirSlotId {
-        let local_idx = next_local_idx(component);
-        let id = LirSlotId::resource(component.slots.len() as u32);
-        component.slots.push(LirSlotInfo {
+            .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
+            .count() as u32;
+        let id = LirSlotId::Block {
+            block: block.id,
+            idx: block.slots.len() as u16,
+        };
+        block.slots.push(LirSlotInfo {
             id,
             kind: LirSlotKind::Temp { local_idx },
             val_ty,
@@ -6773,7 +6789,24 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
         });
         id
     }
-    let next_block_id = |_component: &LirResource| -> BlockId { ctx.alloc_block_id() };
+    fn alloc_block_wasm_param(
+        block: &mut LirBlock,
+        wasm_param_idx: u32,
+        val_ty: LirSlotValType,
+        name: &str,
+    ) -> LirSlotId {
+        let id = LirSlotId::Block {
+            block: block.id,
+            idx: block.slots.len() as u16,
+        };
+        block.slots.push(LirSlotInfo {
+            id,
+            kind: LirSlotKind::WasmParam { idx: wasm_param_idx },
+            val_ty,
+            name: Some(name.to_string()),
+        });
+        id
+    }
 
     let def_id = component.def_id;
     let self_handle_field = component.comp_struct_layout.self_handle_field_idx;
@@ -6788,15 +6821,17 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
 
     // === 1. Export constructor block ===
     {
-        let self_ref = alloc_temp(
-            component, LirSlotValType::RefNullForComponent(def_id), "export_ctor_self_ref",
+        let block_id = ctx.alloc_block_id();
+        let mut block = LirBlock::new(block_id);
+        let self_ref = alloc_block_temp(
+            &mut block, LirSlotValType::RefNullForComponent(def_id), "export_ctor_self_ref",
         );
-        let handle = alloc_temp(component, LirSlotValType::I32, "export_ctor_handle");
-        let idx_scratch = alloc_temp(component, LirSlotValType::I32, "export_ctor_idx_scratch");
-        let arr_scratch = alloc_temp(
-            component, LirSlotValType::RefNullForSharedHandleArray, "export_ctor_arr_scratch",
+        let handle = alloc_block_temp(&mut block, LirSlotValType::I32, "export_ctor_handle");
+        let idx_scratch = alloc_block_temp(&mut block, LirSlotValType::I32, "export_ctor_idx_scratch");
+        let arr_scratch = alloc_block_temp(
+            &mut block, LirSlotValType::RefNullForSharedHandleArray, "export_ctor_arr_scratch",
         );
-        let host_handle = alloc_temp(component, LirSlotValType::I32, "export_ctor_host_handle");
+        let host_handle = alloc_block_temp(&mut block, LirSlotValType::I32, "export_ctor_host_handle");
         let ops = vec![
             LirOp::CallBlock { block: internal_ctor, args: Vec::new(), result: Some(self_ref) },
             LirOp::RegistryAlloc {
@@ -6809,8 +6844,6 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
                 field: self_handle_field, rec: self_ref, value: host_handle,
             },
         ];
-        let block_id = next_block_id(component);
-        let mut block = LirBlock::new(block_id);
         block.ops = ops;
         block.params = Vec::new();
         block.implicit_self = None;
@@ -6821,25 +6854,17 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
 
     // === 2. Export mount block ===
     {
-        let handle_param_idx = LirSlotId::resource(component.slots.len() as u32);
-        component.slots.push(LirSlotInfo {
-            id: handle_param_idx,
-            kind: LirSlotKind::WasmParam { idx: 0 },
-            val_ty: LirSlotValType::I32,
-            name: Some("export_mount_handle".to_string()),
-        });
-        let root_param_idx = LirSlotId::resource(component.slots.len() as u32);
-        component.slots.push(LirSlotInfo {
-            id: root_param_idx,
-            kind: LirSlotKind::WasmParam { idx: 1 },
-            val_ty: LirSlotValType::I32,
-            name: Some("export_mount_root".to_string()),
-        });
-        let self_ref = alloc_temp(
-            component, LirSlotValType::RefNullForComponent(def_id), "export_mount_self_ref",
+        let block_id = ctx.alloc_block_id();
+        let mut block = LirBlock::new(block_id);
+        let handle_param_idx =
+            alloc_block_wasm_param(&mut block, 0, LirSlotValType::I32, "export_mount_handle");
+        let root_param_idx =
+            alloc_block_wasm_param(&mut block, 1, LirSlotValType::I32, "export_mount_root");
+        let self_ref = alloc_block_temp(
+            &mut block, LirSlotValType::RefNullForComponent(def_id), "export_mount_self_ref",
         );
         let result_slot = if children_root.is_some() {
-            Some(alloc_temp(component, LirSlotValType::I32, "export_mount_result"))
+            Some(alloc_block_temp(&mut block, LirSlotValType::I32, "export_mount_result"))
         } else {
             None
         };
@@ -6854,8 +6879,6 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
                 block: mount_block, args: vec![self_ref, root_param_idx], result: result_slot,
             },
         ];
-        let block_id = next_block_id(component);
-        let mut block = LirBlock::new(block_id);
         block.ops = ops;
         block.params = vec![handle_param_idx, root_param_idx];
         block.implicit_self = None;
@@ -6866,15 +6889,12 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
 
     // === 3. Export unmount block ===
     {
-        let handle_param_idx = LirSlotId::resource(component.slots.len() as u32);
-        component.slots.push(LirSlotInfo {
-            id: handle_param_idx,
-            kind: LirSlotKind::WasmParam { idx: 0 },
-            val_ty: LirSlotValType::I32,
-            name: Some("export_unmount_handle".to_string()),
-        });
-        let self_ref = alloc_temp(
-            component, LirSlotValType::RefNullForComponent(def_id), "export_unmount_self_ref",
+        let block_id = ctx.alloc_block_id();
+        let mut block = LirBlock::new(block_id);
+        let handle_param_idx =
+            alloc_block_wasm_param(&mut block, 0, LirSlotValType::I32, "export_unmount_handle");
+        let self_ref = alloc_block_temp(
+            &mut block, LirSlotValType::RefNullForComponent(def_id), "export_unmount_self_ref",
         );
         let ops = vec![
             LirOp::RegistryLookupToSelfRef {
@@ -6884,8 +6904,6 @@ pub(crate) fn synth_export_lifecycle_blocks(ctx: &CompilerContext, component: &m
                 block: internal_unmount, args: vec![self_ref], result: None,
             },
         ];
-        let block_id = next_block_id(component);
-        let mut block = LirBlock::new(block_id);
         block.ops = ops;
         block.params = vec![handle_param_idx];
         block.implicit_self = None;
@@ -6997,10 +7015,18 @@ pub(crate) fn synth_global_fanout_blocks(
                 .find(|b| b.id == effect.update_block);
             let simple = match update_block {
                 Some(b) => b.params.iter().all(|slot_id| {
-                    matches!(
-                        component.slots[slot_id.legacy_u32() as usize].val_ty,
-                        crate::lir::block::LirSlotValType::I32
-                    )
+                    // Task #105 B2: dispatch on the slot-id variant —
+                    // Block-variant params live on the update block's own
+                    // slots vec.
+                    let val_ty = match slot_id {
+                        LirSlotId::Block { idx, .. } => {
+                            b.slots.get(*idx as usize).map(|s| s.val_ty)
+                        }
+                        LirSlotId::Resource { idx } => {
+                            component.slots.get(*idx as usize).map(|s| s.val_ty)
+                        }
+                    };
+                    matches!(val_ty, Some(crate::lir::block::LirSlotValType::I32))
                 }),
                 None => false,
             };
@@ -7070,29 +7096,27 @@ fn synth_one_global_fanout_block(
 
     let comp_def = component.def_id;
 
-    // Slot allocator local to this synth — appends fresh Temp slots
-    // to `component.slots` with contiguous local_idx (after the
-    // current max).
+    // Task #105 B2: slot allocator local to this synth — appends fresh
+    // Temp slots to the fanout block's own `slots` vec (Block-variant
+    // ids, per-block contiguous local_idx from 0).
+    let mut new_block = LirBlock::new(fanout_block_id);
     fn alloc_slot(
-        component: &mut LirResource,
+        block: &mut LirBlock,
         val_ty: LirSlotValType,
         name: Option<String>,
     ) -> LirSlotId {
-        let next_local_idx: u32 = component
+        let local_idx = block
             .slots
             .iter()
-            .filter_map(|s| match s.kind {
-                LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0);
-        let id = LirSlotId::resource(component.slots.len() as u32);
-        component.slots.push(LirSlotInfo {
+            .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
+            .count() as u32;
+        let id = LirSlotId::Block {
+            block: block.id,
+            idx: block.slots.len() as u16,
+        };
+        block.slots.push(LirSlotInfo {
             id,
-            kind: LirSlotKind::Temp {
-                local_idx: next_local_idx,
-            },
+            kind: LirSlotKind::Temp { local_idx },
             val_ty,
             name,
         });
@@ -7103,53 +7127,53 @@ fn synth_one_global_fanout_block(
     // with `block_1param`). The block has `implicit_self: None` and
     // no `params` vec — it's called as `(i32) -> ()` from the writer.
     let dummy_parent =
-        alloc_slot(component, LirSlotValType::I32, Some(format!("fanout_dummy_parent_s{}", signal_def.0)));
+        alloc_slot(&mut new_block, LirSlotValType::I32, Some(format!("fanout_dummy_parent_s{}", signal_def.0)));
 
     // Loop scratch + cached values.
     let idx_slot = alloc_slot(
-        component,
+        &mut new_block,
         LirSlotValType::I32,
         Some(format!("fanout_idx_s{}", signal_def.0)),
     );
     let registry_slot = alloc_slot(
-        component,
+        &mut new_block,
         LirSlotValType::RefNullForSharedHandleArray,
         Some(format!("fanout_registry_s{}", signal_def.0)),
     );
     let registry_isnull = alloc_slot(
-        component,
+        &mut new_block,
         LirSlotValType::I32,
         Some(format!("fanout_reg_isnull_s{}", signal_def.0)),
     );
     let len_slot = alloc_slot(
-        component,
+        &mut new_block,
         LirSlotValType::I32,
         Some(format!("fanout_len_s{}", signal_def.0)),
     );
     let break_cond = alloc_slot(
-        component,
+        &mut new_block,
         LirSlotValType::I32,
         Some(format!("fanout_break_s{}", signal_def.0)),
     );
     let entry_slot = alloc_slot(
-        component,
+        &mut new_block,
         LirSlotValType::RefNullForSharedHandle,
         Some(format!("fanout_entry_s{}", signal_def.0)),
     );
     let entry_isnull = alloc_slot(
-        component,
+        &mut new_block,
         LirSlotValType::I32,
         Some(format!("fanout_entry_isnull_s{}", signal_def.0)),
     );
     // Task #98: `$handle.$inst` is anyref; load it here before
     // `ref.cast` narrows to the typed component ref.
     let inst_anyref = alloc_slot(
-        component,
+        &mut new_block,
         LirSlotValType::AnyRef,
         Some(format!("fanout_inst_anyref_s{}", signal_def.0)),
     );
     let inst_typed = alloc_slot(
-        component,
+        &mut new_block,
         LirSlotValType::RefNullForComponent(comp_def),
         Some(format!("fanout_inst_s{}", signal_def.0)),
     );
@@ -7240,7 +7264,8 @@ fn synth_one_global_fanout_block(
     // its parent is resolved first (or fetch from root directly).
     fn resolve_chain(
         b_id: TreeBoundaryId,
-        component: &mut LirResource,
+        component: &LirResource,
+        fanout_block: &mut LirBlock,
         comp_def: DefId,
         signal_def: DefId,
         inst_typed: LirSlotId,
@@ -7259,25 +7284,25 @@ fn synth_one_global_fanout_block(
             .get(b_id.index())
             .and_then(|s| s.parent);
 
-        // Allocate a slot for this boundary's typed ref.
+        // Allocate a slot for this boundary's typed ref on the fanout
+        // block itself (Task #105 B2: Block-variant, per-block local_idx).
         fn alloc_slot_local(
-            component: &mut LirResource,
+            block: &mut LirBlock,
             val_ty: LirSlotValType,
             name: Option<String>,
         ) -> LirSlotId {
-            let next_local_idx: u32 = component
+            let local_idx = block
                 .slots
                 .iter()
-                .filter_map(|s| match s.kind {
-                    LirSlotKind::Temp { local_idx } => Some(local_idx + 1),
-                    _ => None,
-                })
-                .max()
-                .unwrap_or(0);
-            let id = LirSlotId::resource(component.slots.len() as u32);
-            component.slots.push(LirSlotInfo {
+                .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
+                .count() as u32;
+            let id = LirSlotId::Block {
+                block: block.id,
+                idx: block.slots.len() as u16,
+            };
+            block.slots.push(LirSlotInfo {
                 id,
-                kind: LirSlotKind::Temp { local_idx: next_local_idx },
+                kind: LirSlotKind::Temp { local_idx },
                 val_ty,
                 name,
             });
@@ -7285,7 +7310,7 @@ fn synth_one_global_fanout_block(
         }
 
         let dest = alloc_slot_local(
-            component,
+            fanout_block,
             LirSlotValType::RefNullForBoundary(b_id),
             Some(format!("fanout_b{}_s{}", b_id.0, signal_def.0)),
         );
@@ -7306,6 +7331,7 @@ fn synth_one_global_fanout_block(
                 let parent_slot = resolve_chain(
                     parent_b_id,
                     component,
+                    fanout_block,
                     comp_def,
                     signal_def,
                     inst_typed,
@@ -7336,6 +7362,7 @@ fn synth_one_global_fanout_block(
         resolve_chain(
             *b_id,
             component,
+            &mut new_block,
             comp_def,
             signal_def,
             inst_typed,
@@ -7426,14 +7453,13 @@ fn synth_one_global_fanout_block(
         name: Some(format!("fanout_s{}_loop", signal_def.0)),
     });
 
-    // Build the block.
-    let mut block = LirBlock::new(fanout_block_id);
-    block.ops = outer;
-    block.params = vec![dummy_parent];
-    block.implicit_self = None;
-    block.return_slot = None;
-    block.max_flat_scratch_counts = (0, 0, 0, 0);
-    component.blocks.push(block);
+    // Finish the block (slots were allocated onto it above).
+    new_block.ops = outer;
+    new_block.params = vec![dummy_parent];
+    new_block.implicit_self = None;
+    new_block.return_slot = None;
+    new_block.max_flat_scratch_counts = (0, 0, 0, 0);
+    component.blocks.push(new_block);
 
     ctx.set_block_name(
         comp_def,

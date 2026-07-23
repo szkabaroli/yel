@@ -920,6 +920,10 @@ impl<'a> WasmPackageBuilder<'a> {
             .filter(|&(&ty, _)| self.is_scalar_list_ty(ty))
             .map(|(&ty, &arr_idx)| (ty, arr_idx))
             .collect();
+        // Determinism: `list_array_type_idx` is a HashMap — sort by the GC
+        // array type index so the materializer type/function order (and with
+        // it the emitted wasm) is byte-stable across runs.
+        gc_list_arr_type_idxs.sort_by_key(|&(_, arr_idx)| arr_idx);
         // strings-to-GC (`plans/strings-to-gc.md`): the `$str_bytes` array
         // gets a materializer/un-materializer too, keyed by `Ty::STRING`.
         // Appended last so it never perturbs the list entries' indices.

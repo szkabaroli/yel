@@ -740,7 +740,10 @@ fn hash_block_ref<H: Hasher>(
 /// identical modulo slot-allocation order map to the same normalised
 /// id space.
 struct SlotNormalizer {
-    map: HashMap<u32, u32>,
+    // Keyed by the full `LirSlotId`: per-block slot indices restart at
+    // 0, so two `Block`-variant slots from different blocks share a flat
+    // index and would collide under a bare `u32` key.
+    map: HashMap<LirSlotId, u32>,
     next: u32,
 }
 
@@ -753,12 +756,12 @@ impl SlotNormalizer {
     }
 
     fn norm(&mut self, slot: LirSlotId) -> u32 {
-        if let Some(v) = self.map.get(&slot.legacy_u32()) {
+        if let Some(v) = self.map.get(&slot) {
             return *v;
         }
         let v = self.next;
         self.next += 1;
-        self.map.insert(slot.legacy_u32(), v);
+        self.map.insert(slot, v);
         v
     }
 }

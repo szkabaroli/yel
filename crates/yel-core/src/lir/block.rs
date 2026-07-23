@@ -123,9 +123,9 @@ pub enum LirGlobalRef {
 ///   Indexes into `LirResource.slots`.
 ///
 /// Task #105 Phase B: this enum supersedes the legacy `pub struct
-/// LirSlotId(pub u32)` flat-index form. Construction sites must
-/// classify which variant they intend; `legacy_u32()` exists as a
-/// scaffold while mechanical fixes land.
+/// LirSlotId(pub u32)` flat-index form. `Block`-variant slots index the
+/// owning block's `slots` vec; `Resource`-variant slots index
+/// `LirResource.slots`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum LirSlotId {
     /// Per-block local (Temp or WasmParam). Indexes into block.slots.
@@ -134,19 +134,18 @@ pub enum LirSlotId {
     Resource { idx: u32 },
 }
 
-impl LirSlotId {
-    /// SCAFFOLD (#105): mechanical bridge for sites that still treat
-    /// the slot id as a flat index. Phase B3 is supposed to remove
-    /// every caller — audit by grepping for `legacy_u32`.
-    pub fn legacy_u32(&self) -> u32 {
+impl std::fmt::Display for LirSlotId {
+    /// Compact human-readable form for debug names: `r<idx>` for a
+    /// Resource slot, `b<block>i<idx>` for a Block slot.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            // TODO #105: classify
-            Self::Block { idx, .. } => *idx as u32,
-            // TODO #105: classify
-            Self::Resource { idx } => *idx,
+            Self::Block { block, idx } => write!(formatter, "b{}i{}", block.0, idx),
+            Self::Resource { idx } => write!(formatter, "r{}", idx),
         }
     }
+}
 
+impl LirSlotId {
     /// SCAFFOLD (#105): construct a `Resource`-variant slot id from a
     /// flat index. Use only when the caller knows the index targets
     /// `LirResource.slots` (Memory / BoundaryField).
@@ -159,6 +158,23 @@ impl LirSlotId {
     /// known-current block.
     pub fn block(block: BlockId, idx: u16) -> Self {
         Self::Block { block, idx }
+    }
+
+    /// Address the slot `offset` positions after this one, preserving the
+    /// variant. Valid only for multi-slot values whose slots were allocated
+    /// contiguously in the same space (the same block for `Block`-variant
+    /// ids) — which the allocator guarantees for `EvalExprToSlots`
+    /// destinations.
+    pub fn offset_by(&self, offset: u32) -> Self {
+        match self {
+            Self::Block { block, idx } => Self::Block {
+                block: *block,
+                idx: idx
+                    .checked_add(offset as u16)
+                    .expect("offset_by: per-block slot index overflow"),
+            },
+            Self::Resource { idx } => Self::Resource { idx: idx + offset },
+        }
     }
 }
 
@@ -378,7 +394,12 @@ impl LirBlock {
         slots: &'a [LirSlotInfo],
     ) -> impl Iterator<Item = TreeBoundaryId> + 'a {
         self.boundary_param_slots.iter().map(move |slot_id| {
-            let info = &slots[slot_id.legacy_u32() as usize];
+            // Task #105 B2: Block-variant ids index this block's own
+            // slots; Resource-variant the component's.
+            let info = match slot_id {
+                LirSlotId::Block { idx, .. } => &self.slots[*idx as usize],
+                LirSlotId::Resource { idx } => &slots[*idx as usize],
+            };
             match info.val_ty {
                 LirSlotValType::RefNullForBoundary(b_id) => b_id,
                 ref other => panic!(

@@ -23,13 +23,17 @@ Two crate-level invariants keep debt *loud* rather than silent — keep them:
 > [`ARCHITECTURE.md §0`](ARCHITECTURE.md). Each bridge is debt *only* until that
 > migration lands; the fix is "finish the generalization," not "patch the bridge."
 
-### 1.1 `LirSlotId::legacy_u32()` — the slot-ladder bridge
-Slots are mid-migration from a raw `u32` index to a typed `LirSlotId` enum. The
-shim `legacy_u32()` is called all over codegen and LIR helpers to fall back to
-the old flat index, e.g. `lir/arena.rs:62`, `lir/dedupe.rs:765`,
-`lir/boundary_rewrite.rs:530`, `lir/function.rs:251`. **Every `legacy_u32()` call
-is a migration site**; the typed path should eventually make it unreachable.
-(Git log: "Wire up per-block slot ladder; defer allocator flip".)
+### 1.1 `LirSlotId` slot ladder — RESOLVED (allocator flipped)
+Temps are per-block: `alloc_temp_slot_typed` allocates `LirSlotId::Block`
+into the current block's `slots` vec, every synth pass
+(`synth_export_lifecycle_blocks`, `synth_one_global_fanout_block`, …),
+`allocate_boundary_param_slots`, and the `boundary_rewrite` walk-slot
+allocators do the same, and each generated function declares only its own
+block's temps plus the few genuinely shared `Resource` temps. Cross-block
+Temp references panic loudly in codegen (`scratch::slot_info`). The
+`legacy_u32()` bridge itself is deleted (debug names render slot ids via
+`Display`). No flat index lookups survive. Measured on the complex fuzz fixture: 136,756 →
+1,573 declared locals; dev component 3.0 MB → 77 KB.
 
 ### 1.2 `tree_shape` side-channel + `BoundaryField` chain walk
 `LirResource.tree_shape` is a parallel representation that codegen reads to emit

@@ -106,15 +106,24 @@ pub fn rewrite_struct_field_ops(component: &mut LirResource) -> usize {
         // to fix bugs.
         let all_unbound: Vec<TreeBoundaryId> =
             collect_unbound_boundary_ids(&component.blocks[bi].ops, &current);
+        // Task #105 B2: walk slots are per-block scratch — allocate them
+        // on the block itself (Block-variant ids, per-block local_idx).
+        // `struct_types` is read while the block's slots are mutated;
+        // destructure so the borrows are disjoint fields.
+        let block_id = component.blocks[bi].id;
         let mut prologue: Vec<LirOp> = Vec::new();
         for b_id in &all_unbound {
             // Strategy 1: chain from `$self.tree` (Root) down to
             // `b_id`. Use the existing `BoundaryRefFromSelf` op,
             // which encapsulates the full walk in codegen.
             if boundary_self_walkable(&component.struct_types, *b_id) {
-                let slot_id = LirSlotId::resource(component.slots.len() as u32);
-                let local_idx = next_local_idx(&component.slots);
-                component.slots.push(crate::lir::block::LirSlotInfo {
+                let block_slots = &mut component.blocks[bi].slots;
+                let slot_id = LirSlotId::Block {
+                    block: block_id,
+                    idx: block_slots.len() as u16,
+                };
+                let local_idx = next_local_idx(block_slots);
+                block_slots.push(crate::lir::block::LirSlotInfo {
                     id: slot_id,
                     kind: crate::lir::block::LirSlotKind::Temp { local_idx },
                     val_ty: crate::lir::block::LirSlotValType::RefNullForBoundary(*b_id),
@@ -134,28 +143,28 @@ pub fn rewrite_struct_field_ops(component: &mut LirResource) -> usize {
             // `b_id`, the rewriter falls back to lazy in-flow
             // synthesis inside `rewrite_ops` (which sees additional
             // `BindBoundaryLocal` / `Alloc*Boundary` bindings).
+            let (blocks, struct_types) =
+                (&mut component.blocks, &component.struct_types);
             try_synthesize_ancestor_chain(
-                &component.struct_types,
+                struct_types,
                 *b_id,
                 &mut current,
-                &mut component.slots,
+                block_id,
+                &mut blocks[bi].slots,
                 &mut prologue,
             );
         }
 
-        // Lazy ancestor-chain synthesis inside `rewrite_ops` needs
-        // mutable access to `component.slots` (to allocate fresh
-        // ref slots) and read access to `component.struct_types`
-        // (to walk parent links). Pass the latter by clone-free
-        // immutable borrow alongside the mutable slots vec.
+        // Lazy ancestor-chain synthesis inside `rewrite_ops` allocates
+        // fresh ref slots on the block and reads
+        // `component.struct_types` to walk parent links.
         let original_ops = std::mem::take(&mut component.blocks[bi].ops);
-        // `struct_types` is read-only here while `slots` is mutated; pass them
-        // as a disjoint field borrow (same shape as `try_synthesize_ancestor_chain`
-        // above) instead of cloning the whole table per block.
+        let (blocks, struct_types) = (&mut component.blocks, &component.struct_types);
         let mut new_ops = rewrite_ops(
             original_ops,
-            &mut component.slots,
-            &component.struct_types,
+            block_id,
+            &mut blocks[bi].slots,
+            struct_types,
             &mut current,
             &mut total,
         );
@@ -242,6 +251,7 @@ fn try_synthesize_ancestor_chain(
     struct_types: &[crate::lir::struct_types::LirStructTypeDecl],
     b_id: TreeBoundaryId,
     current: &mut HashMap<TreeBoundaryId, LirSlotId>,
+    block_id: crate::ids::BlockId,
     slots: &mut Vec<LirSlotInfo>,
     out: &mut Vec<LirOp>,
 ) {
@@ -260,7 +270,11 @@ fn try_synthesize_ancestor_chain(
         let rec_slot = *current
             .get(&parent_id)
             .expect("ancestor bound either pre-seed or earlier in this loop");
-        let slot_id = LirSlotId::resource(slots.len() as u32);
+        // Task #105 B2: walk slots live on the block being rewritten.
+        let slot_id = LirSlotId::Block {
+            block: block_id,
+            idx: slots.len() as u16,
+        };
         let local_idx = next_local_idx(slots);
         slots.push(LirSlotInfo {
             id: slot_id,
@@ -339,6 +353,7 @@ fn walk(
 
 fn rewrite_ops(
     ops: Vec<LirOp>,
+    block_id: crate::ids::BlockId,
     slots: &mut Vec<LirSlotInfo>,
     struct_types: &[crate::lir::struct_types::LirStructTypeDecl],
     current: &mut HashMap<TreeBoundaryId, LirSlotId>,
@@ -352,6 +367,7 @@ fn rewrite_ops(
     fn resolve_rec(
         boundary_id: TreeBoundaryId,
         current: &mut HashMap<TreeBoundaryId, LirSlotId>,
+        block_id: crate::ids::BlockId,
         slots: &mut Vec<LirSlotInfo>,
         struct_types: &[crate::lir::struct_types::LirStructTypeDecl],
         out: &mut Vec<LirOp>,
@@ -359,7 +375,7 @@ fn rewrite_ops(
         if let Some(s) = current.get(&boundary_id).copied() {
             return Some(s);
         }
-        try_synthesize_ancestor_chain(struct_types, boundary_id, current, slots, out);
+        try_synthesize_ancestor_chain(struct_types, boundary_id, current, block_id, slots, out);
         current.get(&boundary_id).copied()
     }
 
@@ -402,7 +418,7 @@ fn rewrite_ops(
                 field_idx,
                 result,
             } => {
-                if let Some(rec) = resolve_rec(struct_ty, current, slots, struct_types, &mut out) {
+                if let Some(rec) = resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out) {
                     *total += 1;
                     out.push(LirOp::StructGet {
                         rec,
@@ -422,7 +438,7 @@ fn rewrite_ops(
                 field_idx,
                 value,
             } => {
-                if let Some(rec) = resolve_rec(struct_ty, current, slots, struct_types, &mut out) {
+                if let Some(rec) = resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out) {
                     *total += 1;
                     out.push(LirOp::StructSet {
                         rec,
@@ -442,7 +458,7 @@ fn rewrite_ops(
                 field_idx,
                 value,
             } => {
-                if let Some(rec) = resolve_rec(struct_ty, current, slots, struct_types, &mut out) {
+                if let Some(rec) = resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out) {
                     *total += 1;
                     out.push(LirOp::StructSetConst {
                         rec,
@@ -470,8 +486,8 @@ fn rewrite_ops(
                     else_ops,
                     name,
                 } = *if_op;
-                let then_ops = rewrite_ops(then_ops, slots, struct_types, current, total);
-                let else_ops = rewrite_ops(else_ops, slots, struct_types, current, total);
+                let then_ops = rewrite_ops(then_ops, block_id, slots, struct_types, current, total);
+                let else_ops = rewrite_ops(else_ops, block_id, slots, struct_types, current, total);
                 out.push(LirOp::If(Box::new(LirIf {
                     cond,
                     then_ops,
@@ -484,7 +500,7 @@ fn rewrite_ops(
                 body_ops,
                 name,
             } => {
-                let body_ops = rewrite_ops(body_ops, slots, struct_types, current, total);
+                let body_ops = rewrite_ops(body_ops, block_id, slots, struct_types, current, total);
                 out.push(LirOp::Loop {
                     break_cond,
                     body_ops,

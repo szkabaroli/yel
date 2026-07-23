@@ -36,8 +36,8 @@ or `yel-wasm-codegen`.
   non-UI frontend uses. The flow frontend (`yel-flow-core`) already drives codegen
   via `generate_component` / `generate_function_module` through these traits.
 - **How to tell which side a thing is on:** anything named `tree_shape`,
-  `boundary`, `mount`, `BoundaryField`, `has_self_ref_param`, or `yel:ui/dom`,
-  and anything using `LirSlotId::legacy_u32()`, is UI-coupled / transitional and
+  `boundary`, `mount`, `BoundaryField`, `has_self_ref_param`, or `yel:ui/dom`
+  is UI-coupled / transitional and
   is being pushed either *up* into a Yel-only lowering pass or *down* into generic
   LIR ops. New back-end code should depend only on the arena traits and generic
   ops, never on UI concepts.
@@ -234,7 +234,7 @@ concepts. See [`plans/flow-frontend.md`](../plans/flow-frontend.md).
 These are live migrations; expect mixed old/new naming. Details and call-site
 catalogs in [`docs/TECH_DEBT.md`](TECH_DEBT.md) and [`plans/`](../plans).
 
-1. **Typed `SlotId` ladder** — `LirSlotId::legacy_u32()` is a bridge while slots migrate from raw `u32` to a typed enum; many call sites still use it. (Git log: "per-block slot ladder", "typed SlotId enum".)
+1. **Typed `SlotId` ladder — DONE.** Slots are a typed `LirSlotId` enum (`Block` per-block temps / `Resource` component-wide), the allocator is per-block, and the `legacy_u32()` flat-index bridge is deleted. Cross-block Temp references panic loudly in codegen.
 2. **`LirComponent` → `LirResource` + flatten `tree_shape`** — make LIR frontend-agnostic: replace the `tree_shape` side-channel and symbolic `BoundaryField` slot resolution with explicit GC struct-type registrations and `StructGet`/`StructSet` ops. See `plans/lir-resource-flatten.md`.
 3. **WASM-GC representation migration** — move values from canonical-flat (decomposed flat ABI valtypes in slots/memory) to typed WASM-GC structs/arrays (single ref), with `wasm/repr.rs::InternalRepr` as the single source of truth. Half-migrated today (records/tuples/typed lists on GC; option/result/variant still partly flat). Goal: kill the internal canonical-flat bridges (`lir/layout.rs::canonical_flat_valtypes`) and keep flattening only at WIT boundaries; collapse the dual GC+memory signal storage. Detail + fragile invariants in [`TECH_DEBT.md §1.5`](TECH_DEBT.md). (Memory `project_typed_gc_migration_stage0`, `project_signal_storage_dual`.)
 4. **Inline lifecycle decomposition** — `MountComponent` etc. lowering to plain `LirOp`s; blockers tracked in memory `project_mount_component_wrappers`.

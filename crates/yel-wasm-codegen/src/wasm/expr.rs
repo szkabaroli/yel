@@ -113,7 +113,17 @@ impl WasmPackageBuilder<'_> {
                     && let Some(slot_id) = local_to_slot.get(local_id)
                 {
                     // Local is in an inline-computed slot - this is a pointer to the item
-                    let local_idx = slot_local_resource_only(component, *slot_id, local_offset);
+                    // Task #105 B2: the slot may be Block-variant (per-block
+                    // Temp) — resolve against the block being generated.
+                    let local_idx = match self.current_generated_block_id {
+                        Some(block_id) => super::codegen::scratch::slot_local(
+                            component,
+                            component.get_block(block_id),
+                            *slot_id,
+                            local_offset,
+                        ),
+                        None => slot_local_resource_only(component, *slot_id, local_offset),
+                    };
                     func.instruction(&Instruction::LocalGet(local_idx));
 
                     if binding_mode == LirBindingMode::Ptr {

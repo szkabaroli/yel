@@ -120,7 +120,19 @@ pub(crate) fn slot_info<'a>(
 ) -> &'a LirSlotInfo {
     match slot {
         LirSlotId::Block { block: bid, idx } => {
-            debug_assert_eq!(bid, block.id, "slot ref to different block");
+            // Hard check, not debug_assert: a Block-variant slot referenced
+            // while generating a DIFFERENT block has no wasm local in this
+            // frame — indexing the current block's slots would silently read
+            // the wrong slot info and emit a wrong local index. Cross-block
+            // Temp references must either stay Resource-variant or be passed
+            // through block params.
+            if bid != block.id {
+                panic!(
+                    "slot {:?} belongs to block {:?} but is referenced while generating \
+                     block {:?} — cross-block Temp references have no local in this frame",
+                    slot, bid, block.id
+                );
+            }
             &block.slots[idx as usize]
         }
         LirSlotId::Resource { idx } => &component.slots[idx as usize],
