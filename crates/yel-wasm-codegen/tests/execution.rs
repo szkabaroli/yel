@@ -5582,6 +5582,62 @@ fn count_struct_types_with_name_prefix(bytes: &[u8], prefix: &str) -> usize {
 // Gap 1 — post-return (`cabi_post_*`) free-walk for aggregate getters
 // ============================================================================
 
+/// gc-variant with a **composite** (record) payload — the increment-1 unlock.
+/// A variant case carrying a record used to hit the scalar fallthrough in the
+/// payload lift/pack (`struct.get 0` of a record ref stored as a scalar →
+/// "expected i32, found (ref)"). The lift/pack now recurse into the composite
+/// through a `PayloadOf` source. `b(s64)` forces the canonical `join` to widen
+/// the payload's slot 0 to i64, so the record's `x` field param is declared i64
+/// and must be narrowed back to i32 — a wrong bridge corrupts the value, so
+/// this asserts the exact `Val` for both the record-payload case (`a`) and the
+/// wide-scalar case (`b`).
+#[test]
+fn variant_with_record_payload_roundtrip() {
+    let source = r#"
+        package yel:vrecpay@0.1.0;
+        record R { x: s32, y: string }
+        variant V {
+            a(R),
+            b(s64),
+            c,
+        }
+        export component App {
+            e: V = V.c;
+            VStack { Text { "ok" } }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let iface = "yel:vrecpay/app-component@0.1.0";
+    let (mut h, _dom) = instantiate(&bytes, &[]);
+    let r = ctor_and_mount(&mut h, iface, "app");
+    let getter = get_func(&mut h, iface, "[method]app.get-e");
+    let read = |h: &mut Harness| {
+        let mut out = [Val::Bool(false)];
+        getter
+            .call(&mut h.store, &[Val::Resource(r)], &mut out)
+            .expect("get-e");
+        out[0].clone()
+    };
+
+    let va = Val::Variant(
+        "a".into(),
+        Some(Box::new(Val::Record(vec![
+            ("x".into(), Val::S32(7)),
+            ("y".into(), Val::String("hi".into())),
+        ]))),
+    );
+    call_setter(&mut h, iface, "app", "e", &r, va.clone());
+    assert_eq!(read(&mut h), va, "V.a({{x:7, y:\"hi\"}}) must round-trip");
+
+    let vb = Val::Variant("b".into(), Some(Box::new(Val::S64(5))));
+    call_setter(&mut h, iface, "app", "e", &r, vb.clone());
+    assert_eq!(read(&mut h), vb, "V.b(5) must round-trip");
+
+    let vc = Val::Variant("c".into(), None);
+    call_setter(&mut h, iface, "app", "e", &r, vc.clone());
+    assert_eq!(read(&mut h), vc, "V.c must round-trip");
+}
+
 /// A GC-migrated `list` signal's getter materialises a fresh linear-memory
 /// buffer per call and returns a pointer to it; the canonical ABI reclaims it
 /// through an exported `cabi_post_*`. This is both a correctness AND a leak

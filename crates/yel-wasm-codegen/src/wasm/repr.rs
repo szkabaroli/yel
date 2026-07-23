@@ -180,14 +180,31 @@ impl WasmPackageBuilder<'_> {
             // returning the typed `GcRef`. Reaching this match arm means
             // the type registry is missing an entry — collect_program_*
             // didn't see this Ty.
-            InternedTyKind::Tuple(_) => unreachable!(
-                "internal_repr: tuple {:?} missing tuple_struct_type_idx",
-                ty
+            // Record / tuple repr KIND is always `GcRef`. During the early
+            // type-computation phase (structural walks like `is_scalar_list_ty`
+            // over `flatten_core_valtypes`, before `emit_program_record_types`
+            // populates the registry), the concrete index isn't known yet —
+            // mirror the `String` arm and return the `GcRef` KIND with a
+            // `u32::MAX` sentinel. Structural callers only read the kind;
+            // idx-consuming callers run after registration (where the
+            // `por_record_type_idx` / `tuple_struct_type_idx` checks at the top
+            // of this fn return the real index). `u32::MAX` would fail wasm
+            // validation loudly if ever wrongly emitted — not a silent fallback.
+            InternedTyKind::Tuple(_) => InternalRepr::GcRef(
+                self.record_gc_types
+                    .tuple_struct_type_idx
+                    .get(&ty)
+                    .copied()
+                    .unwrap_or(u32::MAX),
             ),
             InternedTyKind::Adt(def_id) => match self.ctx.defs.kind(*def_id) {
-                DefKind::Record(_) => {
-                    unreachable!("internal_repr: record {:?} missing record_type_idx", ty)
-                }
+                DefKind::Record(_) => InternalRepr::GcRef(
+                    self.record_gc_types
+                        .record_type_idx
+                        .get(def_id)
+                        .copied()
+                        .unwrap_or(u32::MAX),
+                ),
                 // Enums lower to a single i32 discriminant.
                 DefKind::Enum(_) => InternalRepr::Scalar(ValType::I32),
                 // Variants are always GcVariant via the

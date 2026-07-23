@@ -44,6 +44,11 @@ pub(in crate::wasm) enum GcRefSource<'a> {
     PayloadOf {
         inner: &'a GcRefSource<'a>,
         case_sub_idx: u32,
+        /// `struct.get` hops applied AFTER reaching the case payload field
+        /// (`<inner>.ref.cast $case.struct.get 0`), so a record / tuple
+        /// payload's members can be reached through a variant case. Empty =
+        /// the payload ref itself.
+        chain: &'a [(u32, u32)],
     },
 }
 
@@ -1153,11 +1158,13 @@ impl<'a> WasmPackageBuilder<'a> {
             if matches!(self.ctx.ty_kind(ty), InternedTyKind::Option(_))
                 && self.option_collapses_to_ref(ty).is_some()
             {
+                let declared_vts = self.canonical_flat_valtypes(ty);
                 self.emit_self_ref(&mut func, comp_idx)?;
                 self.emit_member_pack(
                     &mut func,
                     ty,
                     CanonicalSource::Params { first_param: 1 },
+                    &declared_vts,
                 )?;
                 func.instruction(&Instruction::StructSet {
                     struct_type_index: struct_ty,
@@ -1180,11 +1187,13 @@ impl<'a> WasmPackageBuilder<'a> {
                 // Build the tuple GC struct from the canonical-ABI flat params
                 // (recursively — see `emit_composite_pack`) and store the
                 // resulting ref into the component field.
+                let declared_vts = self.canonical_flat_valtypes(ty);
                 self.emit_self_ref(&mut func, comp_idx)?;
                 self.emit_composite_pack(
                     &mut func,
                     ty,
                     CanonicalSource::Params { first_param: 1 },
+                    &declared_vts,
                 )?;
                 func.instruction(&Instruction::StructSet {
                     struct_type_index: struct_ty,
@@ -1247,11 +1256,13 @@ impl<'a> WasmPackageBuilder<'a> {
                 // Push self ref, then build the record GC struct from the
                 // flat params (un-materializing string/list (ptr, len) pairs
                 // into GC refs), then `struct.set` on the component field.
+                let declared_vts = self.canonical_flat_valtypes(ty);
                 self.emit_self_ref(&mut func, comp_idx)?;
                 self.emit_composite_pack(
                     &mut func,
                     ty,
                     CanonicalSource::Params { first_param: 1 },
+                    &declared_vts,
                 )?;
                 let _ = (record_type_idx, record_def_id, actual_flat_count);
                 func.instruction(&Instruction::StructSet {
@@ -1545,6 +1556,7 @@ impl<'a> WasmPackageBuilder<'a> {
             let payload_source = GcRefSource::PayloadOf {
                 inner: &source,
                 case_sub_idx,
+                chain: &[],
             };
             return self.emit_gc_variant_lift(
                 func,
@@ -1554,6 +1566,34 @@ impl<'a> WasmPackageBuilder<'a> {
                 scratch_ptr_local,
                 mat_ptr_local,
                 mat_len_local,
+            );
+        }
+
+        // Record / tuple / collapsed-option payload: the case-subtype's field 0
+        // is a composite ref (record ref / tuple ref / collapsed-inner ref).
+        // Delegate to the reach-generic member lift with a `PayloadOf` source
+        // (reaches `<source>.ref.cast $case.struct.get 0`), writing the
+        // payload's canonical bytes at the payload region base offset.
+        if self.composite_gc_members(payload_ty)?.is_some()
+            || self.option_collapses_to_ref(payload_ty).is_some()
+        {
+            let payload_base = canonical_slots.get(1).map(|s| s.offset).ok_or_else(|| {
+                CodegenError::InvalidIR(
+                    "GcVariant composite payload lift: missing payload region base slot".into(),
+                )
+            })?;
+            let payload_source = GcRefSource::PayloadOf {
+                inner: &source,
+                case_sub_idx,
+                chain: &[],
+            };
+            return self.emit_member_lift_to_memory(
+                func,
+                payload_ty,
+                payload_source,
+                scratch_ptr_local,
+                payload_base,
+                Some((mat_ptr_local, mat_len_local)),
             );
         }
 
@@ -1866,6 +1906,7 @@ impl<'a> WasmPackageBuilder<'a> {
                             address_local: elem_addr_local,
                             offset: 0,
                         },
+                        &[],
                     )?;
                     func.instruction(&Instruction::ArraySet(arr_type_idx));
                     Ok(())
@@ -1905,6 +1946,7 @@ impl<'a> WasmPackageBuilder<'a> {
                                 address_local: elem_addr_local,
                                 offset: 0,
                             },
+                            &[],
                         )?;
                         func.instruction(&Instruction::ArraySet(arr_type_idx));
                         Ok(())
@@ -2438,6 +2480,7 @@ impl<'a> WasmPackageBuilder<'a> {
                         address_local: elem_addr_local,
                         offset: payload_off,
                     },
+                    &[],
                 )?;
                 func.instruction(&Instruction::ArraySet(arr_type_idx));
                 func.instruction(&Instruction::End); // if
@@ -3027,9 +3070,12 @@ impl<'a> WasmPackageBuilder<'a> {
             GcRefSource::PayloadOf {
                 inner,
                 case_sub_idx,
+                chain,
             } => {
                 // <inner supertype ref>; ref.cast to the active case; struct.get
-                // the payload field (a nested gc-variant supertype ref).
+                // the payload field (a scalar / nested-gc-variant / record /
+                // tuple ref), then walk any trailing member `struct.get` chain
+                // to reach a composite payload's field.
                 self.emit_gc_ref(func, *inner)?;
                 func.instruction(&Instruction::RefCastNonNull(
                     wasm_encoder::HeapType::Concrete(case_sub_idx),
@@ -3038,6 +3084,13 @@ impl<'a> WasmPackageBuilder<'a> {
                     struct_type_index: case_sub_idx,
                     field_index: 0,
                 });
+                for &(struct_type_index, field_index) in chain {
+                    func.instruction(&Instruction::RefAsNonNull);
+                    func.instruction(&Instruction::StructGet {
+                        struct_type_index,
+                        field_index,
+                    });
+                }
                 Ok(())
             }
         }
@@ -3229,6 +3282,7 @@ impl<'a> WasmPackageBuilder<'a> {
         func: &mut Function,
         ty: Ty,
         source: CanonicalSource,
+        declared_vts: &[wasm_encoder::ValType],
     ) -> Result<(), CodegenError> {
         let (struct_type_index, members) = self.composite_gc_members(ty)?.ok_or_else(|| {
             CodegenError::InvalidIR(format!("composite pack: {:?} is not a record/tuple", ty))
@@ -3247,8 +3301,15 @@ impl<'a> WasmPackageBuilder<'a> {
                     offset: offset + member.canonical_offset,
                 },
             };
-            flat_param_offset += self.canonical_flat_valtypes(member.ty).len() as u32;
-            self.emit_member_pack(func, member.ty, member_source)?;
+            let member_flat = self.canonical_flat_valtypes(member.ty).len() as u32;
+            // A record's fields concatenate in canonical order, so this
+            // member's declared valtypes are the corresponding window of the
+            // parent's declared region.
+            let member_declared: &[wasm_encoder::ValType] = declared_vts
+                .get(flat_param_offset as usize..(flat_param_offset + member_flat) as usize)
+                .unwrap_or(&[]);
+            flat_param_offset += member_flat;
+            self.emit_member_pack(func, member.ty, member_source, member_declared)?;
         }
         func.instruction(&Instruction::StructNew(struct_type_index));
         Ok(())
@@ -3260,18 +3321,23 @@ impl<'a> WasmPackageBuilder<'a> {
     /// collapsed `option<composite/list>` → null-check + inner pack;
     /// nested record / tuple → recurse; string / typed list → (ptr, len) +
     /// un-materializer; scalar / enum → direct read.
+    /// `declared_vts` gives the actual declared valtypes of this value's
+    /// canonical slots as they appear in the source (only meaningful for
+    /// `Params`). At the top level these equal the value's own canonical
+    /// valtypes, but when the value is a variant case payload the parent's
+    /// `join` may have widened shared slots — each `Params` read narrows the
+    /// declared width down to the value's natural width via
+    /// `emit_canonical_reinterpret` (a no-op when they match). `Memory` reads
+    /// at natural offsets and ignore `declared_vts`.
     fn emit_member_pack(
         &mut self,
         func: &mut Function,
         ty: Ty,
         source: CanonicalSource,
+        declared_vts: &[wasm_encoder::ValType],
     ) -> Result<(), CodegenError> {
         if self.is_gc_variant(ty) {
-            // Record/tuple members are laid out at their own natural canonical
-            // width (fields are not width-joined), so the declared param
-            // valtypes equal this value's own canonical valtypes.
-            let declared_vts = self.canonical_flat_valtypes(ty);
-            return self.emit_pack_canonical_to_gc_variant(func, ty, source, &declared_vts);
+            return self.emit_pack_canonical_to_gc_variant(func, ty, source, declared_vts);
         }
         // Collapsed option: canonical [disc, ...inner]; disc != 0 builds the
         // inner ref, else a typed null.
@@ -3290,6 +3356,10 @@ impl<'a> WasmPackageBuilder<'a> {
             match source {
                 CanonicalSource::Params { first_param } => {
                     func.instruction(&Instruction::LocalGet(first_param));
+                    // disc is naturally i32; narrow a joined-widened param.
+                    if let Some(&vt) = declared_vts.first() {
+                        emit_canonical_reinterpret(func, vt, ValType::I32)?;
+                    }
                 }
                 CanonicalSource::Memory {
                     address_local,
@@ -3322,7 +3392,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     offset: offset + payload_offset,
                 },
             };
-            self.emit_member_pack(func, inner_ty, inner_source)?;
+            self.emit_member_pack(func, inner_ty, inner_source, declared_vts.get(1..).unwrap_or(&[]))?;
             func.instruction(&Instruction::Else);
             func.instruction(&Instruction::RefNull(wasm_encoder::HeapType::Concrete(
                 arr_idx,
@@ -3331,14 +3401,28 @@ impl<'a> WasmPackageBuilder<'a> {
             return Ok(());
         }
         if self.composite_gc_members(ty)?.is_some() {
-            return self.emit_composite_pack(func, ty, source);
+            return self.emit_composite_pack(func, ty, source, declared_vts);
         }
         if matches!(self.ctx.ty_kind(ty), InternedTyKind::String)
             || (matches!(self.ctx.ty_kind(ty), InternedTyKind::List(_))
                 && self.record_gc_types.list_array_type_idx.contains_key(&ty))
         {
             let unmat_fn = self.ptr_len_unmaterializer(ty)?;
-            self.push_canonical_ptr_len(func, source);
+            match source {
+                CanonicalSource::Params { first_param } => {
+                    // (ptr, len) — two i32 slots; narrow any joined-widened
+                    // param before the un-materializer consumes them.
+                    for i in 0..2u32 {
+                        func.instruction(&Instruction::LocalGet(first_param + i));
+                        if let Some(&vt) = declared_vts.get(i as usize) {
+                            emit_canonical_reinterpret(func, vt, ValType::I32)?;
+                        }
+                    }
+                }
+                CanonicalSource::Memory { .. } => {
+                    self.push_canonical_ptr_len(func, source);
+                }
+            }
             func.instruction(&Instruction::Call(unmat_fn));
             return Ok(());
         }
@@ -3347,13 +3431,16 @@ impl<'a> WasmPackageBuilder<'a> {
                 "member pack: list has no typed GC array".into(),
             ));
         }
-        // Scalar / enum. Param-sourced values pass every flat slot through
-        // unchanged; memory-sourced values are a single typed load.
+        // Scalar / enum. Param-sourced values pass every flat slot through,
+        // narrowing any joined-widened param to the value's natural width;
+        // memory-sourced values are a single typed load.
         match source {
             CanonicalSource::Params { first_param } => {
-                let flat_count = self.canonical_flat_valtypes(ty).len() as u32;
-                for i in 0..flat_count {
-                    func.instruction(&Instruction::LocalGet(first_param + i));
+                let flat = self.canonical_flat_valtypes(ty);
+                for (i, &vt_natural) in flat.iter().enumerate() {
+                    func.instruction(&Instruction::LocalGet(first_param + i as u32));
+                    let vt_declared = declared_vts.get(i).copied().unwrap_or(vt_natural);
+                    emit_canonical_reinterpret(func, vt_declared, vt_natural)?;
                 }
             }
             CanonicalSource::Memory { .. } => {
@@ -3491,6 +3578,19 @@ impl<'a> WasmPackageBuilder<'a> {
                         child_declared,
                     )?;
                     func.instruction(&Instruction::StructNew(case_sub_idx));
+                } else if self.composite_gc_members(payload_ty)?.is_some()
+                    || self.option_collapses_to_ref(payload_ty).is_some()
+                {
+                    // Record / tuple / collapsed-option payload: build the
+                    // payload ref from the case's payload region, then wrap it
+                    // in the case subtype. `declared_vts[1..]` are the actual
+                    // (possibly parent-joined) param widths for the payload
+                    // region so the pack narrows each shared slot down to the
+                    // payload's natural width.
+                    let child_declared: &[wasm_encoder::ValType] =
+                        declared_vts.get(1..).unwrap_or(&[]);
+                    self.emit_member_pack(func, payload_ty, payload_source, child_declared)?;
+                    func.instruction(&Instruction::StructNew(case_sub_idx));
                 } else {
                     let is_ptr_len_payload = matches!(
                         self.ctx.ty_kind(payload_ty),
@@ -3607,9 +3707,29 @@ impl<'a> WasmPackageBuilder<'a> {
                         chain: &member_chain,
                     }
                 }
+                GcRefSource::PayloadOf {
+                    inner,
+                    case_sub_idx,
+                    chain,
+                } => {
+                    // A record / tuple carried as a variant case payload:
+                    // extend the after-payload `struct.get` chain with this
+                    // member's hop.
+                    member_chain = chain
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(member_hop))
+                        .collect();
+                    GcRefSource::PayloadOf {
+                        inner,
+                        case_sub_idx,
+                        chain: &member_chain,
+                    }
+                }
                 _ => {
                     return Err(CodegenError::InvalidIR(
-                        "composite lift: source must be a self chain or a typed local".into(),
+                        "composite lift: source must be a self chain, a typed local, or a \
+                         variant payload".into(),
                     ));
                 }
             };
@@ -3814,9 +3934,23 @@ impl<'a> WasmPackageBuilder<'a> {
                             chain: &member_chain,
                         }
                     }
-                    GcRefSource::PayloadOf { .. } | GcRefSource::ArrayElem { .. } => {
+                    GcRefSource::PayloadOf {
+                        inner,
+                        case_sub_idx,
+                        chain,
+                    } => {
+                        member_chain =
+                            chain.iter().copied().chain(std::iter::once(hop)).collect();
+                        GcRefSource::PayloadOf {
+                            inner,
+                            case_sub_idx,
+                            chain: &member_chain,
+                        }
+                    }
+                    GcRefSource::ArrayElem { .. } => {
                         return Err(CodegenError::InvalidIR(
-                            "value->stack: record/tuple member source must be a self/local chain"
+                            "value->stack: record/tuple member source must be a self/local/\
+                             payload chain"
                                 .into(),
                         ));
                     }
@@ -4032,6 +4166,7 @@ impl<'a> WasmPackageBuilder<'a> {
             let payload_source = GcRefSource::PayloadOf {
                 inner: &source,
                 case_sub_idx,
+                chain: &[],
             };
             self.emit_value_to_canonical_stack(func, payload_ty, payload_source)?;
             // Reconcile each produced slot with the joined valtype. Only the
