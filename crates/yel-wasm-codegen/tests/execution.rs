@@ -5955,3 +5955,98 @@ fn wide_record_setter_spills_params_and_round_trips() {
         other => panic!("get-big returned non-record: {other:?}"),
     }
 }
+
+/// §1.5 globals migration: record- and tuple-typed global properties
+/// live in ref-typed core wasm globals (no linear-memory residence).
+/// Verifies the full loop: default-init (`globals_init` start function
+/// materializes the record and its fields render on mount), a handler
+/// write (`Store.origin = {..}`), a read-after-write in the same
+/// handler (`mirror = Store.origin.x`), and the global-write fanout
+/// re-rendering the observing text node.
+#[test]
+fn record_global_roundtrip_through_core_globals() {
+    let source = r#"
+        package yel:grecglob@0.1.0;
+        record Pos { x: s32, y: s32 }
+        global Store {
+            origin: Pos = { x: 1, y: 2 };
+            pair: tuple<s32, string> = (5, "init");
+            count: s32 = 0;
+        }
+        export component App {
+            mirror: s32 = 0;
+            VStack {
+                Text { "y={Store.origin.y}" }
+                Button { "set" clicked: {
+                    Store.origin = { x: 10, y: 20 };
+                    mirror = Store.origin.x;
+                } }
+            }
+        }
+    "#;
+    let bytes = compile_to_component(source);
+    let (mut h, dom) = instantiate(&bytes, &[]);
+    let iface = "yel:grecglob/app-component@0.1.0";
+    let r = ctor_and_mount(&mut h, iface, "app");
+
+    // Initial render must show the record default's `y` field (2) —
+    // proves globals_init materialized the record into its core global
+    // and the read path (global.get + struct.get) works.
+    let mount_text = dom
+        .lock()
+        .unwrap()
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            DomOp::CreateText { content, .. } if content.contains("y=") => {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .expect("expected the y= text node at mount");
+    assert_eq!(
+        mount_text, "y=2",
+        "mount must render the record global's default field"
+    );
+
+    let click = dom
+        .lock()
+        .unwrap()
+        .listeners
+        .iter()
+        .find(|(_, e, _)| e == "clicked")
+        .map(|(_, _, h)| *h)
+        .expect("clicked listener registered");
+    call_dispatch(&mut h, click);
+
+    // Read-after-write inside the handler: mirror = Store.origin.x (10).
+    let get_mirror = get_func(&mut h, iface, "[method]app.get-mirror");
+    let mut out = [Val::Bool(false)];
+    get_mirror
+        .call(&mut h.store, &[Val::Resource(r)], &mut out)
+        .expect("get-mirror");
+    assert!(
+        matches!(&out[0], Val::S32(10)),
+        "mirror must read the freshly written record global (x=10), got {:?}",
+        out[0]
+    );
+
+    // The global write must have re-rendered the observing text node.
+    let last_y_text = dom
+        .lock()
+        .unwrap()
+        .ops
+        .iter()
+        .rev()
+        .find_map(|op| match op {
+            DomOp::SetTextContent { content, .. } if content.contains("y=") => {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .expect("expected a y= set_text_content after the global write");
+    assert_eq!(
+        last_y_text, "y=20",
+        "global-write fanout must re-render the observer with the new record"
+    );
+}

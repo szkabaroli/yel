@@ -1,0 +1,17 @@
+package yel:grecglob@0.1.0;
+record Pos { x: s32, y: s32 }
+global Store {
+    origin: Pos = { x: 1, y: 2 };
+    pair: tuple<s32, string> = (5, "init");
+    count: s32 = 0;
+}
+export component App {
+    mirror: s32 = 0;
+    VStack {
+        Text { "y={Store.origin.y}" }
+        Button { "set" clicked: {
+            Store.origin = { x: 10, y: 20 };
+            mirror = Store.origin.x;
+        } }
+    }
+}

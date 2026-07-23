@@ -1075,8 +1075,6 @@ pub(crate) struct WasmPackageBuilder<'a> {
     /// Each entry triggers `generate_list_append_function(list_ty)` and
     /// gets a `RuntimeFunctions::list_append` index.
     pub list_appends: Vec<Ty>,
-    /// Memory addresses for global singleton properties, keyed by property DefId.
-    pub global_property_addrs: HashMap<DefId, i32>,
     /// Per-block layouts for migrated `global Foo { ... }` blocks. One
     /// entry per `defs.globals()` in declaration order. Holds the GC
     /// struct type index, self-global index, and per-property field
@@ -1317,7 +1315,6 @@ impl<'a> WasmPackageBuilder<'a> {
             def_id_to_func_idx: std::collections::HashMap::new(),
             function_type_names: Vec::new(),
             layouts: Vec::new(),
-            global_property_addrs: HashMap::new(),
             globals_layouts: Vec::new(),
             global_block_def_to_idx: HashMap::new(),
             global_defaults: HashMap::new(),

@@ -77,9 +77,13 @@ pub fn ty_to_slot_val_type(
     {
         return vt;
     }
-    // Phase 5e.1: DTR records have a single GC ref internal repr.
+    // Every record has a single GC ref internal repr — codegen's
+    // `internal_repr` returns `GcRef(record_type_idx)` unconditionally
+    // for `Adt(Record)`, so the slot val_ty must mirror that. (The
+    // narrower `is_dtr_record_struct` predicate only gates the
+    // option-of-record collapse, not the record's own repr.)
     if let InternedTyKind::Adt(d) = ctx.ty_kind(ty)
-        && matches!(ctx.defs.kind(*d), DefKind::Record(_)) && is_dtr_record_struct(ctx, *d) {
+        && matches!(ctx.defs.kind(*d), DefKind::Record(_)) {
             return LirSlotValType::RefNullForRecord(ty);
         }
     // Phase 5e.5: option / result / variant migrated to W3C
@@ -242,8 +246,17 @@ fn is_gc_variant_ty_struct_inner(
             if is_scalar_list_ty_struct(ctx, inner, &mut seen) {
                 return false;
             }
+            // Option-of-ref collapse: `option<record | tuple>` collapses
+            // to a single nullable ref of the inner's GC struct type
+            // (codegen's `internal_repr` collapses whenever the inner
+            // repr is GcRef — which is every record and every tuple).
+            // Must mirror codegen's `is_gc_variant` Option arm exactly:
+            // reject ALL records and tuples here, not just DTR records.
+            if matches!(ctx.ty_kind(inner), InternedTyKind::Tuple(_)) {
+                return false;
+            }
             if let InternedTyKind::Adt(d) = ctx.ty_kind(inner)
-                && matches!(ctx.defs.kind(*d), DefKind::Record(_)) && is_dtr_record_struct(ctx, *d)
+                && matches!(ctx.defs.kind(*d), DefKind::Record(_))
                 {
                     return false;
                 }
@@ -556,11 +569,8 @@ pub(crate) struct BlockLowering<'a> {
     // start of `lower_component` (see option (a) routing rule in the
     // refactor plan). The same value is re-stamped onto
     // `LirResource.signal_layout` at end-of-lowering — codegen reads
-    // that copy. Emit sites consult `signal_mem_only_slot(sig_idx)` to
-    // decide whether a memory-backed signal can be inline-expanded via
-    // `signals_inline` helpers, or whether it still passes through as
-    // `LirOp::Signal*` (struct-backed / dual-backed / base-addr-blocked
-    // cases — see the Phase 1.2 report).
+    // that copy. Emit sites consult it for each signal's GC field span
+    // when inline-expanding writes/inits.
     pub(crate) signal_layout_early: crate::lir::SignalLayout,
 
     // Phase 0.3p: the resource-wide `(ref null $Comp)` self-ref slot
@@ -2255,63 +2265,48 @@ impl<'a> BlockLowering<'a> {
         self.start_block();
 
         // Initialize each signal
-        for (i, signal) in tree.signals.iter().enumerate() {
+        for signal in tree.signals.iter() {
             if let Some(default_expr) = &signal.default {
-                // Phase 1.1c-g: with the user constructor_block now a
-                // real wasm function (no clone-into-synth), inlining
-                // `InitSignal` → `EvalExprToSlots` + `StructSetSym`
-                // is safe — the `rec: resource_self_ref_slot` (WasmParam
-                // {idx:0}) op resolves to wasm-local 0 of THIS function,
-                // which is the self-ref the internal_ctor passed.
-                //
-                // Mirror the SignalWriteExpr inline gating: only
-                // **composite** (option/result/variant-with-payload/record),
-                // component-local, gc-only signals inline. Scalars use
-                // the legacy InitSignal path — its codegen already
-                // resolves rec via the ambient `current_self_local`,
-                // which now points at the user_ctor's own wasm-local 0.
-                // Dual-backed (gc + mem) and global-block signals also
-                // keep the legacy op (Phase 1.1c-f holdouts).
+                // §1.4: every default-init lowers inline through the
+                // unified helper (`EvalExprToSlots` + `StructSetSym`
+                // against `resource_self_ref_slot`, wasm-local 0 of
+                // this function — the self-ref the internal_ctor
+                // passed).
                 let expr_id = self.intern_expr(default_expr);
-                // Phase 1.1c-i: route through unified inline helper.
                 let inlined = self.inline_signal_write_or_init_from_expr(
                     signal.def_id,
                     signal.ty,
                     Some(expr_id),
                 );
                 if matches!(inlined, InlineResult::NotHandled) {
-                    self.emit(LirOp::InitSignal {
-                        signal_idx: i as u32,
-                        expr: expr_id,
-                    });
+                    // §1.4: the legacy LirOp::InitSignal fallback is gone —
+                    // the unified helper must handle every component-local
+                    // signal shape. A NotHandled here is a lowering bug.
+                    todo!(
+                        "signal default-init not handled by \
+                         inline_signal_write_or_init_from_expr: signal {:?} ty {:?}",
+                        signal.def_id,
+                        self.ctx.ty_kind(signal.ty)
+                    );
                 }
             } else {
-                // No default - emit InitSignalDefault to set zero/empty.
-                //
-                // Phase 1.2 routing: if the signal is **only** memory-backed
-                // (no GC-struct slot), inline-expand via the helper. Otherwise
-                // (struct-backed or dual-backed) keep emitting the legacy op
-                // until Phase 1.1c (#62) provides the wasm-type-section-index
-                // accessor needed to inline struct-backed sites.
-                //
-                // Phase 1.1c-i: also route through the unified helper with
-                // `value=None` so default-init paths share the inline shape
-                // once the helper handles them. Today both inline helpers
-                // bail for default-init (returning false / None), so the
-                // legacy op still emits. Wiring matches the SignalWriteExpr
-                // sites' template so future helper extensions flip a single
-                // gate.
+                // No default — zero/empty init. For most gc-backed
+                // shapes the parent `struct.new_default $Comp` already
+                // zeroed the fields (helper returns Handled as a
+                // no-op); GcVariant shapes materialize case 0.
                 let unified_inlined = self.inline_signal_write_or_init_from_expr(
                     signal.def_id,
                     signal.ty,
                     None,
                 );
                 if matches!(unified_inlined, InlineResult::NotHandled) {
-                    // No signal is memory-resident anymore, so default-init
-                    // has no inline memory path — emit the legacy op.
-                    self.emit(LirOp::InitSignalDefault {
-                        signal_idx: i as u32,
-                    });
+                    // §1.4: legacy LirOp::InitSignalDefault fallback removed.
+                    todo!(
+                        "signal zero-default-init not handled by \
+                         inline_signal_write_or_init_from_expr: signal {:?} ty {:?}",
+                        signal.def_id,
+                        self.ctx.ty_kind(signal.ty)
+                    );
                 }
             }
         }
@@ -4954,10 +4949,14 @@ impl<'a> BlockLowering<'a> {
                     InlineResult::NotHandled
                 };
                 if matches!(inlined, InlineResult::NotHandled) {
-                    self.emit(LirOp::SignalWriteExpr {
-                        signal: *signal,
-                        expr: value_expr,
-                    });
+                    // §1.4: legacy LirOp::SignalWriteExpr fallback removed —
+                    // the unified helper owns every signal-write shape.
+                    todo!(
+                        "signal write not handled by \
+                         inline_signal_write_or_init_from_expr: signal {:?} ty {:?}",
+                        signal,
+                        signal_ty.map(|t| self.ctx.ty_kind(t))
+                    );
                 }
                 // Phase 1.1c-l (#97): skip trigger if Path B already
                 // emitted inline `CallBlock`s to per-observer fanout
@@ -5381,10 +5380,13 @@ impl<'a> BlockLowering<'a> {
             InlineResult::NotHandled
         };
         if matches!(inlined, InlineResult::NotHandled) {
-            self.emit(LirOp::SignalWriteExpr {
-                signal: d.target,
-                expr: d.expr_id,
-            });
+            // §1.4: legacy LirOp::SignalWriteExpr fallback removed.
+            todo!(
+                "derived-signal write not handled by \
+                 inline_signal_write_or_init_from_expr: signal {:?} ty {:?}",
+                d.target,
+                signal_ty.map(|t| self.ctx.ty_kind(t))
+            );
         }
         // See SignalWrite call site above for the
         // `HandledAndTriggered` suppression rationale.
@@ -5564,20 +5566,19 @@ impl<'a> BlockLowering<'a> {
     /// blocks — caller must SKIP `emit_trigger_for_signal` so the
     /// legacy global-fanout helper isn't called as well.
     /// Returns `InlineResult::NotHandled` when the helper does not
-    /// know how to lower this case (caller falls back to legacy
-    /// `LirOp::SignalWriteExpr` / `LirOp::InitSignal*` op).
+    /// know how to lower this case. §1.4: there is no legacy fallback
+    /// op anymore — every caller turns `NotHandled` into a loud
+    /// `todo!`, so any shape reaching it is a lowering bug to fix
+    /// here, not to route around.
     fn inline_signal_write_or_init_from_expr(
         &mut self,
         signal_def: DefId,
         signal_ty: Ty,
         value: Option<LirExprId>,
     ) -> InlineResult {
-        // Phase 1.1c-i recovery: helper temporarily disabled — defer to
-        // legacy LirOp::SignalWriteExpr / InitSignal paths whose codegen
-        // is known to validate. Re-enable + fix in follow-up.
-        //
-        // Stage 1: scalar i32 gc-only single-slot component-local signals
-        // are now inlined here. All other shapes still bail to caller.
+        // Fast path: scalar and fat-pointer component-local signals with
+        // a value expression. Everything else falls through to Path A
+        // (component-local, generic gc-backed) / Path B (global) below.
         {
             // Skip tuples (typed-ref shape today's helper can't express).
             if !matches!(self.ctx.ty_kind(signal_ty), InternedTyKind::Tuple(_))
@@ -5706,44 +5707,15 @@ impl<'a> BlockLowering<'a> {
                         }
                 }
         }
-        // Part 1: forcing-function panic was attempted here to surface
-        // every unhandled shape. After enabling inline emission for
-        // F32 scalars and multi-slot gc-only fat-pointer (String,
-        // list<T> non-typed-array), the following shapes still fall
-        // through and must be inlined to reach the final state
-        // before the legacy SignalWriteExpr/InitSignal/TriggerEffects
-        // ops can be deleted (Part 3):
-        //   - Adt(record) dual-backed (gc + mem)
-        //   - Tuple dual-backed (gc + mem)
-        //   - Global S32 scalar (signal_layout_early.signals = None
-        //     for globals; needs separate global field-path resolution)
-        //   - Global List(T) (likewise; plus typed-array allocation)
-        // These shapes require lowering memory writes and global
-        // struct accesses + cross-component effect fanout (the user
-        // identified the global-fanout case as the most likely
-        // "can't inline without major restructure"). Bail to caller
-        // (legacy LirOp::SignalWriteExpr / InitSignal path) for now.
-        //
-        // Phase 1.1c-l (#97): narrow gate — fall through to Path B
-        // ONLY for the gc-only-scalar global-signal shape AND ONLY
-        // when every component observing this signal has registered
-        // a fanout block via `synth_global_fanout_blocks` (which means
-        // the observer was lowered FIRST AND all its observing effects
-        // matched the supported simple shape). Other shapes still bail
-        // to the caller, preserving the legacy `LirOp::SignalWriteExpr`
-        // / `LirOp::TriggerEffects` path.
-        // Task #103: previously this site gated ALL of Path A + Path B
-        // on `collect_global_fanout_blocks_if_ready` returning Some —
-        // which meant Path A (component-local) never ran at all
-        // (locals always fail `is_inlineable_global`). Restore the
-        // legacy bail-on-None for Path A by routing locals through a
-        // separate early NotHandled return, then continue into Path B
-        // where `fanout_blocks` becomes a per-return-site decision:
-        // Some → emit inline CallBlocks + HandledAndTriggered;
-        // None  → write was inlined, caller still owns trigger →
-        //         return Handled. Empty `Some(vec![])` (gate passed
-        // but no observer effects matched simple-shape) collapses to
-        // None so the legacy `LirOp::TriggerEffects` still fires.
+        // Global fanout gate: for global-block-owned signals, `Some`
+        // means every observing component has a synthesized inline
+        // fanout block (see `synth_global_fanout_blocks`) — Path B
+        // then emits `CallBlock`s per observer and returns
+        // `HandledAndTriggered`. `None` (including the empty-vec
+        // collapse: gate passed but no observer effects matched)
+        // means Path B still inlines the write but returns `Handled`
+        // so the caller emits `LirOp::TriggerEffects` — the §1.4
+        // residue that goes away with the §1.5 globals migration.
         let local_idx_probe = self.tree_signals.iter().position(|s| s.def_id == signal_def);
         let global_block_probe = self.ctx.defs.owning_global_block(signal_def);
         let fanout_blocks: Option<Vec<(DefId, BlockId)>> = if global_block_probe.is_some() {
@@ -5752,19 +5724,11 @@ impl<'a> BlockLowering<'a> {
                 other => other,
             }
         } else {
-            // Component-local signal: legacy gate preserved.
-            // Path A's inline emission for locals was always reached
-            // pre-#103 (the fanout check returned `Some` only for
-            // globals, so locals fell through). We keep that exact
-            // behavior by gating Path A entry on the same predicate
-            // the legacy bail used.
-            if !is_inlineable_global(self.ctx, signal_def, signal_ty) {
-                // Pre-#103: this `is_none()` arm returned NotHandled
-                // unconditionally — so Path A code that follows
-                // never executed for locals. Preserve that.
-                let _ = (local_idx_probe, global_block_probe);
-                return InlineResult::NotHandled;
-            }
+            // Component-local signal: no fanout blocks (those are a
+            // global-signal mechanism); Path A below handles the
+            // write/init inline and the caller keeps ownership of the
+            // trigger (direct CallBlock via emit_trigger_for_signal).
+            let _ = (local_idx_probe, global_block_probe);
             None
         };
         let local_idx = self.tree_signals.iter().position(|s| s.def_id == signal_def);
@@ -5901,16 +5865,13 @@ impl<'a> BlockLowering<'a> {
             };
         }
 
-        // Path B: global-block-owned signal. Only gc-backed (non-
-        // pointer-typed) globals are inlined; pointer-typed globals
-        // (records / tuples) fall through to the caller so the legacy
-        // memory path keeps emitting via `LirOp::SignalWriteExpr`'s
-        // codegen arm. Today's stdlib has no migrated-but-pointer-
-        // typed global property, so this gate matches `global_in_struct`.
+        // Path B: global-block-owned signal. §1.5: every non-unit
+        // property (scalars, strings, lists, records, tuples,
+        // gc-variants) is one-or-two core-global slots — there is no
+        // memory-resident global path anymore.
         if let Some(block_def) = global_block {
-            // Field path on the globals struct: sum of slot_counts of
-            // prior properties + this property's slots. Pointer-typed
-            // properties contribute 0 slots and stay on the memory path.
+            // Field path into the block's core-global slots: sum of
+            // slot_counts of prior properties + this property's slots.
             let Some(block) = self.ctx.defs.as_global(block_def) else {
                 return InlineResult::NotHandled;
             };
@@ -5933,89 +5894,12 @@ impl<'a> BlockLowering<'a> {
             }
             let count = match prop_slot_count {
                 Some(c) if c > 0 => c,
-                // Pointer-typed (count==0 via slot_count_for_signal_ty
-                // is not actually emitted for records; the codegen
-                // dispatches on signal_storage_valtypes which for
-                // pointer-typed is empty). Conservative bail.
-                _ => return InlineResult::NotHandled,
+                // Unit-typed property — no storage slots, nothing to
+                // write. (§1.5: records/tuples are NOT count==0 — they
+                // are one GC-ref slot like every other single-ref shape
+                // and take the generic core-globals path below.)
+                _ => return InlineResult::Handled,
             };
-            // Pointer-typed globals (records/tuples): the codegen-side
-            // `global_in_struct` consults `property_field_paths`. We
-            // approximate by checking `is_pointer_repr` — same gate
-            // SignalLayout uses for the mem half.
-            let layout_ctx = LirLayoutContext::new(self.ctx);
-            if layout_ctx.is_pointer_repr(signal_ty) {
-                // Phase 1.1c-101: inline the linear-memory write via
-                // `MemConstGlobalProp` + typed-store, then emit the
-                // fanout CallBlocks (signal-type-agnostic). The
-                // pointer-typed canonical ABI is a single i32 (the
-                // pointer to the heap-allocated record / tuple); we
-                // evaluate the value expr into one scratch slot and
-                // hand it to `lower_signal_write_to_global_memory`,
-                // which delegates to `lower_signal_write_to_memory`
-                // and rewrites the resulting `MemConst { addr }` to
-                // `MemConstGlobalProp { signal_def, offset: addr }`
-                // so codegen resolves the absolute address from
-                // `global_property_addrs` (no per-component base).
-                let expr_id = match value {
-                    Some(e) => e,
-                    None => return InlineResult::NotHandled,
-                };
-                let dest = self.alloc_temp_slot_typed(LirSlotValType::I32);
-                self.emit(LirOp::EvalExprToSlots {
-                    expr: expr_id,
-                    dest_first_slot: dest,
-                });
-                let value_slots = vec![dest];
-                let next_slot = &mut self.next_slot;
-                let next_local_idx = &mut self.next_local_idx;
-                let slots = &mut self.slots;
-                let mut alloc = |val_ty: LirSlotValType| -> LirSlotId {
-                    let id = LirSlotId::resource(*next_slot);
-                    *next_slot += 1;
-                    let local_idx = *next_local_idx;
-                    *next_local_idx += 1;
-                    slots.push(LirSlotInfo {
-                        id,
-                        kind: LirSlotKind::Temp { local_idx },
-                        val_ty,
-                        name: None,
-                    });
-                    id
-                };
-                let ops = crate::lower_to_lir::signals_inline::lower_signal_write_to_global_memory(
-                    self.ctx,
-                    signal_ty,
-                    signal_def,
-                    &value_slots,
-                    &mut alloc,
-                );
-                let Some(ops) = ops else {
-                    return InlineResult::NotHandled;
-                };
-                for op in ops {
-                    self.emit(op);
-                }
-                // Fanout: emit a CallBlock per observing component's
-                // synthesized fanout block (same pattern as scalar
-                // globals — fanout body is type-agnostic). Task #103:
-                // when no fanout blocks were synthesized, the inline
-                // write still happened above; return `Handled` so the
-                // caller emits `LirOp::TriggerEffects` (no double-fire
-                // because we skipped the inline CallBlocks).
-                if let Some(blocks) = &fanout_blocks {
-                    let dummy_parent = self.deferred_dummy_parent_slot();
-                    for (_observer_comp, fanout_block_id) in blocks {
-                        self.emit(LirOp::CallBlock {
-                            block: *fanout_block_id,
-                            args: vec![dummy_parent],
-                            result: None,
-                        });
-                    }
-                    return InlineResult::HandledAndTriggered;
-                }
-                return InlineResult::Handled;
-            }
 
             // Default-init for globals: the globals_init function in
             // codegen handles allocation + defaults; this helper is
@@ -7520,8 +7404,6 @@ fn collect_callback_arg_types(ops: &[LirOp], exprs: &[LirExpr], out: &mut Vec<Ty
             LirOp::EvalExpr { expr, .. }
             | LirOp::EvalExprToSlots { expr, .. }
             | LirOp::DropExpr { expr }
-            | LirOp::SignalWriteExpr { expr, .. }
-            | LirOp::InitSignal { expr, .. }
             | LirOp::PushExpr { expr } => {
                 collect_call_arg_types_in_expr(arena_expr(exprs, *expr), exprs, out);
             }
@@ -7634,44 +7516,6 @@ fn compute_flat_scratch_counts(
         };
     for op in ops {
         match op {
-            LirOp::InitSignal { signal_idx, expr } => {
-                if let Some((ty,)) = signals.get(*signal_idx as usize) {
-                    let counts = layout_ctx.canonical_flat_valtype_counts(*ty);
-                    let m = max_flat_counts((mi32, mi64, mf32, mf64), counts);
-                    mi32 = m.0;
-                    mi64 = m.1;
-                    mf32 = m.2;
-                    mf64 = m.3;
-                }
-                let e = &exprs[expr.0 as usize];
-                if expr_contains_composite_field_load(e, exprs, ctx, layout_ctx) {
-                    needs_load_scratch = true;
-                }
-                bump_extras(
-                    e,
-                    &mut min_i32_for_extras,
-                    &mut min_i64_for_extras,
-                    &mut needs_load_scratch,
-                );
-            }
-            LirOp::SignalWriteExpr { expr, .. } => {
-                let e = &exprs[expr.0 as usize];
-                let counts = layout_ctx.canonical_flat_valtype_counts(e.ty);
-                let m = max_flat_counts((mi32, mi64, mf32, mf64), counts);
-                mi32 = m.0;
-                mi64 = m.1;
-                mf32 = m.2;
-                mf64 = m.3;
-                if expr_contains_composite_field_load(e, exprs, ctx, layout_ctx) {
-                    needs_load_scratch = true;
-                }
-                bump_extras(
-                    e,
-                    &mut min_i32_for_extras,
-                    &mut min_i64_for_extras,
-                    &mut needs_load_scratch,
-                );
-            }
             LirOp::If(if_op) => {
                 let (a, b, c, d) =
                     compute_flat_scratch_counts(&if_op.then_ops, signals, exprs, ctx, layout_ctx);

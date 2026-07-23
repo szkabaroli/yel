@@ -31,7 +31,9 @@ digraph yel_signal_graph {
     "c0_elem_6" [shape=box, style="filled", fillcolor="#e0f7fa", label="Button #6", class="yel-element"];
     "c0_handler_0" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on clicked", class="yel-handler"];
     "c0_elem_4" -> "c0_handler_0" [label="fires", color="#7e57c2", class="yel-fires"];
+    "c0_handler_0" -> "global_sig_453" [label="writes", color="#cc3333", class="yel-writes"];
     "c0_handler_1" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on clicked", class="yel-handler"];
     "c0_elem_6" -> "c0_handler_1" [label="fires", color="#7e57c2", class="yel-fires"];
+    "c0_handler_1" -> "global_sig_453" [label="writes", color="#cc3333", class="yel-writes"];
   }
 }

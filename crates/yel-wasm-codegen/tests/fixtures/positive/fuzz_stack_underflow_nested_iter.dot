@@ -235,6 +235,7 @@ digraph yel_signal_graph {
     "c0_elem_73" [shape=box, style="filled", fillcolor="#e0f7fa", label="ZStack #73", class="yel-element"];
     "c0_handler_0" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on changed", class="yel-handler"];
     "c0_elem_2" -> "c0_handler_0" [label="fires", color="#7e57c2", class="yel-fires"];
+    "c0_handler_0" -> "c0_sig_475" [label="writes", color="#cc3333", class="yel-writes"];
     "c0_handler_0" -> "c0_sig_472" [label="writes", color="#cc3333", class="yel-writes"];
     "c0_fn_133" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="update-b0-s475 #133\nb0:root", class="yel-fn"];
     "c0_handler_0" -> "c0_fn_133" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
@@ -274,6 +275,7 @@ digraph yel_signal_graph {
     "c0_fn_47" -> "c0_fn_45" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c0_handler_1" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on clicked", class="yel-handler"];
     "c0_elem_22" -> "c0_handler_1" [label="fires", color="#7e57c2", class="yel-fires"];
+    "c0_handler_1" -> "c0_sig_475" [label="writes", color="#cc3333", class="yel-writes"];
     "c0_handler_1" -> "c0_fn_133" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c0_fn_133" -> "c0_fn_131" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c0_fn_131" -> "c0_fn_14" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
@@ -337,6 +339,7 @@ digraph yel_signal_graph {
     "c0_handler_4" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on clicked", class="yel-handler"];
     "c0_elem_48" -> "c0_handler_4" [label="fires", color="#7e57c2", class="yel-fires"];
     "c0_handler_4" -> "c0_sig_472" [label="writes", color="#cc3333", class="yel-writes"];
+    "c0_handler_4" -> "c0_sig_475" [label="writes", color="#cc3333", class="yel-writes"];
     "c0_handler_4" -> "c0_fn_79" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c0_fn_79" -> "c0_fn_73" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c0_fn_73" -> "c0_fn_72" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
@@ -397,6 +400,7 @@ digraph yel_signal_graph {
     "c0_handler_6" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on clicked", class="yel-handler"];
     "c0_elem_73" -> "c0_handler_6" [label="fires", color="#7e57c2", class="yel-fires"];
     "c0_handler_6" -> "c0_sig_472" [label="writes", color="#cc3333", class="yel-writes"];
+    "c0_handler_6" -> "c0_sig_475" [label="writes", color="#cc3333", class="yel-writes"];
     "c0_handler_6" -> "c0_fn_79" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c0_fn_79" -> "c0_fn_73" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c0_fn_73" -> "c0_fn_72" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
@@ -497,5 +501,6 @@ digraph yel_signal_graph {
     "c2_elem_0" [shape=box, style="filled", fillcolor="#e0f7fa", label="ZStack #0", class="yel-element"];
     "c2_handler_0" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on pressed", class="yel-handler"];
     "c2_elem_0" -> "c2_handler_0" [label="fires", color="#7e57c2", class="yel-fires"];
+    "c2_handler_0" -> "c2_sig_490" [label="writes", color="#cc3333", class="yel-writes"];
   }
 }

@@ -1,5 +1,5 @@
 //! Free helpers shared across the codegen submodules: per-valtype
-//! scratch slot bookkeeping (`compute_slot_locals`, `merge_max_slot_counts`,
+//! scratch slot bookkeeping (`merge_max_slot_counts`,
 //! `push_valtype_locals`, `per_valtype_counts`) plus the small
 //! `mem_arg`/`slot_local`/`i32_narrow_store_for` utilities and the
 //! mount-retention counter (`compute_mount_retention_counts`).
@@ -10,7 +10,6 @@
 
 use wasm_encoder::{Function, Instruction, ValType};
 
-use super::super::CodegenError;
 use yel_core::lir::{LirBlock, LirResource, LirSlotId, LirSlotInfo, LirSlotKind};
 
 /// Emit `cabi_realloc(0, 0, align, size)`, leaving the freshly-allocated
@@ -253,38 +252,3 @@ pub(super) fn push_valtype_locals(
     }
 }
 
-/// Compute absolute scratch local indices for each flat slot under a
-/// per-valtype partitioning. Slot i gets `base_of(valtype_i) +
-/// index_among_same_valtype_slots_so_far`. Returns an error if any slot
-/// would exceed the scratch region reserved by the caller.
-pub(super) fn compute_slot_locals(
-    slots: &[crate::wasm::FlatSlot],
-    scratch: &crate::wasm::FlatScratchBases,
-) -> Result<Vec<u32>, CodegenError> {
-    let mut out = Vec::with_capacity(slots.len());
-    let (mut u_i32, mut u_i64, mut u_f32, mut u_f64) = (0u32, 0u32, 0u32, 0u32);
-    for (i, s) in slots.iter().enumerate() {
-        let (base, used, cap) = match s.valtype {
-            ValType::I32 => (scratch.i32_base, &mut u_i32, scratch.i32_count),
-            ValType::I64 => (scratch.i64_base, &mut u_i64, scratch.i64_count),
-            ValType::F32 => (scratch.f32_base, &mut u_f32, scratch.f32_count),
-            ValType::F64 => (scratch.f64_base, &mut u_f64, scratch.f64_count),
-            other => {
-                return Err(CodegenError::InvalidIR(format!(
-                    "emit_flat_slot_store: unsupported scratch valtype {:?} at slot {}",
-                    other, i
-                )));
-            }
-        };
-        if *used >= cap {
-            return Err(CodegenError::InvalidIR(format!(
-                "emit_flat_slot_store: scratch capacity for valtype {:?} exhausted at slot {} \
-                 (cap={}, used={})",
-                s.valtype, i, cap, *used
-            )));
-        }
-        out.push(base + *used);
-        *used += 1;
-    }
-    Ok(out)
-}

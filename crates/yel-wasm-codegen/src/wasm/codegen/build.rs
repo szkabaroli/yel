@@ -1529,11 +1529,9 @@ impl<'a> WasmPackageBuilder<'a> {
         // code section pass below.
         let mut global_signals_with_observers: Vec<DefId> = Vec::new();
         {
-            // The function-section pass runs before `global_property_addrs`
-            // is populated (that happens in the memory-layout pass below),
-            // so derive the set of global property DefIds straight from the
-            // def table. Memory addresses aren't needed here — we only need
-            // to know **which** DefIds are globals so we can register one
+            // Derive the set of global property DefIds straight from the
+            // def table — we only need to know **which** DefIds are
+            // globals so we can register one
             // fanout helper per observed-elsewhere global.
             let mut seen: HashSet<DefId> = HashSet::new();
             for global_def_id in self.ctx.defs.globals().collect::<Vec<_>>() {
@@ -1699,41 +1697,9 @@ impl<'a> WasmPackageBuilder<'a> {
         mem_base += 8;
         mem_base = (mem_base + 7) & !7;
 
-        // Allocate memory for global singleton properties that are
-        // **not** migrated to per-block GC structs. Migrated properties
-        // (everything except pointer-typed records/tuples) live in
-        // their block's `$globals_<i>` struct fields and don't reserve
-        // bytes here. The remaining pointer-typed properties keep the
-        // legacy linear-memory path until a future pass moves them too.
-        for global_def_id in self.ctx.defs.globals().collect::<Vec<_>>() {
-            let global = self
-                .ctx
-                .defs
-                .as_global(global_def_id)
-                .ok_or_else(|| {
-                    CodegenError::InternalError(format!(
-                        "global_def_id {:?} is not a GlobalDef during memory reservation",
-                        global_def_id
-                    ))
-                })?
-                .clone();
-            for &prop_id in &global.properties {
-                let prop_ty = self
-                    .ctx
-                    .defs
-                    .type_of(prop_id)
-                    .unwrap_or(yel_core::types::Ty::ERROR);
-                if !self.signal_storage_valtypes(prop_ty).is_empty() {
-                    // Migrated → backed by GC struct fields, no byte
-                    // reservation, no `global_property_addrs` entry.
-                    continue;
-                }
-                let size = self.layout_ctx.size_of(prop_ty) as i32;
-                self.global_property_addrs.insert(prop_id, mem_base);
-                mem_base += size;
-            }
-        }
-        mem_base = (mem_base + 3) & !3; // Re-align after globals
+        // §1.5: no linear-memory reservation for global properties —
+        // every non-unit property is backed by a core wasm global
+        // (declared from `GlobalsBlockLayout.field_valtypes`).
 
         let mut layouts: Vec<MemoryLayout> = Vec::new();
         for component in self.components {
@@ -2102,7 +2068,7 @@ impl<'a> WasmPackageBuilder<'a> {
         //   None    → module scope (e.g. in a global-singleton default);
         //             synthesise an empty carrier so any component-local
         //             SignalRead that leaks in fails loudly, while module
-        //             globals resolve via `global_property_addrs`.
+        //             globals resolve via their core-global backing.
         let filter_calls_clone = self.filter_calls.clone();
         let module_carrier_name = self.ctx.intern("<module>");
         let module_carrier = LirResource::empty_module_carrier(module_carrier_name);
@@ -2354,11 +2320,9 @@ impl<'a> WasmPackageBuilder<'a> {
         };
 
         // Collect (prop_id, default_expr) pairs in global declaration
-        // order so output is deterministic. We dispatch per-property
-        // below: migrated properties (in the per-block GC struct) go
-        // through `emit_global_struct_store_from_expr`; pointer-typed
-        // properties (records/tuples) keep the legacy memory path via
-        // `emit_signal_store` against `global_property_addrs`.
+        // order so output is deterministic. §1.5: every non-unit
+        // property is core-global-backed, so each init goes through
+        // `emit_global_struct_store_from_expr`.
         let mut inits: Vec<(DefId, LirExpr)> = Vec::new();
         for global_id in self.ctx.defs.globals() {
             let Some(g) = self.ctx.defs.as_global(global_id) else {
@@ -2396,18 +2360,10 @@ impl<'a> WasmPackageBuilder<'a> {
                         &carrier,
                         globals_scratch,
                     )?;
-                } else if let Some(&addr) = self.global_property_addrs.get(&prop_id) {
-                    self.emit_signal_store(
-                        &mut func,
-                        addr,
-                        &expr,
-                        &carrier,
-                        globals_scratch,
-                    )?;
                 } else {
                     return Err(CodegenError::InvalidIR(format!(
-                        "globals_init: property {:?} has a default expression but is \
-                         neither in a per-block GC struct nor allocated in linear memory",
+                        "globals_init: property {:?} has a default expression but no \
+                         core-global backing (§1.5: no memory-resident globals)",
                         prop_id
                     )));
                 }

@@ -216,6 +216,10 @@ impl<'a> WasmPackageBuilder<'a> {
                     ..
                 } = &lir_expr.kind
                     && matches!(self.ctx.ty_kind(lir_expr.ty), InternedTyKind::Adt(_))
+                    && !matches!(
+                        self.internal_repr(lir_expr.ty),
+                        super::super::repr::InternalRepr::GcVariant(_)
+                    )
                 {
                     func.instruction(&Instruction::I32Const(*case_idx as i32));
                     func.instruction(&Instruction::LocalSet(slot_local(
@@ -304,6 +308,10 @@ impl<'a> WasmPackageBuilder<'a> {
                     ..
                 } = &lir_expr.kind
                     && matches!(self.ctx.ty_kind(lir_expr.ty), InternedTyKind::Adt(_))
+                    && !matches!(
+                        self.internal_repr(lir_expr.ty),
+                        super::super::repr::InternalRepr::GcVariant(_)
+                    )
                 {
                     func.instruction(&Instruction::I32Const(*case_idx as i32));
                     func.instruction(&Instruction::LocalSet(slot_local(
@@ -706,108 +714,9 @@ impl<'a> WasmPackageBuilder<'a> {
                 )));
             }
             // === Constructor Operations ===
-            LirOp::InitSignal { signal_idx, expr } => {
-                let default_expr = component.get_expr(*expr);
-                let scratch = self.current_flat_scratch.unwrap_or_default();
-                let sig_idx = *signal_idx as usize;
-                if self.signal_in_struct(comp_idx, sig_idx) {
-                    self.emit_signal_struct_store_from_expr(
-                        func,
-                        comp_idx,
-                        sig_idx,
-                        default_expr,
-                        component,
-                        scratch,
-                    )?;
-                } else {
-                    unreachable!(
-                        "InitSignal: non-struct signal is unreachable — \
-                         every non-unit signal is GC-struct-resident"
-                    )
-                }
-            }
-
-            LirOp::SignalWriteExpr { signal, expr } => {
-                let lir_expr = component.get_expr(*expr);
-                let scratch = self.current_flat_scratch.unwrap_or_default();
-                if let Some(sig_idx) = self.signal_index_in(component, *signal) {
-                    if self.signal_in_struct(comp_idx, sig_idx) {
-                        self.emit_signal_struct_store_from_expr(
-                            func, comp_idx, sig_idx, lir_expr, component, scratch,
-                        )?;
-                    } else {
-                        unreachable!(
-                            "SignalWriteExpr: non-struct signal is unreachable — \
-                             every non-unit signal is GC-struct-resident"
-                        )
-                    }
-                } else if self.ctx.defs.owning_global_block(*signal).is_some() {
-                    if self.global_in_struct(*signal) {
-                        self.emit_global_struct_store_from_expr(
-                            func, *signal, lir_expr, component, scratch,
-                        )?;
-                    } else if let Some(&addr) = self.global_property_addrs.get(signal) {
-                        self.emit_signal_store(func, addr, lir_expr, component, scratch)?;
-                    } else {
-                        return Err(CodegenError::InvalidIR(format!(
-                            "SignalWriteExpr: pointer-typed global property {:?} has no \
-                             memory address",
-                            signal
-                        )));
-                    }
-                } else {
-                    return Err(CodegenError::InvalidIR(format!(
-                        "SignalWriteExpr: no address for signal {:?}",
-                        signal
-                    )));
-                }
-            }
-
-            LirOp::InitSignalDefault { signal_idx } => {
-                let sig_idx = *signal_idx as usize;
-                // Struct-migrated signals: `struct.new_default` in the
-                // constructor already initialised every field to its
-                // type's zero/null default, so nothing to do here —
-                // EXCEPT for GcVariant, whose null default is
-                // semantically "no active case" rather than "case 0".
-                // Materialize case 0 explicitly so `ref.test` returns
-                // true for case 0 (matching legacy zero-byte memory
-                // init that produced "disc=0, payload=zeros").
-                if self.signal_in_struct(comp_idx, sig_idx) {
-                    let signal_ty = component.signals[sig_idx].ty;
-                    if let super::super::repr::InternalRepr::GcVariant(_) =
-                        self.internal_repr(signal_ty)
-                    {
-                        let case0_sub_idx = *self
-                            .record_gc_types
-                            .gc_variant_case_idx
-                            .get(&(signal_ty, 0))
-                            .ok_or_else(|| {
-                                CodegenError::InvalidIR(format!(
-                                    "InitSignalDefault: missing gc_variant_case_idx \
-                                     for ty={:?} case=0",
-                                    signal_ty
-                                ))
-                            })?;
-                        // self ref → struct.new_default $<sup>_<case0>
-                        // → struct.set on the component field.
-                        self.emit_signal_struct_store_const_default(
-                            func,
-                            comp_idx,
-                            sig_idx,
-                            case0_sub_idx,
-                        )?;
-                    }
-                    // Other struct-migrated signals (records, lists,
-                    // tuples, etc.): null default from `struct.new_default
-                    // $Comp` is already correct.
-                } else {
-                    unreachable!(
-                        "InitSignalDefault: non-struct signal is unreachable — \
-                         every non-unit signal is GC-struct-resident"
-                    )
-                }
-            }
+            // §1.4: `InitSignal` / `SignalWriteExpr` / `InitSignalDefault`
+            // codegen arms deleted — signal writes/inits are lowered
+            // inline to generic ops before codegen sees them.
 
             LirOp::StructGet {
                 rec,
@@ -1003,153 +912,10 @@ impl<'a> WasmPackageBuilder<'a> {
             // yel-core lowering; legacy `i32.const base_addr` body was
             // only used by the non-exported constructor wrapper which
             // is now codegen-inline-only).
-            LirOp::SignalWrite { signal, value } => {
-                // Component-local struct-migrated signal — struct.set
-                // each ABI slot from the consecutive value locals.
-                if let Some(sig_idx) = self.signal_index_in(component, *signal) {
-                    if self.signal_in_struct(comp_idx, sig_idx) {
-                        self.emit_signal_struct_store_from_slot(
-                            func,
-                            comp_idx,
-                            sig_idx,
-                            component,
-                            block,
-                            *value,
-                            local_offset,
-                        )?;
-                        return Ok(());
-                    }
-                    // Pointer-typed signal: fall through to the
-                    // legacy memory-write path below.
-                } else if self.ctx.defs.owning_global_block(*signal).is_some()
-                    && self.global_in_struct(*signal)
-                {
-                    // Migrated global property — write via struct.set
-                    // sourcing values from consecutive WASM locals.
-                    self.emit_global_struct_store_from_slot(
-                        func,
-                        *signal,
-                        component,
-                        block,
-                        *value,
-                        local_offset,
-                    )?;
-                    return Ok(());
-                }
-                // Global property or non-migrated signal — keep
-                // linear-memory write.
-                let (addr, signal_ty) =
-                    if let Some(_sig_idx) = self.signal_index_in(component, *signal) {
-                        unreachable!(
-                            "SignalWrite: memory path is globals-only; \
-                             signals are GC-struct-resident"
-                        )
-                    } else if let Some(&a) = self.global_property_addrs.get(signal) {
-                        let ty = self
-                            .ctx
-                            .defs
-                            .type_of(*signal)
-                            .unwrap_or(yel_core::types::Ty::ERROR);
-                        (a, ty)
-                    } else {
-                        return Err(CodegenError::InvalidIR(format!(
-                            "SignalWrite: no address for signal {:?}",
-                            signal
-                        )));
-                    };
-                match self.ctx.ty_kind(signal_ty) {
-                    InternedTyKind::F32 => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::LocalGet(slot_local(
-                            component, block,
-                            *value,
-                            local_offset,
-                        )));
-                        func.instruction(&Instruction::F32Store(mem_arg(0, 2)));
-                    }
-                    InternedTyKind::F64 => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::LocalGet(slot_local(
-                            component, block,
-                            *value,
-                            local_offset,
-                        )));
-                        func.instruction(&Instruction::F64Store(mem_arg(0, 3)));
-                    }
-                    InternedTyKind::S64 | InternedTyKind::U64 => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::LocalGet(slot_local(
-                            component, block,
-                            *value,
-                            local_offset,
-                        )));
-                        func.instruction(&Instruction::I64Store(mem_arg(0, 3)));
-                    }
-                    InternedTyKind::Option(_) => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::LocalGet(slot_local(
-                            component, block,
-                            *value,
-                            local_offset,
-                        )));
-                        func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
-                        func.instruction(&Instruction::I32Const(addr + 4));
-                        func.instruction(&Instruction::LocalGet(
-                            slot_local(component, block, *value, local_offset) + 1,
-                        ));
-                        func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
-                    }
-                    InternedTyKind::String | InternedTyKind::List(_) => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::LocalGet(slot_local(
-                            component, block,
-                            *value,
-                            local_offset,
-                        )));
-                        func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
-                        func.instruction(&Instruction::I32Const(addr + 4));
-                        func.instruction(&Instruction::LocalGet(
-                            slot_local(component, block, *value, local_offset) + 1,
-                        ));
-                        func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
-                    }
-                    // Narrow types are packed 1/2 bytes wide — a full
-                    // i32.store would clobber the adjacent signal's bytes
-                    // (e.g. a bool at offset 0 next to a string ptr at
-                    // offset 1 would corrupt the ptr on every toggle).
-                    InternedTyKind::Bool
-                    | InternedTyKind::U8
-                    | InternedTyKind::S8
-                    | InternedTyKind::Char => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::LocalGet(slot_local(
-                            component, block,
-                            *value,
-                            local_offset,
-                        )));
-                        func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
-                    }
-                    InternedTyKind::U16 | InternedTyKind::S16 => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::LocalGet(slot_local(
-                            component, block,
-                            *value,
-                            local_offset,
-                        )));
-                        func.instruction(&Instruction::I32Store16(mem_arg(0, 1)));
-                    }
-                    _ => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::LocalGet(slot_local(
-                            component, block,
-                            *value,
-                            local_offset,
-                        )));
-                        func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
-                    }
-                }
-            }
-
+            //
+            // §1.4: LirOp::SignalWrite deleted — never emitted since the
+            // inline signal-write migration; its slot-sourced struct/
+            // memory store body is gone with it.
             LirOp::TriggerEffects { signal } => {
                 self.emit_trigger_effects(func, *signal, comp_idx)?;
             }
@@ -1328,48 +1094,13 @@ impl<'a> WasmPackageBuilder<'a> {
                 });
             }
 
-            LirOp::MemConst { addr, result } => {
-                // Phase 1.2: `addr` is a per-component *relative* offset
-                // (from `signal_layout.signals[i].mem.offset`). Codegen
-                // applies the per-component memory base here so the
-                // emitted `i32.const` matches the legacy `signal_addr()`
-                // arithmetic used by `LirOp::Signal*` — preserving
-                // byte-identical wasm output across the switch.
-                //
-                // Today MemConst is **only** emitted from the inline
-                // signal-write helpers in `signals_inline.rs`, so this
-                // unconditional base addition is safe. If a future
-                // caller wants an absolute address it will need a
-                // dedicated `MemConstAbs` variant.
-                let abs_addr = (*addr as i32).wrapping_add(layout.base);
-                func.instruction(&Instruction::I32Const(abs_addr));
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *result,
-                    local_offset,
-                )));
-            }
+            // §1.5: `LirOp::MemConst` deleted with the inline
+            // memory signal-write helpers — nothing lowers to a raw
+            // per-component memory address anymore.
 
-            LirOp::MemConstGlobalProp { signal_def, offset, result } => {
-                // Resolve the pointer-typed global property's absolute
-                // memory base via the module-level `global_property_addrs`
-                // map, then add the static `offset`. Mirrors the legacy
-                // `emit_signal_store` path that read this map directly.
-                let base = *self.global_property_addrs.get(signal_def).ok_or_else(|| {
-                    CodegenError::InvalidIR(format!(
-                        "MemConstGlobalProp: no global_property_addrs entry for {:?} \
-                         (pointer-typed global expected)",
-                        signal_def
-                    ))
-                })?;
-                let abs_addr = base.wrapping_add(*offset as i32);
-                func.instruction(&Instruction::I32Const(abs_addr));
-                func.instruction(&Instruction::LocalSet(slot_local(
-                    component, block,
-                    *result,
-                    local_offset,
-                )));
-            }
+            // §1.5: `LirOp::MemConstGlobalProp` deleted — record/tuple
+            // global properties live in ref-typed core wasm globals
+            // like every other property; nothing is memory-resident.
 
             // === GC ops ===
             LirOp::StructNew {

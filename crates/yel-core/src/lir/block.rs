@@ -811,29 +811,24 @@ pub enum LirOp {
     // lowering (signal reads are folded into `LirExprKind::SignalRead`
     // inside expressions; see `op_emit.rs:893` historic stub arm).
 
-    /// Write value from slot to signal (component-local or global property).
-    SignalWrite { signal: DefId, value: LirSlotId },
-
-    /// Write an expression's value to a signal (component-local or global
-    /// property) without first funneling through a single-slot temp. Used for
-    /// composite signal types (option, result, variant-with-payload, record,
-    /// tuple) whose flat canonical-ABI shape is multi-slot and therefore
-    /// cannot fit the single-SlotId `SignalWrite` form. Codegen emits the
-    /// expression and stores each flat slot to its offset.
-    SignalWriteExpr { signal: DefId, expr: LirExprId },
+    // §1.4: `SignalWrite` / `SignalWriteExpr` / `InitSignal` /
+    // `InitSignalDefault` deleted — every signal write and init is
+    // lowered inline by `inline_signal_write_or_init_from_expr` to
+    // generic ops (`EvalExprToSlots` + `StructSetSym` /
+    // `GlobalFieldSet`). Only `TriggerEffects` survives, as the
+    // global-signal fanout mechanism.
 
     /// Trigger all effects that depend on signal.
+    ///
+    /// §1.4 residue: emitted only for global-block-owned signals whose
+    /// observers have no synthesized inline fanout blocks (see
+    /// `synth_global_fanout_blocks` and `global_fanout_blocks` in
+    /// `context.rs`). Component-local signals dispatch via direct
+    /// `CallBlock`s in `emit_trigger_for_signal`. Goes away once the
+    /// fanout-block synthesis covers every observer shape.
     TriggerEffects { signal: DefId },
 
     // === Constructor Operations ===
-    /// Initialize signal with expression value.
-    /// Used during component construction to set initial values.
-    InitSignal { signal_idx: u32, expr: LirExprId },
-
-    /// Initialize signal with zero/empty default.
-    /// Used when no default value is provided.
-    InitSignalDefault { signal_idx: u32 },
-
     /// Initialize memory slot to zero.
     /// Used to clear persistent storage during construction.
     InitMemorySlot { slot: LirSlotId },
@@ -927,23 +922,6 @@ pub enum LirOp {
         ty: MemoryValueType,
         width: StoreWidth,
     },
-
-    /// Materialize a constant linear-memory address into a slot.
-    /// Emits `i32.const <addr>; local.set result`. Used by inline
-    /// lowering passes that need a raw memory address as an operand
-    /// for the *Addr load/store ops above.
-    MemConst { addr: u32, result: LirSlotId },
-
-    /// Materialize the absolute linear-memory address of a global-block
-    /// property (plus `offset`) into a slot. Codegen resolves
-    /// `signal_def` via the module-level `global_property_addrs` map
-    /// (which stores absolute addresses for pointer-typed global
-    /// properties) and emits `i32.const (addr + offset); local.set
-    /// <result>`. Differs from `MemConst` in that it does NOT add the
-    /// per-component `layout.base` — globals live at a fixed module
-    /// address. Phase 1.1c-101 — used by the inline pointer-typed
-    /// global write path.
-    MemConstGlobalProp { signal_def: DefId, offset: u32, result: LirSlotId },
 
     // === WASM GC ops (phase 2+ of the GC migration) ===
     //

@@ -159,17 +159,12 @@ impl<'a> WasmPackageBuilder<'a> {
                             .defs
                             .type_of(target_def_id)
                             .unwrap_or(yel_core::types::Ty::ERROR);
-                        let addr = self
-                            .global_property_addrs
-                            .get(&target_def_id)
-                            .copied()
-                            // Migrated globals have no memory address;
-                            // the dispatch below routes around target_addr
-                            // via the per-block struct.set path. -1 is a
-                            // poison sentinel that would surface as a
-                            // wild store if ever emitted.
-                            .unwrap_or(-1);
-                        (addr, ty)
+                        // §1.5: globals have no memory address — the
+                        // dispatch below routes around target_addr via
+                        // the per-block struct.set path. -1 is a poison
+                        // sentinel that would surface as a wild store
+                        // if ever emitted.
+                        (-1, ty)
                     } else {
                         return Err(CodegenError::InvalidIR(format!(
                             "binding-setter handler: no address for target signal {:?}",

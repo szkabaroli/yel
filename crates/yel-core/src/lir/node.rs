@@ -305,8 +305,8 @@ impl LirResource {
     /// emission (e.g. lowering global-singleton property defaults).
     ///
     /// The `signals` vector is empty, so any `SignalRead`/`SignalWrite` that
-    /// leaks into module scope falls through to the module's
-    /// `global_property_addrs` lookup. `blocks` contains a single empty
+    /// leaks into module scope resolves only through global-property
+    /// (core-global) lookups. `blocks` contains a single empty
     /// placeholder block so `constructor_block` / `mount_block` remain valid
     /// indices — nothing actually executes them in module scope.
     pub fn empty_module_carrier(name: Name) -> Self {

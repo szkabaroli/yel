@@ -267,99 +267,15 @@ impl WasmPackageBuilder<'_> {
                     self.emit_global_struct_read(func, *def_id)?;
                     return Ok(self.signal_storage_valtypes(expr.ty).len());
                 }
-                // Global property OR Pointer-typed (record/tuple)
-                // local signal — keep linear-memory load path.
-                let addr = if let Some(_sig_idx) = self.signal_index_in(component, *def_id) {
-                    unreachable!(
-                        "SignalRead: memory path is globals-only; \
-                         signals are GC-struct-resident"
-                    )
-                } else if let Some(&a) = self.global_property_addrs.get(def_id) {
-                    a
-                } else {
-                    todo!("SignalRead: no address for {:?}", def_id)
-                };
-                match self.ctx.ty_kind(expr.ty) {
-                    InternedTyKind::String | InternedTyKind::List(_) => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                        func.instruction(&Instruction::I32Const(addr + 4));
-                        func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                    }
-                    InternedTyKind::F32 => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::F32Load(mem_arg(0, 2)));
-                    }
-                    InternedTyKind::F64 => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::F64Load(mem_arg(0, 3)));
-                    }
-                    InternedTyKind::S64 | InternedTyKind::U64 => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::I64Load(mem_arg(0, 3)));
-                    }
-                    // Narrow types: load 1/2 bytes so we don't pull in the
-                    // adjacent signal's memory.
-                    InternedTyKind::Bool | InternedTyKind::U8 | InternedTyKind::Char => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::I32Load8U(mem_arg(0, 0)));
-                    }
-                    InternedTyKind::S8 => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::I32Load8S(mem_arg(0, 0)));
-                    }
-                    InternedTyKind::U16 => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::I32Load16U(mem_arg(0, 1)));
-                    }
-                    InternedTyKind::S16 => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::I32Load16S(mem_arg(0, 1)));
-                    }
-                    // Option / Result / Variant-with-payload: load each
-                    // canonical-ABI flat slot at its recorded offset,
-                    // producing `flatten_core_valtypes(ty).len()` stack
-                    // values in declaration order. Records / tuples are
-                    // pointer-passed in the current ABI — for those, keep
-                    // pushing a single pointer-sized i32 load of the base
-                    // address so that field accesses (which expect a base
-                    // pointer) remain valid.
-                    InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
-                        self.emit_flat_slot_signal_read(func, addr, expr.ty)?;
-                    }
-                    InternedTyKind::Adt(def_id) => {
-                        // Variant with any payload: flat-slot load.
-                        // Enum / Record: pointer-passed, single i32 load of
-                        // signal base address.
-                        let has_payload = self
-                            .ctx
-                            .defs
-                            .as_variant(*def_id)
-                            .map(|v| {
-                                v.cases.clone().iter().any(|&c| {
-                                    if let yel_core::definitions::DefKind::VariantCase(case) =
-                                        self.ctx.defs.kind(c)
-                                    {
-                                        case.payload.is_some()
-                                    } else {
-                                        false
-                                    }
-                                })
-                            })
-                            .unwrap_or(false);
-                        if has_payload {
-                            self.emit_flat_slot_signal_read(func, addr, expr.ty)?;
-                        } else {
-                            func.instruction(&Instruction::I32Const(addr));
-                            func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                        }
-                    }
-                    _ => {
-                        func.instruction(&Instruction::I32Const(addr));
-                        func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                    }
-                }
-                Ok(self.flatten_core_valtypes(expr.ty).len())
+                // §1.5: no memory-resident signal storage remains —
+                // component-local signals are GC-struct fields and every
+                // non-unit global property is a core wasm global. A
+                // SignalRead reaching here is a lowering/codegen bug.
+                Err(CodegenError::InvalidIR(format!(
+                    "SignalRead: {:?} resolves to neither a component GC-struct \
+                     signal nor a core-global-backed global property",
+                    def_id
+                )))
             }
 
             LirExprKind::Binary { op, lhs, rhs } => {
@@ -585,15 +501,10 @@ impl WasmPackageBuilder<'_> {
                                         func.instruction(&Instruction::Drop);
                                         func.instruction(&Instruction::LocalGet(scratch));
                                         handled_via_emit = true;
-                                    } else {
-                                        let maybe_addr =
-                                            self.global_property_addrs.get(def_id).copied();
-                                        if let Some(addr) = maybe_addr {
-                                            func.instruction(&Instruction::I32Const(addr + 4));
-                                            func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                                            handled_via_emit = true;
-                                        }
                                     }
+                                    // §1.5: no memory-resident globals —
+                                    // anything else falls through to the
+                                    // generic emit-and-discard path.
                                 }
                                 if !handled_via_emit {
                                     // Complex expression or unresolved
@@ -3027,76 +2938,6 @@ impl WasmPackageBuilder<'_> {
         Ok(slots.len())
     }
 
-    /// Load each canonical-ABI flat slot of a signal of type `ty` located at
-    /// base address `addr`, pushing the values onto the stack in declaration
-    /// order.
-    ///
-    /// **Boundary / fallback only.** With GcVariant now hosting
-    /// every option/result/variant signal, the SignalRead callsite for
-    /// `signal_in_struct == false` is dead in practice. Kept so the
-    /// not-yet-migrated `InternalRepr::Flat` arm (TODO in `repr.rs`)
-    /// still works for raw enums and corner cases.
-    pub(super) fn emit_flat_slot_signal_read(
-        &mut self,
-        func: &mut Function,
-        addr: i32,
-        ty: Ty,
-    ) -> Result<(), CodegenError> {
-        use super::StoreWidth;
-        use wasm_encoder::ValType;
-        let slots = self.flatten_core_slots(ty);
-        if slots.is_empty() {
-            return Err(CodegenError::InvalidIR(format!(
-                "SignalRead: type {:?} flattens to zero slots",
-                ty
-            )));
-        }
-        for slot in &slots {
-            func.instruction(&Instruction::I32Const(addr + slot.offset as i32));
-            match (slot.valtype, slot.store) {
-                (ValType::I32, StoreWidth::I32) => {
-                    func.instruction(&Instruction::I32Load(mem_arg(0, 2)));
-                }
-                (ValType::I32, StoreWidth::I32_8) => {
-                    func.instruction(&Instruction::I32Load8U(mem_arg(0, 0)));
-                }
-                (ValType::I32, StoreWidth::I32_16) => {
-                    func.instruction(&Instruction::I32Load16U(mem_arg(0, 1)));
-                }
-                (ValType::I64, StoreWidth::I64) => {
-                    func.instruction(&Instruction::I64Load(mem_arg(0, 3)));
-                }
-                (ValType::F32, StoreWidth::F32) => {
-                    func.instruction(&Instruction::F32Load(mem_arg(0, 2)));
-                }
-                (ValType::F64, StoreWidth::F64) => {
-                    func.instruction(&Instruction::F64Load(mem_arg(0, 3)));
-                }
-                (vt, store) => {
-                    return Err(CodegenError::InvalidIR(format!(
-                        "SignalRead: unsupported slot shape valtype={:?} store={:?} for type {:?}",
-                        vt, store, ty
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// **Boundary only.** Three live callers (record-field memory load,
-    /// `emit_variant_ctor_flat` payload lift, callback POR-record return
-    /// load) all live on canonical-ABI boundaries, not internal SSA.
-    /// `InternalRepr::Flat` is gone, so the "non-migrated option/result
-    /// fallback" mentioned in earlier comments no longer exists.
-    ///
-    /// Load each canonical-ABI flat slot of a value of type `ty` from a base
-    /// pointer currently on top of the WASM stack, pushing the slot values onto
-    /// the stack in declaration order. Consumes the base pointer from the
-    /// stack.
-    ///
-    /// Used by `FieldAccess` for composite field types (option, result,
-    /// variant-with-payload) so downstream consumers observe the exact
-    /// multi-value shape their emitters expect. Mirrors
     /// `emit_flat_slot_signal_read`, but the base is dynamic (the record
     /// pointer + field offset already summed by the caller) rather than a
     /// known absolute address.

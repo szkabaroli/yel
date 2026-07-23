@@ -319,20 +319,7 @@ fn hash_op<H: Hasher>(
         ReturnValue { value } => {
             sn.norm(*value).hash(h);
         }
-        SignalWrite { signal, value } => {
-            signal.0.hash(h);
-            sn.norm(*value).hash(h);
-        }
-        SignalWriteExpr { signal, expr } => {
-            signal.0.hash(h);
-            expr.0.hash(h);
-        }
         TriggerEffects { signal } => signal.0.hash(h),
-        InitSignal { signal_idx, expr } => {
-            signal_idx.hash(h);
-            expr.0.hash(h);
-        }
-        InitSignalDefault { signal_idx } => signal_idx.hash(h),
         InitMemorySlot { slot } => sn.norm(*slot).hash(h),
         RegistryLookupToSelfRef {
             component,
@@ -431,15 +418,6 @@ fn hash_op<H: Hasher>(
             sn.norm(*value).hash(h);
             ty.hash(h);
             width.hash(h);
-        }
-        MemConst { addr, result } => {
-            addr.hash(h);
-            sn.norm(*result).hash(h);
-        }
-        MemConstGlobalProp { signal_def, offset, result } => {
-            signal_def.hash(h);
-            offset.hash(h);
-            sn.norm(*result).hash(h);
         }
         StructNew {
             ty_idx,

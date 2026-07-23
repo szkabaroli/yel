@@ -17,7 +17,6 @@
 pub(crate) mod blocks;
 mod component;
 pub(crate) mod lifecycle_inline;
-pub(crate) mod signals_inline;
 
 pub use blocks::{is_scalar_list_ty_struct, ty_to_slot_val_type};
 pub use component::{lower_component, lower_globals};

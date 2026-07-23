@@ -614,7 +614,7 @@ fn render_block_outputs(
     let block = comp.get_block(block_id);
     let mut writes: Vec<DefId> = Vec::new();
     let mut mutations: Vec<String> = Vec::new();
-    walk_ops_shallow(&block.ops, ctx, &mut writes, &mut mutations);
+    walk_ops_shallow(&block.ops, comp, ctx, &mut writes, &mut mutations);
 
     for &written in &writes {
         writeln!(
@@ -658,7 +658,7 @@ fn describe_block_local(comp: &LirResource, ctx: &CompilerContext, block_id: Blo
     let block = comp.get_block(block_id);
     let mut writes: Vec<DefId> = Vec::new();
     let mut mutations: Vec<String> = Vec::new();
-    walk_ops_shallow(&block.ops, ctx, &mut writes, &mut mutations);
+    walk_ops_shallow(&block.ops, comp, ctx, &mut writes, &mut mutations);
 
     let mut parts: Vec<String> = Vec::new();
     if let Some((bid, kind)) = boundary_kind_for_block(comp, block_id) {
@@ -695,23 +695,70 @@ fn boundary_kind_for_block(comp: &LirResource, block_id: BlockId) -> Option<(u32
     Some((bid.0, kind))
 }
 
+/// Resolve an *inline* signal write back to the signal it targets.
+///
+/// Signal writes are lowered inline (no dedicated signal-write op):
+/// component-local signals become `StructSetSym` on the component
+/// struct at the signal's GC field range; global signals become
+/// `GlobalFieldSet` at the property's field offset. Both carry only a
+/// field index, so this maps the index back through the layout:
+/// `comp.signal_layout` for locals, an accumulated
+/// `slot_count_for_signal_ty` walk over the global block's properties
+/// for globals.
+fn inline_write_target(comp: &LirResource, ctx: &CompilerContext, op: &LirOp) -> Option<DefId> {
+    match op {
+        LirOp::StructSetSym {
+            ty_ref: yel_core::lir::block::LirTypeRef::ComponentStruct,
+            field,
+            ..
+        } => {
+            for (sig, storage) in comp.signals.iter().zip(&comp.signal_layout.signals) {
+                if let Some(gc) = storage.gc
+                    && *field >= gc.field_start
+                    && *field < gc.field_start + gc.field_count
+                {
+                    return Some(sig.def_id);
+                }
+            }
+            None
+        }
+        LirOp::GlobalFieldSet { block, field, .. } => {
+            let global = ctx.defs.as_global(*block)?;
+            let mut field_start: u32 = 0;
+            for &prop_id in &global.properties {
+                let prop_ty = ctx.defs.type_of(prop_id).unwrap_or(Ty::ERROR);
+                let count =
+                    yel_core::lir::signal_layout::slot_count_for_signal_ty(ctx, prop_ty);
+                if *field >= field_start && *field < field_start + count {
+                    return Some(prop_id);
+                }
+                field_start += count;
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Variant of `walk_ops` that does NOT recurse through `CallBlock` /
 /// `CallBlock2` — used for per-block local summaries so each fn node's
 /// label only describes that block's own work. Still descends into
 /// `If` / `Loop` bodies because those are inline within the same block.
 fn walk_ops_shallow(
     ops: &[LirOp],
+    comp: &LirResource,
     ctx: &CompilerContext,
     writes: &mut Vec<DefId>,
     mutations: &mut Vec<String>,
 ) {
     for op in ops {
-        match op {
-            LirOp::SignalWrite { signal, .. } | LirOp::SignalWriteExpr { signal, .. } => {
-                if !writes.contains(signal) {
-                    writes.push(*signal);
-                }
+        if let Some(signal) = inline_write_target(comp, ctx, op) {
+            if !writes.contains(&signal) {
+                writes.push(signal);
             }
+            continue;
+        }
+        match op {
             // DOM mutations flow through `CallFunction` against a
             // `dom_imports` DefId; map the callee back to its entry.
             LirOp::CallFunction { func: callee, .. } => {
@@ -731,11 +778,11 @@ fn walk_ops_shallow(
                 }
             }
             LirOp::If(if_op) => {
-                walk_ops_shallow(&if_op.then_ops, ctx, writes, mutations);
-                walk_ops_shallow(&if_op.else_ops, ctx, writes, mutations);
+                walk_ops_shallow(&if_op.then_ops, comp, ctx, writes, mutations);
+                walk_ops_shallow(&if_op.else_ops, comp, ctx, writes, mutations);
             }
             LirOp::Loop { body_ops, .. } => {
-                walk_ops_shallow(body_ops, ctx, writes, mutations);
+                walk_ops_shallow(body_ops, comp, ctx, writes, mutations);
             }
             _ => {}
         }
@@ -894,12 +941,13 @@ fn walk_ops(
     mutations: &mut Vec<String>,
 ) {
     for op in ops {
-        match op {
-            LirOp::SignalWrite { signal, .. } | LirOp::SignalWriteExpr { signal, .. } => {
-                if !writes.contains(signal) {
-                    writes.push(*signal);
-                }
+        if let Some(signal) = inline_write_target(comp, ctx, op) {
+            if !writes.contains(&signal) {
+                writes.push(signal);
             }
+            continue;
+        }
+        match op {
             // DOM mutations route through `CallFunction` on `dom_imports`
             // DefIds; classify into text/attr/structural buckets by callee.
             LirOp::CallFunction { func: callee, .. } => {
