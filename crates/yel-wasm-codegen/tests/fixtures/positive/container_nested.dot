@@ -4,7 +4,7 @@ digraph yel_signal_graph {
   node [fontname="Helvetica", fontsize=10];
   edge [fontname="Helvetica", fontsize=9];
   subgraph cluster_c0 {
-    label="component Card";
+    label="component Panel";
     style=rounded;
     color="#888";
   }

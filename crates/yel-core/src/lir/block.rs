@@ -7,7 +7,7 @@
 //! - Strings and expressions are interned (StringId, LirExprId)
 
 use std::collections::BTreeSet;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -353,9 +353,9 @@ impl LirBlock {
         Self {
             id,
             ops: Vec::new(),
-            captured_locals: HashMap::new(),
-            local_to_slot: HashMap::new(),
-            local_modes: HashMap::new(),
+            captured_locals: HashMap::default(),
+            local_to_slot: HashMap::default(),
+            local_modes: HashMap::default(),
             return_slot: None,
             params: Vec::new(),
             max_flat_scratch_counts: (0, 0, 0, 0),

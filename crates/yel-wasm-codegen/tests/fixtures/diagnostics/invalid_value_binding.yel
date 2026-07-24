@@ -1,0 +1,14 @@
+// E0050: `set value:` is only valid on input elements, not Text.
+package yel:invalidvaluebind@0.1.0;
+
+export component App {
+    celsius: f32 = 0.0;
+    VStack {
+        Text {
+            value: celsius
+            set value: {
+                celsius = 1.0;
+            }
+        }
+    }
+}

@@ -4,7 +4,7 @@
 //! self ref. Methods live on `WasmPackageBuilder<'a>` via an additional
 //! impl block.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use wasm_encoder::{Function, Instruction, ValType};
 use yel_core::lir::{LirResource, LirSlotKind};
@@ -165,9 +165,9 @@ impl<'a> WasmPackageBuilder<'a> {
             .iter()
             .filter_map(|def_id| self.components.iter().position(|c| c.def_id == *def_id))
             .collect();
-        let mut block_mount_child_locals: HashMap<usize, u32> = HashMap::new();
-        let mut block_mount_child_alloc_idx_locals: HashMap<usize, u32> = HashMap::new();
-        let mut block_mount_child_alloc_arr_locals: HashMap<usize, u32> = HashMap::new();
+        let mut block_mount_child_locals: HashMap<usize, u32> = HashMap::default();
+        let mut block_mount_child_alloc_idx_locals: HashMap<usize, u32> = HashMap::default();
+        let mut block_mount_child_alloc_arr_locals: HashMap<usize, u32> = HashMap::default();
         let scratch_total = max_i32_scratch + max_i64_scratch + max_f32_scratch + max_f64_scratch;
         let mut next_block_local = param_count + num_slots + scratch_total;
         for &child_idx in &block_child_indices {
@@ -216,7 +216,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // arg's GC ref so the lowering can re-read it (per gc-variant case
         // test, per record member). Scalars / lists / strings are handled
         // inline in `emit_callback_arg` and skipped here.
-        let mut block_cb_arg_ref_locals: HashMap<u32, u32> = HashMap::new();
+        let mut block_cb_arg_ref_locals: HashMap<u32, u32> = HashMap::default();
         for &ty in &block.callback_arg_composite_types {
             let gc_type_idx = match self.internal_repr(ty) {
                 crate::wasm::repr::InternalRepr::GcRef(idx)
@@ -380,7 +380,7 @@ impl<'a> WasmPackageBuilder<'a> {
             // emit_expr treats the map as raw absolute indices so it can be
             // shared with the filter-closure path (which reserves raw locals
             // directly instead of going through SlotId).
-            let mut resolved = HashMap::with_capacity(block.captured_locals.len());
+            let mut resolved = HashMap::with_capacity_and_hasher(block.captured_locals.len(), Default::default());
             for (local_id, slot) in &block.captured_locals {
                 resolved.insert(*local_id, slot_local(component, block, *slot, local_offset));
             }

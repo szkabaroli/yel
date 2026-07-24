@@ -1,6 +1,6 @@
 //! AST to HIR lowering.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::context::CompilerContext;
 use crate::definitions::{
@@ -972,7 +972,7 @@ impl<'ctx> HirLowering<'ctx> {
         // (name_span, getter_expr, setter_body)
         type BindingEntry = (Span, Option<HirExpr>, Option<Vec<HirStatement>>);
         let mut binding_order: Vec<String> = Vec::new();
-        let mut binding_map: HashMap<String, BindingEntry> = HashMap::new();
+        let mut binding_map: HashMap<String, BindingEntry> = HashMap::default();
 
         for b in &elem.bindings {
             let name = b.node.name.clone();

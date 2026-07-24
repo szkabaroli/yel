@@ -377,22 +377,10 @@ impl<'a> WasmPackageBuilder<'a> {
                 // that case. `flatten_core_valtypes` treats unknown primitives
                 // as a single i32, so we special-case Unit explicitly here.
                 if !matches!(self.ctx.ty_kind(lir_expr.ty), InternedTyKind::Unit) {
-                    // GcVariant produces a single supertype ref, not
-                    // canonical-flat slots, so drop count must follow
-                    // internal stack-slot count for those Tys.
-                    let drop_count = match self.internal_repr(lir_expr.ty) {
-                        crate::wasm::repr::InternalRepr::GcVariant(_) => {
-                            self.internal_stack_slots(lir_expr.ty)
-                        }
-                        // strings-to-GC: a string is a single $str_bytes ref
-                        // internally, not canonical (ptr, len).
-                        crate::wasm::repr::InternalRepr::GcArrayRef(_)
-                            if matches!(self.ctx.ty_kind(lir_expr.ty), InternedTyKind::String) =>
-                        {
-                            self.internal_stack_slots(lir_expr.ty)
-                        }
-                        _ => self.flatten_core_valtypes(lir_expr.ty).len(),
-                    };
+                    // §1.5: every non-unit value is a single stack slot
+                    // internally (scalar or one GC ref), so exactly one
+                    // Drop — never the canonical multi-slot count.
+                    let drop_count = self.internal_stack_slots(lir_expr.ty);
                     for _ in 0..drop_count {
                         func.instruction(&Instruction::Drop);
                     }
@@ -703,21 +691,15 @@ impl<'a> WasmPackageBuilder<'a> {
                 handle,
                 result,
             } => {
-                let ci = self.comp_idx_by_def_id(*comp_def).map_err(|_| {
-                    CodegenError::InvalidIR(format!(
-                        "CallResourceNew: no component for {:?}",
-                        comp_def
-                    ))
-                })?;
                 let import_layout = self.import_layout.as_ref().ok_or_else(|| {
                     CodegenError::InternalError(
                         "CallResourceNew: import_layout not populated".into(),
                     )
                 })?;
                 let resource_new_idx = import_layout
-                    .components
-                    .get(ci)
-                    .and_then(|c| c.resource_new)
+                    .resource_new
+                    .get(comp_def)
+                    .copied()
                     .ok_or_else(|| {
                         CodegenError::InvalidIR(format!(
                             "CallResourceNew: component {:?} has no [resource-new] import",

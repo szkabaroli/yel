@@ -36,36 +36,6 @@ fn compile_to_component(source: &str) -> Vec<u8> {
         "HIR errors:\n{}",
         compiler.render_diagnostics()
     );
-    let mut lir_components = Vec::new();
-    let mut global_thir_defaults: std::collections::HashMap<
-        yel_core::DefId,
-        yel_core::thir::ThirExpr,
-    > = std::collections::HashMap::new();
-    for item in &hir {
-        match compiler.type_check(item) {
-            yel_core::thir::ThirItem::Component(thir) => {
-                assert!(
-                    !compiler.has_errors(),
-                    "typeck errors:\n{}",
-                    compiler.render_diagnostics()
-                );
-                lir_components.push(compiler.lower_to_lir(&thir));
-            }
-            yel_core::thir::ThirItem::Global(global) => {
-                assert!(
-                    !compiler.has_errors(),
-                    "global typeck errors:\n{}",
-                    compiler.render_diagnostics()
-                );
-                global_thir_defaults.extend(global.signal_defaults);
-            }
-        }
-    }
-    compiler.resolve_global_triggers(&mut lir_components);
-
-    let (lir_globals, lir_global_default_exprs) =
-        compiler.lower_globals_to_lir(&global_thir_defaults);
-
     let (namespace, name, version) = match file.package {
         Some(ref pkg) => (
             pkg.namespace.clone(),
@@ -75,20 +45,16 @@ fn compile_to_component(source: &str) -> Vec<u8> {
         None => ("yel".into(), "app".into(), "0.1.0".into()),
     };
 
-    let interfaces = compiler.build_import_interfaces();
-    let module = yel_core::lir::LirModule {
-        resources: lir_components,
-        global_defaults: lir_globals.clone(),
-        global_default_exprs: lir_global_default_exprs.clone(),
-        interfaces,
-        package: file.package.clone(),
-    };
+    let module = compiler.lower_items_to_module(&hir, file.package.clone());
+    assert!(
+        !compiler.has_errors(),
+        "typeck/lowering errors:\n{}",
+        compiler.render_diagnostics()
+    );
     let opts = codegen::WasmWithWitOptions {
         namespace,
         name,
         version,
-        global_defaults: lir_globals,
-        global_default_exprs: lir_global_default_exprs,
         wasm_opt_args: None,
     };
     codegen::generate_wasm_module(&module, compiler.context(), &opts).expect("wasm codegen")
@@ -451,7 +417,7 @@ fn callback_imports_take_self_handle() {
 fn container_mount_returns_i32_non_container_returns_void() {
     let container = r#"
         package yel:ctnrm@0.1.0;
-        export component Card {
+        export component Panel {
             VStack { Text { "chrome" } @children }
         }
     "#;
@@ -467,7 +433,7 @@ fn container_mount_returns_i32_non_container_returns_void() {
 
     let ctnr_mount = find_export_func_sig(
         &ctnr_core,
-        "yel:ctnrm/card-component@0.1.0#[method]card.mount",
+        "yel:ctnrm/panel-component@0.1.0#[method]panel.mount",
     );
     let plain_mount = find_export_func_sig(
         &plain_core,
@@ -567,9 +533,9 @@ fn module_start_function_seeds_global_defaults() {
     );
 }
 
-/// Regression: `import component Dialog { ... }` produces a WIT interface
+/// Regression: `import component Modal { ... }` produces a WIT interface
 /// that the host is expected to provide. The core module imports
-/// `[resource-new]dialog` from the matching `[export]` interface.
+/// `[resource-new]modal` from the matching `[export]` interface.
 ///
 /// This assertion locks in the resource-new import naming so accidental
 /// renaming breaks loudly instead of silently orphaning imports.
@@ -577,7 +543,7 @@ fn module_start_function_seeds_global_defaults() {
 fn imported_component_declares_resource_new_import() {
     let source = r#"
         package yel:impdecl@0.1.0;
-        import component Dialog {
+        import component Modal {
             title: string;
             func show();
         }
@@ -589,11 +555,11 @@ fn imported_component_declares_resource_new_import() {
     let core = CoreModule::new(extract_yel_core_module(&comp_bytes));
     let imports = core.imports();
     // Sanity: the current module is expected to have a resource-new
-    // import for its OWN exported App component. The imported Dialog
+    // import for its OWN exported App component. The imported Modal
     // doesn't trigger a resource-new in the core module — that's host
     // business. So we only assert that the module imports SOMETHING from
-    // the dialog's interface if we find any such entry; otherwise the
-    // compiler decides not to import anything from Dialog at the core
+    // the modal's interface if we find any such entry; otherwise the
+    // compiler decides not to import anything from Modal at the core
     // level, which is a separate known limitation.
     let app_resource_new = imports
         .iter()

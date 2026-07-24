@@ -119,7 +119,7 @@ pub fn type_check(item: &HirItem, ctx: &mut CompilerContext) -> ThirItem {
 /// signal-defaults contract as a component so the same lowering drives it.
 /// Private — globals reach type-checking only through [`type_check`].
 fn type_check_global(global: &HirGlobal, ctx: &mut CompilerContext) -> super::node::ThirGlobal {
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap as HashMap;
 
     let gid = global.def_id;
     let (name, span, is_export, prop_ids, defaults) = match ctx.defs.as_global(gid) {
@@ -134,7 +134,7 @@ fn type_check_global(global: &HirGlobal, ctx: &mut CompilerContext) -> super::no
         None => unreachable!("HirItem::Global wraps non-global DefId {gid:?}"),
     };
 
-    let mut signal_defaults: HashMap<DefId, ThirExpr> = HashMap::new();
+    let mut signal_defaults: HashMap<DefId, ThirExpr> = HashMap::default();
     {
         let mut checker = TypeChecker::new(ctx);
         for (prop_id, default) in prop_ids.iter().copied().zip(defaults) {
@@ -180,6 +180,78 @@ pub fn type_check_with_map(component: &HirComponent, ctx: &mut CompilerContext) 
     TypeCheckResult {
         component: thir,
         type_map,
+    }
+}
+
+/// Walk `ty` through every boundary-carried position (option/result/list/tuple
+/// payloads, record fields, variant case payloads) and return the `DefId` and
+/// kind label of the first *empty aggregate* reachable, if any: a `record {}`,
+/// an `enum {}`, or a `variant {}`. The WebAssembly component model requires
+/// each of these to have at least one field/case, so an empty one cannot cross
+/// the component boundary. `visiting` guards recursive record types.
+fn ty_reaches_empty_aggregate(
+    ctx: &CompilerContext,
+    ty: Ty,
+    visiting: &mut rustc_hash::FxHashSet<DefId>,
+) -> Option<(DefId, &'static str)> {
+    match ctx.ty_kind(ty) {
+        InternedTyKind::Adt(def_id) => {
+            let def_id = *def_id;
+            if let Some(rec) = ctx.defs.as_record(def_id) {
+                if rec.fields.is_empty() {
+                    return Some((def_id, "record"));
+                }
+                if !visiting.insert(def_id) {
+                    return None; // already on the stack — break the cycle
+                }
+                // Collect field types up front so no borrow of `rec` is held
+                // across the recursive calls.
+                let field_tys: Vec<Ty> = rec
+                    .fields
+                    .iter()
+                    .filter_map(|&f| match ctx.defs.kind(f) {
+                        DefKind::Field(field) => Some(field.ty),
+                        _ => None,
+                    })
+                    .collect();
+                let found = field_tys
+                    .into_iter()
+                    .find_map(|t| ty_reaches_empty_aggregate(ctx, t, visiting));
+                visiting.remove(&def_id);
+                found
+            } else if ctx.defs.as_enum(def_id).is_some_and(|e| e.cases.is_empty()) {
+                Some((def_id, "enum"))
+            } else if let Some(var) = ctx.defs.as_variant(def_id) {
+                if var.cases.is_empty() {
+                    return Some((def_id, "variant"));
+                }
+                let payload_tys: Vec<Ty> = var
+                    .cases
+                    .iter()
+                    .filter_map(|&c| match ctx.defs.kind(c) {
+                        DefKind::VariantCase(case) => case.payload,
+                        _ => None,
+                    })
+                    .collect();
+                payload_tys
+                    .into_iter()
+                    .find_map(|t| ty_reaches_empty_aggregate(ctx, t, visiting))
+            } else {
+                None
+            }
+        }
+        InternedTyKind::Option(inner) => ty_reaches_empty_aggregate(ctx, *inner, visiting),
+        InternedTyKind::Result { ok, err } => {
+            let (ok, err) = (*ok, *err);
+            ok.and_then(|t| ty_reaches_empty_aggregate(ctx, t, visiting))
+                .or_else(|| err.and_then(|t| ty_reaches_empty_aggregate(ctx, t, visiting)))
+        }
+        InternedTyKind::List(elem) => ty_reaches_empty_aggregate(ctx, *elem, visiting),
+        InternedTyKind::Tuple(elems) => elems
+            .clone()
+            .into_iter()
+            .find_map(|t| ty_reaches_empty_aggregate(ctx, t, visiting)),
+        _ => None,
     }
 }
 
@@ -246,13 +318,13 @@ impl<'ctx> TypeChecker<'ctx> {
     // ========================================================================
 
     fn check_component(&mut self, component: &HirComponent) -> ThirComponent {
-        use std::collections::HashMap;
+        use rustc_hash::FxHashMap as HashMap;
 
         self.current_component = component.def_id;
         self.locals = LocalScope::new();
 
         // Store type-checked signal defaults
-        let mut signal_defaults: HashMap<DefId, ThirExpr> = HashMap::new();
+        let mut signal_defaults: HashMap<DefId, ThirExpr> = HashMap::default();
 
         // Phase 1: Add ALL component properties to local scope first
         // This matches HIR lowering order, ensuring LocalIds are consistent
@@ -278,6 +350,41 @@ impl<'ctx> TypeChecker<'ctx> {
         } else {
             vec![]
         };
+
+        // Boundary check: an exported component exposes each property as a WIT
+        // getter/setter. The component model forbids an empty aggregate (a
+        // `record`/`enum`/`variant` with no fields/cases), so one reachable
+        // through an exposed property type cannot cross the boundary. Flag it
+        // here with a precise span instead of letting codegen fail later with
+        // an opaque encoder error. (Callbacks and imported components are caught
+        // by the codegen backstop in `wit_ast::register_type`.)
+        if component.is_export {
+            for &prop_id in &prop_ids {
+                let prop_ty = self.ctx.defs.type_of(prop_id).unwrap_or(Ty::ERROR);
+                if let Some((empty_def, kind)) = ty_reaches_empty_aggregate(
+                    self.ctx,
+                    prop_ty,
+                    &mut rustc_hash::FxHashSet::default(),
+                ) {
+                    let name = self.ctx.str(self.ctx.defs.name(empty_def)).to_string();
+                    let prop_name = self.ctx.str(self.ctx.defs.name(prop_id)).to_string();
+                    let member = if kind == "record" { "field" } else { "case" };
+                    self.ctx.diagnostics.push(
+                        Diagnostic::error(format!(
+                            "empty {kind} `{name}` cannot cross the component boundary"
+                        ))
+                        .with_span(self.ctx.defs.span(prop_id))
+                        .with_code(ErrorCode::EmptyTypeAtBoundary)
+                        .with_note(format!(
+                            "property `{prop_name}` is exposed as a component getter/setter, \
+                             but the WebAssembly component model requires a {kind} to have at \
+                             least one {member}. Give `{name}` a {member}, or keep it internal \
+                             (do not expose it through an exported component's property)."
+                        )),
+                    );
+                }
+            }
+        }
 
         // Phase 2: Type check default values (after all properties are in scope)
         for &prop_id in &prop_ids {
@@ -2671,8 +2778,8 @@ impl<'ctx> TypeChecker<'ctx> {
         getter: &ThirExpr,
         setter: &[ThirStatement],
     ) {
-        let mut getter_reads = std::collections::HashSet::new();
-        let mut setter_writes = std::collections::HashSet::new();
+        let mut getter_reads = rustc_hash::FxHashSet::default();
+        let mut setter_writes = rustc_hash::FxHashSet::default();
 
         let is_signal = |d: DefId| self.ctx.defs.is_signal(d);
         super::signalck::collect_expr_reads(getter, &self.locals, &is_signal, &mut getter_reads);

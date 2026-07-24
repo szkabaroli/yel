@@ -38,6 +38,7 @@ pub mod ids;
 pub mod index_vec;
 pub mod interner;
 pub mod known;
+pub mod naming;
 pub mod ops;
 pub mod source;
 pub mod stdlib_lookup;

@@ -1,6 +1,6 @@
 package yel:slotdup@0.1.0;
 
-component Card {
+component Panel {
     VStack {
         @children
         @children

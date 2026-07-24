@@ -1,0 +1,3 @@
+integer literal `999` is out of range
+u8
+0..=255

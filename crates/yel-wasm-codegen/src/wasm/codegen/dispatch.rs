@@ -1,7 +1,7 @@
 //! Standalone dispatch function emission + value-coercion / input-binding
 //! helpers used by dispatch when threading event payloads back to setters.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use wasm_encoder::{Function, Instruction, ValType};
 use yel_core::Ty;
@@ -71,7 +71,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // Local layout: WASM params 0..3 (4 of them), then locals start
         // at 4: [handle_local: i32], then one ref local per owner comp.
         let handle_local: u32 = 4;
-        let mut owner_self_local: HashMap<usize, u32> = HashMap::new();
+        let mut owner_self_local: HashMap<usize, u32> = HashMap::default();
         let mut local_decls: Vec<(u32, ValType)> = vec![(1, ValType::I32)];
         for (next_local, &ci) in (5_u32..).zip(owner_comps.iter()) {
             let struct_ty = self.gc_layouts[ci]

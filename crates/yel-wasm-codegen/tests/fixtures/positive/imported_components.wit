@@ -12,8 +12,8 @@ interface app-component {
   }
 }
 
-interface dialog-component {
-  resource dialog {
+interface modal-component {
+  resource modal {
     constructor();
     get-title: func() -> string;
     set-title: func(value: string);
@@ -24,8 +24,8 @@ interface dialog-component {
   }
 }
 
-interface icon-component {
-  resource icon {
+interface glyph-component {
+  resource glyph {
     constructor();
     get-name: func() -> string;
     set-name: func(value: string);
@@ -35,8 +35,8 @@ interface icon-component {
 }
 
 world embed {
-  import dialog-component;
-  import icon-component;
+  import glyph-component;
+  import modal-component;
   import yel:ui/dom@0.1.0;
   export app-component;
   export yel:ui/dispatch@0.1.0;

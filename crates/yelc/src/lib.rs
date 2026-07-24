@@ -200,8 +200,6 @@ mod wasi_impl {
                     namespace: wit_options.namespace.clone(),
                     name: wit_options.name.clone(),
                     version: wit_options.version.clone(),
-                    global_defaults: lowered.global_defaults().clone(),
-                    global_default_exprs: lowered.global_default_exprs().to_vec(),
                     wasm_opt_args: None,
                 };
                 let wasm_bytes = if !lowered.components().is_empty() {
@@ -233,8 +231,6 @@ mod wasi_impl {
                     namespace: wit_options.namespace.clone(),
                     name: wit_options.name.clone(),
                     version: wit_options.version.clone(),
-                    global_defaults: lowered.global_defaults().clone(),
-                    global_default_exprs: lowered.global_default_exprs().to_vec(),
                     wasm_opt_args: None,
                 };
                 let wast_code = if !lowered.components().is_empty() {
@@ -418,8 +414,6 @@ pub mod native {
                     namespace: wit_options.namespace.clone(),
                     name: wit_options.name.clone(),
                     version: wit_options.version.clone(),
-                    global_defaults: lowered.global_defaults().clone(),
-                    global_default_exprs: lowered.global_default_exprs().to_vec(),
                     wasm_opt_args: None,
                 };
                 let wasm_bytes = if !lowered.components().is_empty() {

@@ -4,7 +4,7 @@
 //! - Slot allocation (typed-walk paths to each persistent state field)
 //! - Mount/effect emission (typed `struct.new` / `struct.get` sequences)
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::ids::{IfId, NodeId, TreeBoundaryId};
 use crate::types::Ty;

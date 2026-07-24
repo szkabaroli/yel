@@ -1,6 +1,6 @@
 //! String operations for WASM runtime.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
 /// String data for the WASM data section.
@@ -22,7 +22,7 @@ impl StringData {
     pub fn new(base: u32) -> Self {
         Self {
             bytes: Vec::new(),
-            cache: HashMap::new(),
+            cache: HashMap::default(),
             base,
         }
     }

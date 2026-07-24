@@ -268,8 +268,6 @@ fn compile(
                 namespace: wit_options.namespace.clone(),
                 name: wit_options.name.clone(),
                 version: wit_options.version.clone(),
-                global_defaults: lowered.global_defaults().clone(),
-                global_default_exprs: lowered.global_default_exprs().to_vec(),
                 wasm_opt_args: effective_opt_args,
             };
             let wasm_bytes = codegen::generate_wasm_module(&lowered.module, ctx, &wasm_options)

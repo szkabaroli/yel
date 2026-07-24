@@ -1,9 +1,9 @@
 package yel:sloterr@0.1.0;
 
-component Card {
+component Panel {
     VStack { Text { "hi" } }
 }
 
 export component App {
-    Card { Text { "body" } }
+    Panel { Text { "body" } }
 }

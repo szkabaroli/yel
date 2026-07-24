@@ -1,0 +1,7 @@
+// E0031: calling a value that is neither an identifier nor a member
+// expression (an integer literal here).
+package yel:invalidcallbase@0.1.0;
+
+export component App {
+    VStack { Text { "{5()}" } }
+}

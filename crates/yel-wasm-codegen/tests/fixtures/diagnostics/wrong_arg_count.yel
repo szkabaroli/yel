@@ -1,0 +1,7 @@
+// E0030: len() called with an argument.
+package yel:wrongargcount@0.1.0;
+
+export component App {
+    s: string = "hi";
+    VStack { Text { "{s.len(1)}" } }
+}

@@ -1,0 +1,9 @@
+// E0010: two records with the same name.
+package yel:duplicatedef@0.1.0;
+
+record R { a: s32 }
+record R { b: s32 }
+
+export component App {
+    VStack { Text { "ok" } }
+}

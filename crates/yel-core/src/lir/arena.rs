@@ -22,7 +22,7 @@
 //! a silent fallback at runtime. Keeping them split makes the
 //! "this caller has no strings" case representable in the type system.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::ids::{BlockId, DefId, LocalId};
 use crate::interner::Name;

@@ -21,7 +21,7 @@
 //!
 //! Field counts mirror `WasmPackageBuilder::signal_storage_valtypes` exactly.
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -138,7 +138,7 @@ pub fn slot_count_for_signal_ty(
         // A GC string is a single `(ref $str_bytes)` slot.
         InternedTyKind::String => 1,
         InternedTyKind::List(_) => {
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::default();
             if crate::lower_to_lir::blocks::is_scalar_list_ty_struct(ctx, ty, &mut seen) {
                 1
             } else {

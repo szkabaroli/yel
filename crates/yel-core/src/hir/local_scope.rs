@@ -5,7 +5,7 @@ use crate::index_vec::IndexVec;
 use crate::interner::Name;
 use crate::source::Span;
 use crate::types::Ty;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// Information about a local variable.
 #[derive(Debug, Clone)]
@@ -38,7 +38,7 @@ impl LocalScope {
     pub fn new() -> Self {
         Self {
             locals: IndexVec::new(),
-            current: HashMap::new(),
+            current: HashMap::default(),
             stack: Vec::new(),
         }
     }

@@ -106,7 +106,10 @@ stack / in a block" is `wasm/repr.rs::InternalRepr` (`Zero`, `Scalar`,
 half-migrated state is the debt:
 
 - [x] **Internal representation.** Every value shape is a single typed ref (or scalar) internally: records/tuples/lists are GC refs, option/result/variant are `GcVariant` subtype hierarchies (nullable-ref collapse for eligible `option<T>`). The WIT boundary is served by two recursive pairs in `wasm/codegen/accessors.rs` — `emit_member_lift_to_memory` (GC → canonical, over `GcRefSource`) and `emit_member_pack` (canonical → GC, over `CanonicalSource`) — instead of per-shape generators.
-- [ ] **The flat bridge that must shrink to the edges:** `lir/layout.rs:414` `canonical_flat_valtypes` / `:521` `canonical_flat_valtype_counts` still drive flat slot allocation internally. The target (memory `project_typed_gc_migration_stage0`) is to **kill the canonical-flat bridges and keep flattening only at WIT boundaries** (the lift/lower materializers). The invariant "only the boundary-shim generator calls `flatten_core_valtypes` outside `repr.rs`" is **enforced by convention, not the type system** (`repr.rs` docstring) — fragile; a stray internal caller silently reintroduces the split.
+- [x] **The flat bridge that must shrink to the edges** — resolved. Canonical-ABI flattening is now type-enforced to WIT boundaries: both `canonical_flat_valtypes` and `flatten_core_valtypes` require a [`WitBoundary`] witness. The target (memory `project_typed_gc_migration_stage0`) is met.
+  - **LIR side — resolved.** `LirLayoutContext::canonical_flat_valtypes` now has **zero internal LIR-pass callers**; it is reached only through codegen's `WasmPackageBuilder::canonical_flat_valtypes` boundary delegation (the two were unified — one algorithm, no drift; the canonical flattener never emits GC refs, so yel-core's ref-free join and codegen's ref-aware `join_flat_valtypes` provably coincide). The two former internal callers turned out to be **stale over-reservations, not correct mirrors**: (a) `populate_internal_lifecycle_scratch` sized the constructor's flat-scratch region from signal *types* (`canonical_flat_valtype_counts`), but the ctor's inline `EvalExprToSlots`+`StructSetSym` init only needs the *expression-shape* scratch that `compute_flat_scratch_counts` already computes — the type-based stamp just over-declared locals; (b) `expr_contains_composite_field_load`'s `Index` arm reserved a memory base-pointer scratch for composite list elements, but indexing is a single `array.get` yielding one GC ref (the legacy memory `list_get` path was deleted in Phase 7) and never feeds `emit_flat_slot_load_at_ptr`. Both removed; the `InternalLifecycleScratch` struct/field, `canonical_flat_valtype_counts`, and `max_flat_counts` are deleted. Verified: 200-seed fuzz-validate clean, execution + core suites green, all fixtures deterministic, and a `list<record>[i].field` round-trip probe validates.
+  - **Codegen `canonical_flat_valtypes` — enforced.** All 25 call sites were audited: every one is genuinely boundary (WIT setters/getters, ABI function signatures, the callback-import direct/indirect-return decision, `cabi_post` / setter-spill decisions, canonical memory layout, and the canonical→GC pack materializers). The function now requires a zero-sized [`WitBoundary`] witness (`repr.rs`), so the type system enforces that every canonical flattening names itself as boundary code — a new internal caller must write `canonical_flat_valtypes(ty, WitBoundary::assert())`, which is greppable and reviewable rather than a silent reflex. Byte-neutral (ZST); execution + core + 100-seed fuzz green. Not hermetic (the witness is crate-constructible — distributed boundary callers rule out a single-module privacy wall), but it converts a silent convention into an explicit, checked act.
+  - **Codegen `flatten_core_valtypes` — gated.** `flatten_core_valtypes(ty, WitBoundary)` now requires the same zero-sized boundary witness as `canonical_flat_valtypes`, so the type system enforces that every canonical-flattening call names itself boundary code. All 7 internal stack-arity uses had already moved to `internal_stack_slots`; the last non-boundary caller — the `VariantCtor` slot-count return in `emit_expr` — was the blocker. It's replaced by an explicit split: a collapsed `option<ref>` emits its single ref via `emit_variant_ctor_flat` and returns `internal_stack_slots` (==1); **any other** non-GcVariant `VariantCtor` reaching `emit_expr` is now a loud `InvalidIR` error, since genuine multi-slot flat variants (e.g. `attribute-value`) only cross the host boundary via `PushExpr` (op_emit). That converts the old "hit by zero seeds but not provably unreachable" worry into a proof: a 200-seed fuzz run + full fixture suite + execution suite never trips the guard. Every surviving `flatten_core_valtypes` caller is boundary (WIT lift/lower accessors, ABI signatures, callback lower/return, canonical memory + list-element layout, `emit_variant_ctor_flat`'s host-boundary path, the `ternary_block_types` registry consumed only by `canonical_block_type`). Byte-neutral (ZST witness + the one reachable arity is unchanged): snapshots, execution + core suites green, 200-seed fuzz-validate clean.
 - [x] **Incomplete materialize paths.** Resolved by deletion: `lower_to_lir/signals_inline.rs` (the inline _memory_ signal-write helpers with their "bail until const-materialize" todos) is gone entirely — no signal or global write lowers to linear memory anymore, so there is nothing left to materialize into memory.
 - [x] **Dual signal storage.** Pointer-repr signals (records/tuples) used to be stored in **both** the `$Comp` GC struct **and** a per-instance linear-memory cell. That backing is fully **removed**: records/tuples live solely on the GC struct, and boundary getters/setters lift/lower through a `cabi_realloc` scratch. The scaffolding is gone too — `SignalStorage.mem` / `MemSlot` / `memory_size` / `signal_memory_offset` deleted from `signal_layout.rs`, `MemoryLayout::signal_addr` + `signal_offsets` deleted from codegen, and every dead per-signal memory branch (`op_emit.rs` InitSignal/SignalWrite/InitSignalDefault, `expr.rs` SignalRead/Def, the `accessors.rs` scalar getter/variant setter fallthroughs, `blocks.rs` inline routing) removed or turned into `unreachable!`. Verified byte-for-byte behavior-neutral: full suite green + a 100-seed fuzz run with an identical failing-seed set (69/100). Only the WIT-boundary lift/lower shims and the memory-resident **globals** path survive — see below.
 - [x] **Globals-in-memory.** Removed: record/tuple global properties are backed by ref-typed core wasm globals like every other property (`GlobalsBlockLayout` gives them a one-ref-slot field path; `globals_init` materializes defaults via `struct.new` + `global.set`). The whole memory path is deleted — `global_property_addrs`, the reservation loop, `signals_inline.rs`, `LirOp::MemConst` / `MemConstGlobalProp` and their codegen arms, the memory `SignalRead` fallback in `expr.rs`, and the dead store helpers (`emit_signal_store`, `emit_flat_slot_store`, `compute_slot_locals`, `is_pointer_repr`). Note this was latently **broken**, not just ugly: lowering still routed record globals to `MemConstGlobalProp` while codegen had stopped reserving memory for them, so any record/tuple global failed to compile. Pinned by the `record_global_roundtrip_through_core_globals` execution test (default-init render, handler write, read-after-write, fanout re-render) and the `global_record_tuple_props` snapshot fixture. Nothing value-shaped lives in linear memory anymore — remaining linear-memory users are the string/heap runtime, WIT-boundary lift/lower scratch, and DOM-handle slots.
@@ -114,6 +117,114 @@ half-migrated state is the debt:
 > **Phased, with phase labels in comments:** e.g. `lir/block.rs:520` "Phase 2.2b switches the…". Expect `Phase N` markers; grep them to see what's done vs pending.
 
 This is part of the same generic-back-end push as [§1.1–1.4](#1-big-transitional-bridges-highest-leverage) and `ARCHITECTURE.md §0`: a uniform typed-GC representation is what lets a non-UI frontend share codegen without inheriting the linear-memory flat ABI.
+
+## 1.6 Globals are not first-class alongside components (the compilation unit is the file, not the component)
+
+> Tracked in depth by [`plans/global-component-unify.md`](../plans/global-component-unify.md)
+> ("Globals and components are both top-level compilation units, but today they
+> run two parallel spines"). **Phases 1–4 are now done** — `LirModule` carries
+> first-class `globals: Vec<LirGlobal>` and a single `imports: Vec<LirImport>`
+> registry, and codegen + `wit_ast` derive from them. What remains open below is
+> the front-end/lowering-driver residue (anemic `Hir`/`ThirGlobal`, the
+> globals-only `resolve_global_triggers` pass, driver hand-matching) and the
+> codegen `globals_init` shape. The claim this section backs: the real
+> compilation unit is **the `.yel` file** (a module of top-level items), not "a
+> component" — every top-level declaration should lower through one uniform item
+> spine, with codegen differences (resource-with-registry vs.
+> singleton-with-core-globals) expressed as a property of the item.
+
+- [x] **HIR/THIR: globals are symmetric first-class items** — resolved.
+      `HirItem`/`ThirItem` (`hir/node.rs`, `thir/node.rs`) are real
+      `{Component, Global}` enums, and both now expose the **full symmetric
+      accessor set** — `as_component`/`as_global`/`into_component`/`into_global`
+      — so consumers no longer hand-match the enum (e.g. `pipeline.rs`'s HIR
+      retention is now `filter_map(HirItem::into_component)`). The remaining
+      apparent asymmetries turned out to be correct modeling, not debt, and the
+      docs now say so: a global carries no node tree because a UI body is a
+      *component-specific* shape (not a missing field), and its
+      signal-dependency analysis lives in the `CompilerContext::signal_deps`
+      side table keyed by `DefId` **exactly as a component's does** (signalck is
+      read-only analysis whose output belongs with the other analysis tables for
+      both kinds alike). A global's property/callback metadata living in the
+      `GlobalDef` def-table entry mirrors a component's in its `ComponentDef` —
+      both register a `Def`; neither carries that metadata on the HIR node.
+- [x] **LIR: globals are first-class items** — resolved (phase 4). `LirModule`
+      (`lir/module.rs`) now holds `globals: Vec<LirGlobal>` — a per-item struct
+      (`def_id`, `name`, `is_export`, `package`, `properties: Vec<LirGlobalProperty>`
+      with direction + default, `callbacks`) — the peer of `resources` for the
+      non-instantiable half of the module. The old flat, item-less side-maps
+      (`global_defaults: HashMap<DefId, LirExpr>` + `global_default_exprs`) are
+      gone; a global is a unit again, not a bag of property `DefId`s. Default
+      expressions share one module-scope `global_exprs` arena (all global defaults
+      seed together at module start), and `LirModule::global_defaults_map()` is the
+      one thin regrouping codegen's per-property init still consumes. The host
+      import surface is likewise first-class: `imports: Vec<LirImport>` is the
+      single ordered import registry (component callbacks, global callbacks, DOM),
+      built once by `CompilerContext::build_import_contract`, off which both the
+      core import section and the WIT import interfaces derive — killing the old
+      independent `ImportLayout`-vs-`wit_ast` derivations that could drift.
+- [ ] **Module-scope emission still borrows a `LirResource` shape**
+      (`lir/node.rs::module_scope_carrier`, `def_id: DefId::INVALID`, one
+      placeholder block, no signals). The old `empty_module_carrier` +
+      per-call `carrier.exprs = clone()` fabricate-then-mutate pattern is gone:
+      `module_scope_carrier(name, exprs)` constructs the scope in one honest call
+      owning the module expression arena, and both codegen sites
+      (`generate_globals_init` and the module-scope filter loop in
+      `wasm/codegen/build.rs`) go through it — which also closed a latent bug
+      where module-scope filter predicates were handed an **empty** arena and
+      couldn't resolve their child exprs (pinned by the `global_filter_default`
+      fixture). What remains is the root cause: `emit_expr` is typed against
+      `&LirResource`, so module scope needs *some* `LirResource`-shaped value.
+      Full removal = make the shared emitter generic over the `LirFunctionLike`
+      arena trait (`lir/arena.rs`); the flow frontend used the same carrier, but
+      it is deprioritized, so nothing else blocks that refactor now.
+- [ ] **`resolve_global_triggers` — an entire extra compiler pass that exists
+      solely because globals aren't lowered in the same one-pass-per-item flow as
+      components** (`lower_to_lir/blocks.rs::resolve_global_triggers`, run once
+      after every component is lowered — `pipeline.rs::lower_all`). It synthesizes
+      per-(observing-component, global) fanout blocks and rewrites
+      `LirOp::TriggerEffects` placeholders into `CallBlock`s; a `TriggerEffects`
+      surviving to codegen is a hard `InvalidIR` error
+      (`wasm/codegen/op_emit.rs:947`) that literally says "the
+      resolve_global_triggers pass must run after lowering" — i.e. codegen's
+      correctness depends on an out-of-band, globals-only pass with no equivalent
+      for component-to-component signal propagation (handled inline, per-item).
+- [x] **One shared module-lowering spine** — resolved.
+      `Compiler::lower_items_to_module(items, package) -> LirModule`
+      (`compiler.rs`) is the single entry every driver shares: it type-checks
+      each item, lowers components + globals, and runs the module-level passes
+      (`resolve_global_triggers`, global lowering, import contract). `pipeline.rs::lower_all`
+      and all four codegen harnesses
+      (`yel-wasm-codegen/tests/{runtime,execution,dump_wasm,integration}.rs`) now
+      call it instead of each hand-rolling the `ThirItem` match plus the trailing
+      module passes. The globals-only wrinkle in the fuzzer is closed too:
+      `yel-smith`'s `test_generated_code_compiles` used to `continue` past
+      `ThirItem::Global` and compile each component in isolation — it now lowers
+      the whole module through the spine, so the global codegen paths
+      (globals-init, cross-component fan-out, module-scope default expressions)
+      are actually exercised. Note the module-level passes themselves are *not*
+      debt: `resolve_global_triggers` is inherently a whole-module step (it needs
+      every component lowered before it can wire fan-out), like a link phase —
+      it lives inside the spine, not bolted onto each caller.
+- [ ] **Codegen: globals get no registry/handle scaffolding, a separate
+      `(start)` init function, and a separate layout pass.**
+      `GlobalsBlockLayout` (`wasm/gc_types.rs`) is explicitly documented as
+      "singletons — no registry / handle / array scaffolding," unlike the
+      per-component `GcTypeLayout` (registry array + free-list + handle table,
+      assigned in `build.rs`). Global seeding is `generate_globals_init`
+      (`build.rs`), a dedicated function assembled directly in codegen via the
+      `empty_module_carrier` hack, wholly outside the per-resource block-lowering
+      path components use (their `constructor_block`/`internal_constructor_block`
+      on `LirResource`). `compute_globals_block_layout` (`build.rs`) is also a
+      separate loop over `ctx.defs.globals()` (the HIR-era side table), not a walk
+      over `LirModule` items uniformly.
+- [ ] **`docs/ARCHITECTURE.md` is stale relative to the in-progress unification**
+      — it still describes `type_check_globals`/`lower_globals_to_lir` as parallel
+      phase methods and `LirModule.components` (renamed `resources` in phase 4
+      step 1). Update §2–3 alongside the next phase-4 sub-step, per the plan's own
+      "Invariants" section.
+
+---
 
 ## 2. `lower_to_lir/blocks.rs` — the 8.5k-line monster
 
@@ -139,6 +250,8 @@ deferred bodies) the way `wasm/codegen/` is split.
 - [ ] **Lambdas/closures incompletely typed**: `thir/typeck.rs:978,1652` "TODO: capture analysis"; `:1655` "TODO: infer function type from params and body". Closure capture and full function-type inference are stubbed.
 - [ ] **`match` not real yet**: `lower_to_lir/component.rs:626` "TODO: Desugar to match expression" — conditional lowering is special-cased rather than general match.
 - [ ] **Error expr reaching LIR is a crash, by design**: `component.rs:790` `todo!("Error expression reached LIR lowering")` — relies on typeck having stopped the pipeline first (see No-Silent-Fallbacks).
+- [ ] **Two unreachable `ErrorCode` variants (dead code)**: `ErrorCode::UnknownUnitSuffix` (E0004) and `ErrorCode::MissingElement` (E0042) are defined and still have emission arms, but neither can fire — an unknown unit suffix and every `ParseError::Missing(...)` site are shadowed by an earlier `E0060` SyntaxError (the pest grammar rejects the malformed input before the semantic arm runs). Found by the diagnostics-fixture sweep: every other error code has a triggering fixture in `tests/fixtures/diagnostics/` (20 reachable codes, verified by actual `error[E00xx]`), but these two are untriggerable. Either delete them + their dead arms, or leave a note if a future grammar relaxation would surface them.
+- [ ] **Two inconsistent idioms for emitting a coded diagnostic**: the concise `Diagnostics::error(span, code, msg)` convenience method (**33** call sites) coexists with the fluent `Diagnostic::error(msg).with_span(span).with_code(code)` builder (**13** sites). Only **4** of the builder sites actually need it — they attach `.with_note(...)`, which the convenience method can't express; the other ~9 are just verbose duplicates of what the one-liner does. Standardize: migrate the note-free builder sites to `Diagnostics::error(...)`, and add a note-capable convenience variant (e.g. `error_with_note` or a builder-returning helper) so "code + message + note" has one obvious form too. Low risk (pure call-site refactor; diagnostics are covered by `tests/fixtures/diagnostics/`).
 
 ---
 
@@ -223,6 +336,8 @@ failure, not a silent skip. Start by unifying the THIR dependency-collection tri
 - [ ] **`yel-host` CLI name mismatch**: the clap derive still names the command `yel-run` in metadata though the binary is `yel-host` (noted in `yel-host/CLAUDE.md`).
 - [ ] **`lir_rust.rs` dead path**: the LIR→Rust generator is commented out in `yel-wasm-codegen/lib.rs` (`// pub use lir_rust::generate_rust;`). Either revive or remove.
 - [ ] **`test.wasm` committed at repo root** — a stray build artifact.
+- [x] **Nondeterministic GC-type / string-data ordering** — fixed. Two independent `HashMap`/`HashSet`-iteration-order bugs made the emitted module vary run-to-run for globals-heavy fixtures (`global_option_result_defaults`): (1) sibling GC-variant types (`opt_string` vs `res_string_string`) reordered because `gc_types.rs::topo_sort_gc_variant_tys` preserved its `HashSet`-ordered input among mutually-independent nodes — fixed with a deterministic `Ty`-id tie-break; (2) global-default string literals reordered because `lower_globals` built the default-expression arena in `HashMap`-iteration order, and codegen's `collect_strings` interns string literals by walking that arena — fixed by lowering defaults in `DefId` order. Verified: every positive fixture now compiles byte-identically across repeated runs.
+- [x] **Random-seed nondeterminism — fixed systemically (Fx + clippy guard).** Beyond the two site-specific bugs above, the compiler emitted different bytes **run-to-run** for ~35/200 fuzz seeds because `std::collections::HashMap`/`HashSet` use `RandomState` (a per-process random seed) and their iteration order leaked into output (WASM type-index assignment, for-loop update/fanout emission). Rather than chase each site, `yel-core` + `yel-wasm-codegen` were swept to `rustc_hash::FxHashMap`/`FxHashSet` (seedless hashing → deterministic iteration; both crates already depended on `rustc-hash`), plus the one non-`Ord` output boundary (`build.rs` ternary-block-type interning) sorts its shapes before assigning indices. Result: **0/200 run-to-run byte diffs**, snapshots byte-identical, suites green. Guarded against regression by a root `clippy.toml` (`disallowed-types` = std `HashMap`/`HashSet`, with a rule-#4 reason) denied via `[lints.clippy]` in both crates (`allow`ed in `yel-host`, the dev host). The lint is rustc's own `potential_query_instability` discipline: never iterate a random-seeded map for output.
 - [ ] **Large files generally**: `syntax/parser.rs` ~3.3k, `thir/typeck.rs` ~2.8k, `lower_to_lir/component.rs` ~1.1k, `hir/lower.rs` ~1.4k — all candidates for splitting.
 - [ ] **README warns** "Highly WIP — broken builds on main are common." Don't assume `main` is green.
 

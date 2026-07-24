@@ -3,7 +3,7 @@
 //! This module builds a WIT AST using wit-parser types and then uses
 //! wit-component to embed the component-type metadata into the core module.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::FxHashMap as HashMap;
 
 use semver::Version;
 use wit_parser::{
@@ -14,8 +14,8 @@ use wit_parser::{
 
 use yel_core::DefId;
 use yel_core::context::CompilerContext;
-use yel_core::definitions::{DefKind, GlobalPropDirection};
-use yel_core::lir::{InterfaceDirection, LirIfaceFn, LirInterface, LirResource};
+use yel_core::definitions::DefKind;
+use yel_core::lir::{InterfaceDirection, LirIfaceFn, LirInterface, LirReceiver, LirResource};
 use yel_core::types::{InternedTyKind, Ty};
 
 use super::CodegenError;
@@ -100,9 +100,9 @@ impl<'a> WitAstBuilder<'a> {
             yel_ui_package_id: None,
             types_interface_id: None,
             resource_interface_ids: Vec::new(),
-            type_map: HashMap::new(),
-            adt_map: HashMap::new(),
-            alias_map: HashMap::new(),
+            type_map: HashMap::default(),
+            adt_map: HashMap::default(),
+            alias_map: HashMap::default(),
             import_contract: &[],
             inline_types_owner: None,
         }
@@ -120,7 +120,18 @@ impl<'a> WitAstBuilder<'a> {
     /// inline; its functions are emitted from their signatures. This is the
     /// generic replacement for the hardcoded `create_dom_interface` — DOM
     /// is just one row in the contract.
-    fn render_import_contract(&mut self) -> Result<Vec<InterfaceId>, CodegenError> {
+    /// Render every import interface in the contract (`LirModule.interfaces`)
+    /// into WIT: `{component}-callbacks` interfaces, local-global interfaces,
+    /// and foreign-package interfaces (DOM). Returns their ids for the
+    /// world's import list. This is the single import-interface renderer —
+    /// the former `create_per_component_callbacks_interfaces` /
+    /// `create_globals_interfaces` are gone; a function's receiver and its
+    /// interface's package drive the shape, not the kind of item it came
+    /// from.
+    fn render_import_contract(
+        &mut self,
+        component_resources: &HashMap<DefId, TypeId>,
+    ) -> Result<Vec<InterfaceId>, CodegenError> {
         let mut ids = Vec::new();
         for idx in 0..self.import_contract.len() {
             // Index rather than borrow the slice across `&mut self` calls.
@@ -128,20 +139,25 @@ impl<'a> WitAstBuilder<'a> {
                 continue;
             }
             let iface = self.import_contract[idx].clone();
-            ids.push(self.render_import_interface(&iface)?);
+            ids.push(self.render_import_interface(&iface, component_resources)?);
         }
         Ok(ids)
     }
 
-    /// Render a single foreign import interface from its contract entry.
+    /// Render a single import interface from its contract entry. Foreign
+    /// interfaces (`package: Some`) own their ADTs inline; local interfaces
+    /// reference the shared-types interface via `use` aliases.
     fn render_import_interface(
         &mut self,
         iface: &LirInterface,
+        component_resources: &HashMap<DefId, TypeId>,
     ) -> Result<InterfaceId, CodegenError> {
+        let is_foreign = iface.package.is_some();
         // Foreign interfaces own a package; today that's always `yel:ui`.
-        let pkg = match &iface.package {
-            Some(_) => self.ensure_yel_ui_package(),
-            None => self.package_id,
+        let pkg = if is_foreign {
+            self.ensure_yel_ui_package()
+        } else {
+            self.package_id
         };
         let iface_name = to_kebab_case(&self.ctx.str(iface.name));
         let interface_id = self.resolve.interfaces.alloc(Interface {
@@ -157,17 +173,19 @@ impl<'a> WitAstBuilder<'a> {
 
         // Define the interface's owned ADTs INLINE (owned by this
         // interface), driven by the contract — a foreign host package can't
-        // `use` the module's shared types. `register_type` (and its
-        // recursion into nested ADTs) honours `inline_types_owner`.
-        self.inline_types_owner = Some(interface_id);
-        for &ty in &iface.owned_types {
-            self.register_type(ty)?;
+        // `use` the module's shared types. Local interfaces leave
+        // `owned_types` empty and `use` the shared-types interface instead.
+        if is_foreign {
+            self.inline_types_owner = Some(interface_id);
+            for &ty in &iface.owned_types {
+                self.register_type(ty)?;
+            }
+            self.inline_types_owner = None;
         }
-        self.inline_types_owner = None;
 
-        // Emit each function from its plain signature.
+        // Emit each function from its signature (+ receiver).
         for f in &iface.functions {
-            self.render_iface_function(f, interface_id)?;
+            self.render_iface_function(f, interface_id, component_resources)?;
         }
 
         self.resolve.packages[pkg]
@@ -176,13 +194,45 @@ impl<'a> WitAstBuilder<'a> {
         Ok(interface_id)
     }
 
-    /// Emit one `LirIfaceFn` as a freestanding WIT function in `interface_id`.
+    /// Emit one `LirIfaceFn` as a WIT function in `interface_id`. A
+    /// `Borrow(component)` receiver becomes a leading `self: borrow<resource>`
+    /// parameter (component callbacks); `None` is freestanding.
     fn render_iface_function(
         &mut self,
         f: &LirIfaceFn,
         interface_id: InterfaceId,
+        component_resources: &HashMap<DefId, TypeId>,
     ) -> Result<(), CodegenError> {
         let mut params = Vec::new();
+        if let LirReceiver::Borrow(comp_def) = f.receiver {
+            // Non-exported components have no WIT-visible resource of their
+            // own — borrow the first exported component's resource (core ABI
+            // is unaffected: `borrow<X>` lowers to i32 at the boundary).
+            let resource_ty = component_resources
+                .get(&comp_def)
+                .copied()
+                .or_else(|| component_resources.values().next().copied())
+                .ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "no resource type registered for component owning callback `{}`",
+                        self.ctx.str(f.name)
+                    ))
+                })?;
+            let aliased = self.use_resource_in(resource_ty, interface_id);
+            let borrow_ty = Type::Id(self.resolve.types.alloc(TypeDef {
+                name: None,
+                kind: TypeDefKind::Handle(Handle::Borrow(aliased)),
+                owner: TypeOwner::Interface(interface_id),
+                docs: Docs::default(),
+                stability: Stability::default(),
+                span: Default::default(),
+            }));
+            params.push(Param {
+                name: "self".to_string(),
+                ty: borrow_ty,
+                span: Default::default(),
+            });
+        }
         for (pname, pty) in &f.params {
             params.push(Param {
                 name: to_kebab_case(&self.ctx.str(*pname)),
@@ -318,7 +368,10 @@ impl<'a> WitAstBuilder<'a> {
     pub fn build_wit_with_all(
         &mut self,
         exported: &[&LirResource],
-        all: &[&LirResource],
+        // Import-facing WIT (callbacks, globals) now derives entirely from the
+        // module's import contract, so the full component list is no longer
+        // consulted here. Retained for signature stability with the callers.
+        _all: &[&LirResource],
     ) -> Result<WorldId, CodegenError> {
         let components = exported;
         // Register all types referenced by components + globals up front so
@@ -332,7 +385,7 @@ impl<'a> WitAstBuilder<'a> {
         // Kept per-component because each component is genuinely its own
         // resource with its own constructor/method shape.
         let mut component_interfaces: Vec<(InterfaceId, Option<InterfaceId>)> = Vec::new();
-        let mut component_resources: HashMap<DefId, TypeId> = HashMap::new();
+        let mut component_resources: HashMap<DefId, TypeId> = HashMap::default();
         for c in components {
             let resource_name = to_kebab_case(&self.ctx.str(c.name));
             let (iface, resource_ty) = self.create_component_interface(c, &resource_name)?;
@@ -342,20 +395,12 @@ impl<'a> WitAstBuilder<'a> {
             component_interfaces.push((iface, None));
         }
 
-        // Per-component callbacks interfaces: one `{component}-callbacks`
-        // interface per component that declares at least one callback. Two
-        // sibling components can both declare e.g. `on-submit` with
-        // different signatures — they live in separate interfaces, so no
-        // collision. Pass `all` so non-exported components' callbacks are
-        // also surfaced (the core module wires Call sites for them).
-        let per_component_callbacks =
-            self.create_per_component_callbacks_interfaces(all, &component_resources)?;
-
-        // Foreign-package import interfaces (DOM today) are rendered from
-        // the LIR boundary contract — `LirModule.interfaces` — instead of a
-        // hardcoded `create_dom_interface`. DOM is just a contract row that
-        // owns its `attribute-value`/`color` types inline.
-        let foreign_import_interface_ids = self.render_import_contract()?;
+        // Every import interface — `{component}-callbacks`, local-global,
+        // and foreign-package (DOM) — is rendered from the one LIR boundary
+        // contract (`LirModule.interfaces`). A function's receiver and its
+        // interface's package drive the WIT shape, so there is a single
+        // renderer instead of the former per-kind creators.
+        let import_interface_ids = self.render_import_contract(&component_resources)?;
 
         // Module-level dispatch interface — exported exactly once regardless
         // of component count. Only emitted when the module has at least one
@@ -365,9 +410,6 @@ impl<'a> WitAstBuilder<'a> {
         } else {
             Some(self.create_module_dispatch_interface()?)
         };
-
-        // Pure in-tree globals emit no WIT; only host-boundary ones do.
-        let global_interface_ids = self.create_globals_interfaces()?;
 
         // `import component X { ... }` declarations become imported
         // interfaces — the host or an upstream module supplies the
@@ -381,18 +423,12 @@ impl<'a> WitAstBuilder<'a> {
         let world_name = pkg_name;
 
         let resource_interfaces = self.resource_interface_ids.clone();
-        let per_component_callback_iface_ids: Vec<InterfaceId> = per_component_callbacks
-            .iter()
-            .map(|&(_def_id, iface_id)| iface_id)
-            .collect();
         self.create_world(
             &world_name,
-            &foreign_import_interface_ids,
+            &import_interface_ids,
             dispatch_interface_id,
-            &per_component_callback_iface_ids,
             &component_interfaces,
             &resource_interfaces,
-            &global_interface_ids,
             &import_component_interface_ids,
         )
     }
@@ -437,6 +473,23 @@ impl<'a> WitAstBuilder<'a> {
 
                 // Register the record type
                 if let Some(record) = self.ctx.defs.as_record(*def_id) {
+                    // The WebAssembly component model requires a `record` to
+                    // have at least one field, so an empty record cannot be
+                    // expressed at the WIT boundary. Reject it here with a
+                    // clear message rather than letting `wit-component` fail
+                    // later with an opaque "decoding custom section
+                    // component-type" error. Empty records remain usable
+                    // internally — only crossing the boundary is forbidden.
+                    if record.fields.is_empty() {
+                        return Err(CodegenError::UnsupportedType(format!(
+                            "empty record `{}` cannot cross the component boundary — the \
+                             WebAssembly component model requires a record to have at least \
+                             one field. Give it a field, or keep it internal (do not expose \
+                             it through an exported/imported component signal, callback \
+                             parameter/return, or a field of another exposed type).",
+                            self.ctx.str(record.name)
+                        )));
+                    }
                     let record_name = to_kebab_case(&self.ctx.str(record.name));
 
                     // Build field types
@@ -476,6 +529,16 @@ impl<'a> WitAstBuilder<'a> {
 
                     Ok(Some(type_id))
                 } else if let Some(enum_def) = self.ctx.defs.as_enum(*def_id) {
+                    // The component model forbids a zero-case enum (see the
+                    // empty-record note above); reject it with a clear message.
+                    if enum_def.cases.is_empty() {
+                        return Err(CodegenError::UnsupportedType(format!(
+                            "empty enum `{}` cannot cross the component boundary — the \
+                             WebAssembly component model requires an enum to have at least \
+                             one case. Give it a case, or keep it internal.",
+                            self.ctx.str(enum_def.name)
+                        )));
+                    }
                     let enum_name = to_kebab_case(&self.ctx.str(enum_def.name));
 
                     let mut cases = Vec::new();
@@ -507,6 +570,15 @@ impl<'a> WitAstBuilder<'a> {
 
                     Ok(Some(type_id))
                 } else if let Some(variant_def) = self.ctx.defs.as_variant(*def_id) {
+                    // The component model forbids a zero-case variant.
+                    if variant_def.cases.is_empty() {
+                        return Err(CodegenError::UnsupportedType(format!(
+                            "empty variant `{}` cannot cross the component boundary — the \
+                             WebAssembly component model requires a variant to have at least \
+                             one case. Give it a case, or keep it internal.",
+                            self.ctx.str(variant_def.name)
+                        )));
+                    }
                     let variant_name = to_kebab_case(&self.ctx.str(variant_def.name));
 
                     let mut cases = Vec::new();
@@ -1035,166 +1107,6 @@ impl<'a> WitAstBuilder<'a> {
         Ok(interface_id)
     }
 
-    /// Create one `{component}-callbacks` WIT interface per component that
-    /// declares at least one host-implemented callback.
-    ///
-    /// Each component owns its own callback namespace — two sibling
-    /// components may both declare e.g. `on-submit` with different
-    /// signatures and they land in separate interfaces, so no collision is
-    /// possible.
-    ///
-    /// Returns `Vec<(owner_component_def_id, interface_id)>` — one entry
-    /// per component that ended up with a non-empty interface. Components
-    /// with no callbacks contribute no entry. Non-exported components'
-    /// callbacks still surface here: they borrow the first exported
-    /// component's resource for their `self` param, since non-exported
-    /// components have no WIT-visible resource of their own.
-    fn create_per_component_callbacks_interfaces(
-        &mut self,
-        components: &[&LirResource],
-        component_resources: &HashMap<DefId, TypeId>,
-    ) -> Result<Vec<(DefId, InterfaceId)>, CodegenError> {
-        let mut out = Vec::new();
-        let fallback_resource_ty = component_resources.values().next().copied();
-
-        for component in components {
-            let Some(comp_def) = self.ctx.defs.as_component(component.def_id) else {
-                continue;
-            };
-            // Collect this component's callbacks (kebab-name + def id).
-            let mut callbacks: Vec<(DefId, String)> = Vec::new();
-            let mut seen_local: HashSet<String> = HashSet::new();
-            for &def_id in &comp_def.callbacks {
-                let cb_name_opt = if let Some(func_def) = self.ctx.defs.as_function(def_id) {
-                    if func_def.is_export {
-                        Some(to_kebab_case(&self.ctx.str(func_def.name)))
-                    } else {
-                        None
-                    }
-                } else if let Some(sig_def) = self.ctx.defs.as_signal(def_id) {
-                    if let Some(ty) = self.ctx.defs.type_of(def_id) {
-                        if matches!(self.ctx.ty_kind(ty), InternedTyKind::Func { .. }) {
-                            Some(to_kebab_case(&self.ctx.str(sig_def.name)))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                let Some(cb_name) = cb_name_opt else { continue };
-                if !seen_local.insert(cb_name.clone()) {
-                    return Err(CodegenError::InvalidIR(format!(
-                        "component `{}` declares callback `{}` twice",
-                        self.ctx.str(component.name),
-                        cb_name
-                    )));
-                }
-                callbacks.push((def_id, cb_name));
-            }
-
-            if callbacks.is_empty() {
-                continue;
-            }
-
-            let comp_kebab = to_kebab_case(&self.ctx.str(component.name));
-            let interface_name = format!("{}-callbacks", comp_kebab);
-            let interface_id = self.resolve.interfaces.alloc(Interface {
-                name: Some(interface_name.clone()),
-                docs: Docs::default(),
-                types: Default::default(),
-                functions: Default::default(),
-                package: Some(self.package_id),
-                stability: Stability::default(),
-                span: Default::default(),
-                clone_of: None,
-            });
-
-            // Each callback takes the owning component's resource handle
-            // as its first param, typed as `borrow<{component}>`.
-            // Non-exported components have no WIT-visible resource of
-            // their own — they borrow the first exported component's
-            // resource (core ABI is unaffected because `borrow<X>`
-            // lowers to i32 at the core boundary).
-            let resource_ty = component_resources
-                .get(&component.def_id)
-                .copied()
-                .or(fallback_resource_ty)
-                .ok_or_else(|| {
-                    CodegenError::InvalidIR(format!(
-                        "no resource type registered for component owning callbacks of `{}`",
-                        self.ctx.str(component.name)
-                    ))
-                })?;
-            let aliased_resource_ty = self.use_resource_in(resource_ty, interface_id);
-            let borrow_ty = Type::Id(self.resolve.types.alloc(TypeDef {
-                name: None,
-                kind: TypeDefKind::Handle(Handle::Borrow(aliased_resource_ty)),
-                owner: TypeOwner::Interface(interface_id),
-                docs: Docs::default(),
-                stability: Stability::default(),
-                span: Default::default(),
-            }));
-
-            for (cb_def_id, cb_name) in callbacks {
-                // Resolve declared params and return type from the function
-                // def. Property-style function-typed signals lower to a
-                // `FunctionDef` with empty params.
-                let (param_defs, ret_ty) = match self.ctx.defs.as_function(cb_def_id) {
-                    Some(f) => (f.params.clone(), f.ret_ty),
-                    None => (Vec::new(), Ty::UNIT),
-                };
-
-                let mut params: Vec<Param> = vec![Param {
-                    name: "self".to_string(),
-                    ty: borrow_ty,
-                    span: Default::default(),
-                }];
-                for pid in &param_defs {
-                    let pname = self.ctx.str(self.ctx.defs.name(*pid)).to_string();
-                    let pty = match self.ctx.defs.type_of(*pid) {
-                        Some(t) => t,
-                        None => continue,
-                    };
-                    params.push(Param {
-                        name: to_kebab_case(&pname),
-                        ty: self.use_type_in(pty, interface_id)?,
-                        span: Default::default(),
-                    });
-                }
-
-                let result = if ret_ty == Ty::UNIT {
-                    None
-                } else {
-                    Some(self.use_type_in(ret_ty, interface_id)?)
-                };
-
-                let func = Function {
-                    name: cb_name.clone(),
-                    kind: FunctionKind::Freestanding,
-                    params,
-                    result,
-                    docs: Docs::default(),
-                    stability: Stability::default(),
-                    span: Default::default(),
-                };
-                self.resolve.interfaces[interface_id]
-                    .functions
-                    .insert(cb_name, func);
-            }
-
-            self.resolve.packages[self.package_id]
-                .interfaces
-                .insert(interface_name, interface_id);
-
-            out.push((component.def_id, interface_id));
-        }
-
-        Ok(out)
-    }
-
     /// Register types referenced by any global's properties or callback
     /// signatures. Mirrors `register_types_for_component` but walks the
     /// file-level globals instead of a single component's signals.
@@ -1430,210 +1342,22 @@ impl<'a> WitAstBuilder<'a> {
         Ok(out)
     }
 
-    /// Pure in-tree globals (no direction, no callbacks) emit no interface.
-    /// Every emitted interface is imported by the world — the host implements
-    /// it. Each global's `is_export` flag is a documentation hint for
-    /// downstream tooling and does not change what's emitted here.
-    fn create_globals_interfaces(&mut self) -> Result<Vec<InterfaceId>, CodegenError> {
-        let mut out = Vec::new();
-        let global_ids: Vec<_> = self.ctx.defs.globals().collect();
-
-        for g_id in global_ids {
-            // Foreign-package globals (the built-in `Dom` global) own a
-            // host-defined interface whose WIT is synthesized separately
-            // by `create_dom_interface` so its types stay inline and match
-            // the host's `dom.wit`. Skip them here to avoid emitting a
-            // second, conflicting `dom` interface.
-            if self
-                .ctx
-                .defs
-                .as_global(g_id)
-                .map(|g| g.package.is_some())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let (g_name, prop_ids, prop_dirs, callback_ids) = match self.ctx.defs.as_global(g_id) {
-                Some(g) => (
-                    self.ctx.str(g.name).to_string(),
-                    g.properties.clone(),
-                    g.property_directions.clone(),
-                    g.callbacks.clone(),
-                ),
-                None => continue,
-            };
-
-            // Quick pre-check: does this global have any host-boundary members
-            // worth emitting? (Avoids allocating an empty interface.)
-            let has_host_props = prop_ids.iter().enumerate().any(|(idx, _)| {
-                !matches!(
-                    prop_dirs
-                        .get(idx)
-                        .copied()
-                        .unwrap_or(GlobalPropDirection::Inline),
-                    GlobalPropDirection::Inline
-                )
-            });
-            let has_callbacks = !callback_ids.is_empty();
-            if !has_host_props && !has_callbacks {
-                continue;
-            }
-
-            // Allocate the interface up front so `use_type_in` can target it.
-            let interface_name = to_kebab_case(&g_name);
-            let interface_id = self.resolve.interfaces.alloc(Interface {
-                name: Some(interface_name.clone()),
-                docs: Docs::default(),
-                types: Default::default(),
-                functions: Default::default(),
-                package: Some(self.package_id),
-                stability: Stability::default(),
-                span: Default::default(),
-                clone_of: None,
-            });
-
-            // Properties → setter + change-notifier funcs
-            for (idx, prop_id) in prop_ids.iter().enumerate() {
-                let prop_name = self.ctx.str(self.ctx.defs.name(*prop_id)).to_string();
-                let direction = prop_dirs
-                    .get(idx)
-                    .copied()
-                    .unwrap_or(GlobalPropDirection::Inline);
-
-                if direction == GlobalPropDirection::Inline {
-                    continue;
-                }
-
-                let prop_ty = match self.ctx.defs.type_of(*prop_id) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                let wit_ty = self.use_type_in(prop_ty, interface_id)?;
-
-                let emit_setter = matches!(
-                    direction,
-                    GlobalPropDirection::In | GlobalPropDirection::InOut
-                );
-                let emit_notifier = matches!(
-                    direction,
-                    GlobalPropDirection::Out | GlobalPropDirection::InOut
-                );
-
-                if emit_setter {
-                    let name = format!("set-{}", to_kebab_case(&prop_name));
-                    let f = Function {
-                        name: name.clone(),
-                        kind: FunctionKind::Freestanding,
-                        params: vec![Param {
-                            name: "v".to_string(),
-                            ty: wit_ty,
-                            span: Default::default(),
-                        }],
-                        result: None,
-                        docs: Docs::default(),
-                        stability: Stability::default(),
-                        span: Default::default(),
-                    };
-                    self.resolve.interfaces[interface_id]
-                        .functions
-                        .insert(name, f);
-                }
-                if emit_notifier {
-                    let name = format!("on-{}-changed", to_kebab_case(&prop_name));
-                    let f = Function {
-                        name: name.clone(),
-                        kind: FunctionKind::Freestanding,
-                        params: vec![Param {
-                            name: "v".to_string(),
-                            ty: wit_ty,
-                            span: Default::default(),
-                        }],
-                        result: None,
-                        docs: Docs::default(),
-                        stability: Stability::default(),
-                        span: Default::default(),
-                    };
-                    self.resolve.interfaces[interface_id]
-                        .functions
-                        .insert(name, f);
-                }
-            }
-
-            // Callbacks → imported funcs with their signatures
-            for cb_id in &callback_ids {
-                let (cb_name, param_defs, ret_ty) = match self.ctx.defs.as_function(*cb_id) {
-                    Some(f) => (self.ctx.str(f.name).to_string(), f.params.clone(), f.ret_ty),
-                    None => continue,
-                };
-
-                let mut params: Vec<Param> = Vec::new();
-                for pid in &param_defs {
-                    let pname = self.ctx.str(self.ctx.defs.name(*pid)).to_string();
-                    let pty = match self.ctx.defs.type_of(*pid) {
-                        Some(t) => t,
-                        None => continue,
-                    };
-                    params.push(Param {
-                        name: to_kebab_case(&pname),
-                        ty: self.use_type_in(pty, interface_id)?,
-                        span: Default::default(),
-                    });
-                }
-
-                let result = if ret_ty == Ty::UNIT {
-                    None
-                } else {
-                    Some(self.use_type_in(ret_ty, interface_id)?)
-                };
-
-                let name = to_kebab_case(&cb_name);
-                let f = Function {
-                    name: name.clone(),
-                    kind: FunctionKind::Freestanding,
-                    params,
-                    result,
-                    docs: Docs::default(),
-                    stability: Stability::default(),
-                    span: Default::default(),
-                };
-                self.resolve.interfaces[interface_id]
-                    .functions
-                    .insert(name, f);
-            }
-
-            self.resolve.packages[self.package_id]
-                .interfaces
-                .insert(interface_name, interface_id);
-            out.push(interface_id);
-        }
-
-        Ok(out)
-    }
-
     /// Create the world.
     ///
+    /// `import_interface_ids` are every import interface rendered from the
+    /// boundary contract (component callbacks, local globals, foreign DOM).
     /// `component_interfaces` is a list of (resource interface, optional
-    /// callbacks interface) pairs — one entry per LIR component. Each
-    /// resource interface becomes an export; each callbacks interface, if
-    /// present, becomes an import. `dom_interface_id` is omitted for pure
-    /// library worlds with no components. `dispatch_interface_id`, when
-    /// present, is exported once at module scope — it carries the single
-    /// freestanding `dispatch(handler-id)` function.
-    // Args are 8 distinct interface-id slices/options that don't naturally
-    // group: the world owns a heterogeneous mix of dom / dispatch / per-
-    // component-callback / component / resource / global / imported-component
-    // interfaces, each lifted independently by the caller. Bundling would
-    // produce a one-shot struct that just renames the params.
-    #[allow(clippy::too_many_arguments)]
+    /// callbacks interface) pairs — one entry per LIR component; each resource
+    /// interface becomes an export. `dispatch_interface_id`, when present, is
+    /// exported once at module scope — it carries the single freestanding
+    /// `dispatch(handler-id)` function.
     fn create_world(
         &mut self,
         world_name: &str,
-        foreign_import_interface_ids: &[InterfaceId],
+        import_interface_ids: &[InterfaceId],
         dispatch_interface_id: Option<InterfaceId>,
-        per_component_callback_interface_ids: &[InterfaceId],
         component_interfaces: &[(InterfaceId, Option<InterfaceId>)],
         resource_interface_ids: &[InterfaceId],
-        global_interface_ids: &[InterfaceId],
         import_component_interface_ids: &[InterfaceId],
     ) -> Result<WorldId, CodegenError> {
         let world_id = self.resolve.worlds.alloc(World {
@@ -1648,7 +1372,7 @@ impl<'a> WitAstBuilder<'a> {
         });
 
         // Imports: shared types interface (if any ADTs were registered),
-        // DOM, per-component callbacks, global interfaces.
+        // then every contract-rendered import interface.
         if let Some(types_id) = self.types_interface_id {
             self.resolve.worlds[world_id].imports.insert(
                 WorldKey::Interface(types_id),
@@ -1659,24 +1383,19 @@ impl<'a> WitAstBuilder<'a> {
                 },
             );
         }
-        for &fid in foreign_import_interface_ids {
-            self.resolve.worlds[world_id].imports.insert(
-                WorldKey::Interface(fid),
-                WorldItem::Interface {
-                    id: fid,
-                    stability: Stability::default(),
-                    span: Default::default(),
-                },
-            );
-        }
 
-        // Component interfaces are exports, but wit-component requires them
-        // to be in `import_map` when encoding later-imported interfaces
-        // (e.g. per-component callbacks) that reference the component's
-        // resource via `use`. Insert them as imports FIRST — only when
-        // there actually IS a referring callback import. When no callbacks
-        // exist, skip the duplicate-listing to keep the world clean.
-        if !per_component_callback_interface_ids.is_empty() {
+        // Component resource interfaces are exports, but wit-component
+        // requires them in the import map when encoding a later-imported
+        // interface (a `{component}-callbacks` interface) that references the
+        // component's resource via `use`. Insert them as imports FIRST — only
+        // when some import interface actually borrows a component resource
+        // (a component-callbacks interface, marked by a non-empty `resources`
+        // list in the contract). Otherwise skip, to keep the world clean.
+        let has_component_callbacks = self
+            .import_contract
+            .iter()
+            .any(|i| !i.resources.is_empty());
+        if has_component_callbacks {
             for &(iface_id, _) in component_interfaces {
                 self.resolve.worlds[world_id].imports.insert(
                     WorldKey::Interface(iface_id),
@@ -1689,37 +1408,11 @@ impl<'a> WitAstBuilder<'a> {
             }
         }
 
-        // Per-component callbacks interfaces — one per component with
-        // callbacks. Each component owns its own callback namespace, so
-        // two siblings can both declare e.g. `on-submit` with different
-        // signatures without colliding.
-        for &cb_id in per_component_callback_interface_ids {
+        for &iid in import_interface_ids {
             self.resolve.worlds[world_id].imports.insert(
-                WorldKey::Interface(cb_id),
+                WorldKey::Interface(iid),
                 WorldItem::Interface {
-                    id: cb_id,
-                    stability: Stability::default(),
-                    span: Default::default(),
-                },
-            );
-        }
-        for &(_iface_id, cb_id) in component_interfaces {
-            if let Some(cb_id) = cb_id {
-                self.resolve.worlds[world_id].imports.insert(
-                    WorldKey::Interface(cb_id),
-                    WorldItem::Interface {
-                        id: cb_id,
-                        stability: Stability::default(),
-                        span: Default::default(),
-                    },
-                );
-            }
-        }
-        for &g_id in global_interface_ids {
-            self.resolve.worlds[world_id].imports.insert(
-                WorldKey::Interface(g_id),
-                WorldItem::Interface {
-                    id: g_id,
+                    id: iid,
                     stability: Stability::default(),
                     span: Default::default(),
                 },

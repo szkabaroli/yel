@@ -314,7 +314,9 @@ impl WasmPackageBuilder<'_> {
                 func.instruction(&Instruction::Else);
                 self.emit_expr(func, else_expr, component)?;
                 func.instruction(&Instruction::End);
-                Ok(self.flatten_core_valtypes(expr.ty).len())
+                // §1.5: `block_ty_for` is single-slot for every repr, so a
+                // ternary leaves exactly `internal_stack_slots` values.
+                Ok(self.internal_stack_slots(expr.ty))
             }
 
             LirExprKind::Call {
@@ -754,7 +756,7 @@ impl WasmPackageBuilder<'_> {
                                 // and option-of-ref collapses; deciding from the
                                 // internal shape there disagreed with the import
                                 // and underflowed the stack.
-                                let result_flat = self.canonical_flat_valtypes(expr.ty);
+                                let result_flat = self.canonical_flat_valtypes(expr.ty, crate::wasm::repr::WitBoundary::assert());
                                 let uses_indirect_return = result_flat.len() > 1;
 
                                 // Component callbacks are resource methods —
@@ -799,21 +801,11 @@ impl WasmPackageBuilder<'_> {
                 // ref, so the produced stack-slot count matches
                 // `internal_stack_slots(expr.ty)` rather than the
                 // canonical-flat slot count for GcVariant returns.
-                let slots_produced = match self.internal_repr(expr.ty) {
-                    crate::wasm::repr::InternalRepr::GcVariant(_) => {
-                        self.internal_stack_slots(expr.ty)
-                    }
-                    // strings-to-GC: a string-returning builtin (concat /
-                    // *_to_string / object-to-string) now leaves a single
-                    // $str_bytes ref, not canonical (ptr, len).
-                    crate::wasm::repr::InternalRepr::GcArrayRef(_)
-                        if matches!(self.ctx.ty_kind(expr.ty), InternedTyKind::String) =>
-                    {
-                        1
-                    }
-                    _ => self.flatten_core_valtypes(expr.ty).len(),
-                };
-                Ok(slots_produced)
+                // §1.5: every value is a single stack slot internally
+                // (scalar or one GC ref) or zero (unit) — a call leaves
+                // exactly `internal_stack_slots` values, never the
+                // canonical multi-slot count.
+                Ok(self.internal_stack_slots(expr.ty))
             }
 
             LirExprKind::Field { base, field_idx } => {
@@ -830,7 +822,9 @@ impl WasmPackageBuilder<'_> {
                             struct_type_index: tup_idx,
                             field_index: field_idx.0,
                         });
-                        return Ok(self.flatten_core_valtypes(expr.ty).len());
+                        // §1.5: struct.get leaves one value (the field's
+                        // scalar or GC ref) — internal single-slot count.
+                        return Ok(self.internal_stack_slots(expr.ty));
                     }
                 // Phase 2 GC migration: if the base is a primitive-only
                 // record, it sits on the stack as `(ref null $<rec>_record)`
@@ -955,8 +949,8 @@ impl WasmPackageBuilder<'_> {
                     // read directly by the struct.get above. String
                     // ($str_bytes ref), typed-array list, and GcVariant
                     // fields returned earlier; nothing boxes into a
-                    // fat-pointer here anymore.
-                    return Ok(self.flatten_core_valtypes(expr.ty).len());
+                    // fat-pointer here anymore. §1.5: one value left.
+                    return Ok(self.internal_stack_slots(expr.ty));
                 }
                 // Field access on a record
                 // First, emit the base expression which should leave a record pointer on stack
@@ -1158,7 +1152,8 @@ impl WasmPackageBuilder<'_> {
                                     )));
                                 }
                             }
-                            Ok(self.flatten_core_valtypes(expr.ty).len())
+                            // §1.5: the record field load left one value.
+                            Ok(self.internal_stack_slots(expr.ty))
                         } else {
                             Err(CodegenError::InvalidIR(format!(
                                 "emit_expr: field index {} not found in record_layout for {:?}",
@@ -1246,14 +1241,29 @@ impl WasmPackageBuilder<'_> {
                     )?;
                     return Ok(1);
                 }
-                self.emit_variant_ctor_flat(
-                    func,
-                    expr.ty,
-                    *case_idx,
-                    payload.as_deref(),
-                    component,
-                )?;
-                Ok(self.flatten_core_valtypes(expr.ty).len())
+                // §1.5: internally every value is a single stack slot. The only
+                // non-GcVariant `VariantCtor` shape that reaches `emit_expr` is a
+                // collapsed `option<ref>` — `some(v)` is the ref, `none` a typed
+                // null — one slot. Genuine multi-slot flat variants (e.g.
+                // `attribute-value`) only cross the host boundary via `PushExpr`
+                // (op_emit), never here, so anything else is a loud error rather
+                // than a silent canonical multi-slot push.
+                if self.option_collapses_to_ref(expr.ty).is_some() {
+                    self.emit_variant_ctor_flat(
+                        func,
+                        expr.ty,
+                        *case_idx,
+                        payload.as_deref(),
+                        component,
+                    )?;
+                    return Ok(self.internal_stack_slots(expr.ty));
+                }
+                Err(CodegenError::InvalidIR(format!(
+                    "internal VariantCtor for non-GcVariant, non-collapsed type {:?} \
+                     reached emit_expr; genuine flat variants only lower at the host \
+                     boundary via PushExpr",
+                    expr.ty
+                )))
             }
 
             // List/Record/Tuple constructs - placeholder implementations
@@ -1706,7 +1716,8 @@ impl WasmPackageBuilder<'_> {
                         });
                     }
                 }
-                Ok(self.flatten_core_valtypes(expr.ty).len())
+                // §1.5: the variant-payload struct.get left one value.
+                Ok(self.internal_stack_slots(expr.ty))
             }
         }
     }
@@ -1826,7 +1837,7 @@ impl WasmPackageBuilder<'_> {
         // Compute the parent's full flat valtypes. The first slot is always
         // the i32 discriminant; the rest is the slot-wise join over all
         // cases' payload flattenings.
-        let parent_flat = self.flatten_core_valtypes(parent_ty);
+        let parent_flat = self.flatten_core_valtypes(parent_ty, crate::wasm::repr::WitBoundary::assert());
         let joined_payload_slots = if parent_flat.is_empty() {
             &[] as &[ValType]
         } else {
@@ -1851,7 +1862,7 @@ impl WasmPackageBuilder<'_> {
         // Push active case's payload flat slots, then pad remaining joined
         // slots with zeros.
         let payload_flat = match payload {
-            Some(p) => self.flatten_core_valtypes(p.ty),
+            Some(p) => self.flatten_core_valtypes(p.ty, crate::wasm::repr::WitBoundary::assert()),
             None => Vec::new(),
         };
 
@@ -2311,11 +2322,9 @@ impl WasmPackageBuilder<'_> {
                     }
                 }
             }
-            InternedTyKind::S64 | InternedTyKind::U64 => {
-                // 64-bit integer operands. Mirrors the default i32 arm
-                // (same signed convention — see the s32/u32 note there)
-                // but with i64 instructions so the stack stays i64-typed.
-                // Comparisons consume two i64 and yield i32 (bool).
+            InternedTyKind::S64 => {
+                // Signed 64-bit operands. i64 instructions keep the stack
+                // i64-typed; comparisons consume two i64 and yield i32 (bool).
                 match op {
                     BinOp::Add => func.instruction(&Instruction::I64Add),
                     BinOp::Sub => func.instruction(&Instruction::I64Sub),
@@ -2335,8 +2344,55 @@ impl WasmPackageBuilder<'_> {
                     BinOp::BitXor => func.instruction(&Instruction::I64Xor),
                 };
             }
+            InternedTyKind::U64 => {
+                // Unsigned 64-bit operands: division, remainder, and ordered
+                // comparisons must use the `_u` opcodes so large values aren't
+                // treated as negative. Add/Sub/Mul/Eq/Ne/bitwise are
+                // sign-agnostic and match the signed arm.
+                match op {
+                    BinOp::Add => func.instruction(&Instruction::I64Add),
+                    BinOp::Sub => func.instruction(&Instruction::I64Sub),
+                    BinOp::Mul => func.instruction(&Instruction::I64Mul),
+                    BinOp::Div => func.instruction(&Instruction::I64DivU),
+                    BinOp::Mod => func.instruction(&Instruction::I64RemU),
+                    BinOp::Eq => func.instruction(&Instruction::I64Eq),
+                    BinOp::Ne => func.instruction(&Instruction::I64Ne),
+                    BinOp::Lt => func.instruction(&Instruction::I64LtU),
+                    BinOp::Gt => func.instruction(&Instruction::I64GtU),
+                    BinOp::Le => func.instruction(&Instruction::I64LeU),
+                    BinOp::Ge => func.instruction(&Instruction::I64GeU),
+                    BinOp::And => func.instruction(&Instruction::I64And),
+                    BinOp::Or => func.instruction(&Instruction::I64Or),
+                    BinOp::BitAnd => func.instruction(&Instruction::I64And),
+                    BinOp::BitOr => func.instruction(&Instruction::I64Or),
+                    BinOp::BitXor => func.instruction(&Instruction::I64Xor),
+                };
+            }
+            InternedTyKind::U8 | InternedTyKind::U16 | InternedTyKind::U32 => {
+                // Unsigned 32-bit-or-narrower operands: division, remainder, and
+                // ordered comparisons use the `_u` opcodes. Everything else is
+                // sign-agnostic and matches the signed default arm below.
+                match op {
+                    BinOp::Add => func.instruction(&Instruction::I32Add),
+                    BinOp::Sub => func.instruction(&Instruction::I32Sub),
+                    BinOp::Mul => func.instruction(&Instruction::I32Mul),
+                    BinOp::Div => func.instruction(&Instruction::I32DivU),
+                    BinOp::Mod => func.instruction(&Instruction::I32RemU),
+                    BinOp::Eq => func.instruction(&Instruction::I32Eq),
+                    BinOp::Ne => func.instruction(&Instruction::I32Ne),
+                    BinOp::Lt => func.instruction(&Instruction::I32LtU),
+                    BinOp::Gt => func.instruction(&Instruction::I32GtU),
+                    BinOp::Le => func.instruction(&Instruction::I32LeU),
+                    BinOp::Ge => func.instruction(&Instruction::I32GeU),
+                    BinOp::And => func.instruction(&Instruction::I32And),
+                    BinOp::Or => func.instruction(&Instruction::I32Or),
+                    BinOp::BitAnd => func.instruction(&Instruction::I32And),
+                    BinOp::BitOr => func.instruction(&Instruction::I32Or),
+                    BinOp::BitXor => func.instruction(&Instruction::I32Xor),
+                };
+            }
             _ => {
-                // Default: i32 operations
+                // Default: signed i32 operations (s8/s16/s32, bool, char).
                 match op {
                     BinOp::Add => func.instruction(&Instruction::I32Add),
                     BinOp::Sub => func.instruction(&Instruction::I32Sub),
@@ -2558,7 +2614,7 @@ impl WasmPackageBuilder<'_> {
         // Composite argument that isn't a single (ptr, len) pair — the import
         // wants its full canonical flattening, which the argument side does not
         // yet lower. Fail loud instead of pushing the internal ref.
-        let canonical = self.canonical_flat_valtypes(arg.ty);
+        let canonical = self.canonical_flat_valtypes(arg.ty, crate::wasm::repr::WitBoundary::assert());
         if canonical.len() > 1 && !matches!(self.internal_repr(arg.ty), InternalRepr::Scalar(_)) {
             return Err(CodegenError::InvalidIR(format!(
                 "callback arg: composite argument of type {:?} not yet lowered to \
@@ -2819,7 +2875,7 @@ impl WasmPackageBuilder<'_> {
         use wasm_encoder::ValType;
         use yel_core::types::InternedTyKind;
 
-        let payload_canonical = self.flatten_core_valtypes(payload_ty);
+        let payload_canonical = self.flatten_core_valtypes(payload_ty, crate::wasm::repr::WitBoundary::assert());
 
         // strings-to-GC: a string payload comes back as canonical
         // (ptr, len) in memory and rebuilds a `$str_bytes` GC ref. Every
@@ -2904,7 +2960,7 @@ impl WasmPackageBuilder<'_> {
         use wasm_encoder::ValType;
 
         let slots = self.flatten_core_slots(ret_ty);
-        let valtypes = self.flatten_core_valtypes(ret_ty);
+        let valtypes = self.flatten_core_valtypes(ret_ty, crate::wasm::repr::WitBoundary::assert());
         if slots.len() != valtypes.len() {
             return Err(CodegenError::InvalidIR(format!(
                 "emit_cb_indirect_return_load: flat valtypes ({}) disagree with \
@@ -3370,54 +3426,41 @@ mod tests {
         assert!(matches!(single_binop(&ctx, BinOp::Lt, ty), Operator::F32Lt));
     }
 
-    /// KNOWN BUG: `emit_binary_op` has no dedicated arm for `U32`/`U64`;
-    /// they fall through to the catch-all `_ =>` branch that emits
-    /// SIGNED integer instructions. `u32 < u32` therefore lowers to
-    /// `i32.lt_s`, which compares large unsigned values as if they
-    /// were negative. `u32 / u32` lowers to `i32.div_s` with the same
-    /// wrong-sign problem.
-    ///
-    /// This test asserts the **correct** expected behaviour
-    /// (unsigned comparisons and division) and is `#[ignore]`d while the
-    /// bug exists. Fix: add an `InternedTyKind::U32 | InternedTyKind::U16
-    /// | InternedTyKind::U8` branch to `emit_binary_op` that uses
-    /// `_u`-suffixed instructions for `Lt`/`Gt`/`Le`/`Ge`/`Div`/`Mod`.
+    /// Regression: unsigned integer types must use `_u`-suffixed opcodes for
+    /// ordered comparisons and division/remainder, or large values compare as
+    /// if negative. `emit_binary_op` has dedicated `U8|U16|U32` (i32) and `U64`
+    /// (i64) arms; the signed default arm serves `s8/s16/s32`, `bool`, `char`.
+    /// Formerly `#[ignore]`d.
     #[test]
-    #[ignore = "known bug: emit_binary_op uses signed instructions for \
-                 unsigned integer types — u32 comparisons and division \
-                 treat large values as negative"]
     fn binary_ops_unsigned_use_unsigned_comparisons() {
         let mut ctx = CompilerContext::new();
-        let ty = ctx.intern_ty(InternedTyKind::U32);
-        assert!(matches!(
-            single_binop(&ctx, BinOp::Lt, ty),
-            Operator::I32LtU
-        ));
-        assert!(matches!(
-            single_binop(&ctx, BinOp::Gt, ty),
-            Operator::I32GtU
-        ));
-        assert!(matches!(
-            single_binop(&ctx, BinOp::Div, ty),
-            Operator::I32DivU
-        ));
+        let u32_ty = ctx.intern_ty(InternedTyKind::U32);
+        assert!(matches!(single_binop(&ctx, BinOp::Lt, u32_ty), Operator::I32LtU));
+        assert!(matches!(single_binop(&ctx, BinOp::Gt, u32_ty), Operator::I32GtU));
+        assert!(matches!(single_binop(&ctx, BinOp::Le, u32_ty), Operator::I32LeU));
+        assert!(matches!(single_binop(&ctx, BinOp::Ge, u32_ty), Operator::I32GeU));
+        assert!(matches!(single_binop(&ctx, BinOp::Div, u32_ty), Operator::I32DivU));
+        assert!(matches!(single_binop(&ctx, BinOp::Mod, u32_ty), Operator::I32RemU));
+
+        // u64 uses the i64 unsigned opcodes.
+        let u64_ty = ctx.intern_ty(InternedTyKind::U64);
+        assert!(matches!(single_binop(&ctx, BinOp::Lt, u64_ty), Operator::I64LtU));
+        assert!(matches!(single_binop(&ctx, BinOp::Div, u64_ty), Operator::I64DivU));
+
+        // Signed types keep the signed opcodes.
+        let s32_ty = ctx.intern_ty(InternedTyKind::S32);
+        assert!(matches!(single_binop(&ctx, BinOp::Lt, s32_ty), Operator::I32LtS));
+        let s64_ty = ctx.intern_ty(InternedTyKind::S64);
+        assert!(matches!(single_binop(&ctx, BinOp::Lt, s64_ty), Operator::I64LtS));
     }
 
-    /// KNOWN BUG: `emit_binary_op` has no `S64`/`U64` arm; they fall
-    /// through to the catch-all `_ =>` branch that emits `i32`-wide
-    /// instructions. That means `s64 + s64` lowers to `i32.add`,
-    /// silently truncating 64-bit arithmetic to 32 bits and likely
-    /// producing a stack-type-mismatch at validation time — except it
-    /// doesn't, because `SignalRead` of an s64 also falls through to
-    /// the wrong load path in some scenarios, so the widths agree by
-    /// coincidence. Either way, the observable semantics are wrong.
-    ///
-    /// Fix: add `InternedTyKind::S64 | InternedTyKind::U64` branch to
-    /// `emit_binary_op` emitting `I64Add`/`I64Sub`/`I64Mul`/`I64DivS`
-    /// (or `I64DivU` for U64)/etc.
+    /// Regression: `emit_binary_op` must emit `i64`-wide instructions for
+    /// `S64`/`U64` operands (`I64Add`/`I64Sub`/`I64Mul`/`I64DivS`, etc.) — a
+    /// missing arm used to fall through to the `i32` catch-all and silently
+    /// truncate 64-bit arithmetic to 32 bits. Now fixed; formerly `#[ignore]`d.
+    /// (The sibling unsigned-comparison bug is still open — see
+    /// `binary_ops_unsigned_use_unsigned_comparisons`.)
     #[test]
-    #[ignore = "known bug: emit_binary_op emits i32 instructions for s64/u64 \
-                 types — 64-bit arithmetic is silently truncated to 32 bits"]
     fn binary_ops_s64_produce_i64_instructions() {
         let mut ctx = CompilerContext::new();
         let ty = ctx.intern_ty(InternedTyKind::S64);

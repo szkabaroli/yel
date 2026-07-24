@@ -368,7 +368,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // String signals (FatPointer repr). Typed list signals collapse
         // to 1 typed ref slot.
         let mut next_param_idx: u32 = 1; // After src_arr
-        let mut captured_signal_map = std::collections::HashMap::new();
+        let mut captured_signal_map = rustc_hash::FxHashMap::default();
         for (def_id, ty) in &captured_signals {
             let storage = self.signal_storage_valtypes(*ty);
             let is_fat_ptr = storage.len() == 2;
@@ -447,8 +447,8 @@ impl<'a> WasmPackageBuilder<'a> {
         let (param_local_id, _param_ty) = param;
         let old_captured = self.current_block_captured_locals.take();
         let old_modes = self.current_block_local_modes.take();
-        let mut captured_map = std::collections::HashMap::new();
-        let mut local_modes = std::collections::HashMap::new();
+        let mut captured_map = rustc_hash::FxHashMap::default();
+        let mut local_modes = rustc_hash::FxHashMap::default();
         captured_map.insert(param_local_id, item_local);
         local_modes.insert(param_local_id, yel_core::lir::LirBindingMode::Value);
         self.current_block_captured_locals = Some(captured_map);

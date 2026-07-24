@@ -1,6 +1,6 @@
 //! LIR UI node types.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,35 +16,6 @@ use super::block::{LirBlock, LirBlockEffect, LirExprId, LirSlotId, LirSlotInfo, 
 use super::expr::{LirExpr, LirStatement};
 use super::signal::LirSignal;
 use super::signal_layout::SignalLayout;
-
-/// Cached per-valtype flat-scratch counts for the codegen-synthesized
-/// internal lifecycle wrappers (constructor / mount / unmount).
-///
-/// Each tuple is `(i32, i64, f32, f64)` and maps directly onto the
-/// declared local block of the emitted internal-lifecycle WASM
-/// function. Populated during post-lowering by
-/// `populate_internal_lifecycle_scratch` (Phase 0.3d of the
-/// lir-resource-flatten plan), so codegen can read these instead of
-/// re-walking each component's signal types. Phase 0.3e will use these
-/// values when synthesizing the internal lifecycle bodies as
-/// `LirBlock`s to populate their `max_flat_scratch_counts` directly.
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
-pub struct InternalLifecycleScratch {
-    /// Constructor wrapper scratch (i32, i64, f32, f64). Sized to the
-    /// max per-valtype canonical-ABI flat count across all non-Func
-    /// signals on the component, matching the historical
-    /// `flatten_core_slots(s.ty)` walk in
-    /// `generate_constructor_internal_for`.
-    pub ctor: (u32, u32, u32, u32),
-    /// Mount wrapper scratch (i32, i64, f32, f64). Today already
-    /// equal to `LirBlock.max_flat_scratch_counts` on the mount block;
-    /// cached here for symmetry / Phase 0.3e consumers.
-    pub mount: (u32, u32, u32, u32),
-    /// Unmount wrapper scratch (i32, i64, f32, f64). The current
-    /// internal unmount body uses zero scratch — the field exists for
-    /// shape parity with ctor/mount.
-    pub unmount: (u32, u32, u32, u32),
-}
 
 impl LirExprArena for LirResource {
     fn expr(&self, id: LirExprId) -> &LirExpr {
@@ -224,14 +195,6 @@ pub struct LirResource {
     /// `GcTypeLayout::signal_field_paths` + `MemoryLayout::signal_offsets`.
     pub signal_layout: SignalLayout,
 
-    /// Phase 0.3d (lir-resource-flatten plan): cached flat-scratch
-    /// counts for the codegen-synthesized internal lifecycle
-    /// wrappers. See [`InternalLifecycleScratch`]. Populated by
-    /// `populate_internal_lifecycle_scratch` at the end of
-    /// `BlockLowering::lower_component`. Codegen cross-checks its
-    /// per-function recomputation against this in debug builds.
-    pub internal_lifecycle_scratch: InternalLifecycleScratch,
-
     /// Phase 0.3f: lifted component-struct (`$Comp_<i>`) field layout
     /// — moved out of codegen's `GcTypeLayout` so the LIR can name
     /// component-struct fields by index without consulting codegen
@@ -266,7 +229,7 @@ pub struct ComponentStructLayout {
     pub self_handle_field_idx: u32,
     /// Index of the trailing `(mut (ref null <comp>_tree_root))` field
     /// on `$Comp_<i>`. `None` when the component has no body tree
-    /// (e.g. `empty_module_carrier`).
+    /// (e.g. `module_scope_carrier`).
     pub tree_root_field_idx: Option<u32>,
 }
 
@@ -307,15 +270,24 @@ impl LirResource {
         self.blocks.iter().find(|b| b.id == id)
     }
 
-    /// An empty component used as a carrier for module-scope expression
-    /// emission (e.g. lowering global-singleton property defaults).
+    /// A signal-less resource used as the emission scope for module-scope
+    /// expressions (global-singleton property defaults, module-scope filter
+    /// predicates) — the shared body emitter (`emit_expr`) is typed against a
+    /// `LirResource`, so module scope borrows this shape rather than a
+    /// component.
     ///
-    /// The `signals` vector is empty, so any `SignalRead`/`SignalWrite` that
-    /// leaks into module scope resolves only through global-property
-    /// (core-global) lookups. `blocks` contains a single empty
-    /// placeholder block so `constructor_block` / `mount_block` remain valid
-    /// indices — nothing actually executes them in module scope.
-    pub fn empty_module_carrier(name: Name) -> Self {
+    /// `exprs` is the module's expression arena (e.g. `LirModule::global_exprs`)
+    /// so the emitter resolves each top-level node's `LirExprId` children.
+    /// `signals` is empty, so any `SignalRead`/`SignalWrite` that leaks into
+    /// module scope resolves only through global-property (core-global)
+    /// lookups. `blocks` is a single placeholder so `constructor_block` /
+    /// `mount_block` stay valid indices — nothing executes them here.
+    ///
+    /// This is a transitional bridge: once `emit_expr` is generic over the
+    /// `LirFunctionLike` arena trait, module scope needs no `LirResource` at
+    /// all (see `docs/TECH_DEBT.md` §1.6). Pass `Vec::new()` when the scope
+    /// evaluates no child-bearing expressions.
+    pub fn module_scope_carrier(name: Name, exprs: Vec<LirExpr>) -> Self {
         use super::block::LirBlock;
         let placeholder = LirBlock::new(BlockId(0));
         Self {
@@ -335,18 +307,17 @@ impl LirResource {
             effects: Vec::new(),
             slots: Vec::new(),
             strings: Vec::new(),
-            exprs: Vec::new(),
+            exprs,
             signals: Vec::new(),
             children_root_slot: None,
-            input_binding_handlers: HashMap::new(),
-            payload_binding_handlers: HashMap::new(),
+            input_binding_handlers: HashMap::default(),
+            payload_binding_handlers: HashMap::default(),
             for_contexts: Vec::new(),
-            effects_by_signal: HashMap::new(),
+            effects_by_signal: HashMap::default(),
             body_tree: Vec::new(),
             struct_types: Vec::new(),
             array_types: Vec::new(),
             signal_layout: SignalLayout::default(),
-            internal_lifecycle_scratch: InternalLifecycleScratch::default(),
             comp_struct_layout: ComponentStructLayout::default(),
         }
     }

@@ -1,6 +1,6 @@
 package yel:slotok@0.1.0;
 
-component Card {
+component Panel {
     VStack {
         Text { "hi" }
         @children
@@ -8,5 +8,5 @@ component Card {
 }
 
 export component App {
-    Card { Text { "body" } }
+    Panel { Text { "body" } }
 }

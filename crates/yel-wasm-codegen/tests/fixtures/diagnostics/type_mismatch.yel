@@ -1,0 +1,7 @@
+// Canonical E0001: a string literal assigned to an s32 signal.
+package yel:typemismatch@0.1.0;
+
+export component App {
+    x: s32 = "hello";
+    VStack { Text { "ok" } }
+}

@@ -6,8 +6,9 @@
 //! single `LirModule` per compile, not a loose `Vec<LirResource>` + side
 //! tables.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
+use crate::definitions::GlobalPropDirection;
 use crate::ids::{DefId, InterfaceId};
 use crate::index_vec::IndexVec;
 use crate::interner::Name;
@@ -59,47 +60,130 @@ pub struct LirInterface {
     pub functions: Vec<LirIfaceFn>,
 }
 
-/// One freestanding function in an interface contract — a plain WIT
-/// signature. Frontend-agnostic: a DOM import, a global's `set-<prop>` /
-/// `on-<prop>-changed` accessor, and (later) a flow node port all lower
-/// into this same shape. The renderer never learns what a function
-/// "meant" — it emits `name(params) -> result` and a matching import,
-/// keyed by `def`.
+/// What receiver a host-boundary function takes as its implicit first
+/// parameter — the frontend-agnostic encoding of "resource method vs.
+/// freestanding".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LirReceiver {
+    /// No receiver — a freestanding function (global / DOM callbacks,
+    /// module dispatch). At the WIT boundary it is `FunctionKind::Freestanding`;
+    /// at the core ABI it takes no leading handle.
+    None,
+    /// Takes `borrow<resource>` as its first parameter, where the resource
+    /// is the component identified by this `DefId` (component callbacks).
+    /// At the core ABI this lowers to a leading `i32` handle.
+    Borrow(DefId),
+}
+
+/// One function in an interface contract — a plain WIT signature plus its
+/// receiver. Frontend-agnostic: a DOM import, a global's `set-<prop>` /
+/// `on-<prop>-changed` accessor, a component callback, and (later) a flow
+/// node port all lower into this same shape. The renderer never learns what
+/// a function "meant" — it emits `name(params) -> result` and, when part of
+/// the import registry, a matching import keyed by `def`.
 #[derive(Debug, Clone)]
 pub struct LirIfaceFn {
     /// Kebab WIT name, already lowered (`set-attribute`, `set-count`,
     /// `on-count-changed`).
     pub name: Name,
-    /// Parameter list: `(name, type)` pairs in order.
+    /// Parameter list: `(name, type)` pairs in order. Does NOT include the
+    /// receiver — [`Self::receiver`] carries that.
     pub params: Vec<(Name, Ty)>,
     /// Result type; `None` is unit.
     pub result: Option<Ty>,
+    /// Receiver taken as the implicit first parameter.
+    pub receiver: LirReceiver,
     /// The callable identity the core module's call sites key on, so
     /// codegen can correlate this signature to its import/export slot.
     pub def: DefId,
 }
 
+/// A single host-imported function — the unit of the module's import
+/// registry ([`LirModule::imports`]). Both the core module's import section
+/// (index space + emission) and the WIT import interfaces derive from this
+/// one ordered list, so the two can no longer drift (the old code re-derived
+/// each independently from `ctx.defs`).
+#[derive(Debug, Clone)]
+pub struct LirImport {
+    /// Callee identity — call sites resolve their import index by this
+    /// `DefId`, and it correlates the import to its [`LirIfaceFn`] in the
+    /// owning interface.
+    pub def_id: DefId,
+    /// Source function name (kebab-cased at emission).
+    pub name: Name,
+    /// The import interface this function belongs to (index into
+    /// [`LirModule::interfaces`]).
+    pub interface: InterfaceId,
+    /// Parameter list `(name, type)`, excluding the receiver.
+    pub params: Vec<(Name, Ty)>,
+    /// Result type; `None` is unit.
+    pub result: Option<Ty>,
+    /// Receiver — `Borrow` adds a leading core-ABI handle (component
+    /// callbacks); `None` is freestanding (global / DOM callbacks).
+    pub receiver: LirReceiver,
+}
+
+/// One property backing a [`LirGlobal`]'s singleton state: a `DefId`, its
+/// host-boundary direction, and (for properties with a declared default) the
+/// LIR-lowered default expression. The default is a top-level node whose
+/// `LirExprId` children index into the module-shared [`LirModule::global_exprs`]
+/// arena.
+#[derive(Debug, Clone)]
+pub struct LirGlobalProperty {
+    pub def_id: DefId,
+    pub direction: GlobalPropDirection,
+    pub default: Option<LirExpr>,
+}
+
+/// A top-level `global` block, lowered to LIR as a first-class item — the
+/// direct peer of [`LirResource`] for components. A global is a host-boundary
+/// declaration (its `func`-typed members are host imports) with optional
+/// in-tree singleton state (its properties); unlike a component it is never
+/// instantiated, so it owns no blocks/signals/effects, only default-value
+/// expressions.
+#[derive(Debug, Clone)]
+pub struct LirGlobal {
+    pub def_id: DefId,
+    pub name: Name,
+    pub is_export: bool,
+    /// Owning package for this global's interface. `None` = the module's own
+    /// package; `Some` = a foreign package (the built-in `Dom` global lives
+    /// in `yel:ui`).
+    pub package: Option<PackageId>,
+    /// This global's singleton properties, in declaration order.
+    pub properties: Vec<LirGlobalProperty>,
+    /// Host-imported callback `DefId`s (in declaration order).
+    pub callbacks: Vec<DefId>,
+}
+
 /// A Yel module — one or more `.yel` files compiled together.
 ///
-/// Holds every LIR artifact produced for the module: components, global
-/// singleton defaults, and the package header. Successive compiler passes
-/// attach further module-scope state (callbacks, type registry, etc.) here.
+/// Holds every LIR artifact produced for the module: components, globals,
+/// and the package header. Successive compiler passes attach further
+/// module-scope state (callbacks, type registry, etc.) here.
 #[derive(Debug, Clone, Default)]
 pub struct LirModule {
     /// All exported instantiable units declared in the module (exported
     /// and private alike) — UI components today, flow nodes later. Each
     /// surfaces in the component model as a resource.
     pub resources: Vec<LirResource>,
-    /// LIR-lowered default expressions for global singleton properties,
-    /// keyed by property `DefId`. Each value is a top-level expression whose
-    /// `LirExprId` children index into [`Self::global_default_exprs`]. The
-    /// module start function seeds the backing slot for each entry at
-    /// instantiation time.
-    pub global_defaults: HashMap<DefId, LirExpr>,
-    /// Shared expression arena for the global-default expressions. The
-    /// top-level nodes live in [`Self::global_defaults`]; every child handle
-    /// they hold indexes into this arena.
-    pub global_default_exprs: Vec<LirExpr>,
+    /// Every top-level `global` block, as a first-class per-item unit (the
+    /// peer of `resources` for the non-instantiable half of the module).
+    /// Their default expressions' `LirExprId` children index into the
+    /// shared [`Self::global_exprs`] arena.
+    pub globals: Vec<LirGlobal>,
+    /// The module's host-import registry — every function the core module
+    /// imports (component callbacks, global callbacks, DOM), in the order
+    /// they are assigned import indices. The single source of truth: the
+    /// core module's import section and its WIT import interfaces both
+    /// derive from this and [`Self::interfaces`], so they cannot drift.
+    pub imports: Vec<LirImport>,
+    /// Shared expression arena for every global's default expressions.
+    /// Module-scoped rather than per-global because all global defaults are
+    /// seeded together at module start and lower through one module scope —
+    /// the analogue of a single `LirResource`'s `exprs`, but shared across
+    /// the module's globals.
+    pub global_exprs: Vec<LirExpr>,
     /// Every interface the module's world imports or exports. World items
     /// reference these by [`InterfaceId`]; resolve an id here to get the
     /// interface's name, direction, and owning package. Populated by the
@@ -119,5 +203,18 @@ impl LirModule {
     /// Exported-resources view used by WIT and codegen export loops.
     pub fn exported_resources(&self) -> impl Iterator<Item = &LirResource> {
         self.resources.iter().filter(|c| c.is_export)
+    }
+
+    /// A `property DefId → default expression` map over every global's
+    /// properties, for codegen sites that seed a single property by id.
+    /// A plain regrouping of [`Self::globals`] — the defaults already index
+    /// into the shared [`Self::global_exprs`] arena, so no id rewriting is
+    /// involved.
+    pub fn global_defaults_map(&self) -> HashMap<DefId, LirExpr> {
+        self.globals
+            .iter()
+            .flat_map(|g| &g.properties)
+            .filter_map(|p| p.default.as_ref().map(|d| (p.def_id, d.clone())))
+            .collect()
     }
 }

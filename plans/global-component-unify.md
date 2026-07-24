@@ -1,9 +1,13 @@
 # Unifying globals & components onto one pipeline spine
 
-**Status:** active. Scope locked to **phases 1–4** (one typecheck + codegen path;
-no surface-language changes; byte-identical WASM/WIT/DOT on existing fixtures).
-Phases 5–6 (the `@annotation` free-fn/interface toggle and DOM-as-global) are
-**out of scope for now** but the design must not preclude them.
+**Status:** phases 1–4 **DONE**. One typecheck + codegen path; no
+surface-language changes; WIT/DOT byte-identical on existing fixtures and the
+execution suite green throughout. `LirModule` now carries first-class
+`globals: Vec<LirGlobal>` (replacing the `global_defaults`/`global_default_exprs`
+side-maps) and `imports: Vec<LirImport>` (the single host-import registry);
+codegen and `wit_ast` derive from these instead of re-walking `ctx.defs`. Phases
+5–6 (the `@annotation` free-fn/interface toggle and DOM-as-global) remain out of
+scope but are not precluded.
 
 ## Why
 
@@ -99,19 +103,32 @@ lives in **core wasm mutable globals**.
 Target `LirModule` (frontend-agnostic; mirrors the wit-parser world model):
 
 ```rust
+// As landed (lir/module.rs):
 LirModule {
-    resources:  Vec<LirResource>,            // was: components. Exported instantiable units.
-    imports:    Vec<LirImport>,              // host imports; interface: Option<InterfaceId>
-                                             //   None = freeform (WorldItem::Function @ WorldKey::Name)
-                                             //   Some = interface member (WorldItem::Interface)
-    globals:    Vec<LirGlobal>,              // was: global_defaults + global_default_exprs.
-                                             //   module state → core wasm mutable globals.
-    interfaces: IndexVec<InterfaceId, LirInterface>,
-    package,
+    resources:   Vec<LirResource>,           // exported instantiable units (components).
+    globals:     Vec<LirGlobal>,             // first-class global items; their default
+                                             //   exprs' children index into global_exprs.
+    global_exprs: Vec<LirExpr>,              // shared module-start default-expr arena.
+    imports:     Vec<LirImport>,             // the host-import registry (single source of truth).
+    interfaces:  IndexVec<InterfaceId, LirInterface>,
+    package:     Option<PackageId>,
 }
-struct LirInterface { name: Name, direction: Import | Export, package: Option<PackageId> }
-struct LirImport    { name: Name, interface: Option<InterfaceId>, kind: LirFnKind, /* sig */ }
+struct LirGlobal { def_id, name, is_export, package, properties: Vec<LirGlobalProperty>, callbacks }
+struct LirGlobalProperty { def_id, direction: GlobalPropDirection, default: Option<LirExpr> }
+struct LirImport { def_id, name: Name, interface: InterfaceId, params, result, receiver: LirReceiver }
+enum   LirReceiver { None, Borrow(DefId) }   // Borrow => leading borrow<resource> / core i32 self.
 ```
+
+Deviations from the original sketch, and why:
+- **`globals` keeps a module-shared `global_exprs` arena** rather than a per-global
+  one. All global defaults lower through one module scope and seed together at
+  module start; a shared arena keeps the module-scope `.filter()` path and the
+  `globals_init` carrier working with no `LirExprId` rebasing. `LirGlobal` is
+  still a first-class per-item struct (identity, properties, callbacks, package).
+- **`LirImport.interface` is a non-optional `InterfaceId`** (not
+  `Option<InterfaceId>`): every host import today belongs to an interface (the
+  freeform `WorldKey::Name` path is still unused). It can widen to `Option` if a
+  freeform import ever appears.
 
 Alignment notes (verified against `wit-parser` 0.248.0):
 - "Freeform" = `WorldItem::Function` keyed by `WorldKey::Name` (function directly
@@ -133,8 +150,32 @@ Sub-steps (each green; WASM bytes change once state moves to core globals, but
    `LirModule.interfaces: IndexVec<InterfaceId, LirInterface>` (scaffold, empty).
    Also removed vestigial serde: `LirModule` is never (de)serialized — only
    `LirResource` is (for `ir --json`), so `LirModule`/`IndexVec` carry no serde.
-3. Introduce `LirImport`; route the import registry + `wit_ast` off it (incl. the
-   freeform path). Populate `interfaces`; resources/imports reference it.
+3. ✅ **DONE (behaviour-preserving; WIT/DOT byte-identical, execution green).**
+   Introduced `LirImport` (`lir/module.rs`) as the module's **single host-import
+   registry** (`LirModule.imports`) — every function the core module imports
+   (component callbacks, global callbacks, DOM), in import-index order, each
+   referencing its `InterfaceId`. One frontend producer,
+   `CompilerContext::build_import_contract(component_def_ids) -> (interfaces,
+   imports)`, now builds **both** the import registry and the full set of import
+   `LirInterface`s (component-callbacks, local globals with setter/notifier
+   funcs, foreign DOM) — replacing the foreign-only `build_import_interfaces`.
+   `LirIfaceFn` gained a `receiver: LirReceiver` (`None` | `Borrow(component)`),
+   so a `borrow<resource>` self-param is contract data, not a per-kind code path.
+   - **Codegen routed off `imports`:** `ImportLayout::new(imports, all_components)`
+     derives the index space + `[resource-new]` slots from the registry (its
+     `unique_callbacks`/`global_callbacks`/`components` fields are gone); the
+     import section, per-import type interning (`import_types` keyed by `DefId`),
+     the callback return-area scratch sizing, and the name section all iterate
+     `module.imports` + `module.interfaces` instead of re-walking `ctx.defs`.
+   - **`wit_ast` routed off the contract:** one `render_import_contract` renders
+     every import interface (receiver → `borrow<self>`; foreign package → inline
+     types, local → shared-types `use` aliases); the per-kind
+     `create_per_component_callbacks_interfaces` / `create_globals_interfaces`
+     are deleted, and `create_world` takes one unified `import_interface_ids`
+     list. The WIT world is unchanged (byte-identical fixtures).
+   - Kebab-casing is now shared: `yel_core::naming::to_kebab_case` is the single
+     source of truth the frontend contract and the backend renderer both use, so
+     a frontend-computed interface name can't drift from its backend re-derivation.
 4. Global state → core wasm globals, in two halves:
    - **4a ✅ DONE (green).** Consolidated the global-*write* lowering onto a new
      `LirOp::GlobalFieldSet { block, field, value }` (replacing the explicit

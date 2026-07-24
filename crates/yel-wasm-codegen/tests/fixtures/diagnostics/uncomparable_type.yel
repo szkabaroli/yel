@@ -1,0 +1,12 @@
+// E0005: `==` between two record values is not supported.
+package yel:uncomparable@0.1.0;
+
+record R { a: s32 }
+
+export component App {
+    p: R;
+    q: R;
+    VStack {
+        if p == q { Text { "eq" } }
+    }
+}

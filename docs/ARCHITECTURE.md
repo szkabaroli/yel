@@ -94,12 +94,16 @@ WASM component (+ WIT, + DOT debug graph)
 ```
 
 The phases are explicit methods on `Compiler` (`crates/yel-core/src/compiler.rs`):
-`parse`, `lower_to_hir`, `type_check`, `lower_to_lir`, plus the globals variants
-`type_check_globals` / `lower_globals_to_lir`. The whole loop is orchestrated
-once in [`yelc/src/pipeline.rs::lower_all`](../crates/yelc/src/pipeline.rs) and
-reused by every driver (CLI, native lib, WASI). Errors **accumulate** in
-`ctx.diagnostics`; `lower_all` bails between phases via `compiler.has_errors()`
-rather than `Result`-per-node.
+`parse`, `lower_to_hir`, `type_check` (one entry for both `HirItem::Component`
+and `HirItem::Global`), and `lower_to_lir` for components; globals lower once at
+the end via `lower_globals_to_lir` (→ `Vec<LirGlobal>` + a shared default-expr
+arena), after the module-level `resolve_global_triggers` pass. The host-import
+registry + WIT import interfaces are then built once by `build_import_contract`.
+The whole loop is orchestrated once in
+[`yelc/src/pipeline.rs::lower_all`](../crates/yelc/src/pipeline.rs) and reused by
+every driver (CLI, native lib, WASI). Errors **accumulate** in `ctx.diagnostics`;
+`lower_all` bails between phases via `compiler.has_errors()` rather than
+`Result`-per-node.
 
 ### 2.1 The shared state: `CompilerContext`
 
@@ -142,7 +146,7 @@ Two-stage lowering (`lower_to_lir/component.rs`):
 2. **Block LIR** (`LirResource`) — `BlockLowering` (`lower_to_lir/blocks.rs`, **~8.5k lines** — the single biggest file) flattens the tree into blocks of flat `LirOp`s, allocating slots/blocks/strings and interning exprs/strings.
 
 Key LIR data structures (`lir/`):
-- `LirModule { components: Vec<LirResource>, global_defaults: HashMap<DefId, LirExpr>, package }` (`lir/module.rs`) — the whole compilation unit.
+- `LirModule { resources: Vec<LirResource>, globals: Vec<LirGlobal>, global_exprs: Vec<LirExpr>, imports: Vec<LirImport>, interfaces: IndexVec<InterfaceId, LirInterface>, package }` (`lir/module.rs`) — the whole compilation unit. Both top-level kinds are first-class per-item: `LirResource` for instantiable components, `LirGlobal { def_id, name, package, properties, callbacks }` for globals (their default exprs share the `global_exprs` arena). `imports` is the single host-import registry (component callbacks, global callbacks, DOM) that both the core import section and the WIT import `interfaces` derive from, via `CompilerContext::build_import_contract`.
 - `LirResource` (`lir/node.rs`) — one resource (UI: a component; flow: a function package): `blocks` (each owning its Temp slots), `exprs` (interned), `strings` (interned + deduped), `slots` (Memory + shared Temps), `signals`, `effects`, `body_tree`, `tree_shape`, GC `struct_types`/`array_types`.
 - `LirBlock` / `LirOp` (`lir/block.rs`, ~1.6k lines) — block = params + flat op stream. Ops reference exprs by `ExprId`, strings by `StringId`, values by `LirSlotId`.
 - `LirExpr { kind: LirExprKind, ty: Ty }` (`lir/expr.rs`).

@@ -67,7 +67,7 @@ pub use expr::{LirExpr, LirExprKind, LirLiteral};
 
 // Layout utilities
 pub use layout::{
-    align_to, discriminant_size, max_flat_counts, per_valtype_counts, FlatValTypeCounts,
+    align_to, discriminant_size, per_valtype_counts, FlatValTypeCounts,
     LirCoreValType, LirLayoutContext, LirTypeLayout, RecordLayout, VariantLayout,
 };
 
@@ -78,12 +78,13 @@ pub use layout::{
 pub use crate::lower_to_lir::{lower_component, lower_globals};
 
 // Module-scoped compilation unit
-pub use module::{InterfaceDirection, LirIfaceFn, LirInterface, LirModule};
+pub use module::{
+    InterfaceDirection, LirGlobal, LirGlobalProperty, LirIfaceFn, LirImport, LirInterface,
+    LirModule, LirReceiver,
+};
 
 // Component and node types
-pub use node::{
-    InternalLifecycleScratch, LirBinding, LirHandler, LirNode, LirNodeKind, LirResource,
-};
+pub use node::{LirBinding, LirHandler, LirNode, LirNodeKind, LirResource};
 
 // Signal types (LirEffect is internal but used by tree-lowering)
 pub use signal::{LirEffect, LirSignal};

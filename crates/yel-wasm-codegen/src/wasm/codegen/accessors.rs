@@ -191,7 +191,7 @@ fn push_zero_valtype(func: &mut Function, vt: ValType) -> Result<(), CodegenErro
 impl<'a> WasmPackageBuilder<'a> {
     pub(super) fn single_slot_getter_type(&self, ty: Ty) -> Result<Option<u32>, CodegenError> {
         use wasm_encoder::ValType;
-        let flat = self.canonical_flat_valtypes(ty);
+        let flat = self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
         if flat.len() != 1 {
             return Ok(None);
         }
@@ -216,14 +216,14 @@ impl<'a> WasmPackageBuilder<'a> {
     /// (their bytes live in persistent / interned storage and are never freshly
     /// copied by a getter), so they do not count; scalars are inline.
     pub(super) fn ty_contains_fresh_list(&self, ty: Ty) -> bool {
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = rustc_hash::FxHashSet::default();
         self.ty_contains_fresh_list_rec(ty, &mut visited)
     }
 
     fn ty_contains_fresh_list_rec(
         &self,
         ty: Ty,
-        visited: &mut std::collections::HashSet<DefId>,
+        visited: &mut rustc_hash::FxHashSet<DefId>,
     ) -> bool {
         match self.ctx.ty_kind(ty) {
             InternedTyKind::List(_) => true,
@@ -501,7 +501,7 @@ impl<'a> WasmPackageBuilder<'a> {
         let slots = self.flatten_core_slots(value_ty);
         debug_assert_eq!(
             slots.len(),
-            self.canonical_flat_valtypes(value_ty).len(),
+            self.canonical_flat_valtypes(value_ty, crate::wasm::repr::WitBoundary::assert()).len(),
             "spill trampoline: flat-slot count must match the wide setter's param count"
         );
         let value_base = yel_core::lir::align_to(4, self.layout_ctx.align_of(value_ty));
@@ -663,7 +663,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
             self.current_self_local = Some(self_ref_local);
             self.current_self_comp_idx = Some(ci);
-            let flat_valtypes = self.canonical_flat_valtypes(signal_ty);
+            let flat_valtypes = self.canonical_flat_valtypes(signal_ty, crate::wasm::repr::WitBoundary::assert());
             // SLR (POR + records with string / list<scalar>
             // fields) all route through the GC-backed getter path.
             let is_por = self.is_single_level_record(signal_ty);
@@ -1075,7 +1075,7 @@ impl<'a> WasmPackageBuilder<'a> {
             // valtypes count. Reserve the self-ref local right after
             // all params so it's always at the correct index whether
             // we take the POR or the param-mirrored field path.
-            let actual_flat_count = self.canonical_flat_valtypes(ty).len() as u32;
+            let actual_flat_count = self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert()).len() as u32;
             let self_ref_local: u32 = 1 + actual_flat_count;
             let mut func = Function::new([(
                 1,
@@ -1134,7 +1134,7 @@ impl<'a> WasmPackageBuilder<'a> {
             if matches!(self.ctx.ty_kind(ty), InternedTyKind::Option(_))
                 && self.option_collapses_to_ref(ty).is_some()
             {
-                let declared_vts = self.canonical_flat_valtypes(ty);
+                let declared_vts = self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
                 self.emit_self_ref(&mut func, comp_idx)?;
                 self.emit_member_pack(
                     &mut func,
@@ -1163,7 +1163,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 // Build the tuple GC struct from the canonical-ABI flat params
                 // (recursively — see `emit_composite_pack`) and store the
                 // resulting ref into the component field.
-                let declared_vts = self.canonical_flat_valtypes(ty);
+                let declared_vts = self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
                 self.emit_self_ref(&mut func, comp_idx)?;
                 self.emit_composite_pack(
                     &mut func,
@@ -1191,7 +1191,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 super::super::repr::InternalRepr::GcVariant(_)
             ) {
                 self.emit_self_ref(&mut func, comp_idx)?;
-                let declared_vts = self.canonical_flat_valtypes(ty);
+                let declared_vts = self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
                 self.emit_pack_canonical_to_gc_variant(
                     &mut func,
                     ty,
@@ -1232,7 +1232,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 // Push self ref, then build the record GC struct from the
                 // flat params (un-materializing string/list (ptr, len) pairs
                 // into GC refs), then `struct.set` on the component field.
-                let declared_vts = self.canonical_flat_valtypes(ty);
+                let declared_vts = self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
                 self.emit_self_ref(&mut func, comp_idx)?;
                 self.emit_composite_pack(
                     &mut func,
@@ -3277,7 +3277,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     offset: offset + member.canonical_offset,
                 },
             };
-            let member_flat = self.canonical_flat_valtypes(member.ty).len() as u32;
+            let member_flat = self.canonical_flat_valtypes(member.ty, crate::wasm::repr::WitBoundary::assert()).len() as u32;
             // A record's fields concatenate in canonical order, so this
             // member's declared valtypes are the corresponding window of the
             // parent's declared region.
@@ -3412,7 +3412,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // memory-sourced values are a single typed load.
         match source {
             CanonicalSource::Params { first_param } => {
-                let flat = self.canonical_flat_valtypes(ty);
+                let flat = self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
                 for (i, &vt_natural) in flat.iter().enumerate() {
                     func.instruction(&Instruction::LocalGet(first_param + i as u32));
                     let vt_declared = declared_vts.get(i).copied().unwrap_or(vt_natural);
@@ -3581,7 +3581,7 @@ impl<'a> WasmPackageBuilder<'a> {
                             // Push each payload slot, bridging the declared
                             // (possibly parent-joined) width down to the case's
                             // own natural width.
-                            let payload_flat = self.canonical_flat_valtypes(payload_ty);
+                            let payload_flat = self.canonical_flat_valtypes(payload_ty, crate::wasm::repr::WitBoundary::assert());
                             for (i, vt_payload) in payload_flat.iter().enumerate() {
                                 func.instruction(&Instruction::LocalGet(first_param + i as u32));
                                 let vt_declared =
@@ -3973,7 +3973,7 @@ impl<'a> WasmPackageBuilder<'a> {
         inner_ty: Ty,
         source: GcRefSource,
     ) -> Result<(), CodegenError> {
-        let canon = self.flatten_core_valtypes(ty);
+        let canon = self.flatten_core_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
         let block_ty = self.canonical_block_type(ty)?;
         self.emit_gc_ref(func, source)?;
         func.instruction(&Instruction::RefIsNull);
@@ -4003,7 +4003,7 @@ impl<'a> WasmPackageBuilder<'a> {
         ty: Ty,
         source: GcRefSource,
     ) -> Result<(), CodegenError> {
-        let canon_vts = self.flatten_core_valtypes(ty);
+        let canon_vts = self.flatten_core_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
         let block_ty = self.canonical_block_type(ty)?;
         let case_count = *self
             .record_gc_types
@@ -4174,7 +4174,7 @@ impl<'a> WasmPackageBuilder<'a> {
     /// shape: `Empty` for zero slots, `Result(vt)` for one, else a pre-interned
     /// `() -> (slots…)` function type looked up in `ternary_block_types`.
     fn canonical_block_type(&self, ty: Ty) -> Result<wasm_encoder::BlockType, CodegenError> {
-        let vts = self.flatten_core_valtypes(ty);
+        let vts = self.flatten_core_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
         match vts.len() {
             0 => Ok(wasm_encoder::BlockType::Empty),
             1 => Ok(wasm_encoder::BlockType::Result(vts[0])),

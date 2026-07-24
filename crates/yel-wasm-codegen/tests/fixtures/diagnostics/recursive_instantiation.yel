@@ -1,0 +1,6 @@
+// E0043: a component instantiates itself in its own body.
+package yel:recursiveinst@0.1.0;
+
+export component App {
+    VStack { App { } }
+}

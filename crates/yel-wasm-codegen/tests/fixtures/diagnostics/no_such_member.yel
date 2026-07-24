@@ -1,0 +1,8 @@
+// E0013: accessing a property that a global does not declare.
+package yel:nosuchmember@0.1.0;
+
+global Store { count: s32 = 0; }
+
+export component App {
+    VStack { Text { "{Store.nonexistent}" } }
+}

@@ -12,7 +12,7 @@
 //! typeck driver stores it in the `CompilerContext` side table keyed by the
 //! owning component/global `DefId` (`CompilerContext::set_signal_deps`).
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::hir::local_scope::LocalScope;
 use crate::ids::DefId;
@@ -260,7 +260,7 @@ impl<'a, F: Fn(DefId) -> bool> Analyzer<'a, F> {
         // Setter bodies write to signals — treat them like handlers so
         // their writes are exposed.
         if let Some(setter) = &b.setter {
-            let mut writes = HashSet::new();
+            let mut writes = HashSet::default();
             self.collect_stmt_writes(setter, &mut writes);
             let mut writes: Vec<DefId> = writes.into_iter().collect();
             writes.sort_by_key(|d| d.index());
@@ -269,7 +269,7 @@ impl<'a, F: Fn(DefId) -> bool> Analyzer<'a, F> {
     }
 
     fn visit_handler(&mut self, h: &ThirHandler) {
-        let mut writes = HashSet::new();
+        let mut writes = HashSet::default();
         self.collect_stmt_writes(&h.body, &mut writes);
         let mut writes: Vec<DefId> = writes.into_iter().collect();
         writes.sort_by_key(|d| d.index());
@@ -279,7 +279,7 @@ impl<'a, F: Fn(DefId) -> bool> Analyzer<'a, F> {
     /// Collect the deduplicated, deterministically-ordered list of
     /// signal DefIds that `expr` reads.
     fn collect_reads(&self, expr: &ThirExpr) -> Vec<DefId> {
-        let mut set = HashSet::new();
+        let mut set = HashSet::default();
         self.collect_expr_reads(expr, &mut set);
         let mut out: Vec<DefId> = set.into_iter().collect();
         out.sort_by_key(|d| d.index());

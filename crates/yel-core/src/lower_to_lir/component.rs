@@ -8,7 +8,7 @@
 //! 5. Converts to block-based representation for codegen
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::context::CompilerContext;
 use crate::definitions::DefKind;
@@ -78,6 +78,7 @@ fn lower_primitive_literal(lit: &HirLiteral, ty: Ty, ctx: &CompilerContext) -> L
         }
     }
 }
+use crate::lir::module::{LirGlobal, LirGlobalProperty};
 use crate::lir::node::{LirBinding, LirResource, LirHandler, LirNode, LirNodeKind};
 use crate::lir::signal::{LirEffect, LirSignal, UpdateKind};
 
@@ -106,25 +107,53 @@ pub fn lower_component(component: &ThirComponent, ctx: &CompilerContext) -> LirR
     lowering.lower_component(&tree)
 }
 
-/// Lower type-checked global property default expressions to LIR.
+/// Lower every type-checked global block to a first-class [`LirGlobal`].
 ///
-/// Global defaults are module-scoped (not attached to any single component),
-/// so they use their own lowering pass. Returns a map from property DefId to
-/// the top-level LIR expression that seeds its backing slot at module start,
-/// plus the shared expression arena those expressions' `LirExprId` children
-/// index into.
+/// Globals are module-scoped (not attached to any single component), so they
+/// lower through a single module scope. One `LirGlobal` is produced per
+/// top-level `global` block (in `ctx.defs.globals()` declaration order); the
+/// returned `Vec<LirExpr>` is the shared default-expression arena those
+/// globals' `LirExprId` children index into.
+///
+/// Determinism: globals iterate in declaration order (an `IndexVec` walk, not
+/// a `HashMap`), and properties within each in declaration order — the arena
+/// is built in that order, so codegen's string interning (which walks the
+/// arena) is byte-stable run-to-run. Property `DefId`s are assigned in the
+/// same declaration order, so this matches the pre-Phase-4 "sort defaults by
+/// DefId" arena ordering.
 pub fn lower_globals(
     thir_defaults: &HashMap<DefId, crate::thir::ThirExpr>,
     ctx: &CompilerContext,
-) -> (HashMap<DefId, LirExpr>, Vec<LirExpr>) {
+) -> (Vec<LirGlobal>, Vec<LirExpr>) {
     let empty_locals = crate::hir::local_scope::LocalScope::new();
     let lowering = LirLowering::for_module(ctx, &empty_locals);
-    let map = thir_defaults
-        .iter()
-        .map(|(def_id, thir_expr)| (*def_id, lowering.lower_expr(thir_expr)))
+    let globals = ctx
+        .defs
+        .globals()
+        .filter_map(|global_id| {
+            let g = ctx.defs.as_global(global_id)?;
+            let properties = g
+                .properties
+                .iter()
+                .zip(g.property_directions.iter())
+                .map(|(&def_id, &direction)| {
+                    let default = thir_defaults
+                        .get(&def_id)
+                        .map(|thir_expr| lowering.lower_expr(thir_expr));
+                    LirGlobalProperty { def_id, direction, default }
+                })
+                .collect();
+            Some(LirGlobal {
+                def_id: global_id,
+                name: g.name,
+                is_export: g.is_export,
+                package: g.package.clone(),
+                properties,
+                callbacks: g.callbacks.clone(),
+            })
+        })
         .collect();
-    let exprs = lowering.exprs.into_inner();
-    (map, exprs)
+    (globals, lowering.exprs.into_inner())
 }
 
 /// Scope for LIR lowering: either a specific component or module-scoped
@@ -1074,7 +1103,7 @@ mod tests {
             is_export: true,
             body: vec![],
             locals: LocalScope::new(),
-            signal_defaults: HashMap::new(),
+            signal_defaults: HashMap::default(),
         };
 
         let lir = lower_component(&component, &ctx);
@@ -1102,7 +1131,7 @@ mod tests {
             name: Name(0),
             span: dummy_span(),
             is_export: true,
-            signal_defaults: HashMap::new(),
+            signal_defaults: HashMap::default(),
             body: vec![ThirNode::new(
                 NodeId::new(0),
                 ThirNodeKind::Text(ThirExpr::new(

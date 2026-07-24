@@ -70,6 +70,10 @@ pub enum ErrorCode {
     MissingElement,
     /// A component instantiates itself.
     RecursiveInstantiation,
+    /// An empty aggregate (`record`/`enum`/`variant` with no fields/cases) is
+    /// exposed across the component boundary — the WebAssembly component model
+    /// requires each to have at least one field/case.
+    EmptyTypeAtBoundary,
     /// A malformed two-way `set value:` binding.
     InvalidValueBinding,
 
@@ -106,6 +110,7 @@ impl ErrorCode {
             ErrorCode::MissingChildrenSlot => "E0041",
             ErrorCode::MissingElement => "E0042",
             ErrorCode::RecursiveInstantiation => "E0043",
+            ErrorCode::EmptyTypeAtBoundary => "E0044",
             ErrorCode::InvalidValueBinding => "E0050",
             ErrorCode::SyntaxError => "E0060",
             ErrorCode::InvalidPackageName => "E0070",

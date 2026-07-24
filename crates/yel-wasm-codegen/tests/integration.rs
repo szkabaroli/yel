@@ -67,32 +67,6 @@ fn compile_fixture(source: &str) -> Result<CompileOutputs, String> {
         return Err(compiler.render_diagnostics());
     }
 
-    let mut lir_components = Vec::new();
-    let mut global_thir_defaults: std::collections::HashMap<
-        yel_core::DefId,
-        yel_core::thir::ThirExpr,
-    > = std::collections::HashMap::new();
-    for item in &hir {
-        match compiler.type_check(item) {
-            yel_core::thir::ThirItem::Component(thir) => {
-                if compiler.has_errors() {
-                    return Err(compiler.render_diagnostics());
-                }
-                lir_components.push(compiler.lower_to_lir(&thir));
-            }
-            yel_core::thir::ThirItem::Global(global) => {
-                if compiler.has_errors() {
-                    return Err(compiler.render_diagnostics());
-                }
-                global_thir_defaults.extend(global.signal_defaults);
-            }
-        }
-    }
-    compiler.resolve_global_triggers(&mut lir_components);
-
-    let (lir_globals, lir_global_default_exprs) =
-        compiler.lower_globals_to_lir(&global_thir_defaults);
-
     // Use the package from the source when available so the WIT output
     // has stable names; fall back to `yel:app` otherwise.
     let (namespace, name, version) = match file.package {
@@ -104,7 +78,10 @@ fn compile_fixture(source: &str) -> Result<CompileOutputs, String> {
         None => ("yel".into(), "app".into(), "0.1.0".into()),
     };
 
-    let interfaces = compiler.build_import_interfaces();
+    let module = compiler.lower_items_to_module(&hir, file.package.clone());
+    if compiler.has_errors() {
+        return Err(compiler.render_diagnostics());
+    }
     let ctx = compiler.context();
 
     let wit_options = codegen::WitOptions {
@@ -113,28 +90,24 @@ fn compile_fixture(source: &str) -> Result<CompileOutputs, String> {
         version: version.clone(),
         include_dom_interface: true,
     };
-    let wit = codegen::generate_wit(&lir_components, interfaces.as_slice(), ctx, &wit_options)
-        .map_err(|e| format!("WIT generation: {}", e))?;
+    let wit = codegen::generate_wit(
+        &module.resources,
+        module.interfaces.as_slice(),
+        ctx,
+        &wit_options,
+    )
+    .map_err(|e| format!("WIT generation: {}", e))?;
 
-    let module = yel_core::lir::LirModule {
-        resources: lir_components.clone(),
-        global_defaults: lir_globals.clone(),
-        global_default_exprs: lir_global_default_exprs.clone(),
-        interfaces,
-        package: file.package.clone(),
-    };
     let wasm_options = codegen::WasmWithWitOptions {
         namespace,
         name,
         version,
-        global_defaults: lir_globals,
-        global_default_exprs: lir_global_default_exprs,
         wasm_opt_args: None,
     };
     let wasm = codegen::generate_wasm_module(&module, ctx, &wasm_options)
         .map_err(|e| format!("WASM generation: {}", e))?;
 
-    let dot = codegen::generate_dot(&lir_components, ctx, &codegen::DotOptions::new())
+    let dot = codegen::generate_dot(&module.resources, ctx, &codegen::DotOptions::new())
         .map_err(|e| format!("DOT generation: {}", e))?;
 
     Ok(CompileOutputs { wit, wasm, dot })

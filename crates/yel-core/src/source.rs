@@ -4,7 +4,7 @@
 //! accurate error reporting across multiple files.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::path::PathBuf;
 
 /// Unique identifier for a source file.

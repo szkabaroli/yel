@@ -7,9 +7,9 @@ digraph yel_signal_graph {
     label="component App (export)";
     style=rounded;
     color="#888";
-    "c0_sig_457" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="str\n: option<string>", class="yel-signal"];
-    "c0_sig_458" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="res\n: option<result<s32, s64>>", class="yel-signal"];
-    "c0_sig_459" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="var\n: option<V>", class="yel-signal"];
-    "c0_sig_460" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="nestOpt\n: option<option<s32>>", class="yel-signal"];
+    "c0_sig_479" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="str\n: option<string>", class="yel-signal"];
+    "c0_sig_480" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="res\n: option<result<s32, s64>>", class="yel-signal"];
+    "c0_sig_481" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="var\n: option<V>", class="yel-signal"];
+    "c0_sig_482" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="nestOpt\n: option<option<s32>>", class="yel-signal"];
   }
 }

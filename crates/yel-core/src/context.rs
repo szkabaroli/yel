@@ -358,75 +358,226 @@ impl CompilerContext {
     // DOM imports
     // ========================================================================
 
-    /// Build the **import-side boundary contract** — one [`LirInterface`]
-    /// per *foreign-package* global (today only the built-in `Dom`
-    /// global). Each entry carries its package, the ADTs it owns inline
-    /// (`owned_types`), and its functions as plain signatures, so the
-    /// backend renders it directly instead of re-deriving DOM from
-    /// `dom_imports()`. Local globals still flow through the existing
-    /// `create_globals_interfaces` path; they migrate onto the contract
-    /// next.
-    pub fn build_import_interfaces(
+    /// Build the module's **import-side boundary contract** and its
+    /// **host-import registry** in one pass — the single source of truth for
+    /// every function the core module imports and the WIT import interfaces
+    /// that declare them.
+    ///
+    /// Returns `(interfaces, imports)`:
+    /// - `interfaces` — one [`LirInterface`] per import interface, with its
+    ///   final kebab name, package, owned ADTs (foreign only), and the full
+    ///   WIT function surface (`functions`). Three kinds:
+    ///   * `{component}-callbacks` — a component's callbacks (receiver
+    ///     `Borrow(component)`), one per component that declares any;
+    ///   * `{global}` — a local (module-package) global's host-boundary
+    ///     members: `set-<prop>` / `on-<prop>-changed` accessors (from
+    ///     non-`Inline` property directions) plus its callbacks;
+    ///   * a foreign-package global's interface (the built-in `Dom`), whose
+    ///     ADTs are owned inline.
+    /// - `imports` — the ordered host-import registry: every function the
+    ///   *core module* imports (component + global + DOM callbacks — NOT the
+    ///   WIT-only property setters/notifiers), in import-index order
+    ///   (component callbacks first, then global callbacks). Each references
+    ///   its interface by [`InterfaceId`].
+    ///
+    /// `component_def_ids` supplies the components in resource order so the
+    /// import indices are stable and match codegen's component iteration.
+    pub fn build_import_contract(
         &self,
-    ) -> crate::index_vec::IndexVec<crate::ids::InterfaceId, crate::lir::LirInterface> {
-        use crate::lir::{InterfaceDirection, LirIfaceFn, LirInterface};
+        component_def_ids: &[crate::ids::DefId],
+    ) -> (
+        crate::index_vec::IndexVec<crate::ids::InterfaceId, crate::lir::LirInterface>,
+        Vec<crate::lir::LirImport>,
+    ) {
+        use crate::ids::InterfaceId;
+        use crate::lir::{
+            InterfaceDirection, LirIfaceFn, LirImport, LirInterface, LirReceiver,
+        };
+        use crate::naming::to_kebab_case;
         use crate::types::{InternedTyKind, Ty};
 
         let ctx = self;
-        let mut interfaces = crate::index_vec::IndexVec::new();
-        let global_ids: Vec<crate::ids::DefId> = ctx.defs.globals().collect();
-        for g_id in global_ids {
-            let (g_name, g_package, callbacks) = match ctx.defs.as_global(g_id) {
-                // Only foreign-package globals are contract-rendered today.
-                Some(g) if g.package.is_some() => (g.name, g.package.clone(), g.callbacks.clone()),
-                _ => continue,
-            };
+        let mut interfaces: crate::index_vec::IndexVec<InterfaceId, LirInterface> =
+            crate::index_vec::IndexVec::new();
+        let mut imports: Vec<LirImport> = Vec::new();
 
-            let mut functions = Vec::new();
-            let mut owned_types: Vec<Ty> = Vec::new();
-            let note_adt = |ty: Ty, owned: &mut Vec<Ty>| {
-                if matches!(ctx.ty_kind(ty), InternedTyKind::Adt(_)) && !owned.contains(&ty) {
-                    owned.push(ty);
-                }
+        // Resolve a callback `DefId` to a `(name, params, result)` signature,
+        // skipping non-function defs. Component/global callbacks share this.
+        let signature_of = |cb: crate::ids::DefId| -> Option<(Name, Vec<(Name, Ty)>, Option<Ty>)> {
+            let f = ctx.defs.as_function(cb)?;
+            let mut params = Vec::new();
+            for p in &f.params {
+                let Some(pty) = ctx.defs.type_of(*p) else {
+                    continue;
+                };
+                params.push((ctx.defs.name(*p), pty));
+            }
+            let result = if f.ret_ty == Ty::UNIT {
+                None
+            } else {
+                Some(f.ret_ty)
             };
-            for cb in callbacks {
-                let (fname, fparams, fret) = match ctx.defs.as_function(cb) {
-                    Some(f) => (f.name, f.params.clone(), f.ret_ty),
-                    None => continue,
+            Some((f.name, params, result))
+        };
+
+        // --- Component callbacks: one `{component}-callbacks` interface per
+        // component that declares any. Receiver is `Borrow(component)`. These
+        // are allocated first so their import indices lead the registry.
+        for &comp_id in component_def_ids {
+            let Some(comp) = ctx.defs.as_component(comp_id) else {
+                continue;
+            };
+            let comp_name = ctx.str(comp.name).to_string();
+            let mut functions = Vec::new();
+            let mut seen: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+            for &cb in &comp.callbacks {
+                let Some((fname, params, result)) = signature_of(cb) else {
+                    continue;
                 };
-                let mut params = Vec::new();
-                for p in fparams {
-                    let pty = match ctx.defs.type_of(p) {
-                        Some(t) => t,
-                        None => continue,
-                    };
-                    note_adt(pty, &mut owned_types);
-                    params.push((ctx.defs.name(p), pty));
+                // Defence-in-depth: reject duplicate callback names within a
+                // single component (mirrors the old ImportLayout guard).
+                if !seen.insert(to_kebab_case(ctx.str(fname).as_ref())) {
+                    continue;
                 }
-                let result = if fret == Ty::UNIT {
-                    None
-                } else {
-                    note_adt(fret, &mut owned_types);
-                    Some(fret)
-                };
                 functions.push(LirIfaceFn {
                     name: fname,
                     params,
                     result,
+                    receiver: LirReceiver::Borrow(comp_id),
                     def: cb,
                 });
             }
-
-            interfaces.push(LirInterface {
-                name: g_name,
+            if functions.is_empty() {
+                continue;
+            }
+            let iface_id = interfaces.push(LirInterface {
+                name: ctx.intern(&format!("{}-callbacks", to_kebab_case(&comp_name))),
                 direction: InterfaceDirection::Import,
-                package: g_package,
+                package: None,
+                owned_types: Vec::new(),
+                resources: vec![comp_id],
+                functions: functions.clone(),
+            });
+            for f in functions {
+                imports.push(LirImport {
+                    def_id: f.def,
+                    name: f.name,
+                    interface: iface_id,
+                    params: f.params,
+                    result: f.result,
+                    receiver: f.receiver,
+                });
+            }
+        }
+
+        // --- Globals: one interface per global with host-boundary members.
+        // Property setters/notifiers are WIT-only (no core import); callbacks
+        // are both WIT functions and core imports. Foreign globals (DOM) own
+        // their ADTs inline; local globals `use` shared types.
+        for g_id in ctx.defs.globals().collect::<Vec<_>>() {
+            let Some(g) = ctx.defs.as_global(g_id) else {
+                continue;
+            };
+            let is_foreign = g.package.is_some();
+            let mut functions = Vec::new();
+            let mut owned_types: Vec<Ty> = Vec::new();
+            let note_adt = |ty: Ty, owned: &mut Vec<Ty>| {
+                if is_foreign
+                    && matches!(ctx.ty_kind(ty), InternedTyKind::Adt(_))
+                    && !owned.contains(&ty)
+                {
+                    owned.push(ty);
+                }
+            };
+
+            // Property setters / notifiers (WIT-only, non-`Inline`).
+            for (idx, &prop_id) in g.properties.iter().enumerate() {
+                let direction = g
+                    .property_directions
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(crate::definitions::GlobalPropDirection::Inline);
+                if direction == crate::definitions::GlobalPropDirection::Inline {
+                    continue;
+                }
+                let Some(prop_ty) = ctx.defs.type_of(prop_id) else {
+                    continue;
+                };
+                note_adt(prop_ty, &mut owned_types);
+                let prop_name = to_kebab_case(ctx.str(ctx.defs.name(prop_id)).as_ref());
+                let v = ctx.intern("v");
+                use crate::definitions::GlobalPropDirection as D;
+                if matches!(direction, D::In | D::InOut) {
+                    functions.push(LirIfaceFn {
+                        name: ctx.intern(&format!("set-{}", prop_name)),
+                        params: vec![(v, prop_ty)],
+                        result: None,
+                        receiver: LirReceiver::None,
+                        def: prop_id,
+                    });
+                }
+                if matches!(direction, D::Out | D::InOut) {
+                    functions.push(LirIfaceFn {
+                        name: ctx.intern(&format!("on-{}-changed", prop_name)),
+                        params: vec![(v, prop_ty)],
+                        result: None,
+                        receiver: LirReceiver::None,
+                        def: prop_id,
+                    });
+                }
+            }
+
+            // Callbacks (WIT function + core import).
+            let mut callback_imports: Vec<LirIfaceFn> = Vec::new();
+            let mut seen: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+            for &cb in &g.callbacks {
+                let Some((fname, params, result)) = signature_of(cb) else {
+                    continue;
+                };
+                if !seen.insert(to_kebab_case(ctx.str(fname).as_ref())) {
+                    continue;
+                }
+                for (_, pty) in &params {
+                    note_adt(*pty, &mut owned_types);
+                }
+                if let Some(r) = result {
+                    note_adt(r, &mut owned_types);
+                }
+                let f = LirIfaceFn {
+                    name: fname,
+                    params,
+                    result,
+                    receiver: LirReceiver::None,
+                    def: cb,
+                };
+                functions.push(f.clone());
+                callback_imports.push(f);
+            }
+
+            if functions.is_empty() {
+                continue;
+            }
+            let iface_id = interfaces.push(LirInterface {
+                name: g.name,
+                direction: InterfaceDirection::Import,
+                package: g.package.clone(),
                 owned_types,
                 resources: Vec::new(),
                 functions,
             });
+            for f in callback_imports {
+                imports.push(LirImport {
+                    def_id: f.def,
+                    name: f.name,
+                    interface: iface_id,
+                    params: f.params,
+                    result: f.result,
+                    receiver: f.receiver,
+                });
+            }
         }
-        interfaces
+
+        (interfaces, imports)
     }
 
     /// The `to_string` builtin function for converting a value of `ty` to a

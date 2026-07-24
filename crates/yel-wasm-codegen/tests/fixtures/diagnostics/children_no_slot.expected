@@ -1,1 +1,1 @@
-component `Card` does not declare `@children`
+component `Panel` does not declare `@children`
