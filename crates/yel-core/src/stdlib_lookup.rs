@@ -262,6 +262,31 @@ fn register_builtin_variants(ctx: &mut CompilerContext) {
     let attribute_value_ty = ctx.types.intern_adt(attribute_value_def);
     ctx.known.variants.attribute_value = Some(attribute_value_def);
     ctx.known.variants.attribute_value_ty = Some(attribute_value_ty);
+
+    // `event-value` — the payload of the module `dispatch` export
+    // (`yel:ui/dispatch`). Cases in WIT/discriminant order; `dispatch`
+    // codegen (`generate_dispatch`) decodes by these ordinals, and the
+    // canonical-ABI flattening `(i32 disc, i64 slot0, i32 slot1)` — slot0
+    // widened to i64 by the `input-f64` case, slot1 the string length — backs
+    // the core `dispatch` function signature.
+    let event_value_def = register_variant(
+        ctx,
+        "event-value",
+        &[
+            ("none", None),
+            ("input-text", Some(string_t)),
+            ("input-f64", Some(f64)),
+            ("input-f32", Some(f32)),
+            ("input-s32", Some(s32)),
+            ("input-bool", Some(bool_t)),
+            ("drop", Some(string_t)),
+            ("drag-enter", Some(string_t)),
+            ("drag-leave", None),
+        ],
+    );
+    let event_value_ty = ctx.types.intern_adt(event_value_def);
+    ctx.known.variants.event_value = Some(event_value_def);
+    ctx.known.variants.event_value_ty = Some(event_value_ty);
 }
 
 fn register_builtin_functions(ctx: &mut CompilerContext) {

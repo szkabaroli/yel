@@ -1918,7 +1918,7 @@ impl<'a> BlockLowering<'a> {
                     // ListMemory until Phase 6. Eligible elements:
                     // primitive scalars (5b-v.3), DTR records (5e.1).
                     let is_component_signal = match &iterable_expr.kind {
-                        LirExprKind::SignalRead(def_id) => {
+                        LirExprKind::SignalRead(def_id) | LirExprKind::GlobalRead(def_id) => {
                             tree_signals.iter().any(|s| s.def_id == *def_id)
                         }
                         _ => true, // Non-signal exprs: allow GC if eligible
@@ -3882,8 +3882,10 @@ impl<'a> BlockLowering<'a> {
     /// Classify an iterable expression for a for-loop.
     fn classify_iterable(&mut self, expr: &LirExpr) -> IterableKind {
         match &expr.kind {
-            // Signal reads are reactive - create update effects
-            LirExprKind::SignalRead(def_id) => IterableKind::Signal(*def_id),
+            // Signal / global-property reads are reactive - create update effects
+            LirExprKind::SignalRead(def_id) | LirExprKind::GlobalRead(def_id) => {
+                IterableKind::Signal(*def_id)
+            }
             // All other list-producing expressions: literals, field accesses,
             // calls returning lists (e.g. list.filter/map stdlib calls), etc.
             LirExprKind::ListConstruct { .. }
@@ -5188,7 +5190,9 @@ impl<'a> BlockLowering<'a> {
 
     fn collect_deps_recursive(&self, expr: &LirExpr, deps: &mut Vec<DefId>) {
         match &expr.kind {
-            LirExprKind::SignalRead(def_id) => {
+            // A component-local signal read or a global-property read are both
+            // reactive dependencies on their `DefId`.
+            LirExprKind::SignalRead(def_id) | LirExprKind::GlobalRead(def_id) => {
                 if !deps.contains(def_id) {
                     deps.push(*def_id);
                 }
@@ -8354,6 +8358,7 @@ fn expr_contains_composite_field_load(
         | LirExprKind::Def(_)
         | LirExprKind::Literal(_)
         | LirExprKind::SignalRead(_)
+        | LirExprKind::GlobalRead(_)
         | LirExprKind::EnumCase { .. }
         | LirExprKind::VariantCtor { payload: None, .. }
         | LirExprKind::ListStatic { .. } => false,

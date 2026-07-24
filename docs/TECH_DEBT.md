@@ -95,6 +95,29 @@ Two crate-level invariants keep debt _loud_ rather than silent — keep them:
       GcVariant types) that accounted for all four long-standing fuzz baseline
       failures — the 100-seed set went 96/100 → 100/100.
 
+- [ ] **1.4b Signal *reads* are still resolved in codegen (read-side of §1.4).**
+      Signal *writes* were made generic in §1.4 (`SignalWrite` op deleted; writes
+      lower to `EvalExprToSlots` + `StructSetSym`, resolved by `boundary_rewrite`).
+      Reads did **not** follow: `LirExprKind::SignalRead(DefId)` is still a
+      first-class LIR expression that **codegen** resolves (`wasm/expr.rs` →
+      `emit_signal_struct_read` walks `component.signal_layout.signal_field_path`
+      → `struct.get`). So codegen still knows "signal" as a UI concept
+      (`signal_emit.rs`, `signal_layout`, `signal_in_struct`,
+      `signal_storage_valtypes`) — against the §0 north-star ("no UI concepts in
+      codegen"). Harder than writes because reads are *sub-expressions* embedded
+      in trees (not statements like writes), there is no self-referencing *expr*
+      (only a `current_self_local` slot ops consume), some signals are multi-field
+      (fat-pointer lists, `field_count = 2`), and `SignalRead` is overloaded across
+      component-local / global / filter-captured / for-iterable meanings. Staged:
+      **A (done)** — split the *global* meaning into `LirExprKind::GlobalRead`
+      (its own codegen arm; component-local `SignalRead` no longer disambiguates
+      globals via `owning_global_block`). Byte-neutral: WIT/DOT identical, 85
+      execution + 200-seed fuzz green. **B** — add a generic self-referencing
+      struct-read expr and lower single-field component-local `SignalRead` to it.
+      **C** — handle multi-field + filter-captured + for-iterable, then delete
+      `LirExprKind::SignalRead` + `emit_signal_struct_read` + the codegen
+      signal-resolution surface.
+
 ### 1.5 WASM-GC representation migration (canonical-flat → typed GC)
 
 Values are mid-migration from a **canonical-flat** representation (a type

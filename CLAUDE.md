@@ -18,10 +18,12 @@ Full framing: [`docs/ARCHITECTURE.md` §0](docs/ARCHITECTURE.md).
 ## Start here
 
 - **Deep architecture (current state):** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — pipeline, every IR layer, key types, codegen, flow frontend, testing. Read before non-trivial work.
+- **Stage-by-stage reference:** [`docs/PIPELINE.md`](docs/PIPELINE.md) — what each stage (AST→HIR→THIR→LIR→WASM) establishes, its entry functions, which desugarings happen where, and a "where does X happen?" lookup.
 - **Hacks / shortcuts / ugly corners:** [`docs/TECH_DEBT.md`](docs/TECH_DEBT.md) — read before refactoring LIR or codegen.
 - **Refactor plans:** [`plans/`](plans) — `lir-resource-flatten.md`, `flow-frontend.md`.
 - **Coding rules as a skill:** [`/compiler-skills`](.agents/skills/compiler-skills/SKILL.md) (compiler patterns), [`/rust-skills`](.agents/skills/rust-skills/SKILL.md) (general Rust).
 - **Hunting miscompilation bugs with the fuzzer:** [`/fuzzer-debugging`](.agents/skills/fuzzer-debugging/SKILL.md) — the yel-smith triage loop (measure → categorize → minimize → narrow → locate) and verify-with-round-trips discipline. The [`fuzzer-bug-hunter`](.claude/agents/fuzzer-bug-hunter.md) agent runs this end-to-end.
+- **Orchestrating the internals rewrite:** [`/compiler-rewrite`](.agents/skills/compiler-rewrite/SKILL.md) — freeze the old compiler as a read-only oracle, rewrite stage-by-stage in new crates beside it, verify differentially with yel-smith, gate on a ratchet + review panel. Read before briefing any rewrite subagent.
 
 ## The pipeline (one line)
 

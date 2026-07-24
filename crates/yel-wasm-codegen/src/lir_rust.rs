@@ -351,7 +351,7 @@ impl<'ctx> RustCodegen<'ctx> {
                     }
                 }
             }
-            LirExprKind::SignalRead(def_id) => {
+            LirExprKind::SignalRead(def_id) | LirExprKind::GlobalRead(def_id) => {
                 let name = self.ctx.defs.name(*def_id);
                 format!("self.{}", self.ctx.str(name))
             }

@@ -335,3 +335,60 @@ fn diagnostic_fixtures() {
         );
     }
 }
+
+/// §6.7 Phase 1: the frontend produces an `Export`-direction boundary interface
+/// per exported component — the resource's constructor + `mount`/`unmount` plus
+/// a `get-`/`set-` pair for each non-callback signal. This is produced as data
+/// on `LirModule.interfaces` but not yet consumed by the WIT renderer (that is
+/// Phase 2); this test pins the contract shape the renderer will consume.
+#[test]
+fn export_boundary_contract_is_produced() {
+    use yel_core::lir::{InterfaceDirection, LirReceiver};
+
+    let src = r#"
+        package yel:exportc@0.1.0;
+        export component App {
+            count: s32 = 0;
+            VStack { Text { "{count}" } }
+        }
+    "#;
+    let mut compiler = Compiler::new();
+    let file = compiler.parse(src).expect("parse");
+    let hir = compiler.lower_to_hir(&file);
+    assert!(!compiler.has_errors(), "{}", compiler.render_diagnostics());
+    let module = compiler.lower_items_to_module(&hir, file.package.clone());
+    assert!(!compiler.has_errors(), "{}", compiler.render_diagnostics());
+    let ctx = compiler.context();
+
+    let exports: Vec<_> = module
+        .interfaces
+        .iter()
+        .filter(|i| i.direction == InterfaceDirection::Export)
+        .collect();
+    assert_eq!(exports.len(), 1, "one export interface for the one exported component");
+    let iface = exports[0];
+    assert_eq!(ctx.str(iface.name).to_string(), "app-component");
+    assert_eq!(iface.resources.len(), 1, "the interface owns the component resource");
+
+    let fn_names: Vec<String> = iface
+        .functions
+        .iter()
+        .map(|f| ctx.str(f.name).to_string())
+        .collect();
+    assert!(fn_names.contains(&"mount".to_string()), "functions: {fn_names:?}");
+    assert!(fn_names.contains(&"unmount".to_string()), "functions: {fn_names:?}");
+    assert!(fn_names.contains(&"get-count".to_string()), "functions: {fn_names:?}");
+    assert!(fn_names.contains(&"set-count".to_string()), "functions: {fn_names:?}");
+
+    // The constructor takes no receiver param and returns own<resource>
+    // (encoded as the `Constructor` receiver + no explicit result type).
+    let ctor = iface
+        .functions
+        .iter()
+        .find(|f| matches!(f.receiver, LirReceiver::Constructor(_)))
+        .expect("constructor present");
+    assert!(ctor.params.is_empty() && ctor.result.is_none());
+    // Methods (mount/getters/setters) take borrow<resource>.
+    let mount = iface.functions.iter().find(|f| ctx.str(f.name).to_string() == "mount").unwrap();
+    assert!(matches!(mount.receiver, LirReceiver::Borrow(_)));
+}

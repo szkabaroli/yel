@@ -278,7 +278,7 @@ impl<'a> WasmPackageBuilder<'a> {
         signals: &mut Vec<(DefId, Ty)>,
     ) {
         match &expr.kind {
-            LirExprKind::SignalRead(def_id) => {
+            LirExprKind::SignalRead(def_id) | LirExprKind::GlobalRead(def_id) => {
                 if !signals.iter().any(|(id, _)| id == def_id) {
                     signals.push((*def_id, expr.ty));
                 }

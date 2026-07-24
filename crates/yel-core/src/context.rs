@@ -580,6 +580,195 @@ impl CompilerContext {
         (interfaces, imports)
     }
 
+    /// Build the **export**-direction boundary contract (§6.7 of the
+    /// global-component-unify plan): one `{component}-component` interface per
+    /// exported component, whose resource owns a constructor plus
+    /// `mount`/`unmount` lifecycle methods and a `get-<prop>`/`set-<prop>` pair
+    /// for each non-callback signal. This is the data mirror of what
+    /// `wit_ast::create_component_interface` synthesizes ad-hoc today; producing
+    /// it here (in the UI-aware frontend) lets the backend render the export
+    /// surface generically, like it already does for DOM/global imports.
+    ///
+    /// Takes the lowered `resources` because a component's exposed signal set
+    /// lives on its [`crate::lir::LirResource`], not in `ctx.defs`.
+    pub fn build_export_interfaces(
+        &mut self,
+        resources: &[crate::lir::LirResource],
+    ) -> Vec<crate::lir::LirInterface> {
+        use crate::lir::{InterfaceDirection, LirIfaceFn, LirInterface, LirReceiver};
+        use crate::naming::to_kebab_case;
+        use crate::types::InternedTyKind;
+
+        // `mount`'s `root` param and container children-root result are `u32`
+        // (idempotent — every component module already interned it).
+        let u32_ty = self.intern_ty(InternedTyKind::U32);
+
+        let mut interfaces = Vec::new();
+        for resource in resources {
+            // Only exported components get a WIT resource interface.
+            let Some(comp) = self.defs.as_component(resource.def_id) else {
+                continue;
+            };
+            if !comp.is_export {
+                continue;
+            }
+            let comp_id = resource.def_id;
+            let has_children_slot = comp.has_children_slot;
+            let comp_name = to_kebab_case(self.str(comp.name).as_ref());
+            let mut functions: Vec<LirIfaceFn> = Vec::new();
+
+            // Constructor — no receiver param; the renderer supplies the
+            // `own<resource>` result from the `Constructor` receiver.
+            functions.push(LirIfaceFn {
+                name: self.intern(""),
+                params: Vec::new(),
+                result: None,
+                receiver: LirReceiver::Constructor(comp_id),
+                def: comp_id,
+            });
+            // mount(root: u32) -> option<u32> — a container (`@children`) returns
+            // its children-root node id; others return nothing.
+            let root_name = self.intern("root");
+            functions.push(LirIfaceFn {
+                name: self.intern("mount"),
+                params: vec![(root_name, u32_ty)],
+                result: if has_children_slot { Some(u32_ty) } else { None },
+                receiver: LirReceiver::Borrow(comp_id),
+                def: comp_id,
+            });
+            // unmount()
+            functions.push(LirIfaceFn {
+                name: self.intern("unmount"),
+                params: Vec::new(),
+                result: None,
+                receiver: LirReceiver::Borrow(comp_id),
+                def: comp_id,
+            });
+            // get-<prop> / set-<prop> for each non-callback signal.
+            for signal in &resource.signals {
+                if matches!(self.types.kind(signal.ty), InternedTyKind::Func { .. }) {
+                    continue;
+                }
+                let sig_name = to_kebab_case(self.str(self.defs.name(signal.def_id)).as_ref());
+                let value_name = self.intern("value");
+                functions.push(LirIfaceFn {
+                    name: self.intern(&format!("get-{sig_name}")),
+                    params: Vec::new(),
+                    result: Some(signal.ty),
+                    receiver: LirReceiver::Borrow(comp_id),
+                    def: signal.def_id,
+                });
+                functions.push(LirIfaceFn {
+                    name: self.intern(&format!("set-{sig_name}")),
+                    params: vec![(value_name, signal.ty)],
+                    result: None,
+                    receiver: LirReceiver::Borrow(comp_id),
+                    def: signal.def_id,
+                });
+            }
+
+            let name = self.intern(&format!("{comp_name}-component"));
+            interfaces.push(LirInterface {
+                name,
+                direction: InterfaceDirection::Export,
+                package: None,
+                owned_types: Vec::new(),
+                resources: vec![comp_id],
+                functions,
+            });
+        }
+        interfaces
+    }
+
+    /// Build the `Import`-direction resource interfaces for `import component X`
+    /// declarations (§6.7 Phase 3): each owns a resource with a constructor, a
+    /// `get-`/`set-` pair per declared property, and its declared methods. The
+    /// data mirror of the former hardcoded `create_import_component_interfaces`;
+    /// rendered by the same `render_resource_interface` as exported components,
+    /// with the world placing these in imports. Reads `ImportComponentDef` from
+    /// `ctx.defs`.
+    pub fn build_import_component_interfaces(&mut self) -> Vec<crate::lir::LirInterface> {
+        use crate::lir::{InterfaceDirection, LirIfaceFn, LirInterface, LirReceiver};
+        use crate::naming::to_kebab_case;
+
+        let ids: Vec<DefId> = self.defs.import_components().collect();
+        let mut interfaces = Vec::new();
+        for ic_id in ids {
+            let (name, prop_ids, method_ids) = match self.defs.as_import_component(ic_id) {
+                Some(ic) => (ic.name, ic.properties.clone(), ic.methods.clone()),
+                None => continue,
+            };
+            let comp_name = to_kebab_case(self.str(name).as_ref());
+            let mut functions: Vec<LirIfaceFn> = Vec::new();
+
+            // Constructor — `func() -> own<resource>` (host allocates instances).
+            functions.push(LirIfaceFn {
+                name: self.intern(""),
+                params: Vec::new(),
+                result: None,
+                receiver: LirReceiver::Constructor(ic_id),
+                def: ic_id,
+            });
+            // get-/set- per declared property.
+            for prop_id in &prop_ids {
+                let Some(pty) = self.defs.type_of(*prop_id) else {
+                    continue;
+                };
+                let pname = to_kebab_case(self.str(self.defs.name(*prop_id)).as_ref());
+                let value_name = self.intern("value");
+                functions.push(LirIfaceFn {
+                    name: self.intern(&format!("get-{pname}")),
+                    params: Vec::new(),
+                    result: Some(pty),
+                    receiver: LirReceiver::Borrow(ic_id),
+                    def: *prop_id,
+                });
+                functions.push(LirIfaceFn {
+                    name: self.intern(&format!("set-{pname}")),
+                    params: vec![(value_name, pty)],
+                    result: None,
+                    receiver: LirReceiver::Borrow(ic_id),
+                    def: *prop_id,
+                });
+            }
+            // Declared methods — `self: borrow<resource>` + the method's own
+            // params/result. Names are already interned; no new interning here.
+            for method_id in &method_ids {
+                let Some((mname, ret_ty, param_ids)) = self.defs.as_function(*method_id).map(|f| {
+                    (f.name, f.ret_ty, f.params.clone())
+                }) else {
+                    continue;
+                };
+                let mut params = Vec::new();
+                for pid in &param_ids {
+                    let Some(pty) = self.defs.type_of(*pid) else {
+                        continue;
+                    };
+                    params.push((self.defs.name(*pid), pty));
+                }
+                let result = if ret_ty == Ty::UNIT { None } else { Some(ret_ty) };
+                functions.push(LirIfaceFn {
+                    name: mname,
+                    params,
+                    result,
+                    receiver: LirReceiver::Borrow(ic_id),
+                    def: *method_id,
+                });
+            }
+
+            let iface_name = self.intern(&format!("{comp_name}-component"));
+            interfaces.push(LirInterface {
+                name: iface_name,
+                direction: InterfaceDirection::Import,
+                package: None,
+                owned_types: Vec::new(),
+                resources: vec![ic_id],
+                functions,
+            });
+        }
+        interfaces
+    }
+
     /// The `to_string` builtin function for converting a value of `ty` to a
     /// string: type-specific helpers for primitives, `object_to_string` for
     /// everything else. Shared by interpolation lowering and the

@@ -17,7 +17,7 @@ use wasm_encoder::{
 };
 
 use yel_core::lir::arena::LirResourceArena;
-use yel_core::lir::{LirExpr, LirResource, LirSlotKind, ModuleScope, align_to};
+use yel_core::lir::{LirExpr, LirResource, ModuleScope, align_to};
 use yel_core::types::InternedTyKind;
 use yel_core::{DefId, Ty};
 
@@ -26,9 +26,9 @@ use super::super::runtime::{self, RuntimeFunctions};
 use super::super::{
     FuncTypes, ImportLayout, MemoryLayout, WasmPackageBuilder, to_kebab_case, to_wit_name,
 };
-use super::scratch::{compute_mount_retention_counts, push_valtype_locals};
+use super::scratch::compute_mount_retention_counts;
 use crate::wasm::gc_types::{GlobalsBlockLayout, compute_globals_block_layout};
-use crate::wasm::{AllocatorFuncs, FlatScratchBases};
+use crate::wasm::AllocatorFuncs;
 
 impl<'a> WasmPackageBuilder<'a> {
     pub(crate) fn build_core_module(&mut self) -> Result<Module, CodegenError> {
@@ -52,6 +52,15 @@ impl<'a> WasmPackageBuilder<'a> {
             .map(|&i| &self.components[i])
             .collect();
         let all_components: Vec<&LirResource> = self.components.iter().collect();
+
+        // §6.7 dispatch: derive the core `dispatch` signature from the
+        // registered `event-value` variant's canonical flattening — one source
+        // of truth shared with the WIT `event-value` type. Computed before the
+        // `intern_type` closure borrows `self`. Must equal `(i32 disc, i64, i32)`.
+        let dispatch_event_flat = self.canonical_flat_valtypes(
+            self.ctx.known.variants.event_value_ty(),
+            crate::wasm::repr::WitBoundary::assert(),
+        );
 
         // Type section
         let mut types = TypeSection::new();
@@ -274,23 +283,14 @@ impl<'a> WasmPackageBuilder<'a> {
             self.ternary_block_types.insert(shape, idx);
         }
 
-        // Dispatch: `(handler-id: u32, event: event-value) -> ()`.
-        // The WIT `event-value` variant flattens under canonical ABI
-        // to `(i32 disc, i64 slot0, i32 slot1)` because its payload
-        // arms include both f64 (one case) and (i32, i32) strings
-        // (another case) — the joined slot0 is an i64 wide enough
-        // for f64/f32-reinterpreted/s32/etc., slot1 is the string
-        // length.
-        let dispatch_type_idx = intern_type(
-            vec![
-                ValType::I32, // handler_id
-                ValType::I32, // event-value discriminant
-                ValType::I64, // joined slot 0 (f64 / reinterpret-f32 / s32-ext / ptr)
-                ValType::I32, // joined slot 1 (string len, else 0)
-            ],
-            vec![],
-            "type-dispatch".to_string(),
-        );
+        // Dispatch: `(handler-id: u32, event: event-value) -> ()`. The
+        // event-value slots come from the registered variant's canonical
+        // flattening (`dispatch_event_flat`, computed above) — `(i32 disc, i64
+        // slot0, i32 slot1)`: slot0 widened to i64 by the `input-f64` case,
+        // slot1 the string length.
+        let mut dispatch_params = vec![ValType::I32]; // handler_id
+        dispatch_params.extend(dispatch_event_flat.iter().copied());
+        let dispatch_type_idx = intern_type(dispatch_params, vec![], "type-dispatch".to_string());
 
         // Emit the dynamic types at the end of the Type section.
         for (params, results) in &dyn_types {
@@ -410,6 +410,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 | K::Def(_)
                 | K::Literal(_)
                 | K::SignalRead(_)
+                | K::GlobalRead(_)
                 | K::EnumCase { .. }
                 | K::ListStatic { .. }
                 | K::Closure { .. } => {}
@@ -2059,17 +2060,25 @@ impl<'a> WasmPackageBuilder<'a> {
                 let ctor_block = component
                     .export_constructor_block
                     .expect("exported component must have export_constructor_block synthesized");
-                code.function(&self.generate_block_function(comp_idx, ctor_block)?);
+                let ctor = component.get_block(ctor_block);
+                code.function(&self.generate_block_function(component, Some(comp_idx), ctor, true)?);
                 // Reset handler counter before mount - dispatch uses same ordering
                 self.reset_handler_counter();
                 let mount_block = component
                     .export_mount_block
                     .expect("exported component must have export_mount_block synthesized");
-                code.function(&self.generate_block_function(comp_idx, mount_block)?);
+                let mount = component.get_block(mount_block);
+                code.function(&self.generate_block_function(component, Some(comp_idx), mount, true)?);
                 let unmount_block = component
                     .export_unmount_block
                     .expect("exported component must have export_unmount_block synthesized");
-                code.function(&self.generate_block_function(comp_idx, unmount_block)?);
+                let unmount = component.get_block(unmount_block);
+                code.function(&self.generate_block_function(
+                    component,
+                    Some(comp_idx),
+                    unmount,
+                    true,
+                )?);
             } else {
                 self.reset_handler_counter();
             }
@@ -2108,7 +2117,8 @@ impl<'a> WasmPackageBuilder<'a> {
                 {
                     continue;
                 }
-                code.function(&self.generate_block_function(comp_idx, block.id)?);
+                let is_lc = super::block_fn::block_is_lifecycle(component, block.id);
+                code.function(&self.generate_block_function(component, Some(comp_idx), block, is_lc)?);
             }
         }
 
@@ -2173,56 +2183,14 @@ impl<'a> WasmPackageBuilder<'a> {
             func.instruction(&Instruction::End);
             return Ok(func);
         };
-
-        // Declare locals: the block's Temp slots, then per-valtype flat
-        // scratch for composite `EvalExprToSlots` evaluations. The init block
-        // has no component-ref slots, so a default GC layout suffices for
-        // val-ty resolution.
-        let layout = crate::wasm::gc_types::GcTypeLayout::default();
-        let mut locals = self.declare_function_locals(&block.slots, 0, &layout)?;
-        push_valtype_locals(&mut locals, block.max_flat_scratch_counts);
-        let mut func = Function::new(locals);
-
-        // Flat-scratch bases live past the block's Temp slots (local_offset 0,
-        // no owning-resource temps in module scope).
-        let num_slots = block
-            .slots
-            .iter()
-            .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
-            .count() as u32;
-        let (i32c, i64c, f32c, f64c) = block.max_flat_scratch_counts;
-        let scratch_base = num_slots;
-        if i32c + i64c + f32c + f64c > 0 {
-            self.current_init_scratch_start = Some(scratch_base);
-        }
-        self.current_flat_scratch = Some(FlatScratchBases {
-            i32_base: scratch_base,
-            i32_count: i32c,
-            i64_base: scratch_base + i32c,
-            i64_count: i64c,
-            f32_base: scratch_base + i32c + i64c,
-            f32_count: f32c,
-            f64_base: scratch_base + i32c + i64c + f32c,
-            f64_count: f64c,
-        });
-        self.current_block_local_offset = Some(0);
-
-        // Transcribe the block: emit each op through the generic emitter with
-        // a module scope (no owning component). Component-specific ops are
-        // rejected there — this block only carries EvalExprToSlots / GlobalFieldSet.
+        // The init block is emitted through the *same* arena-generic path as
+        // every component block: `generate_block_function` with a `ModuleScope`
+        // (no owning component, `is_lifecycle: false` — the block is
+        // paramless). Codegen makes no globals-specific decisions.
         let scope = ModuleScope::new(
             self.ctx.intern("<module>"),
             self.global_default_exprs.clone(),
         );
-        for op in &block.ops {
-            self.emit_op(&mut func, op, &scope, None, &block, 0)?;
-        }
-
-        self.current_init_scratch_start = None;
-        self.current_flat_scratch = None;
-        self.current_block_local_offset = None;
-
-        func.instruction(&Instruction::End);
-        Ok(func)
+        self.generate_block_function(&scope, None, &block, false)
     }
 }

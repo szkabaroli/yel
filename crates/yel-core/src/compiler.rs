@@ -359,7 +359,21 @@ impl Compiler {
         let global_init_block =
             crate::lower_to_lir::synth_globals_init_block(&self.ctx, &globals, &mut global_exprs);
         let component_def_ids: Vec<DefId> = resources.iter().map(|r| r.def_id).collect();
-        let (interfaces, imports) = self.build_import_contract(&component_def_ids);
+        let (mut interfaces, imports) = self.build_import_contract(&component_def_ids);
+        // §6.7 Phase 1: also produce the export-direction boundary contract as
+        // data. Nothing consumes it yet (the WIT renderer still synthesizes the
+        // export surface via `create_component_interface`); appended here so it
+        // rides `LirModule.interfaces`, where the import renderer skips every
+        // non-`Import` entry. Wiring the renderer onto it is Phase 2.
+        for iface in self.ctx.build_export_interfaces(&resources) {
+            interfaces.push(iface);
+        }
+        // §6.7 Phase 3: `import component X` declarations become Import-direction
+        // resource interfaces in the same contract (rendered by the shared
+        // `render_resource_interface`).
+        for iface in self.ctx.build_import_component_interfaces() {
+            interfaces.push(iface);
+        }
         LirModule {
             resources,
             globals,

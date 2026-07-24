@@ -123,6 +123,11 @@ threaded (`&` / `&mut`) through every phase:
 
 ## 3. The IR layers
 
+> For a **stage-by-stage** treatment — what each stage establishes, its entry
+> functions, which desugarings happen where, and a "where does X happen?"
+> lookup table — see [`PIPELINE.md`](PIPELINE.md). This section is the
+> structural summary.
+
 ### 3.1 AST — `syntax/`
 - `syntax/parser.rs` (~3.3k lines) wraps a **pest** grammar; `syntax/ast.rs` (~940 lines) is the tree.
 - Carries spans; identifiers are plain strings; `AstTyKind` includes `Named(..)` which is **not** resolved here.

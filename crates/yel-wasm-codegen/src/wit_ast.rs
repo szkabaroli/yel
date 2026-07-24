@@ -138,10 +138,28 @@ impl<'a> WitAstBuilder<'a> {
             if self.import_contract[idx].direction != InterfaceDirection::Import {
                 continue;
             }
+            // Resource-owning imports (`import component X`) render through the
+            // shared `render_resource_interface` — this path is for callbacks /
+            // globals / DOM, whose functions only *borrow* a resource.
+            if Self::owns_resource(&self.import_contract[idx]) {
+                continue;
+            }
             let iface = self.import_contract[idx].clone();
             ids.push(self.render_import_interface(&iface, component_resources)?);
         }
         Ok(ids)
+    }
+
+    /// True if this contract interface *owns* a resource — i.e. declares a
+    /// constructor. Such interfaces (exported components, `import component`s)
+    /// render through [`Self::render_resource_interface`]; interfaces that only
+    /// *borrow* a resource (component callbacks) render as freestanding
+    /// functions with a leading `self` param.
+    fn owns_resource(iface: &LirInterface) -> bool {
+        iface
+            .functions
+            .iter()
+            .any(|f| matches!(f.receiver, LirReceiver::Constructor(_)))
     }
 
     /// Render a single import interface from its contract entry. Foreign
@@ -258,6 +276,142 @@ impl<'a> WitAstBuilder<'a> {
             .functions
             .insert(name, function);
         Ok(())
+    }
+
+    /// Render a **resource-owning** interface from the boundary contract
+    /// (§6.7): allocate the resource + `{resource}-component` interface, then
+    /// emit each [`LirIfaceFn`] as a WIT **constructor** or **method** based on
+    /// its receiver. Direction-agnostic — the same shape serves an *exported*
+    /// component (mount/unmount/getters/setters) and an *imported* component
+    /// (`import component X`: constructor + property getters/setters + declared
+    /// methods); the world builder places it in exports or imports per the
+    /// interface's direction. This is the data-driven replacement for the
+    /// former hardcoded `create_component_interface` /
+    /// `create_import_component_interfaces` — the backend no longer knows what
+    /// mount/unmount/get-/set- "mean"; it renders whatever the contract holds.
+    /// Returns the interface id, the resource `TypeId`, and the owning
+    /// component `DefId` (so `component_resources` can be populated for callback
+    /// borrows).
+    fn render_resource_interface(
+        &mut self,
+        iface: &LirInterface,
+    ) -> Result<(InterfaceId, TypeId, DefId), CodegenError> {
+        let comp_def = *iface.resources.first().ok_or_else(|| {
+            CodegenError::InvalidIR("export interface carries no resource".into())
+        })?;
+        let resource_name = to_kebab_case(&self.ctx.str(self.ctx.defs.name(comp_def)));
+        let interface_name = to_kebab_case(&self.ctx.str(iface.name));
+
+        // Resource type + owning interface.
+        let resource_ty = self.resolve.types.alloc(TypeDef {
+            name: Some(resource_name.clone()),
+            kind: TypeDefKind::Resource,
+            owner: TypeOwner::None,
+            docs: Docs::default(),
+            stability: Stability::default(),
+            span: Default::default(),
+        });
+        let interface_id = self.resolve.interfaces.alloc(Interface {
+            name: Some(interface_name.clone()),
+            docs: Docs::default(),
+            types: Default::default(),
+            functions: Default::default(),
+            package: Some(self.package_id),
+            stability: Stability::default(),
+            span: Default::default(),
+            clone_of: None,
+        });
+        self.resolve.types[resource_ty].owner = TypeOwner::Interface(interface_id);
+        self.resolve.interfaces[interface_id]
+            .types
+            .insert(resource_name.clone(), resource_ty);
+
+        // Handle types owned by this interface: `own<resource>` (constructor
+        // result) and `borrow<resource>` (method self).
+        let own_ty = Type::Id(self.resolve.types.alloc(TypeDef {
+            name: None,
+            kind: TypeDefKind::Handle(Handle::Own(resource_ty)),
+            owner: TypeOwner::Interface(interface_id),
+            docs: Docs::default(),
+            stability: Stability::default(),
+            span: Default::default(),
+        }));
+
+        let borrow_ty = Type::Id(self.resolve.types.alloc(TypeDef {
+            name: None,
+            kind: TypeDefKind::Handle(Handle::Borrow(resource_ty)),
+            owner: TypeOwner::Interface(interface_id),
+            docs: Docs::default(),
+            stability: Stability::default(),
+            span: Default::default(),
+        }));
+
+        for f in &iface.functions {
+            match f.receiver {
+                LirReceiver::Constructor(_) => {
+                    let function = Function {
+                        name: String::new(), // wit-parser convention for constructors
+                        kind: FunctionKind::Constructor(resource_ty),
+                        params: Vec::new(),
+                        result: Some(own_ty),
+                        docs: Docs::default(),
+                        stability: Stability::default(),
+                        span: Default::default(),
+                    };
+                    self.resolve.interfaces[interface_id]
+                        .functions
+                        .insert(format!("[constructor]{resource_name}"), function);
+                }
+                LirReceiver::Borrow(_) => {
+                    let method_name = to_kebab_case(&self.ctx.str(f.name));
+                    let full_name = format!("[method]{resource_name}.{method_name}");
+                    let mut params = vec![Param {
+                        name: "self".to_string(),
+                        ty: borrow_ty,
+                        span: Default::default(),
+                    }];
+                    for (pname, pty) in &f.params {
+                        let pname = to_kebab_case(&self.ctx.str(*pname));
+                        let pty = self.use_type_in(*pty, interface_id)?;
+                        params.push(Param {
+                            name: pname,
+                            ty: pty,
+                            span: Default::default(),
+                        });
+                    }
+                    let result = match f.result {
+                        Some(rty) => Some(self.use_type_in(rty, interface_id)?),
+                        None => None,
+                    };
+                    let function = Function {
+                        name: full_name.clone(),
+                        kind: FunctionKind::Method(resource_ty),
+                        params,
+                        result,
+                        docs: Docs::default(),
+                        stability: Stability::default(),
+                        span: Default::default(),
+                    };
+                    self.resolve.interfaces[interface_id]
+                        .functions
+                        .insert(full_name, function);
+                }
+                LirReceiver::None => {
+                    return Err(CodegenError::InvalidIR(format!(
+                        "export interface function `{}` has no receiver; an exported \
+                         function must be a constructor or a method",
+                        self.ctx.str(f.name)
+                    )));
+                }
+            }
+        }
+
+        // Register the interface in the package so wit-parser emits its body.
+        self.resolve.packages[self.package_id]
+            .interfaces
+            .insert(interface_name, interface_id);
+
+        Ok((interface_id, resource_ty, comp_def))
     }
 
     /// Create or return the shared `types` interface. Every ADT (record,
@@ -381,18 +535,27 @@ impl<'a> WitAstBuilder<'a> {
         }
         self.register_types_for_globals()?;
 
-        // Per-component resource interfaces — one per exported component.
-        // Kept per-component because each component is genuinely its own
-        // resource with its own constructor/method shape.
+        // Per-component resource interfaces — rendered from the
+        // `Export`-direction boundary contract (§6.7). Each exported component
+        // owns its resource + constructor/method surface as frontend-produced
+        // data (`build_export_interfaces`), so the backend renders it
+        // generically instead of synthesizing mount/unmount/getters/setters by
+        // hand. Must run before `render_import_contract` so `component_resources`
+        // is populated for callback interfaces that borrow the resource.
         let mut component_interfaces: Vec<(InterfaceId, Option<InterfaceId>)> = Vec::new();
         let mut component_resources: HashMap<DefId, TypeId> = HashMap::default();
-        for c in components {
-            let resource_name = to_kebab_case(&self.ctx.str(c.name));
-            let (iface, resource_ty) = self.create_component_interface(c, &resource_name)?;
-            component_resources.insert(c.def_id, resource_ty);
+        for idx in 0..self.import_contract.len() {
+            if self.import_contract[idx].direction != InterfaceDirection::Export {
+                continue;
+            }
+            // Clone to release the `self.import_contract` borrow across the
+            // `&mut self` render call (mirrors `render_import_contract`).
+            let iface = self.import_contract[idx].clone();
+            let (iface_id, resource_ty, comp_def) = self.render_resource_interface(&iface)?;
+            component_resources.insert(comp_def, resource_ty);
             // Callbacks are module-scoped (see below), so each component
             // entry gets `None` for its callback interface id.
-            component_interfaces.push((iface, None));
+            component_interfaces.push((iface_id, None));
         }
 
         // Every import interface — `{component}-callbacks`, local-global,
@@ -411,10 +574,23 @@ impl<'a> WitAstBuilder<'a> {
             Some(self.create_module_dispatch_interface()?)
         };
 
-        // `import component X { ... }` declarations become imported
+        // `import component X { ... }` declarations become imported resource
         // interfaces — the host or an upstream module supplies the
-        // implementation.
-        let import_component_interface_ids = self.create_import_component_interfaces()?;
+        // implementation. They own a resource (constructor + property
+        // getters/setters + declared methods), so they render through the same
+        // `render_resource_interface` as exported components; the world just
+        // places them in imports instead of exports (§6.7 Phase 3).
+        let mut import_component_interface_ids = Vec::new();
+        for idx in 0..self.import_contract.len() {
+            if self.import_contract[idx].direction != InterfaceDirection::Import
+                || !Self::owns_resource(&self.import_contract[idx])
+            {
+                continue;
+            }
+            let iface = self.import_contract[idx].clone();
+            let (iface_id, _resource_ty, _def) = self.render_resource_interface(&iface)?;
+            import_component_interface_ids.push(iface_id);
+        }
 
         // World name is consistent regardless of whether the module has
         // exported components or is globals/lib-only — a Yel module is a
@@ -737,207 +913,6 @@ impl<'a> WitAstBuilder<'a> {
         })
     }
 
-    /// Create the component interface with resource. Returns the interface
-    /// id plus the resource type id. The resource + methods live in this
-    /// interface as usual; callbacks and other module-scoped interfaces
-    /// reference it via `use {component}-component.{resource}` aliasing.
-    fn create_component_interface(
-        &mut self,
-        component: &LirResource,
-        resource_name: &str,
-    ) -> Result<(InterfaceId, TypeId), CodegenError> {
-        let interface_name = format!("{}-component", resource_name);
-
-        // Create the resource type
-        let resource_type_id = self.resolve.types.alloc(TypeDef {
-            name: Some(resource_name.to_string()),
-            kind: TypeDefKind::Resource,
-            owner: TypeOwner::None,
-            docs: Docs::default(),
-            stability: Stability::default(),
-            span: Default::default(),
-        });
-
-        // Create interface
-        let interface_id = self.resolve.interfaces.alloc(Interface {
-            name: Some(interface_name.clone()),
-            docs: Docs::default(),
-            types: Default::default(),
-            functions: Default::default(),
-            package: Some(self.package_id),
-            stability: Stability::default(),
-            span: Default::default(),
-            clone_of: None,
-        });
-
-        self.resolve.types[resource_type_id].owner = TypeOwner::Interface(interface_id);
-        self.resolve.interfaces[interface_id]
-            .types
-            .insert(resource_name.to_string(), resource_type_id);
-
-        // ADTs live in the dedicated `types` interface; this interface pulls
-        // them in via `use types.{...};` on demand through `use_type_in`.
-
-        // Create own handle type for constructor return
-        let own_type_id = self.resolve.types.alloc(TypeDef {
-            name: None,
-            kind: TypeDefKind::Handle(Handle::Own(resource_type_id)),
-            owner: TypeOwner::Interface(interface_id),
-            docs: Docs::default(),
-            stability: Stability::default(),
-            span: Default::default(),
-        });
-
-        // Add constructor - returns own<resource>
-        let constructor_func = Function {
-            name: String::new(), // Empty for constructors
-            kind: FunctionKind::Constructor(resource_type_id),
-            params: vec![],
-            result: Some(Type::Id(own_type_id)), // Constructor returns own<resource>
-            docs: Docs::default(),
-            stability: Stability::default(),
-            span: Default::default(),
-        };
-        self.resolve.interfaces[interface_id]
-            .functions
-            .insert(format!("[constructor]{}", resource_name), constructor_func);
-
-        // Create borrow type for self parameter
-        let borrow_type_id = self.resolve.types.alloc(TypeDef {
-            name: None,
-            kind: TypeDefKind::Handle(Handle::Borrow(resource_type_id)),
-            owner: TypeOwner::Interface(interface_id),
-            docs: Docs::default(),
-            stability: Stability::default(),
-            span: Default::default(),
-        });
-        let self_type = Type::Id(borrow_type_id);
-
-        // Add mount method. Container components (those with `@children`)
-        // return a `u32` children-root node id — the caller appends its
-        // children under that returned id. Non-containers return nothing.
-        let has_children_slot = self
-            .ctx
-            .defs
-            .as_component(component.def_id)
-            .map(|c| c.has_children_slot)
-            .unwrap_or(false);
-        let mount_name = format!("[method]{}.mount", resource_name);
-        let mount_func = Function {
-            name: mount_name.clone(),
-            kind: FunctionKind::Method(resource_type_id),
-            params: vec![
-                Param {
-                    name: "self".to_string(),
-                    ty: self_type,
-                    span: Default::default(),
-                },
-                Param {
-                    name: "root".to_string(),
-                    ty: Type::U32,
-                    span: Default::default(),
-                },
-            ],
-            result: if has_children_slot {
-                Some(Type::U32)
-            } else {
-                None
-            },
-            docs: Docs::default(),
-            stability: Stability::default(),
-            span: Default::default(),
-        };
-        self.resolve.interfaces[interface_id]
-            .functions
-            .insert(mount_name, mount_func);
-
-        // Add unmount method
-        let unmount_name = format!("[method]{}.unmount", resource_name);
-        let unmount_func = Function {
-            name: unmount_name.clone(),
-            kind: FunctionKind::Method(resource_type_id),
-            params: vec![Param {
-                name: "self".to_string(),
-                ty: self_type,
-                span: Default::default(),
-            }],
-            result: None,
-            docs: Docs::default(),
-            stability: Stability::default(),
-            span: Default::default(),
-        };
-        self.resolve.interfaces[interface_id]
-            .functions
-            .insert(unmount_name, unmount_func);
-
-        // Dispatch is module-scoped and lives in a dedicated dispatch
-        // interface — see `create_module_dispatch_interface`. It's exported
-        // exactly once per module regardless of how many components exist.
-
-        // Add getter/setter for each signal (skip function-typed signals - those are callbacks)
-        for signal in &component.signals {
-            // Skip function-typed signals - they're callbacks, not data properties
-            if matches!(self.ctx.ty_kind(signal.ty), InternedTyKind::Func { .. }) {
-                continue;
-            }
-
-            let signal_name = to_kebab_case(&self.ctx.str(self.ctx.defs.name(signal.def_id)));
-            let wit_type = self.use_type_in(signal.ty, interface_id)?;
-
-            // Getter
-            let getter_name = format!("[method]{}.get-{}", resource_name, signal_name);
-            let getter_func = Function {
-                name: getter_name.clone(),
-                kind: FunctionKind::Method(resource_type_id),
-                params: vec![Param {
-                    name: "self".to_string(),
-                    ty: self_type,
-                    span: Default::default(),
-                }],
-                result: Some(wit_type),
-                docs: Docs::default(),
-                stability: Stability::default(),
-                span: Default::default(),
-            };
-            self.resolve.interfaces[interface_id]
-                .functions
-                .insert(getter_name, getter_func);
-
-            // Setter
-            let setter_name = format!("[method]{}.set-{}", resource_name, signal_name);
-            let setter_func = Function {
-                name: setter_name.clone(),
-                kind: FunctionKind::Method(resource_type_id),
-                params: vec![
-                    Param {
-                        name: "self".to_string(),
-                        ty: self_type,
-                        span: Default::default(),
-                    },
-                    Param {
-                        name: "value".to_string(),
-                        ty: wit_type,
-                        span: Default::default(),
-                    },
-                ],
-                result: None,
-                docs: Docs::default(),
-                stability: Stability::default(),
-                span: Default::default(),
-            };
-            self.resolve.interfaces[interface_id]
-                .functions
-                .insert(setter_name, setter_func);
-        }
-
-        // Register interface in package
-        self.resolve.packages[self.package_id]
-            .interfaces
-            .insert(interface_name, interface_id);
-
-        Ok((interface_id, resource_type_id))
-    }
-
     /// Allocate (or return the cached) `yel:ui@0.1.0` package id. Both the
     /// DOM interface and the dispatch interface live here — they're the
     /// language-level syscall surface every Yel module shares, not
@@ -1000,80 +975,18 @@ impl<'a> WitAstBuilder<'a> {
         //   <input type="text">     → input-text(string)
         //   <input type="number">   → input-f64(f64)     // or input-f32/s32
         //   <input type="checkbox"> → input-bool(bool)
-        let event_value_id = self.resolve.types.alloc(TypeDef {
-            name: Some("event-value".to_string()),
-            kind: TypeDefKind::Variant(Variant {
-                cases: vec![
-                    Case {
-                        name: "none".to_string(),
-                        ty: None,
-                        docs: Docs::default(),
-                        span: Default::default(),
-                    },
-                    Case {
-                        name: "input-text".to_string(),
-                        ty: Some(Type::String),
-                        docs: Docs::default(),
-                        span: Default::default(),
-                    },
-                    Case {
-                        name: "input-f64".to_string(),
-                        ty: Some(Type::F64),
-                        docs: Docs::default(),
-                        span: Default::default(),
-                    },
-                    Case {
-                        name: "input-f32".to_string(),
-                        ty: Some(Type::F32),
-                        docs: Docs::default(),
-                        span: Default::default(),
-                    },
-                    Case {
-                        name: "input-s32".to_string(),
-                        ty: Some(Type::S32),
-                        docs: Docs::default(),
-                        span: Default::default(),
-                    },
-                    Case {
-                        name: "input-bool".to_string(),
-                        ty: Some(Type::Bool),
-                        docs: Docs::default(),
-                        span: Default::default(),
-                    },
-                    // Cold drag/drop lifecycle. Appended after the input
-                    // arms so their discriminants stay stable. `drop`
-                    // carries the payload string, `drag-enter` the media
-                    // type, `drag-leave` nothing. The host constructs
-                    // these from a brokered DropEvent and calls
-                    // `dispatch(handler-id, event-value::drop(payload))`.
-                    Case {
-                        name: "drop".to_string(),
-                        ty: Some(Type::String),
-                        docs: Docs::default(),
-                        span: Default::default(),
-                    },
-                    Case {
-                        name: "drag-enter".to_string(),
-                        ty: Some(Type::String),
-                        docs: Docs::default(),
-                        span: Default::default(),
-                    },
-                    Case {
-                        name: "drag-leave".to_string(),
-                        ty: None,
-                        docs: Docs::default(),
-                        span: Default::default(),
-                    },
-                ],
-            }),
-            owner: TypeOwner::Interface(interface_id),
-            docs: Docs::default(),
-            stability: Stability::default(),
-            span: Default::default(),
-        });
-        self.resolve.interfaces[interface_id]
-            .types
-            .insert("event-value".to_string(), event_value_id);
+        // Render `event-value` from the registered builtin variant Ty — the
+        // same source the core `dispatch` signature derives from (no second
+        // hardcoded copy). Owned inline in this foreign interface (a host
+        // package can't `use` the module's shared types), like DOM's
+        // `attribute-value`.
+        let event_value_ty = self.ctx.known.variants.event_value_ty();
+        let prev_owner = self.inline_types_owner;
+        self.inline_types_owner = Some(interface_id);
+        let event_value_id = self.register_type(event_value_ty)?.ok_or_else(|| {
+            CodegenError::InvalidIR("event-value variant did not register a WIT type".into())
+        })?;
+        self.inline_types_owner = prev_owner;
 
         let dispatch_func = Function {
             name: "dispatch".to_string(),
@@ -1144,203 +1057,6 @@ impl<'a> WitAstBuilder<'a> {
         Ok(())
     }
 
-    /// Create one WIT interface per global that has host-boundary members.
-    ///
-    /// A global's interface contains:
-    /// - `set-<prop>: func(v: T)` for each `in` or `in-out` property
-    /// - `on-<prop>-changed: func(v: T)` for each `out` or `in-out` property
-    /// - `<name>: func(...) -> ret?` for each callback
-    ///
-    /// Emit one WIT interface per `import component` declaration in the
-    /// module. Each interface exposes the component as a resource with the
-    /// declared properties (as `get-X`/`set-X` method pairs) and methods.
-    /// The world imports every such interface so the host / upstream
-    /// module supplies the concrete implementation.
-    fn create_import_component_interfaces(&mut self) -> Result<Vec<InterfaceId>, CodegenError> {
-        let mut out = Vec::new();
-        let ids: Vec<_> = self.ctx.defs.import_components().collect();
-        for id in ids {
-            let (name, prop_ids, method_ids) = match self.ctx.defs.as_import_component(id) {
-                Some(ic) => (
-                    self.ctx.str(ic.name).to_string(),
-                    ic.properties.clone(),
-                    ic.methods.clone(),
-                ),
-                None => continue,
-            };
-
-            let resource_name = to_kebab_case(&name);
-            let interface_name = format!("{}-component", resource_name);
-
-            // Allocate the interface + its resource type up front so
-            // subsequent `use_type_in` / method declarations can reference
-            // them. Layout mirrors `create_component_interface` but the
-            // interface is module-imported rather than exported.
-            let interface_id = self.resolve.interfaces.alloc(Interface {
-                name: Some(interface_name.clone()),
-                docs: Docs::default(),
-                types: Default::default(),
-                functions: Default::default(),
-                package: Some(self.package_id),
-                stability: Stability::default(),
-                span: Default::default(),
-                clone_of: None,
-            });
-            let resource_ty = self.resolve.types.alloc(TypeDef {
-                name: Some(resource_name.clone()),
-                kind: TypeDefKind::Resource,
-                owner: TypeOwner::Interface(interface_id),
-                docs: Docs::default(),
-                stability: Stability::default(),
-                span: Default::default(),
-            });
-            self.resolve.interfaces[interface_id]
-                .types
-                .insert(resource_name.clone(), resource_ty);
-
-            let self_borrow = Type::Id(self.resolve.types.alloc(TypeDef {
-                name: None,
-                kind: TypeDefKind::Handle(Handle::Borrow(resource_ty)),
-                owner: TypeOwner::Interface(interface_id),
-                docs: Docs::default(),
-                stability: Stability::default(),
-                span: Default::default(),
-            }));
-            let self_ty = self_borrow;
-
-            // Constructor: `func() -> own<resource>`. The host's
-            // implementation is responsible for allocating instances.
-            let own_ty = Type::Id(self.resolve.types.alloc(TypeDef {
-                name: None,
-                kind: TypeDefKind::Handle(Handle::Own(resource_ty)),
-                owner: TypeOwner::Interface(interface_id),
-                docs: Docs::default(),
-                stability: Stability::default(),
-                span: Default::default(),
-            }));
-            let ctor = Function {
-                name: String::new(),
-                kind: FunctionKind::Constructor(resource_ty),
-                params: vec![],
-                result: Some(own_ty),
-                docs: Docs::default(),
-                stability: Stability::default(),
-                span: Default::default(),
-            };
-            self.resolve.interfaces[interface_id]
-                .functions
-                .insert(format!("[constructor]{}", resource_name), ctor);
-
-            // Properties → getter/setter method pairs. Same shape as
-            // exported component interfaces.
-            for prop_id in &prop_ids {
-                let prop_name = self.ctx.str(self.ctx.defs.name(*prop_id)).to_string();
-                let prop_ty = match self.ctx.defs.type_of(*prop_id) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                let wit_ty = self.use_type_in(prop_ty, interface_id)?;
-                let kebab = to_kebab_case(&prop_name);
-
-                let getter_name = format!("[method]{}.get-{}", resource_name, kebab);
-                let getter = Function {
-                    name: getter_name.clone(),
-                    kind: FunctionKind::Method(resource_ty),
-                    params: vec![Param {
-                        name: "self".to_string(),
-                        ty: self_ty,
-                        span: Default::default(),
-                    }],
-                    result: Some(wit_ty),
-                    docs: Docs::default(),
-                    stability: Stability::default(),
-                    span: Default::default(),
-                };
-                self.resolve.interfaces[interface_id]
-                    .functions
-                    .insert(getter_name, getter);
-
-                let setter_name = format!("[method]{}.set-{}", resource_name, kebab);
-                let setter = Function {
-                    name: setter_name.clone(),
-                    kind: FunctionKind::Method(resource_ty),
-                    params: vec![
-                        Param {
-                            name: "self".to_string(),
-                            ty: self_ty,
-                            span: Default::default(),
-                        },
-                        Param {
-                            name: "value".to_string(),
-                            ty: wit_ty,
-                            span: Default::default(),
-                        },
-                    ],
-                    result: None,
-                    docs: Docs::default(),
-                    stability: Stability::default(),
-                    span: Default::default(),
-                };
-                self.resolve.interfaces[interface_id]
-                    .functions
-                    .insert(setter_name, setter);
-            }
-
-            // Declared methods become resource methods with their own
-            // signatures. `self: borrow<resource>` is prepended.
-            for method_id in &method_ids {
-                let func_def = match self.ctx.defs.as_function(*method_id) {
-                    Some(f) => f.clone(),
-                    None => continue,
-                };
-                let method_name = self.ctx.str(func_def.name).to_string();
-                let kebab = to_kebab_case(&method_name);
-
-                let mut params: Vec<Param> = vec![Param {
-                    name: "self".to_string(),
-                    ty: self_ty,
-                    span: Default::default(),
-                }];
-                for pid in &func_def.params {
-                    let pname = self.ctx.str(self.ctx.defs.name(*pid)).to_string();
-                    let pty = match self.ctx.defs.type_of(*pid) {
-                        Some(t) => t,
-                        None => continue,
-                    };
-                    params.push(Param {
-                        name: to_kebab_case(&pname),
-                        ty: self.use_type_in(pty, interface_id)?,
-                        span: Default::default(),
-                    });
-                }
-                let result = if func_def.ret_ty == Ty::UNIT {
-                    None
-                } else {
-                    Some(self.use_type_in(func_def.ret_ty, interface_id)?)
-                };
-
-                let wit_method_name = format!("[method]{}.{}", resource_name, kebab);
-                let method = Function {
-                    name: wit_method_name.clone(),
-                    kind: FunctionKind::Method(resource_ty),
-                    params,
-                    result,
-                    docs: Docs::default(),
-                    stability: Stability::default(),
-                    span: Default::default(),
-                };
-                self.resolve.interfaces[interface_id]
-                    .functions
-                    .insert(wit_method_name, method);
-            }
-
-            self.resolve.packages[self.package_id]
-                .interfaces
-                .insert(interface_name, interface_id);
-            out.push(interface_id);
-        }
-        Ok(out)
-    }
 
     /// Create the world.
     ///
@@ -1391,10 +1107,14 @@ impl<'a> WitAstBuilder<'a> {
         // when some import interface actually borrows a component resource
         // (a component-callbacks interface, marked by a non-empty `resources`
         // list in the contract). Otherwise skip, to keep the world clean.
-        let has_component_callbacks = self
-            .import_contract
-            .iter()
-            .any(|i| !i.resources.is_empty());
+        let has_component_callbacks = self.import_contract.iter().any(|i| {
+            i.direction == InterfaceDirection::Import
+                && !i.resources.is_empty()
+                // Callbacks *borrow* a component resource; `import component`
+                // interfaces *own* one — only the former needs the exported
+                // resource pre-imported for wit-component's `use`.
+                && !Self::owns_resource(i)
+        });
         if has_component_callbacks {
             for &(iface_id, _) in component_interfaces {
                 self.resolve.worlds[world_id].imports.insert(

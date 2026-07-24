@@ -7,10 +7,10 @@ digraph yel_signal_graph {
     label="component App (export)";
     style=rounded;
     color="#888";
-    "c0_sig_475" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="items\n: list<result<string, string>>", class="yel-signal"];
+    "c0_sig_485" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="items\n: list<result<string, string>>", class="yel-signal"];
     "c0_elem_0" [shape=box, style="filled", fillcolor="#e0f7fa", label="VStack #0", class="yel-element"];
     "c0_handler_0" [shape=diamond, style=filled, fillcolor="#f3e5f5", label="on clicked", class="yel-handler"];
     "c0_elem_0" -> "c0_handler_0" [label="fires", color="#7e57c2", class="yel-fires"];
-    "c0_handler_0" -> "c0_sig_475" [label="writes", color="#cc3333", class="yel-writes"];
+    "c0_handler_0" -> "c0_sig_485" [label="writes", color="#cc3333", class="yel-writes"];
   }
 }

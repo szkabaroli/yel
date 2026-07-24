@@ -7,10 +7,10 @@ digraph yel_signal_graph {
     label="component App (export)";
     style=rounded;
     color="#888";
-    "c0_sig_480" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="a\n: result<s32, s64>", class="yel-signal"];
-    "c0_sig_481" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="b\n: result<f64, s32>", class="yel-signal"];
-    "c0_sig_482" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="c\n: result<f32, f64>", class="yel-signal"];
-    "c0_sig_483" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="v\n: Mixed", class="yel-signal"];
-    "c0_sig_484" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withString\n: result<string, s64>", class="yel-signal"];
+    "c0_sig_490" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="a\n: result<s32, s64>", class="yel-signal"];
+    "c0_sig_491" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="b\n: result<f64, s32>", class="yel-signal"];
+    "c0_sig_492" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="c\n: result<f32, f64>", class="yel-signal"];
+    "c0_sig_493" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="v\n: Mixed", class="yel-signal"];
+    "c0_sig_494" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withString\n: result<string, s64>", class="yel-signal"];
   }
 }

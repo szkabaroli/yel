@@ -904,7 +904,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                 }
             }
 
-            ThirExprKind::GlobalRead { prop, .. } => LirExprKind::SignalRead(*prop),
+            ThirExprKind::GlobalRead { prop, .. } => LirExprKind::GlobalRead(*prop),
 
             // A call on a global singleton lowers to the same generic
             // `Call` as a component callback — both are calls to a

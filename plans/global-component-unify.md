@@ -367,12 +367,56 @@ lowering can build the ctor. WASM re-baselines (different instruction sequence);
 grid/checker fixtures); `.wit`/`.dot` unchanged. This removes the last
 UI-specific DOM op from codegen.
 
-Remaining (6.7): migrate the **export side** onto the contract — component
-resource interfaces + dispatch (the `resources` field is in the model; the
-resource must own its constructor/method surface, today synthesized by
-`create_component_interface` with UI lifecycle baked in) — and local globals
-(shared-types). The `color` branch in `emit_variant_ctor_flat` is a guarded reuse
-that generalizes to a nested-variant lift when a second nested-variant case appears.
+### 6.7 — exported component resource interfaces rendered from the contract  ✅ DONE (execution-verified)
+The **export** boundary is now data-driven like the import side. The frontend
+produces an `Export`-direction `LirInterface` per exported component
+(`CompilerContext::build_export_interfaces`): the resource plus a `LirIfaceFn`
+for the constructor (`LirReceiver::Constructor`), `mount`/`unmount`, and a
+`get-`/`set-` pair per non-callback signal (`LirReceiver::Borrow`). The WIT
+backend renders it via the generic `wit_ast::render_export_interface` (constructor
+→ `FunctionKind::Constructor` + `own<resource>`; borrow → `FunctionKind::Method`
++ `borrow<resource>` self), and the **201-line hardcoded `create_component_interface`
+is deleted** — the backend no longer knows mount/unmount/getters/setters "mean"
+anything; it renders whatever the contract holds. Latent bug fixed along the way:
+`create_world`'s `has_component_callbacks` proxy (`!resources.is_empty()`) now
+filters `direction == Import`, since export entries also carry `resources`. WIT/DOT
+byte-identical, 85 execution tests + 200-seed fuzz-validate green.
+
+### 6.7 Phase 3 — `import component` interfaces rendered from the contract  ✅ DONE (execution-verified)
+`import component X` declarations now flow through the same generic path as
+exported components. `render_export_interface` was generalized to
+`render_resource_interface` (direction-agnostic: renders any resource-owning
+interface — constructor + methods + property getters/setters), and the frontend
+produces `Import`-direction resource interfaces via
+`CompilerContext::build_import_component_interfaces` (reads `ImportComponentDef`:
+constructor + `get-`/`set-` per property + declared methods). The world builder
+places them in imports (an interface "owns a resource" iff it declares a
+constructor — the new `owns_resource` predicate splits resource-owning imports
+from borrow-only callback/DOM imports). The **185-line hardcoded
+`create_import_component_interfaces` is deleted**. Same latent-bug class fixed:
+`has_component_callbacks` now excludes owned-resource interfaces (callbacks
+*borrow*, `import component`s *own*). WIT/DOT byte-identical, full suite +
+execution + 200-seed fuzz green. (Local-global interfaces were already
+contract-driven — `create_globals_interfaces` no longer exists.)
+
+### 6.7 dispatch — `event-value` is a builtin variant; WIT + core ABI derive from it  ✅ DONE (execution-verified)
+The `event-value` type is now a **registered builtin variant** (`known.variants.event_value`,
+9 cases in discriminant order: `none`, `input-text`, `input-f64`, `input-f32`,
+`input-s32`, `input-bool`, `drop`, `drag-enter`, `drag-leave`) — the exact analog
+of DOM's `attribute-value`. The two former hardcoded copies are gone: the WIT
+`event-value` type renders from the variant `Ty` via `register_type` (inline in
+the foreign `dispatch` interface), and the core `dispatch` function signature
+derives its slots from `canonical_flat_valtypes(event_value_ty)` — proven to
+equal the old hardcoded `(i32 disc, i64 slot0, i32 slot1)` by the 85 host-linking
+execution tests (the host really sends dispatch events). WIT byte-identical; DOT
+re-baselined for the new builtin's DefId shift. Remaining polish (not UI-builtin
+debt): the `dispatch` *function* itself is still created imperatively in
+`create_module_dispatch_interface` (one freestanding fn referencing the
+registered type) rather than modeled as a contract `LirIfaceFn` — marginal, and
+needs a synthetic def for a non-user function.
+
+The `color` branch in `emit_variant_ctor_flat` is a guarded reuse that
+generalizes to a nested-variant lift when a second nested-variant case appears.
 
 Note: `.dot` encoding raw `DefId` numbers makes all 63 fixtures churn on any
 builtin-registration change — brittle; a follow-up could use stable per-component

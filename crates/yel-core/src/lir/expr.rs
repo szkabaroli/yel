@@ -90,8 +90,19 @@ pub enum LirExprKind {
     /// the callee's kind. Global-singleton calls (`Global.fn(..)`) lower
     /// to this same variant.
     Call { func: DefId, args: Vec<LirExprId> },
-    /// Signal read (component-local or global property).
+    /// Read a **component-local** reactive signal (a field of `$self`'s
+    /// `$Comp` GC struct, or a filter-captured WASM param). Global-property
+    /// reads are the distinct [`Self::GlobalRead`] — codegen resolves them
+    /// through a different path (per-block globals struct / core wasm globals),
+    /// so keeping them separate lets codegen stop disambiguating by
+    /// `owning_global_block`.
     SignalRead(DefId),
+    /// Read a **global-block property** (`GlobalStore.prop`) — reactive state
+    /// backed by the module's per-block globals struct rather than a component
+    /// instance. The `DefId` is the property. For dependency/reactivity/DOT
+    /// purposes it behaves exactly like a [`Self::SignalRead`]; only the
+    /// codegen emission differs (globals struct vs `$self`).
+    GlobalRead(DefId),
     /// Ternary expression.
     Ternary {
         condition: LirExprId,

@@ -73,9 +73,15 @@ pub enum LirReceiver {
     /// at the core ABI it takes no leading handle.
     None,
     /// Takes `borrow<resource>` as its first parameter, where the resource
-    /// is the component identified by this `DefId` (component callbacks).
+    /// is the component identified by this `DefId` (component callbacks, and
+    /// exported resource methods — mount/unmount/getters/setters).
     /// At the core ABI this lowers to a leading `i32` handle.
     Borrow(DefId),
+    /// A resource **constructor** for the component identified by this
+    /// `DefId`: no receiver parameter, and the WIT result is `own<resource>`
+    /// (the renderer supplies the handle type). At the WIT boundary it is
+    /// `FunctionKind::Constructor`; used only on `Export`-direction interfaces.
+    Constructor(DefId),
 }
 
 /// One function in an interface contract — a plain WIT signature plus its

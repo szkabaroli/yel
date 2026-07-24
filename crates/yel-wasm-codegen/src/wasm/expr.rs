@@ -251,8 +251,9 @@ impl WasmPackageBuilder<'_> {
                     }
                     return Ok(if is_fat_ptr { 2 } else { 1 });
                 }
-                // Component-local signal that's been migrated to the
-                // GC struct — struct.get each ABI slot.
+                // Component-local signal migrated to the GC struct —
+                // struct.get each ABI slot. (Global-property reads are now the
+                // distinct `GlobalRead` arm below.)
                 if let Some(sig_idx) = self.signal_index_in(component, *def_id)
                     && let Some(comp_idx) = self.comp_idx_of(component)
                     && self.signal_in_struct(comp_idx, sig_idx)
@@ -260,21 +261,40 @@ impl WasmPackageBuilder<'_> {
                     self.emit_signal_struct_read(func, comp_idx, sig_idx)?;
                     return Ok(self.signal_storage_valtypes(expr.ty).len());
                 }
-                // Migrated global property — read via per-block GC
-                // struct.
+                Err(CodegenError::InvalidIR(format!(
+                    "SignalRead: {:?} is not a component GC-struct signal \
+                     (global reads lower to GlobalRead)",
+                    def_id
+                )))
+            }
+
+            LirExprKind::GlobalRead(def_id) => {
+                // Inside a filter helper (a module-level fn with no `self`), a
+                // captured read is a WASM param — same convention as
+                // `SignalRead`. Globals are module-scope so this is usually
+                // unnecessary, but preserve it for parity with capture
+                // collection (`extract_signal_reads`).
+                if let Some(captured) = &self.current_filter_captured_signals
+                    && let Some(&(local_idx, is_fat_ptr)) = captured.get(def_id)
+                {
+                    func.instruction(&Instruction::LocalGet(local_idx));
+                    if is_fat_ptr {
+                        func.instruction(&Instruction::LocalGet(local_idx + 1));
+                    }
+                    return Ok(if is_fat_ptr { 2 } else { 1 });
+                }
+                // Global-block property, backed by the module's per-block
+                // globals GC struct (`global.get $globals_<block>_self;
+                // struct.get`). Reactively identical to a signal read; the
+                // storage/codegen path is what differs.
                 if self.ctx.defs.owning_global_block(*def_id).is_some()
                     && self.global_in_struct(*def_id)
                 {
                     self.emit_global_struct_read(func, *def_id)?;
                     return Ok(self.signal_storage_valtypes(expr.ty).len());
                 }
-                // §1.5: no memory-resident signal storage remains —
-                // component-local signals are GC-struct fields and every
-                // non-unit global property is a core wasm global. A
-                // SignalRead reaching here is a lowering/codegen bug.
                 Err(CodegenError::InvalidIR(format!(
-                    "SignalRead: {:?} resolves to neither a component GC-struct \
-                     signal nor a core-global-backed global property",
+                    "GlobalRead: {:?} is not a globals-struct-backed global property",
                     def_id
                 )))
             }
@@ -472,7 +492,9 @@ impl WasmPackageBuilder<'_> {
                                 handled_via_emit = true;
                             }
                             if !handled_via_emit {
-                                if let LirExprKind::SignalRead(def_id) = &component.expr(*arg).kind {
+                                if let LirExprKind::SignalRead(def_id)
+                                | LirExprKind::GlobalRead(def_id) = &component.expr(*arg).kind
+                                {
                                     // Not a `zip`: the intermediate `filter` consumes
                                     // `sig_idx` and the tuple is `(ci, sig_idx)`, neither
                                     // of which `Option::zip` can express.

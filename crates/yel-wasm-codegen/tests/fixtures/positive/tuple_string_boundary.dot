@@ -7,14 +7,14 @@ digraph yel_signal_graph {
     label="component App (export)";
     style=rounded;
     color="#888";
-    "c0_sig_478" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="pair\n: tuple<s32, string>", class="yel-signal"];
-    "c0_sig_479" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="swapped\n: tuple<string, s32>", class="yel-signal"];
-    "c0_sig_480" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="both\n: tuple<string, string>", class="yel-signal"];
-    "c0_sig_481" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="listed\n: tuple<s32, list<s32>>", class="yel-signal"];
-    "c0_sig_482" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withRecord\n: tuple<s32, Item>", class="yel-signal"];
-    "c0_sig_483" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withOption\n: tuple<s32, option<string>>", class="yel-signal"];
-    "c0_sig_484" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withResult\n: tuple<s32, result<s32, string>>", class="yel-signal"];
-    "c0_sig_485" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="nested\n: tuple<s32, tuple<s32, string>>", class="yel-signal"];
-    "c0_sig_486" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="nestedRecord\n: tuple<s32, tuple<Item, s32>>", class="yel-signal"];
+    "c0_sig_488" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="pair\n: tuple<s32, string>", class="yel-signal"];
+    "c0_sig_489" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="swapped\n: tuple<string, s32>", class="yel-signal"];
+    "c0_sig_490" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="both\n: tuple<string, string>", class="yel-signal"];
+    "c0_sig_491" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="listed\n: tuple<s32, list<s32>>", class="yel-signal"];
+    "c0_sig_492" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withRecord\n: tuple<s32, Item>", class="yel-signal"];
+    "c0_sig_493" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withOption\n: tuple<s32, option<string>>", class="yel-signal"];
+    "c0_sig_494" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withResult\n: tuple<s32, result<s32, string>>", class="yel-signal"];
+    "c0_sig_495" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="nested\n: tuple<s32, tuple<s32, string>>", class="yel-signal"];
+    "c0_sig_496" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="nestedRecord\n: tuple<s32, tuple<Item, s32>>", class="yel-signal"];
   }
 }
