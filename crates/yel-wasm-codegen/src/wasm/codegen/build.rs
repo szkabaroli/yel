@@ -436,13 +436,11 @@ impl<'a> WasmPackageBuilder<'a> {
         // A global property with no default has no expr to seed from, yet its
         // declared type still needs GC-type registration (the globals-layout
         // pass below calls `signal_storage_valtypes` on it). Seed every global
-        // property's type directly.
-        for block_def_id in self.ctx.defs.globals().collect::<Vec<_>>() {
-            if let Some(block) = self.ctx.defs.as_global(block_def_id) {
-                for &prop_id in &block.properties {
-                    if let Some(prop_ty) = self.ctx.defs.type_of(prop_id) {
-                        extra_seed_tys.push(prop_ty);
-                    }
+        // property's type directly from the first-class `LirGlobal` items.
+        for global in &self.globals {
+            for prop in &global.properties {
+                if let Some(prop_ty) = self.ctx.defs.type_of(prop.def_id) {
+                    extra_seed_tys.push(prop_ty);
                 }
             }
         }
@@ -850,36 +848,28 @@ impl<'a> WasmPackageBuilder<'a> {
         // not instantiable, so they need no struct.
         let mut globals_layouts: Vec<GlobalsBlockLayout> = Vec::new();
         let mut global_block_def_to_idx: HashMap<DefId, usize> = HashMap::default();
-        let global_block_ids: Vec<DefId> = self.ctx.defs.globals().collect();
 
-        for block_def_id in global_block_ids.iter().copied() {
-            let block = self
-                .ctx
-                .defs
-                .as_global(block_def_id)
-                .ok_or_else(|| {
-                    CodegenError::InternalError(format!(
-                        "globals() iterator yielded {:?} which is not a GlobalDef",
-                        block_def_id
-                    ))
-                })?
-                .clone();
-            let prop_slot_valtypes: Vec<Vec<ValType>> = block
+        // Walk the module's first-class `LirGlobal` items (not
+        // `ctx.defs.globals()`) for global structure. Property *types* still
+        // come from the interner (`type_of`), which is shared def-table state.
+        let globals = self.globals.clone();
+        for global in &globals {
+            let prop_slot_valtypes: Vec<Vec<ValType>> = global
                 .properties
                 .iter()
-                .map(|&prop_id| {
+                .map(|prop| {
                     let prop_ty = self
                         .ctx
                         .defs
-                        .type_of(prop_id)
+                        .type_of(prop.def_id)
                         .unwrap_or(yel_core::types::Ty::ERROR);
                     self.signal_storage_valtypes(prop_ty)
                 })
                 .collect();
 
-            let layout = compute_globals_block_layout(block_def_id, &prop_slot_valtypes);
+            let layout = compute_globals_block_layout(global.def_id, &prop_slot_valtypes);
 
-            global_block_def_to_idx.insert(block_def_id, globals_layouts.len());
+            global_block_def_to_idx.insert(global.def_id, globals_layouts.len());
             globals_layouts.push(layout);
         }
         self.globals_layouts = globals_layouts;
@@ -2181,16 +2171,18 @@ impl<'a> WasmPackageBuilder<'a> {
         // default expression under canonical-ABI flattening. Minimum of 3
         // i32 keeps a stable baseline for simple string/result defaults.
         let mut max_counts: (u32, u32, u32, u32) = (3, 0, 0, 0);
-        for global_id in self.ctx.defs.globals() {
-            let Some(g) = self.ctx.defs.as_global(global_id) else {
-                continue;
-            };
-            for &prop_id in &g.properties {
-                if let Some(default) = self.global_defaults.get(&prop_id) {
-                    let slots = self.flatten_core_slots(default.ty);
-                    merge_max_slot_counts(&mut max_counts, &slots);
-                }
-            }
+        // Collect (prop_id, default) pairs from the first-class `LirGlobal`
+        // items in declaration order (deterministic), reused for both the
+        // scratch-sizing pass and the init emission below.
+        let inits: Vec<(DefId, LirExpr)> = self
+            .globals
+            .iter()
+            .flat_map(|g| &g.properties)
+            .filter_map(|p| p.default.as_ref().map(|d| (p.def_id, d.clone())))
+            .collect();
+        for (_, default) in &inits {
+            let slots = self.flatten_core_slots(default.ty);
+            merge_max_slot_counts(&mut max_counts, &slots);
         }
         let (max_i32, max_i64, max_f32, max_f64) = max_counts;
         let mut locals: Vec<(u32, ValType)> = Vec::new();
@@ -2213,21 +2205,9 @@ impl<'a> WasmPackageBuilder<'a> {
             f64_count: max_f64,
         };
 
-        // Collect (prop_id, default_expr) pairs in global declaration
-        // order so output is deterministic. §1.5: every non-unit
-        // property is core-global-backed, so each init goes through
-        // `emit_global_struct_store_from_expr`.
-        let mut inits: Vec<(DefId, LirExpr)> = Vec::new();
-        for global_id in self.ctx.defs.globals() {
-            let Some(g) = self.ctx.defs.as_global(global_id) else {
-                continue;
-            };
-            for &prop_id in &g.properties {
-                if let Some(default) = self.global_defaults.get(&prop_id) {
-                    inits.push((prop_id, default.clone()));
-                }
-            }
-        }
+        // `inits` (collected above from `self.globals`) drives emission.
+        // §1.5: every non-unit property is core-global-backed, so each init
+        // goes through `emit_global_struct_store_from_expr`.
 
         if !inits.is_empty() {
             // Module scope has no owning component. `emit_signal_store` /

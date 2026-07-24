@@ -32,7 +32,8 @@ use yel_core::lir::{
     LirBindingMode, LirCoreValType, LirLayoutContext, LirLiteral, LirSlotKind, align_to,
 };
 use yel_core::lir::{
-    LirExpr, LirExprId, LirExprKind, LirImport, LirInterface, LirModule, LirReceiver, LirResource,
+    LirExpr, LirExprId, LirExprKind, LirGlobal, LirImport, LirInterface, LirModule, LirReceiver,
+    LirResource,
     LirSlotId,
 };
 use yel_core::types::Ty;
@@ -433,7 +434,7 @@ pub fn generate_wasm_module_with_wit(
     builder.set_wit_package(&options.namespace, &options.name, &options.version);
 
     // Seed global singleton defaults — the start function emits these.
-    builder.set_global_defaults(module.global_defaults_map(), module.global_exprs.clone());
+    builder.set_globals(module.globals.clone(), module.global_exprs.clone());
 
     // Provide the host-import registry + interfaces — the import section,
     // index space, and per-import type interning all derive from these.
@@ -977,9 +978,14 @@ pub(crate) struct WasmPackageBuilder<'a> {
     /// Block DefId → index into `globals_layouts`. Reverse lookup for
     /// `Definitions::owning_global_block`.
     pub global_block_def_to_idx: HashMap<DefId, usize>,
+    /// The module's first-class global items (`LirModule.globals`). Codegen
+    /// walks these for global structure (properties + directions + defaults,
+    /// callbacks) instead of re-deriving it from `ctx.defs.globals()`.
+    pub globals: Vec<LirGlobal>,
     /// Typed default expressions for global singleton properties, keyed by
-    /// property DefId. Lowered at module start to seed each backing slot.
-    /// Each value's `LirExprId` children index into `global_default_exprs`.
+    /// property DefId — a `DefId → default` view derived from [`Self::globals`]
+    /// for O(1) per-property lookup. Each value's `LirExprId` children index
+    /// into `global_default_exprs`.
     pub global_defaults: HashMap<DefId, LirExpr>,
     /// Expression arena backing `global_defaults`' top-level nodes.
     pub global_default_exprs: Vec<LirExpr>,
@@ -1209,6 +1215,7 @@ impl<'a> WasmPackageBuilder<'a> {
             layouts: Vec::new(),
             globals_layouts: Vec::new(),
             global_block_def_to_idx: HashMap::default(),
+            globals: Vec::new(),
             global_defaults: HashMap::default(),
             global_default_exprs: Vec::new(),
             imports: Vec::new(),
@@ -1265,15 +1272,18 @@ impl<'a> WasmPackageBuilder<'a> {
         self.wit_package = Some((namespace.to_string(), name.to_string(), version.to_string()));
     }
 
-    /// Provide the LIR-lowered default expressions for global singleton
-    /// properties. The module start function stores them to each property's
-    /// backing slot before any export runs.
-    pub fn set_global_defaults(
-        &mut self,
-        defaults: HashMap<DefId, LirExpr>,
-        default_exprs: Vec<LirExpr>,
-    ) {
-        self.global_defaults = defaults;
+    /// Provide the module's first-class globals + their shared default-expr
+    /// arena. Codegen walks `globals` for structure; the `DefId → default`
+    /// lookup map is derived here so per-property sites stay O(1). The module
+    /// start function stores each default to its property's backing slot
+    /// before any export runs.
+    pub fn set_globals(&mut self, globals: Vec<LirGlobal>, default_exprs: Vec<LirExpr>) {
+        self.global_defaults = globals
+            .iter()
+            .flat_map(|g| &g.properties)
+            .filter_map(|p| p.default.as_ref().map(|d| (p.def_id, d.clone())))
+            .collect();
+        self.globals = globals;
         self.global_default_exprs = default_exprs;
     }
 

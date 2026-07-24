@@ -182,17 +182,16 @@ This is part of the same generic-back-end push as [§1.1–1.4](#1-big-transitio
       legitimate uses, not emission fabrication. Latent bug closed along the way:
       module-scope filter predicates used to get an **empty** expression arena
       (pinned by the `global_filter_default` fixture).
-- [ ] **`resolve_global_triggers` — an entire extra compiler pass that exists
-      solely because globals aren't lowered in the same one-pass-per-item flow as
-      components** (`lower_to_lir/blocks.rs::resolve_global_triggers`, run once
-      after every component is lowered — `pipeline.rs::lower_all`). It synthesizes
-      per-(observing-component, global) fanout blocks and rewrites
-      `LirOp::TriggerEffects` placeholders into `CallBlock`s; a `TriggerEffects`
-      surviving to codegen is a hard `InvalidIR` error
-      (`wasm/codegen/op_emit.rs:947`) that literally says "the
-      resolve_global_triggers pass must run after lowering" — i.e. codegen's
-      correctness depends on an out-of-band, globals-only pass with no equivalent
-      for component-to-component signal propagation (handled inline, per-item).
+- [x] **`resolve_global_triggers` is a legitimate whole-module pass, not debt**
+      — it synthesizes each observing component's global-fanout blocks and
+      expands `LirOp::TriggerEffects` placeholders into `CallBlock`s
+      (`lower_to_lir/blocks.rs`), and it *must* run after every component is
+      lowered because a global's fan-out targets don't exist until then — a link
+      step, not a globals-second-class hack. It now lives inside the shared
+      `Compiler::lower_items_to_module` spine (see the previous item), so no
+      driver bolts it on by hand. Component-to-component propagation is handled
+      inline because a component observing its *own* signals needs no
+      cross-item pass; a global crossing component boundaries genuinely does.
 - [x] **One shared module-lowering spine** — resolved.
       `Compiler::lower_items_to_module(items, package) -> LirModule`
       (`compiler.rs`) is the single entry every driver shares: it type-checks
@@ -210,23 +209,28 @@ This is part of the same generic-back-end push as [§1.1–1.4](#1-big-transitio
       debt: `resolve_global_triggers` is inherently a whole-module step (it needs
       every component lowered before it can wire fan-out), like a link phase —
       it lives inside the spine, not bolted onto each caller.
-- [ ] **Codegen: globals get no registry/handle scaffolding, a separate
-      `(start)` init function, and a separate layout pass.**
-      `GlobalsBlockLayout` (`wasm/gc_types.rs`) is explicitly documented as
-      "singletons — no registry / handle / array scaffolding," unlike the
-      per-component `GcTypeLayout` (registry array + free-list + handle table,
-      assigned in `build.rs`). Global seeding is `generate_globals_init`
-      (`build.rs`), a dedicated function assembled directly in codegen via the
-      `empty_module_carrier` hack, wholly outside the per-resource block-lowering
-      path components use (their `constructor_block`/`internal_constructor_block`
-      on `LirResource`). `compute_globals_block_layout` (`build.rs`) is also a
-      separate loop over `ctx.defs.globals()` (the HIR-era side table), not a walk
-      over `LirModule` items uniformly.
-- [ ] **`docs/ARCHITECTURE.md` is stale relative to the in-progress unification**
-      — it still describes `type_check_globals`/`lower_globals_to_lir` as parallel
-      phase methods and `LirModule.components` (renamed `resources` in phase 4
-      step 1). Update §2–3 alongside the next phase-4 sub-step, per the plan's own
-      "Invariants" section.
+- [x] **Codegen consumes the first-class `LirGlobal` (not `ctx.defs.globals()`)**
+      — resolved. `generate_globals_init`, `compute_globals_block_layout`'s
+      driving loop, and the global type-seeding pass (`build.rs`) now walk
+      `WasmPackageBuilder.globals` (the module's `Vec<LirGlobal>`, set via
+      `set_globals`) for global *structure* — property `DefId`s, directions,
+      defaults, callbacks. The only thing they still read from `ctx.defs` is
+      `type_of(prop)` (property *types*), which is shared interner state every
+      phase reads, not global structure. The `LirGlobal` the frontend produces
+      is now actually consumed by the back-end it was built for.
+      The rest of this item was never debt, and is correct by design: a global
+      genuinely needs **no** registry/handle scaffolding (it is a singleton,
+      not instantiable), and its state is seeded by a `(start)` function
+      emitting `global.set` into **core wasm globals** — target code that
+      belongs in the back-end (`GlobalsBlockLayout`/`generate_globals_init` map
+      properties to `wasm_encoder::ValType`s + core-global indices). `yel-core`
+      stays target-neutral; it owns only the neutral `LirGlobal` description.
+- [x] **`docs/ARCHITECTURE.md` updated** — §2–3 now describe the current
+      pipeline (one `type_check` entry, `lower_globals_to_lir` → `Vec<LirGlobal>`,
+      the shared `resolve_global_triggers` / `build_import_contract` passes) and
+      the current `LirModule` shape (`resources` / `globals` / `global_exprs` /
+      `imports` / `interfaces`). No `type_check_globals` / `LirModule.components`
+      references remain.
 
 ---
 
