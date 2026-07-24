@@ -10,6 +10,7 @@
 
 use wasm_encoder::{Function, Instruction, ValType};
 
+use yel_core::lir::arena::LirResourceArena;
 use yel_core::lir::{LirBlock, LirResource, LirSlotId, LirSlotInfo, LirSlotKind};
 
 /// Emit `cabi_realloc(0, 0, align, size)`, leaving the freshly-allocated
@@ -72,7 +73,7 @@ pub(super) fn compute_mount_retention_counts(component: &LirResource) -> u32 {
 /// at the call site, so the `WasmParam` variant can bypass the offset.
 #[inline]
 pub(crate) fn slot_local(
-    component: &LirResource,
+    component: &dyn LirResourceArena,
     block: &LirBlock,
     slot: LirSlotId,
     local_offset: u32,
@@ -89,7 +90,7 @@ pub(crate) fn slot_local(
             // Resource Temp slots in the component.
             LirSlotId::Block { .. } => {
                 let n_resource_temp = component
-                    .slots
+                    .slots()
                     .iter()
                     .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
                     .count() as u32;
@@ -115,7 +116,7 @@ pub(crate) fn slot_local(
 pub(crate) fn slot_info<'a>(
     slot: LirSlotId,
     block: &'a LirBlock,
-    component: &'a LirResource,
+    component: &'a dyn LirResourceArena,
 ) -> &'a LirSlotInfo {
     match slot {
         LirSlotId::Block { block: bid, idx } => {
@@ -134,7 +135,7 @@ pub(crate) fn slot_info<'a>(
             }
             &block.slots[idx as usize]
         }
-        LirSlotId::Resource { idx } => &component.slots[idx as usize],
+        LirSlotId::Resource { idx } => &component.slots()[idx as usize],
     }
 }
 
@@ -145,12 +146,12 @@ pub(crate) fn slot_info<'a>(
 /// non-block contexts today) and panics on `Block`.
 #[inline]
 pub(crate) fn slot_local_resource_only(
-    component: &LirResource,
+    component: &dyn LirResourceArena,
     slot: LirSlotId,
     local_offset: u32,
 ) -> u32 {
     match slot {
-        LirSlotId::Resource { idx } => match component.slots[idx as usize].kind {
+        LirSlotId::Resource { idx } => match component.slots()[idx as usize].kind {
             LirSlotKind::Temp { local_idx } => local_idx + local_offset,
             LirSlotKind::WasmParam { idx } => idx,
             LirSlotKind::Memory { .. } => panic!(

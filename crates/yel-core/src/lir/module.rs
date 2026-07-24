@@ -15,8 +15,11 @@ use crate::interner::Name;
 use crate::syntax::ast::PackageId;
 use crate::types::Ty;
 
+use super::arena::{LirExprArena, LirResourceArena, LirSlotArena, LirStringArena};
+use super::block::{LirBlock, LirSlotInfo, StringId};
 use super::expr::LirExpr;
 use super::node::LirResource;
+use super::struct_types::{LirArrayTypeDecl, LirStructTypeDecl};
 
 /// Whether a world item is imported from or exported to the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +157,73 @@ pub struct LirGlobal {
     pub properties: Vec<LirGlobalProperty>,
     /// Host-imported callback `DefId`s (in declaration order).
     pub callbacks: Vec<DefId>,
+}
+
+/// The emission scope for **module-scope expressions** — global-singleton
+/// property defaults and module-scope filter predicates — as a minimal
+/// [`LirResourceArena`]. It replaces the fabricated `LirResource` carrier the
+/// back-end used to synthesize (`DefId::INVALID`, a placeholder block): the
+/// shared wasm expression emitter reads its owning scope through the arena
+/// traits, so module scope plugs in as a purpose-built adapter that owns only
+/// the expression arena its expressions' `LirExprId` children index into.
+///
+/// It has no signals, slots, blocks, or GC types, because module-scope
+/// expressions reference only globals — which resolve through core wasm
+/// globals, not a resource. A component-local lookup that leaks in resolves
+/// against the empty tables and fails loudly (No-Silent-Fallbacks).
+pub struct ModuleScope {
+    name: Name,
+    exprs: Vec<LirExpr>,
+}
+
+impl ModuleScope {
+    /// Build a module-scope emission arena over `exprs` (typically a
+    /// [`LirModule::global_exprs`] arena).
+    pub fn new(name: Name, exprs: Vec<LirExpr>) -> Self {
+        Self { name, exprs }
+    }
+}
+
+impl LirExprArena for ModuleScope {
+    fn exprs(&self) -> &[LirExpr] {
+        &self.exprs
+    }
+}
+
+impl LirStringArena for ModuleScope {
+    fn string(&self, id: StringId) -> &str {
+        unreachable!(
+            "ModuleScope owns no interned strings (id {id:?}) — module-scope \
+             expressions inline their string literals"
+        )
+    }
+}
+
+impl LirSlotArena for ModuleScope {
+    fn slots(&self) -> &[LirSlotInfo] {
+        &[]
+    }
+}
+
+impl LirResourceArena for ModuleScope {
+    fn def_id(&self) -> DefId {
+        DefId::INVALID
+    }
+    fn name(&self) -> Name {
+        self.name
+    }
+    fn is_export(&self) -> bool {
+        false
+    }
+    fn blocks(&self) -> &[LirBlock] {
+        &[]
+    }
+    fn struct_types(&self) -> &[LirStructTypeDecl] {
+        &[]
+    }
+    fn array_types(&self) -> &[LirArrayTypeDecl] {
+        &[]
+    }
 }
 
 /// A Yel module — one or more `.yel` files compiled together.

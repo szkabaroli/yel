@@ -163,21 +163,25 @@ This is part of the same generic-back-end push as [§1.1–1.4](#1-big-transitio
       built once by `CompilerContext::build_import_contract`, off which both the
       core import section and the WIT import interfaces derive — killing the old
       independent `ImportLayout`-vs-`wit_ast` derivations that could drift.
-- [ ] **Module-scope emission still borrows a `LirResource` shape**
-      (`lir/node.rs::module_scope_carrier`, `def_id: DefId::INVALID`, one
-      placeholder block, no signals). The old `empty_module_carrier` +
-      per-call `carrier.exprs = clone()` fabricate-then-mutate pattern is gone:
-      `module_scope_carrier(name, exprs)` constructs the scope in one honest call
-      owning the module expression arena, and both codegen sites
-      (`generate_globals_init` and the module-scope filter loop in
-      `wasm/codegen/build.rs`) go through it — which also closed a latent bug
-      where module-scope filter predicates were handed an **empty** arena and
-      couldn't resolve their child exprs (pinned by the `global_filter_default`
-      fixture). What remains is the root cause: `emit_expr` is typed against
-      `&LirResource`, so module scope needs *some* `LirResource`-shaped value.
-      Full removal = make the shared emitter generic over the `LirFunctionLike`
-      arena trait (`lir/arena.rs`); the flow frontend used the same carrier, but
-      it is deprioritized, so nothing else blocks that refactor now.
+- [x] **Module-scope emission no longer fabricates a `LirResource`** —
+      resolved. The shared wasm emitter (`emit_expr` and its helpers —
+      `emit_callback_arg`, `emit_variant_ctor_*`, `slot_local`/`slot_info`,
+      `signal_index_in`, `comp_idx_of`, `emit_global_struct_store_from_expr`,
+      `generate_filter_function`) now takes `&dyn LirResourceArena` instead of a
+      concrete `&LirResource`. Component callers pass `&LirResource` (auto
+      unsizing coercion — no call-site churn); module-scope emission
+      (`generate_globals_init`, the module-scope filter loop) plugs in a
+      purpose-built `lir::module::ModuleScope` arena that owns only the global
+      default-expression arena — no `DefId::INVALID`, no placeholder block, no
+      fake signals. The arena trait gained `exprs()` and a transitional
+      `signals()` (defaulted empty for non-UI scopes); its `block()` default was
+      made dedupe-robust (id-match + linear fallback) to match
+      `LirResource::get_block`. The old fabricated `module_scope_carrier` is
+      deleted; the minimal `LirResource::empty` shell survives only for the flow
+      frontend's per-function packaging and boundary-rewrite test scaffolding —
+      legitimate uses, not emission fabrication. Latent bug closed along the way:
+      module-scope filter predicates used to get an **empty** expression arena
+      (pinned by the `global_filter_default` fixture).
 - [ ] **`resolve_global_triggers` — an entire extra compiler pass that exists
       solely because globals aren't lowered in the same one-pass-per-item flow as
       components** (`lower_to_lir/blocks.rs::resolve_global_triggers`, run once

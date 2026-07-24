@@ -99,7 +99,7 @@ pub struct GcTypeLayout {
     pub tree_root_type_idx: Option<u32>,
     /// Index of the trailing `(mut (ref null $<comp>_tree_root))`
     /// field on `$Comp_<Name>`. `None` when the component has no
-    /// body tree (e.g. `module_scope_carrier`). The constructor
+    /// body tree (e.g. `LirResource::empty`). The constructor
     /// populates this field with a freshly-allocated root struct so
     /// every instance starts with a non-null typed root.
     ///

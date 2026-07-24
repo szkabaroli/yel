@@ -27,6 +27,7 @@ use wit_component::{StringEncoding, dummy_module};
 use wit_parser::{ManglingAndAbi, Resolve, WorldId};
 use yel_core::context::CompilerContext;
 use yel_core::ids::{BlockId, DefId, LocalId};
+use yel_core::lir::arena::LirResourceArena;
 use yel_core::lir::{
     LirBindingMode, LirCoreValType, LirLayoutContext, LirLiteral, LirSlotKind, align_to,
 };
@@ -2091,19 +2092,22 @@ impl<'a> WasmPackageBuilder<'a> {
     }
 
     /// Get signal index by DefId within a specific component
-    pub fn signal_index_in(&self, component: &LirResource, def_id: DefId) -> Option<usize> {
-        component.signals.iter().position(|s| s.def_id == def_id)
+    pub fn signal_index_in(
+        &self,
+        component: &dyn LirResourceArena,
+        def_id: DefId,
+    ) -> Option<usize> {
+        component.signals().iter().position(|s| s.def_id == def_id)
     }
 
     /// Position of `component` in `self.components` — the index used
     /// to look up `self.gc_layouts[i]` and other per-component data.
-    /// Returns `None` for the empty module-scope carrier used during
-    /// global-defaults emission, where no component owns the expressions
-    /// being lowered.
-    pub fn comp_idx_of(&self, component: &LirResource) -> Option<usize> {
+    /// Returns `None` for a module-scope emission scope (no owning
+    /// component), where no component owns the expressions being lowered.
+    pub fn comp_idx_of(&self, component: &dyn LirResourceArena) -> Option<usize> {
         self.components
             .iter()
-            .position(|c| c.def_id == component.def_id)
+            .position(|c| c.def_id == component.def_id())
     }
 }
 

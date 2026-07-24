@@ -16,7 +16,8 @@ use wasm_encoder::{
     TypeSection, ValType,
 };
 
-use yel_core::lir::{LirExpr, LirResource, align_to};
+use yel_core::lir::arena::LirResourceArena;
+use yel_core::lir::{LirExpr, LirResource, ModuleScope, align_to};
 use yel_core::types::InternedTyKind;
 use yel_core::{DefId, Ty};
 
@@ -1978,16 +1979,14 @@ impl<'a> WasmPackageBuilder<'a> {
         //             predicate's `LirExprId` children resolve.
         let filter_calls_clone = self.filter_calls.clone();
         let module_carrier_name = self.ctx.intern("<module>");
-        let module_carrier = LirResource::module_scope_carrier(
-            module_carrier_name,
-            self.global_default_exprs.clone(),
-        );
+        let module_scope =
+            ModuleScope::new(module_carrier_name, self.global_default_exprs.clone());
         for (filter_id, (comp_idx, elem_ty, elem_size, param, predicate)) in
             filter_calls_clone.iter().enumerate()
         {
-            let component = match comp_idx {
+            let component: &dyn LirResourceArena = match comp_idx {
                 Some(idx) => &self.components[*idx],
-                None => &module_carrier,
+                None => &module_scope,
             };
             code.function(&self.generate_filter_function(
                 filter_id,
@@ -2239,10 +2238,8 @@ impl<'a> WasmPackageBuilder<'a> {
             // arena so `emit_expr` resolves each default's `LirExprId`
             // children.
             let carrier_name = self.ctx.intern("<module>");
-            let carrier = LirResource::module_scope_carrier(
-                carrier_name,
-                self.global_default_exprs.clone(),
-            );
+            let module_scope =
+                ModuleScope::new(carrier_name, self.global_default_exprs.clone());
             self.current_init_scratch_start = Some(0);
             self.current_flat_scratch = Some(globals_scratch);
             for (prop_id, expr) in inits {
@@ -2251,7 +2248,7 @@ impl<'a> WasmPackageBuilder<'a> {
                         &mut func,
                         prop_id,
                         &expr,
-                        &carrier,
+                        &module_scope,
                         globals_scratch,
                     )?;
                 } else {

@@ -9,7 +9,8 @@ use yel_core::{DefId, Ty};
 
 use super::CodegenError;
 use yel_core::hir::expr::{BinOp, UnaryOp};
-use yel_core::lir::{LirBindingMode, LirResource, LirExpr, LirExprKind, LirLiteral};
+use yel_core::lir::arena::LirResourceArena;
+use yel_core::lir::{LirBindingMode, LirExpr, LirExprKind, LirLiteral};
 use yel_core::types::InternedTyKind;
 
 use super::codegen::{mem_arg, slot_local_resource_only};
@@ -20,7 +21,7 @@ impl WasmPackageBuilder<'_> {
         &mut self,
         func: &mut Function,
         expr: &LirExpr,
-        component: &LirResource,
+        component: &dyn LirResourceArena,
     ) -> Result<usize, CodegenError> {
         match &expr.kind {
             LirExprKind::Literal(lit) => {
@@ -118,7 +119,7 @@ impl WasmPackageBuilder<'_> {
                     let local_idx = match self.current_generated_block_id {
                         Some(block_id) => super::codegen::scratch::slot_local(
                             component,
-                            component.get_block(block_id),
+                            component.block(block_id),
                             *slot_id,
                             local_offset,
                         ),
@@ -279,8 +280,8 @@ impl WasmPackageBuilder<'_> {
             }
 
             LirExprKind::Binary { op, lhs, rhs } => {
-                let lhs = component.get_expr(*lhs);
-                let rhs = component.get_expr(*rhs);
+                let lhs = component.expr(*lhs);
+                let rhs = component.expr(*rhs);
                 self.emit_expr(func, lhs, component)?;
                 self.emit_expr(func, rhs, component)?;
                 self.emit_binary_op(func, op, lhs.ty);
@@ -288,7 +289,7 @@ impl WasmPackageBuilder<'_> {
             }
 
             LirExprKind::Unary { op, operand } => {
-                let operand = component.get_expr(*operand);
+                let operand = component.expr(*operand);
                 self.emit_expr(func, operand, component)?;
                 self.emit_unary_op(func, op, operand.ty);
                 Ok(1)
@@ -299,9 +300,9 @@ impl WasmPackageBuilder<'_> {
                 then_expr,
                 else_expr,
             } => {
-                let condition = component.get_expr(*condition);
-                let then_expr = component.get_expr(*then_expr);
-                let else_expr = component.get_expr(*else_expr);
+                let condition = component.expr(*condition);
+                let then_expr = component.expr(*then_expr);
+                let else_expr = component.expr(*else_expr);
                 self.emit_expr(func, condition, component)?;
                 // Single source of truth for the block type — covers
                 // primitives (`Result(valtype)`), multi-slot composites
@@ -330,7 +331,7 @@ impl WasmPackageBuilder<'_> {
                     "s32-to-string" => {
                         // Call s32_to_string runtime function
                         if let Some(arg) = args.first() {
-                            self.emit_expr(func, component.get_expr(*arg), component)?;
+                            self.emit_expr(func, component.expr(*arg), component)?;
                         } else {
                             todo!("s32-to-string requires 1 arg: {:?}", expr.kind)
                         }
@@ -343,7 +344,7 @@ impl WasmPackageBuilder<'_> {
                     "bool-to-string" => {
                         // Call bool_to_string runtime function
                         if let Some(arg) = args.first() {
-                            self.emit_expr(func, component.get_expr(*arg), component)?;
+                            self.emit_expr(func, component.expr(*arg), component)?;
                         } else {
                             todo!("bool-to-string requires 1 arg: {:?}", expr.kind)
                         }
@@ -354,7 +355,7 @@ impl WasmPackageBuilder<'_> {
                     "u32-to-string" => {
                         // u32 can be converted using s32_to_string (values fit in positive i32 range)
                         if let Some(arg) = args.first() {
-                            self.emit_expr(func, component.get_expr(*arg), component)?;
+                            self.emit_expr(func, component.expr(*arg), component)?;
                         } else {
                             todo!("u32-to-string requires 1 arg: {:?}", expr.kind)
                         }
@@ -369,7 +370,7 @@ impl WasmPackageBuilder<'_> {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR(format!("{} requires 1 arg", func_name))
                         })?;
-                        self.emit_expr(func, component.get_expr(*arg), component)?;
+                        self.emit_expr(func, component.expr(*arg), component)?;
                         let f = self.runtime_funcs.as_ref().and_then(|r| r.s64_to_string).expect("s64_to_string must be in runtime_needs (scan missed it?)");
                         func.instruction(&Instruction::Call(f));
                         self.emit_str_bytes_unmaterialize(func)?;
@@ -378,7 +379,7 @@ impl WasmPackageBuilder<'_> {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR("f32-to-string requires 1 arg".to_string())
                         })?;
-                        self.emit_expr(func, component.get_expr(*arg), component)?;
+                        self.emit_expr(func, component.expr(*arg), component)?;
                         let f = self.runtime_funcs.as_ref().and_then(|r| r.f32_to_string).expect("f32_to_string must be in runtime_needs (scan missed it?)");
                         func.instruction(&Instruction::Call(f));
                         self.emit_str_bytes_unmaterialize(func)?;
@@ -387,7 +388,7 @@ impl WasmPackageBuilder<'_> {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR("f64-to-string requires 1 arg".to_string())
                         })?;
-                        self.emit_expr(func, component.get_expr(*arg), component)?;
+                        self.emit_expr(func, component.expr(*arg), component)?;
                         // Fallback: demote f64 -> f32 and stringify, since a
                         // dedicated f64_to_string runtime helper is not yet
                         // generated. This is lossy but validates cleanly and
@@ -406,7 +407,7 @@ impl WasmPackageBuilder<'_> {
                         let arg = args.first().ok_or_else(|| {
                             CodegenError::InvalidIR("char-to-string requires 1 arg".to_string())
                         })?;
-                        self.emit_expr(func, component.get_expr(*arg), component)?;
+                        self.emit_expr(func, component.expr(*arg), component)?;
                         let f = self.runtime_funcs.as_ref().and_then(|r| r.s32_to_string).expect("s32_to_string must be in runtime_needs (scan missed it?)");
                         func.instruction(&Instruction::Call(f));
                         self.emit_str_bytes_unmaterialize(func)?;
@@ -414,7 +415,7 @@ impl WasmPackageBuilder<'_> {
                     "object-to-string" => {
                         // Return "[object]" string
                         if let Some(arg) = args.first() {
-                            let count = self.emit_expr(func, component.get_expr(*arg), component)?;
+                            let count = self.emit_expr(func, component.expr(*arg), component)?;
                             for _ in 0..count {
                                 func.instruction(&Instruction::Drop);
                             }
@@ -429,7 +430,7 @@ impl WasmPackageBuilder<'_> {
                             self.emit_string_literal_gc(func, "");
                         } else if arity == 1 {
                             // Single arg - already a `$str_bytes` ref.
-                            self.emit_expr(func, component.get_expr(args[0]), component)?;
+                            self.emit_expr(func, component.expr(args[0]), component)?;
                         } else {
                             // strings-to-GC: each arg is a `$str_bytes` ref;
                             // materialize it to canonical (ptr,len) so the
@@ -437,7 +438,7 @@ impl WasmPackageBuilder<'_> {
                             // memory) can consume it. The result (ptr,len) is
                             // re-interned to a ref below.
                             for arg in args {
-                                self.emit_expr(func, component.get_expr(*arg), component)?;
+                                self.emit_expr(func, component.expr(*arg), component)?;
                                 self.emit_str_bytes_materialize(func)?;
                             }
                             // Call concat<n>
@@ -465,13 +466,13 @@ impl WasmPackageBuilder<'_> {
                             let mut handled_via_emit = false;
                             // GcArrayRef path: array.len instruction.
                             use super::repr::InternalRepr;
-                            if let InternalRepr::GcArrayRef(_) = self.internal_repr(component.get_expr(*arg).ty) {
-                                self.emit_expr(func, component.get_expr(*arg), component)?;
+                            if let InternalRepr::GcArrayRef(_) = self.internal_repr(component.expr(*arg).ty) {
+                                self.emit_expr(func, component.expr(*arg), component)?;
                                 func.instruction(&Instruction::ArrayLen);
                                 handled_via_emit = true;
                             }
                             if !handled_via_emit {
-                                if let LirExprKind::SignalRead(def_id) = &component.get_expr(*arg).kind {
+                                if let LirExprKind::SignalRead(def_id) = &component.expr(*arg).kind {
                                     // Not a `zip`: the intermediate `filter` consumes
                                     // `sig_idx` and the tuple is `(ci, sig_idx)`, neither
                                     // of which `Option::zip` can express.
@@ -498,7 +499,7 @@ impl WasmPackageBuilder<'_> {
                                             .as_ref()
                                             .map(|s| s.i32_base)
                                             .unwrap_or(2);
-                                        self.emit_expr(func, component.get_expr(*arg), component)?;
+                                        self.emit_expr(func, component.expr(*arg), component)?;
                                         func.instruction(&Instruction::LocalSet(scratch));
                                         func.instruction(&Instruction::Drop);
                                         func.instruction(&Instruction::LocalGet(scratch));
@@ -516,7 +517,7 @@ impl WasmPackageBuilder<'_> {
                                         .as_ref()
                                         .map(|s| s.i32_base)
                                         .unwrap_or(2);
-                                    self.emit_expr(func, component.get_expr(*arg), component)?;
+                                    self.emit_expr(func, component.expr(*arg), component)?;
                                     func.instruction(&Instruction::LocalSet(scratch));
                                     func.instruction(&Instruction::Drop);
                                     func.instruction(&Instruction::LocalGet(scratch));
@@ -534,10 +535,10 @@ impl WasmPackageBuilder<'_> {
                                 "list-get requires 2 args: list, index".to_string(),
                             ));
                         }
-                        let list_ty = component.get_expr(args[0]).ty;
+                        let list_ty = component.expr(args[0]).ty;
                         // Push src list (ref null $arr) and the index (i32).
-                        self.emit_expr(func, component.get_expr(args[0]), component)?;
-                        self.emit_expr(func, component.get_expr(args[1]), component)?;
+                        self.emit_expr(func, component.expr(args[0]), component)?;
+                        self.emit_expr(func, component.expr(args[1]), component)?;
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
@@ -561,12 +562,12 @@ impl WasmPackageBuilder<'_> {
                         // First arg is the string. Under strings-to-GC it is a
                         // $str_bytes ref; materialize to (ptr,len) for the
                         // linear-memory starts_with helper.
-                        self.emit_expr(func, component.get_expr(args[0]), component)?;
+                        self.emit_expr(func, component.expr(args[0]), component)?;
                         self.emit_str_bytes_materialize(func)?;
                         // Stack: [str_ptr, str_len]
 
                         // Second arg is the prefix.
-                        self.emit_expr(func, component.get_expr(args[1]), component)?;
+                        self.emit_expr(func, component.expr(args[1]), component)?;
                         self.emit_str_bytes_materialize(func)?;
                         // Stack: [str_ptr, str_len, prefix_ptr, prefix_len]
 
@@ -582,8 +583,8 @@ impl WasmPackageBuilder<'_> {
                             return Err(CodegenError::InvalidIR("min requires 2 args".to_string()));
                         }
                         // Emit both args
-                        self.emit_expr(func, component.get_expr(args[0]), component)?;
-                        self.emit_expr(func, component.get_expr(args[1]), component)?;
+                        self.emit_expr(func, component.expr(args[0]), component)?;
+                        self.emit_expr(func, component.expr(args[1]), component)?;
                         // Stack: [a, b]
                         // Duplicate for comparison: [a, b, a, b]
                         let s_a = self
@@ -608,8 +609,8 @@ impl WasmPackageBuilder<'_> {
                             return Err(CodegenError::InvalidIR("max requires 2 args".to_string()));
                         }
                         // Emit both args
-                        self.emit_expr(func, component.get_expr(args[0]), component)?;
-                        self.emit_expr(func, component.get_expr(args[1]), component)?;
+                        self.emit_expr(func, component.expr(args[0]), component)?;
+                        self.emit_expr(func, component.expr(args[1]), component)?;
                         // Stack: [a, b]
                         let s_a = self
                             .current_flat_scratch
@@ -637,10 +638,10 @@ impl WasmPackageBuilder<'_> {
                                 "append requires 2 args: list, element".to_string(),
                             ));
                         }
-                        let list_ty = component.get_expr(args[0]).ty;
+                        let list_ty = component.expr(args[0]).ty;
                         // Push src list (ref null $arr) and the new element.
-                        self.emit_expr(func, component.get_expr(args[0]), component)?;
-                        self.emit_expr(func, component.get_expr(args[1]), component)?;
+                        self.emit_expr(func, component.expr(args[0]), component)?;
+                        self.emit_expr(func, component.expr(args[1]), component)?;
                         let runtime_funcs = self.runtime_funcs.as_ref().ok_or_else(|| {
                             CodegenError::InvalidIR("Runtime functions not initialized".to_string())
                         })?;
@@ -683,20 +684,20 @@ impl WasmPackageBuilder<'_> {
                         })?;
                         let predicate = self.filter_calls[filter_id].4.clone();
                         let mut captured_signals: Vec<(DefId, Ty)> = Vec::new();
-                        self.extract_signal_reads(&predicate, &component.exprs, &mut captured_signals);
+                        self.extract_signal_reads(&predicate, component.exprs(), &mut captured_signals);
 
                         // Push src list as typed array ref. Internal
                         // repr must be GcArrayRef post Stage 6 — the
                         // LIR builder only registers filter calls when
                         // args[0] has typed list type.
-                        self.emit_expr(func, component.get_expr(args[0]), component)?;
+                        self.emit_expr(func, component.expr(args[0]), component)?;
 
                         // Push each captured signal in its natural
                         // storage shape (typed list = 1 ref, string =
                         // 2 i32, scalar = 1 slot).
                         for (def_id, _ty) in &captured_signals {
                             let Some(sig_idx) =
-                                component.signals.iter().position(|s| s.def_id == *def_id)
+                                component.signals().iter().position(|s| s.def_id == *def_id)
                             else {
                                 return Err(CodegenError::InvalidIR(format!(
                                     "Captured signal {:?} not found in component signals",
@@ -767,7 +768,7 @@ impl WasmPackageBuilder<'_> {
                                     self.emit_self_handle_load(func, component)?;
                                 }
                                 for arg in args {
-                                    self.emit_callback_arg(func, component.get_expr(*arg), component)?;
+                                    self.emit_callback_arg(func, component.expr(*arg), component)?;
                                 }
 
                                 if uses_indirect_return {
@@ -809,7 +810,7 @@ impl WasmPackageBuilder<'_> {
             }
 
             LirExprKind::Field { base, field_idx } => {
-                let base = component.get_expr(*base);
+                let base = component.expr(*base);
                 // Phase 5e.3: tuple field access via struct.get when
                 // the base tuple has GC-ref internal repr.
                 if let InternedTyKind::Tuple(_) = self.ctx.ty_kind(base.ty)
@@ -1175,8 +1176,8 @@ impl WasmPackageBuilder<'_> {
             }
 
             LirExprKind::Index { base, index } => {
-                let base = component.get_expr(*base);
-                let index = component.get_expr(*index);
+                let base = component.expr(*base);
+                let index = component.expr(*index);
                 // Phase 5b-v.3 / 5e.4: GC array — emit base (array
                 // ref), index, then `array.get`. For string elements,
                 // unbox the resulting `(ref null $fat_value)` into
@@ -1222,7 +1223,7 @@ impl WasmPackageBuilder<'_> {
             LirExprKind::VariantCtor {
                 case_idx, payload, ..
             } => {
-                let payload = payload.as_ref().map(|p| component.get_expr(*p));
+                let payload = payload.as_ref().map(|p| component.expr(*p));
                 use super::repr::InternalRepr;
                 // Phase 5e.5 (Stage 3): when the parent type is migrated to
                 // the W3C subtype-hierarchy GC representation, emit a single
@@ -1375,7 +1376,7 @@ impl WasmPackageBuilder<'_> {
                         // ref from `emit_expr`, records/tuples/lists a typed
                         // ref, scalars their value. No `$fat_value` box.
                         for elem in elements {
-                            self.emit_expr(func, component.get_expr(*elem), component)?;
+                            self.emit_expr(func, component.expr(*elem), component)?;
                         }
                         func.instruction(&Instruction::ArrayNewFixed {
                             array_type_index: arr_ty_idx,
@@ -1391,24 +1392,24 @@ impl WasmPackageBuilder<'_> {
                     func.instruction(&Instruction::I32Const(0));
                     func.instruction(&Instruction::I32Const(0));
                 } else {
-                    let elem_ty = component.get_expr(elements[0]).ty;
+                    let elem_ty = component.expr(elements[0]).ty;
                     let count = elements.len();
 
                     // Emit all element values onto the stack
                     for elem in elements {
                         // For RecordConstruct elements, emit field values directly (not calling ctor)
                         // This is because list_ctor stores fields inline
-                        if let LirExprKind::RecordConstruct { fields, .. } = &component.get_expr(*elem).kind {
+                        if let LirExprKind::RecordConstruct { fields, .. } = &component.expr(*elem).kind {
                             for field in fields {
-                                self.emit_expr(func, component.get_expr(*field), component)?;
+                                self.emit_expr(func, component.expr(*field), component)?;
                                 // Phase 5e.4: legacy list_ctor expects
                                 // canonical-flat slots per record
                                 // field. If the field's emit pushed a
                                 // typed GC array ref, materialize it
                                 // back to (ptr, len).
-                                if self.is_scalar_list_ty(component.get_expr(*field).ty)
+                                if self.is_scalar_list_ty(component.expr(*field).ty)
                                     && let super::repr::InternalRepr::GcArrayRef(arr_idx) =
-                                        self.internal_repr(component.get_expr(*field).ty)
+                                        self.internal_repr(component.expr(*field).ty)
                                     {
                                         let mat_fn = *self
                                             .gc_list_materializer_fn_indices
@@ -1421,7 +1422,7 @@ impl WasmPackageBuilder<'_> {
                             }
                         } else {
                             // Other elements: emit normally
-                            self.emit_expr(func, component.get_expr(*elem), component)?;
+                            self.emit_expr(func, component.expr(*elem), component)?;
                         }
                     }
 
@@ -1472,7 +1473,7 @@ impl WasmPackageBuilder<'_> {
                             // a string as its `$str_bytes` ref, a list as
                             // its typed `(ref null $arr)`. Nothing needs a
                             // fat-pointer box anymore.
-                            self.emit_expr(func, component.get_expr(*field_expr), component)?;
+                            self.emit_expr(func, component.expr(*field_expr), component)?;
                         }
                         func.instruction(&Instruction::StructNew(type_idx));
                         return Ok(1);
@@ -1480,7 +1481,7 @@ impl WasmPackageBuilder<'_> {
                 // Use record constructor helper - no local conflicts!
                 // Emit all field values onto the stack, then call $ctor_X
                 for field in fields {
-                    self.emit_expr(func, component.get_expr(*field), component)?;
+                    self.emit_expr(func, component.expr(*field), component)?;
                 }
 
                 // Call the record constructor helper
@@ -1508,7 +1509,7 @@ impl WasmPackageBuilder<'_> {
                 use super::repr::InternalRepr;
                 if let InternalRepr::GcRef(tup_idx) = self.internal_repr(expr.ty) {
                     for elem in elements {
-                        self.emit_expr(func, component.get_expr(*elem), component)?;
+                        self.emit_expr(func, component.expr(*elem), component)?;
                     }
                     func.instruction(&Instruction::StructNew(tup_idx));
                     return Ok(1);
@@ -1543,7 +1544,7 @@ impl WasmPackageBuilder<'_> {
                         func.instruction(&Instruction::I32Const(offset as i32));
                         func.instruction(&Instruction::I32Add);
                     }
-                    self.emit_expr(func, component.get_expr(*elem), component)?;
+                    self.emit_expr(func, component.expr(*elem), component)?;
                     func.instruction(&Instruction::I32Store(mem_arg(0, 2)));
                     offset += 4;
                 }
@@ -1569,7 +1570,7 @@ impl WasmPackageBuilder<'_> {
             }
 
             LirExprKind::IsCase { base, case_idx } => {
-                let base = component.get_expr(*base);
+                let base = component.expr(*base);
                 // Collapsed option (`option<record | tuple | scalar-list |
                 // collapsing-option>`) is stored as one nullable ref — there is
                 // no case subtype to `ref.test`. `Some` = non-null, `None` =
@@ -1638,7 +1639,7 @@ impl WasmPackageBuilder<'_> {
                 case_idx,
                 field_idx,
             } => {
-                let base = component.get_expr(*base);
+                let base = component.expr(*base);
                 // Collapsed option: the `Some` payload IS the ref itself (the
                 // inner value; `None` = null). The caller has discriminated
                 // `Some` (via IsCase), so the ref is non-null — hand it back
@@ -1748,7 +1749,7 @@ impl WasmPackageBuilder<'_> {
         parent_ty: Ty,
         case_idx: u32,
         payload: Option<&LirExpr>,
-        component: &LirResource,
+        component: &dyn LirResourceArena,
     ) -> Result<(), CodegenError> {
         let case_sub_idx = *self
             .record_gc_types
@@ -1809,7 +1810,7 @@ impl WasmPackageBuilder<'_> {
         parent_ty: Ty,
         case_idx: u32,
         payload: Option<&LirExpr>,
-        component: &LirResource,
+        component: &dyn LirResourceArena,
     ) -> Result<(), CodegenError> {
         use wasm_encoder::{HeapType, ValType};
 
@@ -2484,7 +2485,7 @@ impl WasmPackageBuilder<'_> {
         &mut self,
         func: &mut Function,
         expr: &LirExpr,
-        component: &LirResource,
+        component: &dyn LirResourceArena,
     ) -> Result<(), CodegenError> {
         let helper = self
             .pack_color_helper_fn_idx
@@ -2539,7 +2540,7 @@ impl WasmPackageBuilder<'_> {
         &mut self,
         func: &mut Function,
         arg: &LirExpr,
-        component: &LirResource,
+        component: &dyn LirResourceArena,
     ) -> Result<(), CodegenError> {
         use super::repr::InternalRepr;
         // A typed-array list argument: emit the array ref, then materialize it

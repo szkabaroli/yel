@@ -32,6 +32,7 @@ use super::block::{
 };
 use super::expr::LirExpr;
 use super::function::{CallingConv, FunctionRole};
+use super::signal::LirSignal;
 use super::struct_types::{LirArrayTypeDecl, LirStructTypeDecl};
 
 /// Read-only access to a LIR expression table.
@@ -40,7 +41,13 @@ use super::struct_types::{LirArrayTypeDecl, LirStructTypeDecl};
 /// different arenas may both hand out the integer `5` and they refer
 /// to different expressions. The arena is the scope.
 pub trait LirExprArena {
-    fn expr(&self, id: LirExprId) -> &LirExpr;
+    /// The whole expression arena. `LirExprId`s index into it.
+    fn exprs(&self) -> &[LirExpr];
+
+    /// Fetch one expression by id. Defaults to indexing [`Self::exprs`].
+    fn expr(&self, id: LirExprId) -> &LirExpr {
+        &self.exprs()[id.0 as usize]
+    }
 }
 
 /// Read-only access to an interned-string table. Implementors are
@@ -183,9 +190,23 @@ pub trait LirResourceArena: LirExprArena + LirStringArena + LirSlotArena {
     /// ordering for `LirOp::CallBlock` resolution.
     fn blocks(&self) -> &[LirBlock];
 
-    /// Convenience: fetch a block by id.
+    /// Convenience: fetch a block by id. After structural dedupe a block's
+    /// `BlockId.0` is no longer guaranteed to equal its index in `blocks()`
+    /// (duplicate blocks are spliced out and their `CallBlock`s rewritten to
+    /// a canonical survivor), so this checks the fast-path index and falls
+    /// back to a linear scan — mirroring `LirResource::get_block`.
     fn block(&self, id: BlockId) -> &LirBlock {
-        &self.blocks()[id.0 as usize]
+        let blocks = self.blocks();
+        let idx = id.0 as usize;
+        if let Some(b) = blocks.get(idx)
+            && b.id == id
+        {
+            return b;
+        }
+        blocks
+            .iter()
+            .find(|b| b.id == id)
+            .unwrap_or_else(|| panic!("block {:?} not found in resource", id))
     }
 
     /// GC struct types declared by this resource (record / variant /
@@ -195,4 +216,15 @@ pub trait LirResourceArena: LirExprArena + LirStringArena + LirSlotArena {
 
     /// GC array types declared (typed lists, children arrays, etc.).
     fn array_types(&self) -> &[LirArrayTypeDecl];
+
+    /// Reactive signals owned by this resource (UI component properties).
+    /// **Transitional:** signals are UI metadata that codegen still reads by
+    /// index during the migration (see this trait's header) — the emit path
+    /// resolves a `SignalRead`/`Def` of a component-local signal through this.
+    /// Defaults to empty so non-UI arenas (flow functions, module-scope
+    /// expression scopes) that own no signals don't have to stub it; those
+    /// scopes only ever reference globals, which resolve without this table.
+    fn signals(&self) -> &[LirSignal] {
+        &[]
+    }
 }

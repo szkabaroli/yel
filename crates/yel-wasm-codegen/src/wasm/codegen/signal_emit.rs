@@ -4,7 +4,8 @@
 
 use wasm_encoder::{Function, Instruction};
 use yel_core::DefId;
-use yel_core::lir::{LirExpr, LirResource};
+use yel_core::lir::arena::LirResourceArena;
+use yel_core::lir::LirExpr;
 
 use super::super::CodegenError;
 use super::super::WasmPackageBuilder;
@@ -167,7 +168,7 @@ impl<'a> WasmPackageBuilder<'a> {
     pub(crate) fn emit_self_handle_load(
         &self,
         func: &mut Function,
-        component: &yel_core::lir::LirResource,
+        component: &dyn yel_core::lir::arena::LirResourceArena,
     ) -> Result<(), CodegenError> {
         let comp_idx = self.comp_idx_of(component).ok_or_else(|| {
             CodegenError::InvalidIR(
@@ -529,7 +530,7 @@ impl<'a> WasmPackageBuilder<'a> {
         func: &mut Function,
         prop_def_id: DefId,
         expr: &LirExpr,
-        component: &LirResource,
+        component: &dyn LirResourceArena,
         scratch: crate::wasm::FlatScratchBases,
     ) -> Result<(), CodegenError> {
         let _ = scratch;

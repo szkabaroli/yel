@@ -18,8 +18,8 @@ use super::signal::LirSignal;
 use super::signal_layout::SignalLayout;
 
 impl LirExprArena for LirResource {
-    fn expr(&self, id: LirExprId) -> &LirExpr {
-        &self.exprs[id.0 as usize]
+    fn exprs(&self) -> &[LirExpr] {
+        &self.exprs
     }
 }
 
@@ -53,6 +53,9 @@ impl LirResourceArena for LirResource {
     }
     fn array_types(&self) -> &[LirArrayTypeDecl] {
         &self.array_types
+    }
+    fn signals(&self) -> &[LirSignal] {
+        &self.signals
     }
 }
 
@@ -229,7 +232,7 @@ pub struct ComponentStructLayout {
     pub self_handle_field_idx: u32,
     /// Index of the trailing `(mut (ref null <comp>_tree_root))` field
     /// on `$Comp_<i>`. `None` when the component has no body tree
-    /// (e.g. `module_scope_carrier`).
+    /// (e.g. `LirResource::empty`).
     pub tree_root_field_idx: Option<u32>,
 }
 
@@ -270,24 +273,18 @@ impl LirResource {
         self.blocks.iter().find(|b| b.id == id)
     }
 
-    /// A signal-less resource used as the emission scope for module-scope
-    /// expressions (global-singleton property defaults, module-scope filter
-    /// predicates) — the shared body emitter (`emit_expr`) is typed against a
-    /// `LirResource`, so module scope borrows this shape rather than a
-    /// component.
+    /// A minimal, signal-less `LirResource` shell: one placeholder block, no
+    /// signals/effects/GC types, carrying only an expression arena.
     ///
-    /// `exprs` is the module's expression arena (e.g. `LirModule::global_exprs`)
-    /// so the emitter resolves each top-level node's `LirExprId` children.
-    /// `signals` is empty, so any `SignalRead`/`SignalWrite` that leaks into
-    /// module scope resolves only through global-property (core-global)
-    /// lookups. `blocks` is a single placeholder so `constructor_block` /
-    /// `mount_block` stay valid indices — nothing executes them here.
-    ///
-    /// This is a transitional bridge: once `emit_expr` is generic over the
-    /// `LirFunctionLike` arena trait, module scope needs no `LirResource` at
-    /// all (see `docs/TECH_DEBT.md` §1.6). Pass `Vec::new()` when the scope
-    /// evaluates no child-bearing expressions.
-    pub fn module_scope_carrier(name: Name, exprs: Vec<LirExpr>) -> Self {
+    /// Used to *package* LIR that isn't a real UI component into the
+    /// `LirResource` shape codegen consumes — the flow frontend's per-function
+    /// carrier, and boundary-rewrite unit-test scaffolding. Module-scope
+    /// *expression emission* (global defaults, module-scope filters) no longer
+    /// uses this: the shared emitter reads its scope through the arena traits,
+    /// so that path plugs in [`super::module::ModuleScope`] instead of a
+    /// fabricated component. Pass `Vec::new()` when no child-bearing
+    /// expressions are evaluated.
+    pub fn empty(name: Name, exprs: Vec<LirExpr>) -> Self {
         use super::block::LirBlock;
         let placeholder = LirBlock::new(BlockId(0));
         Self {

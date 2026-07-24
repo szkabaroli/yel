@@ -80,7 +80,7 @@ pub use crate::lower_to_lir::{lower_component, lower_globals};
 // Module-scoped compilation unit
 pub use module::{
     InterfaceDirection, LirGlobal, LirGlobalProperty, LirIfaceFn, LirImport, LirInterface,
-    LirModule, LirReceiver,
+    LirModule, LirReceiver, ModuleScope,
 };
 
 // Component and node types

@@ -3,7 +3,8 @@
 //! and shared across all components that need them.
 
 use wasm_encoder::{BlockType, Function, Instruction, ValType};
-use yel_core::lir::{LirResource, LirExpr, LirExprKind};
+use yel_core::lir::arena::LirResourceArena;
+use yel_core::lir::{LirExpr, LirExprKind};
 use yel_core::types::InternedTyKind;
 use yel_core::ids::LocalId;
 use yel_core::{DefId, DefKind, Ty};
@@ -325,7 +326,7 @@ impl<'a> WasmPackageBuilder<'a> {
         param: (LocalId, Ty),
         predicate: LirExpr,
         _alloc_idx: u32,
-        component: &LirResource,
+        component: &dyn LirResourceArena,
     ) -> Result<Function, CodegenError> {
         // Stage 6 of typed-GC migration: filter operates entirely in
         // typed-GC space. Param 0 is `(ref null $list_arr)` (was
@@ -359,7 +360,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Extract captured signals from predicate.
         let mut captured_signals: Vec<(DefId, Ty)> = Vec::new();
-        self.extract_signal_reads(&predicate, &component.exprs, &mut captured_signals);
+        self.extract_signal_reads(&predicate, component.exprs(), &mut captured_signals);
 
         // Build param slot map: param 0 is src_arr; captured signals
         // start at param 1, each consuming `signal_storage_valtypes`

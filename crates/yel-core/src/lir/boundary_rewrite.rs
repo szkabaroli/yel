@@ -536,7 +536,7 @@ mod tests {
     /// established the boundary's ref binding earlier.
     #[test]
     fn rewrite_after_bind() {
-        let mut comp = LirResource::module_scope_carrier(Name(0), Vec::new());
+        let mut comp = LirResource::empty(Name(0), Vec::new());
         comp.def_id = DefId::INVALID;
         // slot 0 = ref slot, slot 1 = result
         comp.slots = vec![
@@ -589,7 +589,7 @@ mod tests {
     /// stays as-is (counted as remaining; codegen would surface it).
     #[test]
     fn no_rewrite_without_bind() {
-        let mut comp = LirResource::module_scope_carrier(Name(0), Vec::new());
+        let mut comp = LirResource::empty(Name(0), Vec::new());
         comp.slots = vec![mk_slot(0, LirSlotKind::Temp { local_idx: 0 })];
         comp.blocks = vec![LirBlock {
             id: BlockId(0),
@@ -623,7 +623,7 @@ mod stage4_tests {
         // (allocated by `set_boundary_params`) — no BindBoundaryLocal or
         // AllocBoundary in the ops. The seeding makes the rewrite fire
         // anyway.
-        let mut comp = LirResource::module_scope_carrier(Name(0), Vec::new());
+        let mut comp = LirResource::empty(Name(0), Vec::new());
         comp.slots = vec![
             // slot 0 = result
             LirSlotInfo {
