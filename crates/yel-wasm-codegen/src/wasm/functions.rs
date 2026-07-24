@@ -273,8 +273,9 @@ fn build_function(
     // emitter's `ReturnValue` arm does `local.get <value>; return`,
     // satisfying the function's typed wasm return on the stack at
     // the early-exit point. No per-caller walker needed.
+    let component: &LirResource = &builder.components[comp_idx];
     for op in &block.ops {
-        builder.emit_op(&mut func, op, comp_idx, block, 0)?;
+        builder.emit_op(&mut func, op, component, Some(comp_idx), block, 0)?;
     }
 
     // Tear down per-function state so a later function gets clean

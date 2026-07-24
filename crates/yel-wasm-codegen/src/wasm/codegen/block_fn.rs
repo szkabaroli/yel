@@ -436,7 +436,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Emit block operations
         for op in &block.ops {
-            self.emit_op(&mut func, op, comp_idx, block, local_offset)?;
+            self.emit_op(&mut func, op, component, Some(comp_idx), block, local_offset)?;
         }
 
         // Clear captured locals, local_to_slot, and local_offset

@@ -17,7 +17,8 @@ use super::super::CodegenError;
 use super::super::{MemoryLayout, WasmPackageBuilder};
 use super::constants::{HANDLER_ID_HANDLE_SHIFT, MAX_HANDLERS_PER_COMPONENT};
 use super::scratch::{mem_arg, slot_info, slot_local};
-use yel_core::lir::{LirBlock, LirResource, LirSlotId};
+use yel_core::lir::arena::LirResourceArena;
+use yel_core::lir::{LirBlock, LirSlotId};
 
 impl<'a> WasmPackageBuilder<'a> {
     /// Emit a single block operation as WASM instructions.
@@ -30,22 +31,37 @@ impl<'a> WasmPackageBuilder<'a> {
     /// `crate::flow`), so it's `pub(crate)` rather than `pub(super)`
     /// — keeps the codegen layering visible without forcing flow to
     /// duplicate ~1700 lines of op-dispatch.
+    /// Emit one op. `component` is the owning emission scope read through the
+    /// arena traits — a `LirResource` for component blocks, or a `ModuleScope`
+    /// for the module-start globals-init block. `comp_idx` is `Some(i)` for a
+    /// real component (index into `self.components`/`self.layouts`/`gc_layouts`)
+    /// and `None` in module scope; component-specific ops resolve it via a
+    /// guard that fails loudly (`InvalidIR`) if reached without a component.
     pub(crate) fn emit_op(
         &mut self,
         func: &mut Function,
         op: &LirOp,
-        comp_idx: usize,
+        component: &dyn LirResourceArena,
+        comp_idx: Option<usize>,
         block: &LirBlock,
         local_offset: u32,
     ) -> Result<(), CodegenError> {
-        let component = &self.components[comp_idx];
-        let layout = self.layouts.get(comp_idx).cloned().unwrap_or_else(|| {
-            // Fallback layout for a component missing from `self.layouts`.
-            // Per-signal linear memory was removed (every non-unit signal is
-            // GC-struct-resident), so there is no signal-sized region to
-            // reserve here.
-            MemoryLayout { base: 324, size: 0 }
-        });
+        // Per-signal linear memory was removed (every non-unit signal is
+        // GC-struct-resident), so a missing component layout reserves no
+        // region — and module scope has no component layout at all.
+        let layout = comp_idx
+            .and_then(|ci| self.layouts.get(ci))
+            .cloned()
+            .unwrap_or(MemoryLayout { base: 324, size: 0 });
+
+        // Module-scope emission (the globals-init block) has no component
+        // index. Only the component-agnostic ops are valid there; route them
+        // to the restricted emitter and keep `comp_idx` a plain `usize` for
+        // every component-specific arm below.
+        let comp_idx = match comp_idx {
+            Some(ci) => ci,
+            None => return self.emit_op_module_scope(func, op, component, block, local_offset),
+        };
 
         match op {
             // Phase 3.3: `LirOp::MountComponent` and `LirOp::ResourceNew`
@@ -209,7 +225,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 }
             }
             LirOp::EvalExpr { expr, result } => {
-                let lir_expr = component.get_expr(*expr);
+                let lir_expr = component.expr(*expr);
 
                 // Payload-less user-variant constructor targeting a
                 // single-i32 slot: `emit_variant_ctor_flat` would push
@@ -312,7 +328,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 expr,
                 dest_first_slot,
             } => {
-                let lir_expr = component.get_expr(*expr);
+                let lir_expr = component.expr(*expr);
 
                 // Payload-less user-variant constructor shortcut, same
                 // as the EvalExpr arm: push a single i32 discriminant.
@@ -369,7 +385,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 }
             }
             LirOp::DropExpr { expr } => {
-                let lir_expr = component.get_expr(*expr);
+                let lir_expr = component.expr(*expr);
                 self.emit_expr(func, lir_expr, component)?;
                 // Drop exactly the number of values the expression pushed.
                 // Unit-typed expressions (e.g. callbacks returning nothing)
@@ -404,13 +420,13 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::If(BlockType::Empty));
 
                 for nested_op in &if_op.then_ops {
-                    self.emit_op(func, nested_op, comp_idx, block, local_offset)?;
+                    self.emit_op(func, nested_op, component, Some(comp_idx), block, local_offset)?;
                 }
 
                 if !if_op.else_ops.is_empty() {
                     func.instruction(&Instruction::Else);
                     for nested_op in &if_op.else_ops {
-                        self.emit_op(func, nested_op, comp_idx, block, local_offset)?;
+                        self.emit_op(func, nested_op, component, Some(comp_idx), block, local_offset)?;
                     }
                 }
 
@@ -430,7 +446,7 @@ impl<'a> WasmPackageBuilder<'a> {
             LirOp::PushStringPtr { string_id } => {
                 // Stack-push primitive: resolve `string_id` via the
                 // component's string pool and emit `i32.const <data_ptr>`.
-                let s = component.get_string(*string_id);
+                let s = component.string(*string_id);
                 let (ptr, _len) = self.get_string_info(s).ok_or_else(|| {
                     CodegenError::InvalidIR(format!(
                         "PushStringPtr: string {:?} (\"{}\") not in string pool",
@@ -440,7 +456,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::I32Const(ptr as i32));
             }
             LirOp::PushStringLen { string_id } => {
-                let s = component.get_string(*string_id);
+                let s = component.string(*string_id);
                 let (_ptr, len) = self.get_string_info(s).ok_or_else(|| {
                     CodegenError::InvalidIR(format!(
                         "PushStringLen: string {:?} (\"{}\") not in string pool",
@@ -456,12 +472,12 @@ impl<'a> WasmPackageBuilder<'a> {
                 // boundary lowering even when the type's in-memory repr is a
                 // GC struct — `emit_expr` would otherwise dispatch to the GC
                 // ctor and push a ref. Other exprs flatten via `emit_expr`.
-                let lir_expr = component.get_expr(*expr);
+                let lir_expr = component.expr(*expr);
                 if let LirExprKind::VariantCtor {
                     case_idx, payload, ..
                 } = &lir_expr.kind
                 {
-                    let payload_expr = payload.map(|p| component.get_expr(p));
+                    let payload_expr = payload.map(|p| component.expr(p));
                     self.emit_variant_ctor_flat(
                         func,
                         lir_expr.ty,
@@ -1002,7 +1018,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::BrIf(1));
 
                 for nested_op in body_ops {
-                    self.emit_op(func, nested_op, comp_idx, block, local_offset)?;
+                    self.emit_op(func, nested_op, component, Some(comp_idx), block, local_offset)?;
                 }
 
                 func.instruction(&Instruction::Br(0));
@@ -1587,7 +1603,7 @@ impl<'a> WasmPackageBuilder<'a> {
                         "LoadListGc: signal {:?} is neither a component-local \
                          signal of `{}` nor a global property",
                         signal,
-                        self.ctx.str(component.name)
+                        self.ctx.str(component.name())
                     )));
                 }
                 func.instruction(&Instruction::LocalTee(slot_local(
@@ -1614,7 +1630,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 // ref on the stack (e.g. `array.new_fixed $<elem>_list
                 // ...`). Tee into ref_result; derive len via
                 // `array.len`.
-                let list_expr = component.get_expr(*expr);
+                let list_expr = component.expr(*expr);
                 self.emit_expr(func, list_expr, component)?;
                 func.instruction(&Instruction::LocalTee(slot_local(
                     component,
@@ -1783,6 +1799,36 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(())
     }
 
+    /// Emit a single op in **module scope** — the globals-init `(start)`
+    /// block, which has no owning component. Only the component-agnostic ops
+    /// are valid here (`EvalExprToSlots`, `GlobalFieldSet`); anything else is
+    /// an IR bug (a component-specific op leaked into module scope).
+    ///
+    /// Those two arms provably never read `comp_idx` (they resolve through
+    /// the arena / the globals layout), so we re-enter [`Self::emit_op`] with
+    /// a phantom `Some(usize::MAX)` that the whitelisted arms never index —
+    /// reusing their exact emission logic without duplicating it. Any other op
+    /// would touch `comp_idx` and is rejected here before that can happen.
+    fn emit_op_module_scope(
+        &mut self,
+        func: &mut Function,
+        op: &LirOp,
+        component: &dyn LirResourceArena,
+        block: &LirBlock,
+        local_offset: u32,
+    ) -> Result<(), CodegenError> {
+        match op {
+            LirOp::EvalExprToSlots { .. } | LirOp::GlobalFieldSet { .. } => {
+                self.emit_op(func, op, component, Some(usize::MAX), block, local_offset)
+            }
+            other => Err(CodegenError::InvalidIR(format!(
+                "LirOp {:?} is not valid in module-scope (globals-init) emission — \
+                 only EvalExprToSlots / GlobalFieldSet are",
+                other
+            ))),
+        }
+    }
+
     /// Find the index of a component in `self.components` by its
     /// `DefId`. Used by [`Self::resolve_lir_type_ref`] to route
     /// `LirTypeRef::OtherComponentStruct` lookups into the matching
@@ -1812,7 +1858,7 @@ impl<'a> WasmPackageBuilder<'a> {
     fn struct_ty_idx_from_rec(
         &self,
         comp_idx: usize,
-        component: &LirResource,
+        component: &dyn LirResourceArena,
         block: &LirBlock,
         rec: LirSlotId,
     ) -> Result<u32, CodegenError> {
