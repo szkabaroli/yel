@@ -3988,6 +3988,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "yelc-base"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "pretty_assertions",
+ "rustc-hash",
+ "serde",
+]
+
+[[package]]
+name = "yelc-syntax"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+ "rustc-hash",
+ "yelc-base",
+]
+
+[[package]]
 name = "yoke"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

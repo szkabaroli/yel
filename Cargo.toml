@@ -2,6 +2,9 @@
 members = [
   "crates/yelc",
   "crates/yel-core",
+  # --- rewrite tree (see plans/rewrite/README.md) ---
+  "crates/yelc-base",
+  "crates/yelc-syntax",
   "crates/yel-host",
   "crates/yel-lsp",
   "crates/yel-smith",
@@ -17,6 +20,9 @@ license = "Apache-2.0"
 # Internal crates
 yel-core = { path = "crates/yel-core" }
 yel-wasm-codegen = { path = "crates/yel-wasm-codegen" }
+# Rewrite tree
+yelc-base = { path = "crates/yelc-base" }
+yelc-syntax = { path = "crates/yelc-syntax" }
 
 # CLI & Error handling
 anyhow = "1"
