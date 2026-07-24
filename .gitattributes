@@ -1,0 +1,4 @@
+corpus/wasm/** filter=lfs diff=lfs merge=lfs -text
+corpus/src/** filter=lfs diff=lfs merge=lfs -text
+corpus/wit/** filter=lfs diff=lfs merge=lfs -text
+corpus/dot/** filter=lfs diff=lfs merge=lfs -text
