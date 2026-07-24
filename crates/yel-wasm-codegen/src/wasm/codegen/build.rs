@@ -17,7 +17,7 @@ use wasm_encoder::{
 };
 
 use yel_core::lir::arena::LirResourceArena;
-use yel_core::lir::{LirExpr, LirResource, ModuleScope, align_to};
+use yel_core::lir::{LirExpr, LirResource, LirSlotKind, ModuleScope, align_to};
 use yel_core::types::InternedTyKind;
 use yel_core::{DefId, Ty};
 
@@ -26,7 +26,7 @@ use super::super::runtime::{self, RuntimeFunctions};
 use super::super::{
     FuncTypes, ImportLayout, MemoryLayout, WasmPackageBuilder, to_kebab_case, to_wit_name,
 };
-use super::scratch::{compute_mount_retention_counts, merge_max_slot_counts, push_valtype_locals};
+use super::scratch::{compute_mount_retention_counts, push_valtype_locals};
 use crate::wasm::gc_types::{GlobalsBlockLayout, compute_globals_block_layout};
 use crate::wasm::{AllocatorFuncs, FlatScratchBases};
 
@@ -2159,89 +2159,68 @@ impl<'a> WasmPackageBuilder<'a> {
     /// Generate the standalone dispatch function.
     /// Signature: `(handler-id: i32) -> ()`.
     /// Routes ALL handler IDs across all components to their block functions.
-    /// Generate the module start function that seeds global singleton
-    /// property slots with their declared defaults. Runs once at module
-    /// instantiation, before any export is invoked.
-    ///
-    /// Non-literal defaults (e.g. cross-global references, arithmetic) still
-    /// go through `emit_signal_store` which reuses the same expression
-    /// machinery as component constructors.
+    /// Generate the module `(start)` function that seeds global singleton
+    /// properties with their declared defaults. This is a pure **transcriber**
+    /// of `module.global_init_block` — the init sequence (which properties,
+    /// their field offsets, scratch slots, and `EvalExprToSlots`/`GlobalFieldSet`
+    /// ops) was planned in LIR by `synth_globals_init_block`; codegen only
+    /// declares the block's locals and emits each op through the ordinary
+    /// generic op emitter in module scope.
     fn generate_globals_init(&mut self) -> Result<Function, CodegenError> {
-        // Reserve per-valtype scratch locals sized to the widest global
-        // default expression under canonical-ABI flattening. Minimum of 3
-        // i32 keeps a stable baseline for simple string/result defaults.
-        let mut max_counts: (u32, u32, u32, u32) = (3, 0, 0, 0);
-        // Collect (prop_id, default) pairs from the first-class `LirGlobal`
-        // items in declaration order (deterministic), reused for both the
-        // scratch-sizing pass and the init emission below.
-        let inits: Vec<(DefId, LirExpr)> = self
-            .globals
-            .iter()
-            .flat_map(|g| &g.properties)
-            .filter_map(|p| p.default.as_ref().map(|d| (p.def_id, d.clone())))
-            .collect();
-        for (_, default) in &inits {
-            let slots = self.flatten_core_slots(default.ty);
-            merge_max_slot_counts(&mut max_counts, &slots);
-        }
-        let (max_i32, max_i64, max_f32, max_f64) = max_counts;
-        let mut locals: Vec<(u32, ValType)> = Vec::new();
-        push_valtype_locals(&mut locals, max_counts);
-        let mut func = Function::new(locals);
-
-        // No allocation pass: global state lives in core wasm globals
-        // (declared with zero/null inits in the global section), so there
-        // is no singleton struct to `struct.new`. The default-init loop
-        // below seeds each property's core global(s).
-
-        let globals_scratch = FlatScratchBases {
-            i32_base: 0,
-            i32_count: max_i32,
-            i64_base: max_i32,
-            i64_count: max_i64,
-            f32_base: max_i32 + max_i64,
-            f32_count: max_f32,
-            f64_base: max_i32 + max_i64 + max_f32,
-            f64_count: max_f64,
+        let Some(block) = self.global_init_block.clone() else {
+            // No defaulted global properties — an empty start function.
+            let mut func = Function::new(Vec::new());
+            func.instruction(&Instruction::End);
+            return Ok(func);
         };
 
-        // `inits` (collected above from `self.globals`) drives emission.
-        // §1.5: every non-unit property is core-global-backed, so each init
-        // goes through `emit_global_struct_store_from_expr`.
+        // Declare locals: the block's Temp slots, then per-valtype flat
+        // scratch for composite `EvalExprToSlots` evaluations. The init block
+        // has no component-ref slots, so a default GC layout suffices for
+        // val-ty resolution.
+        let layout = crate::wasm::gc_types::GcTypeLayout::default();
+        let mut locals = self.declare_function_locals(&block.slots, 0, &layout)?;
+        push_valtype_locals(&mut locals, block.max_flat_scratch_counts);
+        let mut func = Function::new(locals);
 
-        if !inits.is_empty() {
-            // Module scope has no owning component. `emit_signal_store` /
-            // `emit_expr` still take a `&LirResource`, but global defaults
-            // never reference component-local state — a signal-less carrier
-            // makes any accidental component-local lookup a loud failure
-            // (No-Silent-Fallbacks). It carries the global-default expression
-            // arena so `emit_expr` resolves each default's `LirExprId`
-            // children.
-            let carrier_name = self.ctx.intern("<module>");
-            let module_scope =
-                ModuleScope::new(carrier_name, self.global_default_exprs.clone());
-            self.current_init_scratch_start = Some(0);
-            self.current_flat_scratch = Some(globals_scratch);
-            for (prop_id, expr) in inits {
-                if self.global_in_struct(prop_id) {
-                    self.emit_global_struct_store_from_expr(
-                        &mut func,
-                        prop_id,
-                        &expr,
-                        &module_scope,
-                        globals_scratch,
-                    )?;
-                } else {
-                    return Err(CodegenError::InvalidIR(format!(
-                        "globals_init: property {:?} has a default expression but no \
-                         core-global backing (§1.5: no memory-resident globals)",
-                        prop_id
-                    )));
-                }
-            }
-            self.current_init_scratch_start = None;
-            self.current_flat_scratch = None;
+        // Flat-scratch bases live past the block's Temp slots (local_offset 0,
+        // no owning-resource temps in module scope).
+        let num_slots = block
+            .slots
+            .iter()
+            .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
+            .count() as u32;
+        let (i32c, i64c, f32c, f64c) = block.max_flat_scratch_counts;
+        let scratch_base = num_slots;
+        if i32c + i64c + f32c + f64c > 0 {
+            self.current_init_scratch_start = Some(scratch_base);
         }
+        self.current_flat_scratch = Some(FlatScratchBases {
+            i32_base: scratch_base,
+            i32_count: i32c,
+            i64_base: scratch_base + i32c,
+            i64_count: i64c,
+            f32_base: scratch_base + i32c + i64c,
+            f32_count: f32c,
+            f64_base: scratch_base + i32c + i64c + f32c,
+            f64_count: f64c,
+        });
+        self.current_block_local_offset = Some(0);
+
+        // Transcribe the block: emit each op through the generic emitter with
+        // a module scope (no owning component). Component-specific ops are
+        // rejected there — this block only carries EvalExprToSlots / GlobalFieldSet.
+        let scope = ModuleScope::new(
+            self.ctx.intern("<module>"),
+            self.global_default_exprs.clone(),
+        );
+        for op in &block.ops {
+            self.emit_op(&mut func, op, &scope, None, &block, 0)?;
+        }
+
+        self.current_init_scratch_start = None;
+        self.current_flat_scratch = None;
+        self.current_block_local_offset = None;
 
         func.instruction(&Instruction::End);
         Ok(func)

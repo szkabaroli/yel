@@ -6933,8 +6933,7 @@ pub fn resolve_global_triggers(ctx: &CompilerContext, resources: &mut [LirResour
     // signal → fanout blocks of every observing component, in resource
     // declaration order (deterministic — resources is a Vec, and the
     // per-resource signal list is sorted).
-    let mut fanout: rustc_hash::FxHashMap<DefId, Vec<BlockId>> =
-        rustc_hash::FxHashMap::default();
+    let mut fanout: rustc_hash::FxHashMap<DefId, Vec<BlockId>> = rustc_hash::FxHashMap::default();
     for resource in resources.iter() {
         let mut observed: Vec<DefId> = resource
             .effects_by_signal
@@ -7064,6 +7063,109 @@ pub fn resolve_global_triggers(ctx: &CompilerContext, resources: &mut [LirResour
             resource.blocks[block_index].ops = ops;
         }
     }
+}
+
+/// Allocate one block-local `Temp` slot of `val_ty` in `block`, returning its
+/// id. Used by [`synth_globals_init_block`] to lay out its scratch slots.
+fn alloc_init_block_temp(
+    block: &mut LirBlock,
+    next_local: &mut u32,
+    val_ty: LirSlotValType,
+) -> LirSlotId {
+    let idx = block.slots.len() as u16;
+    let id = LirSlotId::Block {
+        block: block.id,
+        idx,
+    };
+    block.slots.push(LirSlotInfo {
+        id,
+        kind: LirSlotKind::Temp {
+            local_idx: *next_local,
+        },
+        val_ty,
+        name: None,
+    });
+    *next_local += 1;
+    id
+}
+
+/// Synthesize the module-start **globals-init block**: for each global
+/// property with a default, evaluate the default into block-local scratch
+/// slots and store them into the property's core-global fields.
+///
+/// This makes the module-start init a complete part of the LIR plan rather
+/// than imperative back-end code. The returned [`LirBlock`] is self-contained
+/// — its own `Temp` slots, an `EvalExprToSlots` + `GlobalFieldSet` sequence
+/// per defaulted property, and the flat-scratch counts (the same core
+/// computation component blocks use) — so the backend transcribes it verbatim
+/// as the `(start)` function via the ordinary op emitter.
+///
+/// `exprs` is the shared global default-expr arena; each default's top-level
+/// node is interned into it so `EvalExprToSlots` can reference it by id.
+/// Returns `None` when no global property has a default (no init needed).
+pub fn synth_globals_init_block(
+    ctx: &CompilerContext,
+    globals: &[crate::lir::module::LirGlobal],
+    exprs: &mut Vec<LirExpr>,
+) -> Option<LirBlock> {
+    use crate::lir::signal_layout::{lir_slot_val_ty_for_signal_field, slot_count_for_signal_ty};
+
+    let mut block = LirBlock::new(BlockId(0));
+    let mut next_local: u32 = 0;
+
+    for global in globals {
+        // The core-global field offset accumulates over *every* property
+        // (defaulted or not) — undefaulted properties still occupy
+        // zero-initialised core-global fields.
+        let mut field_start: u32 = 0;
+        for prop in &global.properties {
+            let Some(prop_ty) = ctx.defs.type_of(prop.def_id) else {
+                continue;
+            };
+            let count = slot_count_for_signal_ty(ctx, prop_ty);
+            if let Some(default) = &prop.default
+                && count > 0
+            {
+                let expr_id = LirExprId(exprs.len() as u32);
+                exprs.push(default.clone());
+                // Field 0 uses the value's natural slot val-ty (a typed ref
+                // for gc shapes); companion fields use the per-field mirror.
+                let dest_first = alloc_init_block_temp(
+                    &mut block,
+                    &mut next_local,
+                    ty_to_slot_val_type(ctx, prop_ty),
+                );
+                for i in 1..count {
+                    let vt = lir_slot_val_ty_for_signal_field(ctx, prop_ty, i);
+                    alloc_init_block_temp(&mut block, &mut next_local, vt);
+                }
+                block.ops.push(LirOp::EvalExprToSlots {
+                    expr: expr_id,
+                    dest_first_slot: dest_first,
+                });
+                for i in 0..count {
+                    block.ops.push(LirOp::GlobalFieldSet {
+                        block: global.def_id,
+                        field: field_start + i,
+                        value: dest_first.offset_by(i),
+                    });
+                }
+            }
+            field_start += count;
+        }
+    }
+
+    if block.ops.is_empty() {
+        return None;
+    }
+
+    // Flat-scratch counts for the block's `EvalExprToSlots` evaluations — the
+    // same core computation component blocks use; the backend only reads it.
+    let mut layout_ctx = LirLayoutContext::new(ctx);
+    block.max_flat_scratch_counts =
+        compute_flat_scratch_counts(&block.ops, &[], exprs, ctx, &mut layout_ctx);
+
+    Some(block)
 }
 
 /// Synthesize per-(observing-component, global-signal) fanout

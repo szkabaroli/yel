@@ -353,13 +353,18 @@ impl Compiler {
         // component is lowered), then lower globals and build the import
         // contract off the finished resource set.
         self.resolve_global_triggers(&mut resources);
-        let (globals, global_exprs) = self.lower_globals_to_lir(&global_thir_defaults);
+        let (globals, mut global_exprs) = self.lower_globals_to_lir(&global_thir_defaults);
+        // Plan the module-start init in LIR (a block of ops), so the backend
+        // transcribes it rather than building it imperatively.
+        let global_init_block =
+            crate::lower_to_lir::synth_globals_init_block(&self.ctx, &globals, &mut global_exprs);
         let component_def_ids: Vec<DefId> = resources.iter().map(|r| r.def_id).collect();
         let (interfaces, imports) = self.build_import_contract(&component_def_ids);
         LirModule {
             resources,
             globals,
             global_exprs,
+            global_init_block,
             imports,
             interfaces,
             package,

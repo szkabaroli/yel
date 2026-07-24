@@ -175,43 +175,6 @@ pub(crate) fn mem_arg(offset: u64, align: u32) -> wasm_encoder::MemArg {
     }
 }
 
-/// Count the number of flat slots of each valtype required to hold a
-/// composite value of `ty`. Used to size the per-valtype scratch local
-/// regions on the caller side.
-pub(super) fn per_valtype_counts(slots: &[crate::wasm::FlatSlot]) -> (u32, u32, u32, u32) {
-    let (mut n_i32, mut n_i64, mut n_f32, mut n_f64) = (0u32, 0u32, 0u32, 0u32);
-    for s in slots {
-        match s.valtype {
-            ValType::I32 => n_i32 += 1,
-            ValType::I64 => n_i64 += 1,
-            ValType::F32 => n_f32 += 1,
-            ValType::F64 => n_f64 += 1,
-            _ => {}
-        }
-    }
-    (n_i32, n_i64, n_f32, n_f64)
-}
-
-/// Accumulate per-valtype slot counts into a running max tuple.
-pub(super) fn merge_max_slot_counts(
-    max: &mut (u32, u32, u32, u32),
-    slots: &[crate::wasm::FlatSlot],
-) {
-    let (a, b, c, d) = per_valtype_counts(slots);
-    if a > max.0 {
-        max.0 = a;
-    }
-    if b > max.1 {
-        max.1 = b;
-    }
-    if c > max.2 {
-        max.2 = c;
-    }
-    if d > max.3 {
-        max.3 = d;
-    }
-}
-
 /// Emit the right `I32Store{,8,16}` for an i32-backed signed or unsigned
 /// narrow integer target (`s8`/`u8`/`s16`/`u16`/`s32`/`u32`). Caller
 /// must have pushed `(addr, i32_value)` on the stack.

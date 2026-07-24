@@ -254,6 +254,14 @@ pub struct LirModule {
     /// the analogue of a single `LirResource`'s `exprs`, but shared across
     /// the module's globals.
     pub global_exprs: Vec<LirExpr>,
+    /// The synthesized module-start **globals-init block** — the LIR plan for
+    /// seeding every defaulted global property at instantiation, as an
+    /// ordinary `LirBlock` (scratch slots + `EvalExprToSlots`/`GlobalFieldSet`
+    /// ops). The backend transcribes it verbatim as the `(start)` function;
+    /// the init is thus part of the LIR, not imperative codegen. `None` when
+    /// no global property has a default. Its op exprs index into
+    /// [`Self::global_exprs`].
+    pub global_init_block: Option<LirBlock>,
     /// Every interface the module's world imports or exports. World items
     /// reference these by [`InterfaceId`]; resolve an id here to get the
     /// interface's name, direction, and owning package. Populated by the

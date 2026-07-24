@@ -330,6 +330,7 @@ pub fn generate_wasm_with_wit(
         resources: components.to_vec(),
         globals: Vec::new(),
         global_exprs: Vec::new(),
+        global_init_block: None,
         imports,
         interfaces,
         package: None,
@@ -434,7 +435,11 @@ pub fn generate_wasm_module_with_wit(
     builder.set_wit_package(&options.namespace, &options.name, &options.version);
 
     // Seed global singleton defaults — the start function emits these.
-    builder.set_globals(module.globals.clone(), module.global_exprs.clone());
+    builder.set_globals(
+        module.globals.clone(),
+        module.global_exprs.clone(),
+        module.global_init_block.clone(),
+    );
 
     // Provide the host-import registry + interfaces — the import section,
     // index space, and per-import type interning all derive from these.
@@ -982,6 +987,9 @@ pub(crate) struct WasmPackageBuilder<'a> {
     /// walks these for global structure (properties + directions + defaults,
     /// callbacks) instead of re-deriving it from `ctx.defs.globals()`.
     pub globals: Vec<LirGlobal>,
+    /// The synthesized module-start globals-init block (`LirModule.global_init_block`)
+    /// — the LIR plan the `(start)` function transcribes. `None` for no defaults.
+    pub global_init_block: Option<yel_core::lir::LirBlock>,
     /// Typed default expressions for global singleton properties, keyed by
     /// property DefId — a `DefId → default` view derived from [`Self::globals`]
     /// for O(1) per-property lookup. Each value's `LirExprId` children index
@@ -1216,6 +1224,7 @@ impl<'a> WasmPackageBuilder<'a> {
             globals_layouts: Vec::new(),
             global_block_def_to_idx: HashMap::default(),
             globals: Vec::new(),
+            global_init_block: None,
             global_defaults: HashMap::default(),
             global_default_exprs: Vec::new(),
             imports: Vec::new(),
@@ -1277,7 +1286,12 @@ impl<'a> WasmPackageBuilder<'a> {
     /// lookup map is derived here so per-property sites stay O(1). The module
     /// start function stores each default to its property's backing slot
     /// before any export runs.
-    pub fn set_globals(&mut self, globals: Vec<LirGlobal>, default_exprs: Vec<LirExpr>) {
+    pub fn set_globals(
+        &mut self,
+        globals: Vec<LirGlobal>,
+        default_exprs: Vec<LirExpr>,
+        init_block: Option<yel_core::lir::LirBlock>,
+    ) {
         self.global_defaults = globals
             .iter()
             .flat_map(|g| &g.properties)
@@ -1285,6 +1299,7 @@ impl<'a> WasmPackageBuilder<'a> {
             .collect();
         self.globals = globals;
         self.global_default_exprs = default_exprs;
+        self.global_init_block = init_block;
     }
 
     /// Provide the module's host-import registry + import interfaces
