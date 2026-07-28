@@ -812,3 +812,39 @@ _private
 Component and type names conventionally use PascalCase (`Counter`, `MailStore`,
 `Person`). Property and variable names use kebab-case (`selected-id`,
 `dark-mode`). Enum cases use kebab-case (`inbox`, `in-progress`).
+
+### Hyphens
+
+A hyphen is part of an identifier only when a letter, digit, or underscore
+follows it. Everywhere else it is the subtraction or negation operator:
+
+```
+selected-id          one identifier
+count-1              one identifier — `1` continues the name
+count - 1            subtraction
+count -= 1           compound assignment, not a name `count-`
+{ p: s32 -> p }      a closure; so is `{ p: s32->p }`
+```
+
+That rule is what lets kebab-case names and the `-` operator coexist without
+whitespace being significant.
+
+### Keywords are reserved at word boundaries
+
+`component`, `global`, `record`, `enum`, `variant`, `element`, `extern`,
+`package`, `export`, `func`, `callback`, `if`, `else`, `for`, `in`, `key`,
+`let`, `set`, and `bind` are keywords **only when a name character does not
+follow them**. A longer identifier that merely begins with one is an ordinary
+identifier:
+
+```
+if active { … }      an if-node
+ifactive { … }       an element named `ifactive`
+record Person { … }  a record declaration
+recordPerson         an identifier
+for item in xs { … } a for-loop
+format { … }         an element named `format`
+```
+
+So a keyword never claims the front of a longer name, and no identifier is
+rejected merely for starting with one.

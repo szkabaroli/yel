@@ -22,6 +22,7 @@ started measuring.
 | **baseline (pre-rewrite)** | 2026-07-24 | `ccf2086` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus defined here) | **2** |
 | **baseline (re-freeze)** | 2026-07-28 | `c51b51d` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus regenerated) | **2** |
 | **1 — syntax** | 2026-07-28 | `33e5c71` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | **0** | **2** |
+| **baseline (re-freeze 2)** | 2026-07-28 | `3ef3568` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus proved neutral, not regenerated) | **2** |
 | — `yelc-sema` (infra) | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 2a — HIR build+resolve | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 2b — HIR check | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
@@ -152,6 +153,33 @@ keyword itself, and it is why stage 1's numbers stay comparable across the move.
 (The first draft of this row said 395, reasoned from arithmetic rather than
 measured. That is the A19 violation this file exists to prevent, caught before it
 landed. Every number here comes from the command named beside it.)
+
+## Why there are three baselines
+
+The freeze point moved twice, both times for **shipping work on the frozen
+tree**, which `greenfield-never-touch-old-code` permits and prices.
+
+| SHA | change |
+|---|---|
+| `ccf2086` | original freeze |
+| `c51b51d` | `import component` → `extern component` |
+| `3ef3568` | the kebab lookahead and the keyword word boundary |
+
+**All three baselines are identical on every column** — 315 / 0 / 2, 85/85,
+200/200 — measured each time with
+`cargo test --workspace --exclude yelc-syntax --exclude yelc-base`. That is the
+evidence each change was behaviour-neutral apart from the construct it targeted,
+and it is why stage 1's numbers stay comparable across both moves.
+
+**The corpus was regenerated for `c51b51d` and deliberately NOT for `3ef3568`.**
+The keyword/hyphen change was proved neutral a stronger way: the corpus was
+regenerated into a scratch directory and all **8000 digests came back
+byte-identical**, confirmed independently by compiling all 2000 sources through
+both binaries side by side (0 WIT, 0 DOT, 0 WASM moved). Regenerating in place
+would have rewritten 209 MB of git-lfs objects to identical content. The
+committed corpus is still a faithful oracle for `3ef3568`; `corpus/MANIFEST`
+names `33e5c71` because that is the tree its binary was built from, and the
+frozen half is unchanged between the two.
 
 ## Rules
 
