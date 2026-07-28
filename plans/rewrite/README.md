@@ -48,12 +48,20 @@ what gets *written*.
 | 0 | — | — | ✅ **done** | orchestrator | 2026-07-24 |
 | — | `yelc-base` | keep-list items | ✅ **landed** (infrastructure, no stage) | — | 2026-07-28 |
 | 1 | `yelc-syntax` | `yel-core/src/syntax/` | ✅ **landed** | agent + integrator | 2026-07-28 |
-| — | `yelc-sema` | `context.rs`, `definitions.rs`, `known.rs`, `stdlib_lookup.rs`, `types/` (~3.5k) | 📝 [brief](infra-sema.md) — **blocks 2a** | — | — |
-| 2a | `yelc-hir` | `yel-core/src/hir/` | 📝 [brief](stage-2a-hir-build.md), not briefed | — | — |
-| 2b | `yelc-hir` | `yel-core/src/thir/` | 📝 [brief](stage-2b-hir-check.md), blocked on 2a | — | — |
-| 3a | `yelc-lir` | `yel-core/src/lir/` | ⬜ [stub](stage-3a-lir.md), blocked on 2b | — | — |
-| 3b | `yelc-lower` | `yel-core/src/lower_to_lir/` | ⬜ [stub](stage-3b-lower.md), blocked on 3a | — | — |
-| 4 | `yelc-codegen` | `yel-wasm-codegen/` | ⬜ [stub](stage-4-codegen.md), blocked on 3b | — | — |
+| **2** | `yelc-driver` | — (new: the observation instrument) | 📝 [brief](stage-2-driver.md), **next** | — | — |
+| — | `yelc-sema` | `context.rs`, `definitions.rs`, `known.rs`, `stdlib_lookup.rs`, `types/` (~3.5k) | 📝 [brief](infra-sema.md) — **blocks 3a** | — | — |
+| 3a | `yelc-hir` | `yel-core/src/hir/` | 📝 [brief](stage-2a-hir-build.md), not briefed | — | — |
+| 3b | `yelc-hir` | `yel-core/src/thir/` | 📝 [brief](stage-2b-hir-check.md), blocked on 3a | — | — |
+| 4a | `yelc-lir` | `yel-core/src/lir/` | ⬜ [stub](stage-3a-lir.md), blocked on 3b | — | — |
+| 4b | `yelc-lower` | `yel-core/src/lower_to_lir/` | ⬜ [stub](stage-3b-lower.md), blocked on 4a | — | — |
+| 5 | `yelc-codegen` | `yel-wasm-codegen/` | ⬜ [stub](stage-4-codegen.md), blocked on 4b | — | — |
+
+> **Filenames still carry the old numbers** (`stage-2a-hir-build.md` is now stage
+> 3a, and so on). That is deliberate: renaming them would break every existing
+> cross-reference to buy tidiness, which is
+> [A17](anti-spec.md#a17--test-input-selection-is-stable-under-renames) in spirit
+> — stable identifiers beat consistent ones. The table is the index; the
+> filenames are addresses.
 
 **HIR and THIR merged** into one IR with two phases on 2026-07-28
 ([`seam-changes.md`](seam-changes.md)), and the remaining stages were renumbered
@@ -129,6 +137,7 @@ same reason (2a then 2b).
 | how do I sweep the oracle? | [`corpus.md`](corpus.md) | procedure |
 | why was a golden re-blessed? | [`goldens-changed.md`](goldens-changed.md) | log |
 | what am I building? | `stage-N*-*.md` (a phase) · `infra-*.md` (shared infrastructure) | **yes** — brief, contract, DoD, decisions, surprises |
+| what is blocking the next stage? | [`open-decisions.md`](open-decisions.md) | worksheet — 16 open calls, in dependency order |
 
 **Rules that keep this usable.** Evidence lives once, in `findings.md`, and is
 **cited** — never restated. A direction is not a contract until a brief copies
