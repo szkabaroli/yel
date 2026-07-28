@@ -17,59 +17,88 @@ Base: — · Started: — · Landed: —
 
 ## Brief
 
-A **thin** driver over the new crates, with rustc-style IR dump flags.
+A **thin** driver over the new crates: one subcommand per IR, in the shape
+`yelc` already uses.
 
 Thin is the requirement, not an aspiration. The moment it grows behaviour of its
 own it becomes a third implementation to keep in sync with two others. It
 formats and routes; it does not decide anything about the language.
 
-### The flag surface
+### The command surface
 
-Modelled on `rustc -Z unpretty=…`, which is the closest prior art and already
-familiar. One flag, a value, and optional comma-separated modifiers:
+`yelc` already has a subcommand shape, and the driver extends it rather than
+bolting a new flag idiom onto the side:
 
 ```
-yelc2 --unpretty=<mode>[,<modifier>…] <file>
+yelc compile -o {wasm,wit,dot} · yelc ast · yelc ir · yelc check      (frozen)
 ```
 
-| mode | dumps | available from |
+so:
+
+```
+yelc2 ast    [--identified] [--spans]   <file>
+yelc2 green  [--text]                   <file>
+yelc2 hir    [--typed] [--identified]   <file>
+yelc2 ir                                <file>
+yelc2 check                             <file>
+yelc2 diff                              <file>
+```
+
+| command | dumps | available from |
 |---|---|---|
-| `ast-tree` | the typed AST, structurally | **stage 1** |
+| `ast` | the typed AST, structurally | **stage 1** |
 | `green` | the lossless green tree, kinds + widths | **stage 1** |
-| `green-text` | `green.text()` — the S1 round-trip, for eyeballing | **stage 1** |
-| `hir` | HIR, pretty-printed as source-like text | stage 3a |
-| `hir-tree` | HIR, structurally | stage 3a |
-| `lir` | LIR blocks and ops | stage 4a |
+| `green --text` | `green.text()` — the S1 round-trip, for eyeballing | **stage 1** |
+| `hir` | HIR; `--typed` dumps after phase 2b instead of 2a | stage 3a |
+| `ir` | LIR blocks and ops — the name yel already uses | stage 4a |
 
-| modifier | effect |
+| flag | effect |
 |---|---|
-| `identified` | include `NodeId` / `HirId` on every node — rustc's `expanded,identified` |
-| `spans` | include byte spans |
-| `typed` | HIR only: dump after phase 2b, with the type map total rather than empty |
+| `--identified` | include `NodeId` / `HirId` on every node |
+| `--spans` | include byte spans |
+| `--typed` | `hir` only: after phase 2b, type map total rather than empty |
 
-`typed` is the yel-specific one and it is the reason the merged HIR needs a
-driver at all: **phase 2a's output is a public surface**
-([`seam-changes.md`](seam-changes.md)), so `--unpretty=hir` and
-`--unpretty=hir,typed` are the two positions lints and the LSP will read. If the
-driver cannot show both, nothing else can either.
+Three reasons this shape beats a rustc-style `--unpretty=<mode>,<modifier>`:
 
-Deliberately **not** copied from rustc: `expanded`. It means "after macro and
-`#[derive]` expansion", and yel has neither. Yel's analogous idea is
-*desugaring* — `if`/`for` nodes becoming block structure — which does not happen
-until LIR lowering, and is already visible as `lir`. Adding an `expanded` that
-means something different from rustc's would be worse than not having it.
+1. **`yelc ast` and `yelc2 ast` become directly comparable**, which is exactly
+   what the differential wants. A flag idiom the frozen CLI does not share makes
+   every side-by-side invocation asymmetric.
+2. Modifiers are ordinary flags rather than comma-separated values inside a
+   value.
+3. `ir` keeps the name yel already uses for LIR, instead of introducing `lir` as
+   a second name for one thing.
+
+**`--unpretty` was considered and rejected.** It is a historical accident in
+rustc: there was once a stable `--pretty` for pretty-printing source, the
+unstable structural dumps went behind `-Z unpretty` to contrast with it, and then
+`--pretty` was removed — leaving a flag named against something that no longer
+exists. Copying it would import the baggage and none of the meaning.
+
+What *is* worth taking from rustc is `identified` — node ids in the dump, so a
+diagnostic or an LSP request can be pointed at a node. That is a capability, not
+a naming convention.
+
+**`expanded` is deliberately absent.** In rustc it means "after macro and
+`#[derive]` expansion" and yel has neither. Yel's analogous idea is *desugaring*
+— `if`/`for` nodes becoming block structure — which does not happen until LIR
+lowering and is already visible as `ir`. An `expanded` that meant something
+different from rustc's would be worse than not having one.
+
+`--typed` is the yel-specific one, and the reason the merged HIR needs a driver
+at all: **phase 2a's output is a public surface**
+([`seam-changes.md`](seam-changes.md)), so `hir` and `hir --typed` are the two
+positions lints and the LSP will read. If the driver cannot show both, nothing
+else can either.
 
 ### Also
 
-```
-yelc2 check <file>     parse + report through Diagnostics::render(&SourceMap)
-yelc2 diff  <file>     run the frozen and new front ends, print what differs
-```
+`check` renders diagnostics through `yelc-base`'s renderer — the same one `yelc
+check` uses, so the two are comparable line for line.
 
 `diff` is the differential runner. It currently lives inside
-`yelc-syntax/tests/parity.rs` as a dev-dependency on the frozen crate — a
-harness living in a test file of the crate under test. Moving it here makes it
-runnable by hand, which is what every review round actually wanted.
+`yelc-syntax/tests/parity.rs` as a dev-dependency on the frozen crate — a harness
+living in a test file of the crate under test. Moving it here makes it runnable
+by hand, which is what every review round actually wanted.
 
 ## Constraints
 
@@ -90,8 +119,8 @@ runnable by hand, which is what every review round actually wanted.
 
 ## Definition of done
 
-- [ ] `--unpretty=ast-tree`, `green`, `green-text`, each with `identified` and
-      `spans`, over any `.yel` file.
+- [ ] `ast` and `green`, each with `--identified` / `--spans` / `--text`, over
+      any `.yel` file.
 - [ ] `check` renders diagnostics identically to `yelc check` for the same input
       — same `ErrorCode`, same span. It shares `yelc-base`'s renderer, so this is
       a wiring check, not a reimplementation.
