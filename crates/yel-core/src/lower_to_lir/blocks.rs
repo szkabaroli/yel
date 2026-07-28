@@ -2350,7 +2350,7 @@ impl<'a> BlockLowering<'a> {
                         // lower caller's children under that slot.
                         let target_has_slot = match self.ctx.defs.kind(*component_def) {
                             DefKind::Component(c) => c.has_children_slot,
-                            DefKind::ImportComponent(ic) => ic.has_children_slot,
+                            DefKind::ExternComponent(ic) => ic.has_children_slot,
                             _ => false,
                         };
                         let children_root = if target_has_slot {

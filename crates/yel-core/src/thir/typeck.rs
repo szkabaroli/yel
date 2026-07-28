@@ -469,7 +469,7 @@ impl<'ctx> TypeChecker<'ctx> {
                     && !children.is_empty() && !self.ctx.known.elements.is_builtin(def_id) {
                         let accepts = match self.ctx.defs.kind(def_id) {
                             DefKind::Component(c) => c.has_children_slot,
-                            DefKind::ImportComponent(ic) => ic.has_children_slot,
+                            DefKind::ExternComponent(ic) => ic.has_children_slot,
                             _ => false,
                         };
                         if !accepts {

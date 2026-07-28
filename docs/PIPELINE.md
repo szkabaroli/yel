@@ -85,7 +85,7 @@ downstream accumulates instead of returning `Result`.
 declaration order (`hir/lower.rs`):
 
 1. register type definitions — `register_record` / `register_enum` / `register_variant`
-2. register `element`s, `import component`s, `global`s — `register_element`,
+2. register `element`s, `extern component`s, `global`s — `register_element`,
    `register_import_component`, `register_global`
 3. register component *declarations* (name, properties, callbacks) — **without** bodies (`register_component`)
 4. lower bodies — `lower_component` → `lower_node` → `lower_expr` / `lower_statement`
@@ -261,7 +261,7 @@ produce the `LirModule`:
 | Module-start init | `synth_globals_init_block` | Plans the globals-init as an **LIR block**, so the backend transcribes it rather than building it imperatively. |
 | Import contract | `ctx.build_import_contract` | One registry of every host import (component callbacks, global callbacks, DOM) plus the `Import`-direction WIT interfaces that declare them. |
 | Export contract | `ctx.build_export_interfaces` | `Export`-direction `LirInterface` per exported component: the resource plus `LirIfaceFn`s for the constructor, mount/unmount, and a get/set pair per non-callback signal. |
-| Import components | `ctx.build_import_component_interfaces` | `import component X` declarations as `Import`-direction resource interfaces. |
+| Extern components | `ctx.build_extern_component_interfaces` | `extern component X` declarations as `Import`-direction resource interfaces. |
 
 Result — the single compilation unit handed to the backend:
 

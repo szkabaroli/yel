@@ -5,7 +5,7 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::context::CompilerContext;
 use crate::definitions::{
     ComponentDef, DefKind, ElementDef, EnumDef, FieldDef, FunctionDef, GlobalDef,
-    GlobalPropDirection, ImportComponentDef, Namespace, ParameterDef, RecordDef, SignalDef,
+    GlobalPropDirection, ExternComponentDef, Namespace, ParameterDef, RecordDef, SignalDef,
     VariantCaseDef, VariantDef,
 };
 use crate::syntax::ast::PropertyDirection;
@@ -126,13 +126,13 @@ impl<'ctx> HirLowering<'ctx> {
             self.register_variant(&variant.node, variant.span);
         }
 
-        // Phase 1b: Register element and import component declarations
+        // Phase 1b: Register element and extern component declarations
         for element in &file.elements {
             self.register_element(&element.node, element.span);
         }
 
-        for import_comp in &file.import_components {
-            self.register_import_component(&import_comp.node, import_comp.span);
+        for import_comp in &file.extern_components {
+            self.register_extern_component(&import_comp.node, import_comp.span);
         }
 
         for global in &file.globals {
@@ -391,11 +391,11 @@ impl<'ctx> HirLowering<'ctx> {
         }
     }
 
-    fn register_import_component(&mut self, import_comp: &ast::ImportComponent, span: Span) {
+    fn register_extern_component(&mut self, import_comp: &ast::ExternComponent, span: Span) {
         let name = self.ctx.intern(&import_comp.name);
         let def_id = self.ctx.defs.alloc(
             name,
-            DefKind::ImportComponent(ImportComponentDef {
+            DefKind::ExternComponent(ExternComponentDef {
                 def_id: DefId::INVALID,
                 name,
                 properties: vec![],
@@ -490,8 +490,8 @@ impl<'ctx> HirLowering<'ctx> {
             method_ids.push(method_id);
         }
 
-        // Update import component with property and method IDs
-        if let Some(c) = self.ctx.defs.as_import_component_mut(def_id) {
+        // Update extern component with property and method IDs
+        if let Some(c) = self.ctx.defs.as_extern_component_mut(def_id) {
             c.def_id = def_id;
             c.properties = prop_ids;
             c.methods = method_ids;

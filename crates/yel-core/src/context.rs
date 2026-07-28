@@ -680,21 +680,21 @@ impl CompilerContext {
         interfaces
     }
 
-    /// Build the `Import`-direction resource interfaces for `import component X`
+    /// Build the `Import`-direction resource interfaces for `extern component X`
     /// declarations (§6.7 Phase 3): each owns a resource with a constructor, a
     /// `get-`/`set-` pair per declared property, and its declared methods. The
-    /// data mirror of the former hardcoded `create_import_component_interfaces`;
+    /// data mirror of the former hardcoded `create_extern_component_interfaces`;
     /// rendered by the same `render_resource_interface` as exported components,
-    /// with the world placing these in imports. Reads `ImportComponentDef` from
+    /// with the world placing these in imports. Reads `ExternComponentDef` from
     /// `ctx.defs`.
-    pub fn build_import_component_interfaces(&mut self) -> Vec<crate::lir::LirInterface> {
+    pub fn build_extern_component_interfaces(&mut self) -> Vec<crate::lir::LirInterface> {
         use crate::lir::{InterfaceDirection, LirIfaceFn, LirInterface, LirReceiver};
         use crate::naming::to_kebab_case;
 
-        let ids: Vec<DefId> = self.defs.import_components().collect();
+        let ids: Vec<DefId> = self.defs.extern_components().collect();
         let mut interfaces = Vec::new();
         for ic_id in ids {
-            let (name, prop_ids, method_ids) = match self.defs.as_import_component(ic_id) {
+            let (name, prop_ids, method_ids) = match self.defs.as_extern_component(ic_id) {
                 Some(ic) => (ic.name, ic.properties.clone(), ic.methods.clone()),
                 None => continue,
             };

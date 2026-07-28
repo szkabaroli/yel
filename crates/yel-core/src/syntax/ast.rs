@@ -81,7 +81,7 @@ pub struct File {
     /// Intrinsic element type definitions.
     pub elements: Vec<Spanned<Element>>,
     /// Imported component declarations.
-    pub import_components: Vec<Spanned<ImportComponent>>,
+    pub extern_components: Vec<Spanned<ExternComponent>>,
     /// Global singleton declarations.
     pub globals: Vec<Spanned<Global>>,
     /// Component definitions.
@@ -881,10 +881,10 @@ pub struct Element {
     pub properties: Vec<Spanned<Property>>,
 }
 
-/// An imported component declaration: `import component Dialog { name: string; func show(); }`
+/// An external component declaration: `extern component Dialog { name: string; func show(); }`
 /// Imported components are external components provided by the host or other modules.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ImportComponent {
+pub struct ExternComponent {
     /// Component name (PascalCase).
     pub name: String,
     /// Span of the name.

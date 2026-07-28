@@ -138,7 +138,7 @@ impl<'a> WitAstBuilder<'a> {
             if self.import_contract[idx].direction != InterfaceDirection::Import {
                 continue;
             }
-            // Resource-owning imports (`import component X`) render through the
+            // Resource-owning imports (`extern component X`) render through the
             // shared `render_resource_interface` — this path is for callbacks /
             // globals / DOM, whose functions only *borrow* a resource.
             if Self::owns_resource(&self.import_contract[idx]) {
@@ -151,7 +151,7 @@ impl<'a> WitAstBuilder<'a> {
     }
 
     /// True if this contract interface *owns* a resource — i.e. declares a
-    /// constructor. Such interfaces (exported components, `import component`s)
+    /// constructor. Such interfaces (exported components, `extern component`s)
     /// render through [`Self::render_resource_interface`]; interfaces that only
     /// *borrow* a resource (component callbacks) render as freestanding
     /// functions with a leading `self` param.
@@ -283,11 +283,11 @@ impl<'a> WitAstBuilder<'a> {
     /// emit each [`LirIfaceFn`] as a WIT **constructor** or **method** based on
     /// its receiver. Direction-agnostic — the same shape serves an *exported*
     /// component (mount/unmount/getters/setters) and an *imported* component
-    /// (`import component X`: constructor + property getters/setters + declared
+    /// (`extern component X`: constructor + property getters/setters + declared
     /// methods); the world builder places it in exports or imports per the
     /// interface's direction. This is the data-driven replacement for the
     /// former hardcoded `create_component_interface` /
-    /// `create_import_component_interfaces` — the backend no longer knows what
+    /// `create_extern_component_interfaces` — the backend no longer knows what
     /// mount/unmount/get-/set- "mean"; it renders whatever the contract holds.
     /// Returns the interface id, the resource `TypeId`, and the owning
     /// component `DefId` (so `component_resources` can be populated for callback
@@ -574,13 +574,13 @@ impl<'a> WitAstBuilder<'a> {
             Some(self.create_module_dispatch_interface()?)
         };
 
-        // `import component X { ... }` declarations become imported resource
+        // `extern component X { ... }` declarations become imported resource
         // interfaces — the host or an upstream module supplies the
         // implementation. They own a resource (constructor + property
         // getters/setters + declared methods), so they render through the same
         // `render_resource_interface` as exported components; the world just
         // places them in imports instead of exports (§6.7 Phase 3).
-        let mut import_component_interface_ids = Vec::new();
+        let mut extern_component_interface_ids = Vec::new();
         for idx in 0..self.import_contract.len() {
             if self.import_contract[idx].direction != InterfaceDirection::Import
                 || !Self::owns_resource(&self.import_contract[idx])
@@ -589,7 +589,7 @@ impl<'a> WitAstBuilder<'a> {
             }
             let iface = self.import_contract[idx].clone();
             let (iface_id, _resource_ty, _def) = self.render_resource_interface(&iface)?;
-            import_component_interface_ids.push(iface_id);
+            extern_component_interface_ids.push(iface_id);
         }
 
         // World name is consistent regardless of whether the module has
@@ -605,7 +605,7 @@ impl<'a> WitAstBuilder<'a> {
             dispatch_interface_id,
             &component_interfaces,
             &resource_interfaces,
-            &import_component_interface_ids,
+            &extern_component_interface_ids,
         )
     }
 
@@ -1074,7 +1074,7 @@ impl<'a> WitAstBuilder<'a> {
         dispatch_interface_id: Option<InterfaceId>,
         component_interfaces: &[(InterfaceId, Option<InterfaceId>)],
         resource_interface_ids: &[InterfaceId],
-        import_component_interface_ids: &[InterfaceId],
+        extern_component_interface_ids: &[InterfaceId],
     ) -> Result<WorldId, CodegenError> {
         let world_id = self.resolve.worlds.alloc(World {
             name: world_name.to_string(),
@@ -1110,7 +1110,7 @@ impl<'a> WitAstBuilder<'a> {
         let has_component_callbacks = self.import_contract.iter().any(|i| {
             i.direction == InterfaceDirection::Import
                 && !i.resources.is_empty()
-                // Callbacks *borrow* a component resource; `import component`
+                // Callbacks *borrow* a component resource; `extern component`
                 // interfaces *own* one — only the former needs the exported
                 // resource pre-imported for wit-component's `use`.
                 && !Self::owns_resource(i)
@@ -1139,9 +1139,9 @@ impl<'a> WitAstBuilder<'a> {
             );
         }
 
-        // `import component` declarations — the host (or an upstream
+        // `extern component` declarations — the host (or an upstream
         // module) provides the concrete implementation of each.
-        for &ic_id in import_component_interface_ids {
+        for &ic_id in extern_component_interface_ids {
             self.resolve.worlds[world_id].imports.insert(
                 WorldKey::Interface(ic_id),
                 WorldItem::Interface {

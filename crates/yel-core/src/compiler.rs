@@ -368,10 +368,10 @@ impl Compiler {
         for iface in self.ctx.build_export_interfaces(&resources) {
             interfaces.push(iface);
         }
-        // §6.7 Phase 3: `import component X` declarations become Import-direction
+        // §6.7 Phase 3: `extern component X` declarations become Import-direction
         // resource interfaces in the same contract (rendered by the shared
         // `render_resource_interface`).
-        for iface in self.ctx.build_import_component_interfaces() {
+        for iface in self.ctx.build_extern_component_interfaces() {
             interfaces.push(iface);
         }
         LirModule {

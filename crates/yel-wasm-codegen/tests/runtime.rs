@@ -533,7 +533,7 @@ fn module_start_function_seeds_global_defaults() {
     );
 }
 
-/// Regression: `import component Modal { ... }` produces a WIT interface
+/// Regression: `extern component Modal { ... }` produces a WIT interface
 /// that the host is expected to provide. The core module imports
 /// `[resource-new]modal` from the matching `[export]` interface.
 ///
@@ -543,7 +543,7 @@ fn module_start_function_seeds_global_defaults() {
 fn imported_component_declares_resource_new_import() {
     let source = r#"
         package yel:impdecl@0.1.0;
-        import component Modal {
+        extern component Modal {
             title: string;
             func show();
         }

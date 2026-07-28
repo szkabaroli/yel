@@ -21,7 +21,7 @@ BLOCK_LEVEL_CATCH_ALL = @{ !("}" | NL) ~ (!NL ~ ANY)+ ~ NL? }
 file = { SOI ~ package_decl? ~ (top_level_item | CATCH_ALL)* ~ EOI }
 
 // Top-level items: records, enums, variants, elements, imports, globals, and components
-top_level_item = _{ record_decl | enum_decl | variant_decl | element_decl | import_component | global_decl | component }
+top_level_item = _{ record_decl | enum_decl | variant_decl | element_decl | extern_component | global_decl | component }
 
 // Record type declaration: record Name { field: type, ... }
 record_decl = {
@@ -82,25 +82,25 @@ element_property = {
     identifier ~ ":" ~ type_annotation ~ ";"
 }
 
-// Imported component declaration: import component Dialog { name: string; func show(); }
-// Imported components are external components provided by the host or other modules.
-import_component = {
-    "import" ~ "component" ~ identifier ~ "{" ~
-        import_component_member* ~
+// External component declaration: extern component Dialog { name: string; func show(); }
+// These components are external components provided by the host or other modules.
+extern_component = {
+    "extern" ~ "component" ~ identifier ~ "{" ~
+        extern_component_member* ~
     "}"
 }
 
-import_component_member = _{
-    import_method | import_property | children_node
+extern_component_member = _{
+    extern_method | extern_property | children_node
 }
 
-// Imported component property: name: type;
-import_property = {
+// External component property: name: type;
+extern_property = {
     identifier ~ ":" ~ type_annotation ~ ";"
 }
 
-// Imported component method: func name(params) -> ret;
-import_method = {
+// External component method: func name(params) -> ret;
+extern_method = {
     "func" ~ identifier ~ "(" ~ func_params? ~ ")" ~ func_return? ~ ";"
 }
 
