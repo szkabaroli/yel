@@ -12,7 +12,7 @@ Base: — · Started: — · Landed: —
 *To be written.* LIR → WASM component + WIT + DOT.
 
 Depends on `{ yelc-lir, yelc-base }` **and nothing else**. No dependency path to
-any frontend crate; see [stage 3](stage-3-lir.md#why-it-is-split).
+any frontend crate; see [stage 3a](stage-3a-lir.md#why-3a-and-3b-are-separate-crates).
 
 Must honour:
 
@@ -90,6 +90,20 @@ Plus, in the same PR:
 - Every throwaway adapter written during the rewrite. Each is named in its stage
   file; the reviewer checks each one is gone
   ([anti-spec A4](anti-spec.md#a4--no-permanent-bridge)).
+- **The keyword-boundary simplification** —
+  [directions §7](directions.md#7--keywords-get-a-word-boundary--at-cutover-by-deletion).
+  Once the frozen grammar is gone, nothing requires keywords to match *without* a
+  word boundary, so the machinery built to reproduce that goes with it:
+  `at_keyword_prefix`/`eat_keyword`/`assert_keyword` and their call sites, and
+  the `if`/element speculation with its measured ~150–190× parse-time
+  amplification. `yelc-syntax`'s lexer boundaries keywords naturally —
+  `keyword_kind` is called on a complete word — so this is **deletion, not new
+  code**.
+  **`split_token` and `partial_offset` stay**: `split_token`'s other caller is
+  `expect_type_close`, which takes the `>` out of a `>=` so `list<s32>=1` closes
+  the generic. That is a separate scannerless artifact the boundary does not
+  touch. Do it in this PR, while the reason it existed is still visible in the
+  diff.
 - The stage-selection seam in `yelc-driver` — once there is only one
   implementation, a selector between implementations is dead weight.
 - Workspace members, path deps, and CI matrix entries for the deleted crates.

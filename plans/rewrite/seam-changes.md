@@ -130,7 +130,7 @@ divergence that would have been "stage 2 or stage 3" is now "stage 2a or 2b".
 had **no artifact whatsoever**. HIR is not dumpable, the frozen tree may not be
 edited to add a dump, and the two HIRs were designed to differ in shape, so
 nothing could be diffed
-([stage 2 § How this stage is verified](stage-2-hir.md)). The merged stage ends
+([2a § Verification](stage-2a-hir-build.md#verification)). The merged stage ends
 at a **serializable typed module**, which is byte-comparable. Attribution between
 2a and 2b is recovered the cheap way: 2b runs as a separate pass over the output
 of 2a, so a divergence is bisected by dumping after 2a.
@@ -156,8 +156,9 @@ the merged stage, not a later concern:
 **Blast radius.**
 - `scope.md` stage-order row: THIR removed.
 - `README.md`: status table, crate layout, dependency graph.
-- `stage-2-hir.md`: absorbs stage 3's brief; restructured as 2a/2b.
-- `stage-3-thir.md`: **deleted.** Its content moved into `stage-2-hir.md` — none
+- `stage-2-hir.md`: absorbed stage 3's brief, then split per phase into
+  `stage-2a-hir-build.md` + `stage-2b-hir-check.md`.
+- `stage-3-thir.md`: **deleted.** Its content moved into the stage-2 files — none
   discarded, including the inherited-gap table (closure capture, function-type
   inference, generics, `match`, `color`/`brush`) and the §5 trigger
   sub-decision. It briefly existed as a tombstone; once every inbound link was

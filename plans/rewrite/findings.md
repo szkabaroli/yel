@@ -17,7 +17,7 @@
 | [F2](#f2) | The grammar has no generic type application | types |
 | [F3](#f3) | `intern_ast_ty` runs during registration, so named types become `Unknown` | resolution |
 | [F4](#f4) | Cross-file references are order-dependent | resolution |
-| [F5](#f5) | The definition tables are typed, and stage 2 types them | resolution |
+| [F5](#f5) | The definition tables are typed, and 2a types them | resolution |
 | [F6](#f6) | A closure capturing an enclosing local panics in codegen | closures |
 | [F7](#f7) | Codegen matches the `filter` builtin by string | closures |
 | [F8](#f8) | A block typechecks and compiles against a `func()` prop | closures |
@@ -26,7 +26,7 @@
 | [F11](#f11) | `else_if_branches` propagates through three IRs | control flow |
 | [F12](#f12) | Builtins are a field per builtin across 1,442 lines | builtins |
 | [F13](#f13) | `bind` desugars to getter + empty setter at HIR | lowering |
-| [F14](#f14) | There is no HIR dump, so stage 2 has no artifact | verification |
+| [F14](#f14) | There is no HIR dump, so 2a has no artifact of its own | verification |
 
 ---
 
@@ -51,7 +51,7 @@ no `Named<Args>` form, so a user cannot write `Box<T>`.
 `Result` stores `args: Vec<TypeRef>` **as written**, not `{ok, err}`, because
 `result<a,b,c>` is real input and truncating drops a subtree (stage-1 S5).
 
-`yelc-syntax/src/ast.rs:604` · cited by [§3](directions.md), [stage 2](stage-2-hir.md)
+`yelc-syntax/src/ast.rs:604` · cited by [§3](directions.md), [2a](stage-2a-hir-build.md)
 
 ## F3
 
@@ -68,7 +68,7 @@ AstTyKind::Named(_) => {
 A record field typed as a user record is `Unknown` in the definition table.
 
 `types/interner.rs:331`, called from `hir/lower.rs:206` and 11 other sites ·
-anti-spec B2 · cited by [stage 2 H1](stage-2-hir.md)
+anti-spec B2 · cited by [2a H1](stage-2a-hir-build.md#h1)
 
 ## F4
 
@@ -85,7 +85,7 @@ yelc check a.yel b.yel   # error[E0002]: cannot infer type of anonymous record l
 ```
 
 Same defect class as [F3](#f3), one level up. Measured 2026-07-28 ·
-cited by [stage 2](stage-2-hir.md)
+cited by [2a § Multiple files](stage-2a-hir-build.md#multiple-files)
 
 ## F5
 
@@ -97,7 +97,7 @@ So "HIR is untyped" is false as stated: *item signatures* are typed at stage 2,
 *expressions* are not. This is rustc's `type_of(def_id)`-before-body-check split,
 not a deviation from it. The frozen bug is only *when* it runs — see [F3](#f3).
 
-`definitions.rs:130,143,156,171,184` · cited by [stage 2 H1](stage-2-hir.md)
+`definitions.rs:130,143,156,171,184` · cited by [2a H1](stage-2a-hir-build.md#h1)
 
 ## F6
 
@@ -182,7 +182,7 @@ if n==1 {…} else { if n==2 {…} else {…} }
 
 The frozen lowering treats `else if` as a flat N-way selector at one anchor and
 nested `if` as two independent 1-way selectors. Measured via `compile -o dot`,
-2026-07-28 · cited by [stage 2 D7](stage-2-hir.md)
+2026-07-28 · cited by [2a D7](stage-2a-hir-build.md#d7--flatten-else-if-chains)
 
 ## F11
 
@@ -190,7 +190,7 @@ nested `if` as two independent 1-way selectors. Measured via `compile -o dot`,
 (`hir/node.rs`), THIR (`thir/node.rs:144`), LIR (`lir/node.rs:363`) — so every
 `If` consumer in three stages handles three shapes where one would do.
 
-anti-spec B4 · cited by [stage 2 D7](stage-2-hir.md)
+anti-spec B4 · cited by [2a D7](stage-2a-hir-build.md#d7--flatten-else-if-chains)
 
 ## F12
 
@@ -216,7 +216,7 @@ Implemented with `HashMap<String, _>` plus a parallel `binding_order:
 Vec<String>` to recover the determinism the map destroyed.
 
 `hir/lower.rs:967-1018` · undocumented in `docs/PIPELINE.md` ·
-cited by [stage 2](stage-2-hir.md)
+cited by [2a](stage-2a-hir-build.md#what-lowerings-belong-here)
 
 ## F14
 
@@ -225,9 +225,9 @@ cited by [stage 2](stage-2-hir.md)
 the two HIRs are designed to differ in shape, so a serialized byte-diff would be
 meaningless.
 
-Consequence: stage 2 has **no artifact** and cannot be differentially verified
-on its own. What is comparable instead: the `Definitions` table (contents *and*
+Consequence: 2a has **no artifact** and cannot be differentially verified on
+its own; the artifact arrives after 2b. What is comparable instead: the `Definitions` table (contents *and*
 order — `DefId`s are ordinals that reach output), HIR-stage diagnostics via
 `yelc check`, and total-lowering-without-panic.
 
-cited by [stage 2](stage-2-hir.md), [§6](directions.md)
+cited by [2a](stage-2a-hir-build.md#verification), [2b](stage-2b-hir-check.md#verification), [§6](directions.md)

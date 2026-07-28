@@ -20,26 +20,54 @@ phases — THIR merged into it on 2026-07-28
 3. **The conformance number never goes down.** Every stage lands on a measured
    number ≥ [`ratchet.md`](ratchet.md), or it does not land.
 
+## Read the frozen tree; do not port it
+
+The old compiler is the **specification, not a source of code**. It encodes years
+of correct behaviour in an implementation that is feature-incomplete and
+structurally wrong — [`findings.md`](findings.md) is the measured evidence, with
+repros. What transfers is the **inventory and the behaviour**: which builtins
+exist, what each diagnostic means, what order things happen in, what the output
+bytes are. The implementation is written fresh.
+
+Two exceptions, both narrow:
+
+- **The [keep-list](keep-list.md)** — kept by contract, already landed in
+  `yelc-base`. Not up for rewrite.
+- **A construct explicitly named in a brief as a model**, with the reason
+  written down. `thir/visit.rs` is the standing example: the one place the
+  duplicated-walker problem was actually solved.
+
+Everything else: read it constantly, copy it never. A brief that says a frozen
+file "carries over" is using the wrong word — say what the file *tells you* and
+what gets *written*.
+
 ## Status
 
 | # | Crate | Replaces (frozen) | Status | Agent | Landed |
 |---|-------|-------------------|--------|-------|--------|
 | 0 | — | — | ✅ **done** | orchestrator | 2026-07-24 |
+| — | `yelc-base` | keep-list items | ✅ **landed** (infrastructure, no stage) | — | 2026-07-28 |
 | 1 | `yelc-syntax` | `yel-core/src/syntax/` | ✅ **landed** | agent + integrator | 2026-07-28 |
-| 2a·2b | `yelc-hir` | `yel-core/src/{hir,thir}/` | 📝 brief written, not briefed | — | — |
-| 3a | `yelc-lir` | `yel-core/src/lir/` | ⬜ blocked on 2 | — | — |
-| 3b | `yelc-lower` | `yel-core/src/lower_to_lir/` | ⬜ blocked on 3a | — | — |
-| 4 | `yelc-codegen` | `yel-wasm-codegen/` | ⬜ blocked on 3b | — | — |
+| — | `yelc-sema` | `context.rs`, `definitions.rs`, `known.rs`, `stdlib_lookup.rs`, `types/` (~3.5k) | 📝 [brief](infra-sema.md) — **blocks 2a** | — | — |
+| 2a | `yelc-hir` | `yel-core/src/hir/` | 📝 [brief](stage-2a-hir-build.md), not briefed | — | — |
+| 2b | `yelc-hir` | `yel-core/src/thir/` | 📝 [brief](stage-2b-hir-check.md), blocked on 2a | — | — |
+| 3a | `yelc-lir` | `yel-core/src/lir/` | ⬜ [stub](stage-3a-lir.md), blocked on 2b | — | — |
+| 3b | `yelc-lower` | `yel-core/src/lower_to_lir/` | ⬜ [stub](stage-3b-lower.md), blocked on 3a | — | — |
+| 4 | `yelc-codegen` | `yel-wasm-codegen/` | ⬜ [stub](stage-4-codegen.md), blocked on 3b | — | — |
 
 **HIR and THIR merged** into one IR with two phases on 2026-07-28
 ([`seam-changes.md`](seam-changes.md)), and the remaining stages were renumbered
 to close the gap: LIR is **3a**/**3b**, codegen is **4**. Stage numbers are
 contiguous — a gap invites someone to "fix" it later.
 
-One row here = one crate and one brief. **[`ratchet.md`](ratchet.md) has one row
-per *landing***, so 2a and 2b appear separately there — each lands on its own
-measured number, and the point of the ratchet is that the number does not go
-down between them.
+**One row = one phase = one brief file = one ratchet row.** 2a and 2b share the
+crate `yelc-hir` but are briefed, landed and measured separately; so are 3a/3b,
+which are two crates. A phase is the unit an agent owns end to end.
+
+**Rows marked `—` are infrastructure, not stages** — they transform no IR and get
+no ratchet row, but they must land before the stage that depends on them.
+`yelc-base` is the precedent. `yelc-sema` is the same category and is **the open
+blocker for 2a** — brief: [`infra-sema.md`](infra-sema.md).
 
 Cutover phase: **1 — coexist**. Phase 4 (deletion) is a named task, scheduled
 now: [`stage-4-codegen.md` § Final deletion](stage-4-codegen.md#final-deletion--cutover-phase-4).
@@ -100,7 +128,7 @@ same reason (2a then 2b).
 | what number must I beat? | [`ratchet.md`](ratchet.md) | **yes**, append-only |
 | how do I sweep the oracle? | [`corpus.md`](corpus.md) | procedure |
 | why was a golden re-blessed? | [`goldens-changed.md`](goldens-changed.md) | log |
-| what am I building? | `stage-N-*.md` | **yes** — brief, contract, DoD, decisions, surprises |
+| what am I building? | `stage-N*-*.md` (a phase) · `infra-*.md` (shared infrastructure) | **yes** — brief, contract, DoD, decisions, surprises |
 
 **Rules that keep this usable.** Evidence lives once, in `findings.md`, and is
 **cited** — never restated. A direction is not a contract until a brief copies

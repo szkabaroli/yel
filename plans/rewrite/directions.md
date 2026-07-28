@@ -145,6 +145,13 @@ ordinary monomorphic definition — exactly what `register_function` already
 produces. **Internal only**: `list<s32>` stays the surface, the mangled name is
 never parsed and never rendered.
 
+**Scope of the claim.** This removes the need for a **type parameter** variant
+(`Param`) — the `T` in `list<T>` — *if* templates are carried as syntax and
+interned only once concrete. It says nothing about **inference variables**
+(`Infer`), which are a separate question owned by 2b's function-type-inference
+gap. See [`infra-sema.md` S7](infra-sema.md#s7--does-ty-gain-a-non-concrete-variant);
+conflating the two is a mistake this file made once already.
+
 **Why it fits.** There are no type variables to remove — [F1](findings.md#f1).
 The choice is not "real generics vs. a compromise" but:
 
@@ -390,15 +397,117 @@ serialization onto a one-compilation design produces. The rule that removes them
 
 | | retrofit (a remap to forget) | designed in (nothing to forget) |
 |---|---|---|
-| `DefId` | ordinal into one arena; remap on load | carries its module; a cross-module reference serializes as `(module, symbol)` and resolves on load — *a lookup that fails loudly*, not an offset that is silently wrong |
+| `DefId` | ordinal into one arena; remap on load | carries its module; a cross-module reference serializes as a **name path** and resolves by lookup on load — *a lookup that fails loudly*, not an offset that is silently wrong |
 | `Ty` | interner index; re-intern and remap | serialize the **structure**. Loading re-interns as a matter of course, because no handle was ever written. Two modules cannot disagree about `Ty(7)` because neither wrote `7`. |
+
+**Swift does exactly this split**, and states it plainly
+(`docs/Serialization.md`): *"Decl nodes may be **cross-references to other
+modules**, while types are **always serialized with enough info to regenerate
+them at load time**. Nodes are accessed by a file-unique 'DeclIDs' … and
+'TypeIDs'; the two sets of IDs use separate numbering schemes."*
+
+Inside a `.swiftmodule`, `DeclID`/`TypeID`/`IdentifierID` are **module-local
+indices** into an offset table. Across modules, an `XREF` record stores a base
+module ID plus a **path of name pieces** (`XREF_TYPE_PATH_PIECE`,
+`XREF_VALUE_PATH_PIECE`, `XREF_EXTENSION_PATH_PIECE`,
+`XREF_OPERATOR_OR_ACCESSOR_PATH_PIECE`, …) which the reader re-resolves by
+lookup. A miss is a diagnosed cross-reference error.
+
+**Two details worth stealing, both non-obvious:**
+
+1. **`XREF_VALUE_PATH_PIECE` carries the *type*, not just the name** — because a
+   name does not identify a decl under overloading. Yel has this problem
+   already: [§3](#3--generics-are-monomorphization-by-name) keeps `len` as both
+   `list<T> -> s32` and `string -> s32`, resolved by (name, argument types). A
+   bare `(module, symbol)` reference **cannot name one of two `len`s**. The
+   cross-module reference must carry the same discriminator the resolver uses.
+2. **Path pieces carry a "private discriminator"** so a non-exported decl is
+   still referenceable without colliding with a same-named one elsewhere. Yel's
+   `export` keyword makes the same distinction and will need the same handling.
 
 The one genuine constraint: **staleness is a hash** — of inputs *and* compiler
 version. A stale module that loads successfully is worse than one that fails to.
 
+**Swift's answer to cross-version modules is not to have one.** `.swiftmodule`
+is version-locked — `SWIFTMODULE_VERSION_MINOR` is currently **1013**, under the
+rule *"when the format changes IN ANY WAY, this number should be incremented"* —
+and a mismatch refuses to load. Stability across compiler versions is a
+*separate, textual* artifact (`.swiftinterface`: source-like, **re-typechecked**
+by the consumer). Two artifacts, two jobs: the binary one is a cache and is
+allowed to be brittle; the textual one is the contract.
+
+That is a real answer to the versioning question below, and a cheap one for yel:
+version-lock the binary module, refuse on mismatch, and recompile from source —
+which is always available, because [§2](#2--the-stdlib-is-yel-source-embedded-in-the-binary)
+embeds the stdlib source in the binary. Yel gets `.swiftinterface`'s guarantee
+without a second format.
+
 *General form, because it will recur:* **a property that is hard to add later is
 usually cheap to assume from the start, and the frozen compiler's difficulties
 are evidence about retrofitting, not about the property.**
+
+### The format: serde + postcard, in a hand-written envelope
+
+**Decided: postcard.** `serde` is already a workspace dependency and `yelc-base`
+already uses it; `postcard` adds the codec.
+
+**Why not something heavier.** Version-locking (above) removes schema evolution —
+the main reason to reach for protobuf/capnproto/flatbuffers. Cross-language
+readers are not a requirement; only `yelc` reads these. And zero-copy (`rkyv`)
+should not be chosen before deserialization is *measured* to be the bottleneck:
+its cost is **design** cost, because archived types shape the data structures
+that use them. Adopting it early means the serializer dictates the IR — the same
+inversion the [boundary relaxation](seam-changes.md) exists to catch. Revisit if
+prelude load time shows up in a profile.
+
+**Why postcard over its near neighbours.** `bincode` and `borsh` are both
+defensible and both deterministic *given deterministic data* — which is our
+problem, not the codec's. The separator is **wire-format stability independent of
+dependency bumps**: postcard commits to a documented wire spec, so the bytes move
+only when *our* schema moves. That matters because
+[2b byte-compares the serialized module](stage-2b-hir-check.md#verification); with
+a codec whose encoding can shift under a version bump, every artifact diff lights
+up for a reason that has nothing to do with the compiler. (`borsh` is canonical
+by design and would serve equally; the tiebreak was ecosystem familiarity, not
+engineering.)
+
+**Keep the codec behind one boundary** — `encode(&Module) -> Vec<u8>` /
+`decode(&[u8]) -> Result<Module>`, imported by nothing else. Then this decision
+is reversible in an afternoon and `rkyv` stays live if a profile ever demands it.
+
+**One derive set, two encoders.** The same serde impls give a **text dump**
+(RON/JSON) alongside the binary artifact, for one extra call. That is not a
+nicety: [F14](findings.md#f14) leaves stage 2 without an artifact and pushes its
+differential onto `Definitions`-table comparison — a readable dump makes that
+comparison reviewable instead of a hexdump.
+
+**The envelope is hand-written and tiny**, so Swift's index-block door stays open
+without building lazy loading now:
+
+```
+magic "YELM" · format_version: u32 · input_hash: [u8; 32] · section_count: u32
+section table:  (kind: u8, offset: u32, len: u32) × N
+sections:       postcard payloads
+```
+
+Lazy loading later = read the table, decode one section. Version mismatch or hash
+mismatch = refuse, recompile from source.
+
+**Two traps that are format-adjacent and already armed.**
+
+1. **`Ty` derives `Serialize` and is a `u32` index.** `pub struct Ty(pub u32)`
+   with `#[derive(…, Serialize, Deserialize)]` (`types/interner.rs:13`) means a
+   naive derive on anything containing a `Ty` writes **the handle** — precisely
+   the bug this direction exists to prevent. The existing derive is a loaded gun:
+   serialized positions need a wrapper or `serialize_with` that writes the
+   *structure*. Anything that merely compiles here is wrong.
+2. **Iteration order reaching bytes.** `clippy.toml` already states the rule —
+   `FxHashMap` is seedless and therefore fine for *iteration*, but "where the
+   iteration order itself reaches output, additionally sort by a stable key or
+   use a `BTreeMap`." **Serialized bytes are output.** So a serialized map is
+   sorted on write or is a `BTreeMap`; `HirMap`'s `FxHashMap` fields qualify.
+   Cheaper still: `HirMap` is *derivable* from the nodes, so the honest question
+   is whether it is serialized at all.
 
 **What it buys beyond speed.** §2 becomes affordable · separate compilation stops
 being impossible ([F4](findings.md#f4): "multi-file" currently means concatenating
@@ -410,5 +519,119 @@ resolution and typecheck, but a consumer still needs the implementation to emit
 code — so either bodies ship or the module carries compiled LIR and the back end
 links. Yel is AOT into a single component, which argues for shipping bodies. ·
 Module identity: there is no `import` syntax, so a file cannot name a dependency;
-an implicit prelude works, anything more is a language change. · Versioning and
-ABI across compiler versions — the hash detects it, does not solve it.
+an implicit prelude works, anything more is a language change. · What
+discriminator does a cross-module reference carry so it can name one of two
+overloads (see the `XREF_VALUE_PATH_PIECE` note above)? That is the same question
+as §3's mangling scheme and should be settled once, for both.
+
+~~Versioning and ABI across compiler versions.~~ **Answered:** version-lock the
+binary module and recompile from source on mismatch, per Swift's split above.
+
+---
+
+## 7 · Keywords get a word boundary — at cutover, by deletion
+
+**Status: wanted, blocked on cutover phase 4 rather than on design.** The
+mechanism is understood, the win is large, and the *only* reason not to do it now
+is that it would blind the differential while the differential is still the
+correctness gate.
+
+### The shape
+
+`grammar.pest` matches keywords as **bare string literals with no word
+boundary**, so `"if"` matches the first two characters of `ifa` and `ifa { … }`
+parses as `if a { … }`. Likewise `recordFoo` is a record named `Foo`,
+`exportcomponent A` is an exported component, `forx in xs` is a `for` over `x`,
+and `iflex { color: red }` is an element only because a `named_prop` is not a
+`node`.
+
+A tokenizing lexer does not naturally behave this way. `yelc-syntax`'s
+`keyword_kind(word)` is called on a **complete** lexed word, so `ifa` is one
+`IDENTIFIER` and only an exact `if` is `IF_KW`. Word boundaries are the default.
+
+So stage 1 had to build machinery to *undo* its own lexer:
+`at_keyword_prefix` / `eat_keyword` / `assert_keyword`, plus the `if`/element
+speculation (`Parser::try_parse`), which exists because `ife {` has two live
+readings and which carries a measured **~150–190× parse-time amplification** on
+nested glued `if`s (3.19 s vs 17 ms at 16,000 levels).
+
+### What survives, and why — do not over-claim this
+
+`split_token` and `partial_offset` **stay.** `split_token` has two callers, and
+only one is about keywords:
+
+| caller | purpose | after a word boundary |
+|---|---|---|
+| `eat_keyword` (`parser.rs:545`) | keyword prefix — `recordFoo` → `record` + `Foo` | goes |
+| `expect_type_close` (`parser.rs:627`) | takes the `>` out of a `>=`, so `list<s32>=1` closes the generic | **stays** |
+
+The `>=` split is a *separate* consequence of pest being scannerless, and a
+keyword boundary does nothing for it. So the cursor keeps `partial_offset`, and
+`Checkpoint` keeps its field.
+
+An earlier draft of this entry claimed the boundary deletes "all of it,
+including `partial_offset` and its checkpoint field". That was wrong, and it is
+exactly the kind of over-claim a deletion PR would act on before discovering
+`list<s32>=1` had stopped parsing.
+
+### Why not now, in both compilers
+
+Two pest-specific obstacles, both hit and measured:
+
+1. **A shared boundary rule does not work.** `"record" ~ WB ~ identifier`
+   becomes `"record" ~ WHITESPACE* ~ WB ~ …`, because pest inserts implicit
+   whitespace between every `~` in a non-atomic rule. The space is skipped
+   *before* the boundary is tested, so it sees `F` and fails. `record Foo`
+   stops parsing.
+2. **Atomic keyword rules work, but change the pair tree.**
+   `kw_record = @{ "record" ~ !(ALNUM | "_" | "-") }` is correct as a grammar —
+   atomic suppresses the whitespace insertion. But an atomic rule **emits a
+   pair**, so `record_decl`'s children become `[kw_record, identifier, …]` and
+   the hand-written parser walking `into_inner()` finds a keyword where it
+   expects a name. Everything rejects.
+
+pest has no single modifier for *silent and atomic*: `_` suppresses the pair and
+reintroduces the whitespace, `@` fixes the whitespace and emits the pair. Doing
+it in the frozen tree therefore also means updating ~20 productions' pair-walking
+in a 3.3k-line file, where a mistake is a silent misparse rather than a compile
+error.
+
+### Why not now, in the new parser only
+
+Technically trivial — it is deletion. But it breaks the premise the whole rewrite
+rests on: **the differential is only meaningful while both compilers accept the
+same language.** Change one and every keyword-prefix input becomes a reported
+divergence, and the harness can no longer tell an intended change from a
+regression introduced beside it. The allow-list needed to cover the class
+(`recordFoo`, `component8A`, `exportcomponent`, `forx`, `iflex`, `letx`, `keyx`,
+…) would be large enough to stop being a ratchet — the escape-hatch shape
+[A10](anti-spec.md#a10--an-allow-list-entry-is-characterized-by-evidence-about-the-other-implementation)
+names, at scale.
+
+There is also a product answer: the frozen compiler is what ships. If the two
+disagree, the new one rejects source the shipping compiler accepts.
+
+### Why cutover is the right moment
+
+At phase 4 the frozen tree is deleted and there is **no oracle left to
+preserve**. The change stops being a surface change fought against a differential
+and becomes a deletion PR:
+
+- drop the 56 `at_keyword_prefix`/`eat_keyword`/`split_token` call sites
+- drop `partial_offset` from the cursor and its checkpoint field
+- drop the `if`/element speculation, and with it the ~150–190× amplification
+- the lexer's natural behaviour simply stands
+
+Nothing is blocked by waiting: the machinery is built, tested, and correct
+against the frozen grammar today. Waiting costs nothing and removes all the risk.
+
+**Cross-reference:** [`stage-4-codegen.md` § Final deletion](stage-4-codegen.md#final-deletion--cutover-phase-4)
+carries this as a checklist item so it is picked up rather than rediscovered.
+
+### If it is ever wanted *before* cutover
+
+It is a surface change and gets the same evidence the kebab lookahead got
+([`goldens-changed.md`](goldens-changed.md)): apply it to **both** compilers,
+regenerate the corpus, and require all 8000 artifacts byte-identical. Real yel
+writes `if a {`, not `ifa {`, so that is a plausible outcome — but the frozen
+half needs the pair-walking work above first, and that is the expensive part.

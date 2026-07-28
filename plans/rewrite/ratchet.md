@@ -22,6 +22,7 @@ started measuring.
 | **baseline (pre-rewrite)** | 2026-07-24 | `ccf2086` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus defined here) | **2** |
 | **baseline (re-freeze)** | 2026-07-28 | `c51b51d` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus regenerated) | **2** |
 | **1 — syntax** | 2026-07-28 | `33e5c71` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | **0** | **2** |
+| — `yelc-sema` (infra) | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 2a — HIR build+resolve | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 2b — HIR check | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 3a — LIR data model | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
@@ -32,7 +33,10 @@ started measuring.
 2026-07-28 ([`seam-changes.md`](seam-changes.md)), and the remaining stages were
 renumbered rather than left with a gap. Row labels here match
 [`README.md`](README.md) § Status and the `stage-N-*.md` files exactly —
-`2a`/`2b` are `yelc-hir`, `3a` is `yelc-lir`, `3b` is `yelc-lower`.
+`2a`/`2b` are `yelc-hir`, `3a` is `yelc-lir`, `3b` is `yelc-lower`. Rows marked
+`—` are **infrastructure, not stages** ([`infra-sema.md`](infra-sema.md)): they
+transform no IR, but they land on `main`, so the rule that landing never lowers
+the number applies to them too.
 
 **A row is per landing, not per crate.** 2a and 2b live in one crate but ratchet
 separately, because each lands on its own measured number and the whole point is
