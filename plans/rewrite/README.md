@@ -23,8 +23,8 @@ internal data structure, pass, and helper is replaced.
 | # | Crate | Replaces (frozen) | Status | Agent | Landed |
 |---|-------|-------------------|--------|-------|--------|
 | 0 | — | — | ✅ **done** | orchestrator | 2026-07-24 |
-| 1 | `yelc-syntax` | `yel-core/src/syntax/` | ⬜ not started | — | — |
-| 2 | `yelc-hir` | `yel-core/src/hir/` | ⬜ blocked on 1 | — | — |
+| 1 | `yelc-syntax` | `yel-core/src/syntax/` | ✅ **landed** | agent + integrator | 2026-07-28 |
+| 2 | `yelc-hir` | `yel-core/src/hir/` | 📝 brief written, blocked on 1 | — | — |
 | 3 | `yelc-thir` | `yel-core/src/thir/` | ⬜ blocked on 2 | — | — |
 | 4a | `yelc-lir` | `yel-core/src/lir/` | ⬜ blocked on 3 | — | — |
 | 4b | `yelc-lower` | `yel-core/src/lower_to_lir/` | ⬜ blocked on 4a | — | — |
@@ -95,14 +95,18 @@ constrain the new design, and they are rewritten at cutover rather than honoured
 `docs/TECH_DEBT.md` is different: it is the *input* to
 [`anti-spec.md`](anti-spec.md), and it is accurate.
 
-## Baseline (freeze `ccf2086`, 2026-07-24)
+## Baseline (freeze `c51b51d`, 2026-07-28)
 
-| | |
-|---|---|
-| workspace tests | **315 passed, 0 failed, 2 ignored** |
-| execution tests | **85 / 85** — the only semantic oracle, never modified |
-| fuzz 200 seeds | **200 / 200** |
-| corpus | **2000 / 2000** compile + validate; `known-failures.txt` **empty** |
+The freeze point **moved**: `c51b51d` renamed `import component` to
+`extern component` on the frozen tree. Corpus regenerated, corrective baseline
+row added — see [`ratchet.md`](ratchet.md) § Why there are two baselines.
+
+| | baseline `c51b51d` | stage 1 `33e5c71` |
+|---|---|---|
+| workspace tests | **315 / 0 / 2 ignored** | **480 / 0 / 2** |
+| execution tests | **85 / 85** — the only semantic oracle, never modified | **85 / 85** |
+| fuzz 200 seeds | **200 / 200** | **200 / 200** |
+| corpus | **2000 / 2000**; `known-failures.txt` **empty** | **0 divergences** |
 
 The fuzz metric is **saturated** and cannot improve. Regressions show up as
 **corpus divergences**; fixes show up as `known_bugs` promotions. See

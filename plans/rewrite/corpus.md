@@ -23,8 +23,9 @@ nobody did, and they are the larger half.
 
 | | |
 |---|---|
-| **Freeze SHA** | `ccf2086de2750c3783fd6f930be4a766f2463adb` |
-| **Date** | 2026-07-24 |
+| **Freeze SHA** | `33e5c7147a84f634eafb3303de495300f27ef585` |
+| **Previous freeze** | `ccf2086` — superseded, see below |
+| **Date** | 2026-07-28 (regenerated) |
 | **Generator** | [`scripts/freeze-corpus.sh`](../../scripts/freeze-corpus.sh) |
 | **Seeds** | 1 … 2000 (`yel-smith --seed N`) |
 | **Toolchain** | release build of `yelc` + `yel-smith` at the freeze SHA; `wasm-tools 1.227.1` |
@@ -33,6 +34,21 @@ nobody did, and they are the larger half.
 a `compiler_sources_clean=yes|NO` flag. If that flag ever reads `NO`, the corpus
 is **not** reproducible and must be regenerated from a clean checkout before it
 is trusted as a baseline.
+
+## Why it was regenerated
+
+The first corpus was frozen at `ccf2086`. Commit `c51b51d` then renamed
+`import component` to `extern component` — a **surface language change on the
+frozen tree**, which is legitimate shipping work but moves the freeze point. The
+`ccf2086` artifacts described a compiler that no longer exists, and diffing
+against a moving target is the one thing the freeze exists to prevent.
+
+The manifest names `33e5c71` (the stage-1 commit) rather than `c51b51d`, because
+that is the tree the generating binary was built from. The **frozen half is
+identical between them** — stage 1 only added `yelc-syntax` and `yelc-base`, and
+`cargo test --workspace --exclude yelc-syntax --exclude yelc-base` gives the same
+315 / 0 / 2 at both. So the corpus provenance is the frozen compiler at
+`c51b51d`, which is the baseline row it is compared against.
 
 ## Layout
 
@@ -67,13 +83,13 @@ Note `src/` in particular is not optional: seed N does **not** reliably reproduc
 the same program, because `yel-smith` is part of the workspace and its generator
 will change. The `.yel` files, not the seeds, are the corpus.
 
-## Measured at the freeze
+## Measured at the freeze (regenerated 2026-07-28)
 
 ```
-freeze_sha=ccf2086de2750c3783fd6f930be4a766f2463adb
+freeze_sha=33e5c7147a84f634eafb3303de495300f27ef585
 compiler_sources_clean=yes
 seeds=2000
-yelc_version=yelc 0.1.0 (ccf2086 2026-07-24 18:18:25 +00:00)
+yelc_version=yelc 0.1.0 (33e5c71 2026-07-28 10:35:53 +00:00)
 rustc: rustc 1.96.0 (ac68faa20 2026-05-25)
 wasm_tools_version=wasm-tools 1.227.1
 src_count=2000   wit_count=2000   dot_count=2000   wasm_count=2000

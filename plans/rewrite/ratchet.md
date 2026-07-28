@@ -20,7 +20,8 @@ started measuring.
 | Stage | Date | freeze/base SHA | workspace tests | execution | fuzz/200 | corpus divergences | ignored |
 |-------|------|-----------------|-----------------|-----------|----------|--------------------|---------|
 | **baseline (pre-rewrite)** | 2026-07-24 | `ccf2086` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus defined here) | **2** |
-| **1 — syntax** | 2026-07-28 | `0b3054b` | **479 pass / 0 fail** | **85 / 85** | 200 / 200 | **0** | **2** |
+| **baseline (re-freeze)** | 2026-07-28 | `c51b51d` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus regenerated) | **2** |
+| **1 — syntax** | 2026-07-28 | `33e5c71` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | **0** | **2** |
 | 2 — HIR | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 3 — THIR | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 4 — LIR | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
@@ -84,6 +85,31 @@ Both are documentation-example doctests, not disabled behaviour:
 The ignored count is the easiest number in this table to game and the one that
 silently absorbs regressions. It is tracked for exactly that reason: a stage
 that "passes" by adding `#[ignore]` fails the gate.
+
+## Why there are two baselines
+
+The freeze point moved. `c51b51d` renamed `import component` to
+`extern component` — a **surface language change** on the frozen tree, and
+therefore ordinary shipping work rather than rewrite work
+([`greenfield-never-touch-old-code`](../../.agents/skills/compiler-rewrite/rules/greenfield-never-touch-old-code.md)
+allows exactly this, and says what it costs).
+
+What it cost, done rather than promised:
+
+1. The corpus was regenerated from `c51b51d`. The `ccf2086` artifacts described a
+   compiler that no longer exists, so keeping them would have meant diffing
+   against a moving target — the one thing the freeze exists to prevent.
+2. This corrective baseline row, so stage 1's numbers are compared against the
+   compiler it actually ran beside.
+
+The two baselines are **identical on every column** — 315 / 0 / 2, 85/85, 200/200
+— measured with `cargo test --workspace --exclude yelc-syntax --exclude yelc-base`.
+That is the evidence the rename was behaviour-neutral for everything except the
+keyword itself, and it is why stage 1's numbers stay comparable across the move.
+
+(The first draft of this row said 395, reasoned from arithmetic rather than
+measured. That is the A19 violation this file exists to prevent, caught before it
+landed. Every number here comes from the command named beside it.)
 
 ## Rules
 
