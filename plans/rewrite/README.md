@@ -48,8 +48,8 @@ what gets *written*.
 | 0 | — | — | ✅ **done** | orchestrator | 2026-07-24 |
 | — | `yelc-base` | keep-list items | ✅ **landed** (infrastructure, no stage) | — | 2026-07-28 |
 | 1 | `yelc-syntax` | `yel-core/src/syntax/` | ✅ **landed** | agent + integrator | 2026-07-28 |
-| **2** | `yelc-driver` | — (new: the observation instrument) | 📝 [brief](stage-2-driver.md), **next** | — | — |
-| — | `yelc-sema` | `context.rs`, `definitions.rs`, `known.rs`, `stdlib_lookup.rs`, `types/` (~3.5k) | 📝 [brief](infra-sema.md) — **blocks 3a** | — | — |
+| 2 | `yelc-driver` | — (new: the observation instrument, binary `yelc2`) | ✅ **landed** | integrator | 2026-07-28 |
+| — | `yelc-sema` | `context.rs`, `definitions.rs`, `known.rs`, `stdlib_lookup.rs`, `types/` (~3.5k) | 📝 [brief](infra-sema.md), **next** — blocks 3a | — | — |
 | 3a | `yelc-hir` | `yel-core/src/hir/` | 📝 [brief](stage-2a-hir-build.md), not briefed | — | — |
 | 3b | `yelc-hir` | `yel-core/src/thir/` | 📝 [brief](stage-2b-hir-check.md), blocked on 3a | — | — |
 | 4a | `yelc-lir` | `yel-core/src/lir/` | ⬜ [stub](stage-3a-lir.md), blocked on 3b | — | — |

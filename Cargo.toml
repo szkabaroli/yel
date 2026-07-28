@@ -5,6 +5,7 @@ members = [
   # --- rewrite tree (see plans/rewrite/README.md) ---
   "crates/yelc-base",
   "crates/yelc-syntax",
+  "crates/yelc-driver",
   "crates/yel-host",
   "crates/yel-lsp",
   "crates/yel-smith",
@@ -23,6 +24,7 @@ yel-wasm-codegen = { path = "crates/yel-wasm-codegen" }
 # Rewrite tree
 yelc-base = { path = "crates/yelc-base" }
 yelc-syntax = { path = "crates/yelc-syntax" }
+yelc-driver = { path = "crates/yelc-driver" }
 
 # CLI & Error handling
 anyhow = "1"

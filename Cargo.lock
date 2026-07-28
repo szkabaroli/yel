@@ -4039,6 +4039,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "yelc-driver"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "yelc-base",
+ "yelc-syntax",
+]
+
+[[package]]
 name = "yelc-syntax"
 version = "0.1.0"
 dependencies = [

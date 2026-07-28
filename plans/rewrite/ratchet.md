@@ -23,6 +23,7 @@ started measuring.
 | **baseline (re-freeze)** | 2026-07-28 | `c51b51d` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus regenerated) | **2** |
 | **1 — syntax** | 2026-07-28 | `33e5c71` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | **0** | **2** |
 | **baseline (re-freeze 2)** | 2026-07-28 | `3ef3568` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus proved neutral, not regenerated) | **2** |
+| **2 — driver** | 2026-07-28 | `2505f8d` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | **0** | **2** |
 | — `yelc-sema` (infra) | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 2a — HIR build+resolve | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 2b — HIR check | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
@@ -38,6 +39,15 @@ renumbered rather than left with a gap. Row labels here match
 `—` are **infrastructure, not stages** ([`infra-sema.md`](infra-sema.md)): they
 transform no IR, but they land on `main`, so the rule that landing never lowers
 the number applies to them too.
+
+**Stage 2's workspace count is flat at 480 on purpose.** `yelc-driver` adds no
+tests, because nothing in `tests/` may assert on a dump's text — the moment
+something does, the driver becomes a thing that must not change, and it is
+supposed to be the cheap-to-change one
+([`stage-2-driver.md`](stage-2-driver.md)). Its verification is the corpus run
+recorded there: 2000 / 2000 programs round-tripped byte-identically through the
+shipping binary, 0 driver failures. That is the first check of invariant S1 from
+*outside* `yelc-syntax`.
 
 **A row is per landing, not per crate.** 2a and 2b live in one crate but ratchet
 separately, because each lands on its own measured number and the whole point is

@@ -1,0 +1,19 @@
+[package]
+name = "yelc-driver"
+version.workspace = true
+edition = "2024"
+description = "Yel compiler driver (rewrite) — runs the new pipeline and emits its IRs"
+license.workspace = true
+
+[[bin]]
+name = "yelc2"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+yelc-base.workspace = true
+yelc-syntax.workspace = true
+
+# Determinism guard — see plans/rewrite/anti-spec.md A6.
+[lints.clippy]
+disallowed_types = "deny"
