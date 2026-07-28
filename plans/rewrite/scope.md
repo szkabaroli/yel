@@ -22,7 +22,7 @@ simultaneously.
 | Stage names and their order: **AST → HIR → THIR → LIR → WASM** | Every type, pass, and helper *inside* a stage |
 | Exported WIT world and the `yel:ui/dom@0.1.0` host contract | How WIT is constructed and emitted (`wit_ast.rs` internals) |
 | Observable DOM-op behaviour asserted by the **85 execution tests** | The lowering and codegen that produce it |
-| Diagnostic *meaning* for the 46 diagnostic fixtures, and the `diagnostic.rs` API | Which stage reports what; new `ErrorCode` variants; message wording (with a recorded diff) |
+| Diagnostic *meaning* for the 23 diagnostic fixtures, and the `diagnostic.rs` API | Which stage reports what; new `ErrorCode` variants; message wording (with a recorded diff) |
 | CLI surface: `yelc compile -o {wasm,wit,dot}`, `ast`, `ir`, `check` | Driver internals, `pipeline.rs` structure, the new `yelc2` stage-selection seam |
 | Determinism of all output (byte-stable across runs) | Which data structures produce it (Fx maps, sorted derivations) |
 | The keep-list items ([`keep-list.md`](keep-list.md)): diagnostics, `SourceMap`/`Span`, interning, typed ids + `IndexVec`, context threading, accumulate-and-continue, no-silent-fallbacks, the determinism lint | Everything else in `yel-core` and `yel-wasm-codegen` |

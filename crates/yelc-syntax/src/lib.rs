@@ -78,12 +78,12 @@ pub struct ParsedFile {
 /// `CompilerContext`: the parser must stay usable by the LSP without dragging in
 /// type-checking state.
 pub fn parse(
-    _source: SourceId,
-    _content: &str,
-    _interner: &Interner,
-    _diags: &mut Diagnostics,
+    source: SourceId,
+    content: &str,
+    interner: &Interner,
+    diags: &mut Diagnostics,
 ) -> ParsedFile {
-    todo!("stage 1: implement the parser")
+    parser::Parser::new(source, content, interner, diags).parse()
 }
 
 // ---------------------------------------------------------------------------

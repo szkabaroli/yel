@@ -36,3 +36,6 @@ yel-flow-editor/
 # git-lfs — see .gitattributes and plans/rewrite/corpus.md. The blanket
 # **/*.wasm rule above would otherwise swallow the frozen components.
 !corpus/wasm/*.wasm
+
+# macOS Finder metadata
+.DS_Store

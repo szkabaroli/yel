@@ -99,7 +99,7 @@ Plus, in the same PR:
 - [ ] Stage 5 closed out; ratchet row landed and met.
 - [ ] Zero unexplained corpus divergences across all 2000 seeds.
 - [ ] 85/85 execution tests pass against the new compiler, **unmodified**.
-- [ ] 91 positive fixtures byte-identical; 46 diagnostic fixtures same meaning.
+- [ ] 91 positive fixtures byte-identical; 23 diagnostic fixtures same meaning.
 - [ ] Ignored-test count ≤ 2.
 - [ ] Bake period elapsed with no revert.
 - [ ] **Corpus provenance resolved.** After deletion the corpus can never be

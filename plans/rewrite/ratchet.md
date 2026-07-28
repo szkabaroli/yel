@@ -20,7 +20,7 @@ started measuring.
 | Stage | Date | freeze/base SHA | workspace tests | execution | fuzz/200 | corpus divergences | ignored |
 |-------|------|-----------------|-----------------|-----------|----------|--------------------|---------|
 | **baseline (pre-rewrite)** | 2026-07-24 | `ccf2086` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus defined here) | **2** |
-| 1 — syntax | | | ≥ 315 | 85 / 85 | ≥ 200 | 0 | ≤ 2 |
+| **1 — syntax** | 2026-07-28 | `0b3054b` | **479 pass / 0 fail** | **85 / 85** | 200 / 200 | **0** | **2** |
 | 2 — HIR | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 3 — THIR | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 4 — LIR | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |

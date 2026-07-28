@@ -125,7 +125,7 @@ See anti-spec A6.
 ## 9 · The test corpus itself
 
 - 91 positive fixtures (WIT + DOT byte-for-byte, WASM validates)
-- 46 diagnostic fixtures
+- 23 diagnostic fixtures
 - `known_bugs` fixtures — programs that *should* work and don't; the rewrite's
   free wins
 - **85 execution tests** under Wasmtime — the only semantic oracle. Unmodified,

@@ -110,6 +110,191 @@ justified, and recorded in `goldens-changed.md`. An expected-to-fail test is
 `#[ignore]` **with a reference**, and the ignored count is a tracked ratchet
 metric.
 
+### A8 · An invariant is asserted, not observed
+
+A test that collects counterexamples into a `Vec` and prints the count is not a
+test of the property. If the property has known-permitted exceptions, they are an
+**exact allow-list that fails in both directions** — it fails when an entry stops
+being an exception, too. If it has none, it is an `assert!`.
+
+A test whose *name* states a property its *body* does not check is a weakened
+assertion under A7, whether or not it ever passed in the stronger form. So is a
+count-based assertion loose enough to pass vacuously: `assert!(checked > 0)` over
+a file list built by swallowing `read_dir` errors into an empty `Vec` reports
+"120/120 ✓" when it should have checked 2118.
+
+*Found by:* the stage-1 review panel. `truncation_inside_a_construct_always_reports`
+asserted only that the tree round-tripped, never the diagnostic half of S5 it was
+named for; the sibling sweep `eprintln!`d that 89 of 750 mutated inputs produced
+no diagnostic and passed green. Both blocking S5 violations were sitting inside
+the tests written to catch them.
+
+### A9 · A ported construct is load-bearing or it is deleted
+
+When a stage ports a design from a reference implementation, every construct it
+brings over has a **live use site** in the new tree. A `const` set with no
+consumer, a builder method called only by its own unit test, or a function
+parameter that takes the same value at every call site is a **shape-only port**:
+it makes review believe a mechanism is present when only its declaration is.
+
+The stage file lists such items and either wires them up or removes them.
+"Unused" is a finding, not a footnote.
+
+*Found by:* the stage-1 review panel. `token::EMPTY` (documented as a recovery
+set, zero references, used twice in the reference), `GreenTreeBuilder::abandon_node`
+(only caller was its own test — and its absence changed the green shape of every
+failed declaration), and `parse_list`'s `code: ErrorCode` parameter (`SyntaxError`
+at all 8 call sites).
+
+### A10 · An allow-list entry is characterized by evidence about the *other* implementation
+
+A differential allow-list records where the new implementation is permitted to
+differ from the frozen one. Its per-entry check must therefore assert something
+about **the frozen side** — what it produced, what it skipped, what it did not
+report. A check that inspects the *new* side restates the divergence instead of
+justifying it, and **cannot fail while the divergence exists**.
+
+The tell is that the check reads like the bug's own description.
+
+*Found by:* the stage-1 review panel, round 2. An entry claiming the frozen
+parser silently dropped a statement was guarded by "the new parser produced a
+`Recovered::Missing` let-name". The frozen parser had in fact **kept** the
+statement — the entry was a regression in the new parser (it reserved `let` and
+`if` in statement position, which the frozen grammar does not), allow-listed
+under a check that could only ever confirm it. This was the single case where the
+differential caught a silently-tightened grammar, and the check turned it into an
+exemption.
+
+The companion rule: **the characterization must be falsifiable by a plausible
+regression.** In the same review, the *main* allow-list's check
+(`new_member_count > frozen_member_count`) was satisfied by a deliberately
+introduced grammar tightening, because the recovery model always materialises an
+unreadable element as a member — so `new > frozen` held by construction for the
+entire class the check claimed to characterize. If you cannot state a check a
+tightening would fail, you do not have a characterization; you have a list.
+
+### A11 · A bound measures the quantity that actually fails
+
+A guard against resource exhaustion counts the thing that runs out. A limit on
+*recursion depth in one pass* does not bound *the depth of the structure that
+pass builds*, and every later consumer — a walker, a `Drop` glue chain, a
+serializer — recurses over the structure, not over the pass.
+
+The compounding failure is that the guard's own tests then measure the guarded
+counter, so they report healthy headroom on precisely the inputs that abort.
+
+*Found by:* the stage-1 review panel, round 2, independently by both reviewers.
+`MAX_NESTING_DEPTH = 256` bounded parser recursion, but `parse_binary` and
+`parse_postfix` are iterative loops that enter and leave nesting per operand — so
+`a.b.b.b…` built a 12,000-deep `Box` chain from a **valid, diagnostic-free** 6 KB
+file while the depth counter read **2**. `parse()` returned; the walker aborted at
+n=3144, `Drop` at n=5058, and the round-trip check itself at n=13164. The
+invariant "parsing always returns" was true and worthless.
+
+### A12 · An assertion holds at the granularity of the property
+
+A property that is true *per construct* is asserted per construct. Aggregated to
+the file or the run, two violations in opposite directions cancel and the
+assertion passes.
+
+*Found by:* the stage-1 review panel, round 2. S5 ("ill-formed input produces a
+diagnostic **and** a recovery node") was asserted as
+`(diagnostics > 0) != (error_nodes > 0)` over a whole file. Deleting a recovery
+diagnostic left that test green across all 2225 mutated inputs — the file's
+*other* recovery positions supplied the missing count. Only a hand-written
+per-construct list caught it.
+
+### A13 · The generator that found a bug class is what ships, not its instances
+
+When randomized or generated input exposes a class of defect, the **generator**
+is committed with a fixed seed. Freezing the specific counterexamples it happened
+to find converts a mechanism that can find the *next* member of the class into a
+regression test for the members already fixed.
+
+Watch for the shape where a sweep's stated strength grows while its actual
+coverage shrinks — a claim of "zero violations" backed by fewer, narrower inputs
+than the run that found the violations in the first place.
+
+*Found by:* the stage-1 review panel, round 2. The 300,000-random-input sweep
+that found 446 S5 counterexamples in round 1 was not committed; the shipped
+generator sampled ~1,200 truncations and split on **whitespace**, so it could not
+construct `"{}"` from `"v={value}"` — and four S5 clusters survived underneath a
+passing test.
+
+### A14 · Test inputs are verified present, not merely counted
+
+A count assertion over a directory proves the directory has entries, not that the
+entries are the intended content. Content-addressed or lazily-fetched test data
+(git-lfs pointers, submodules, downloaded archives) reads as **present and
+wrong**, not as absent.
+
+Assert something only the real content satisfies.
+
+*Found by:* the stage-1 review panel, round 2. The corpus is git-lfs tracked; an
+unpulled checkout leaves 2000 ~130-byte pointer stubs, so the pinned
+`CORPUS_COUNT` passed. **Four of the stage's six headline numbers reproduced over
+pointer stubs**, including "2118/2118 round-trip" and "deepest real program = 21".
+The comment defending the assertion said an unpulled corpus "reads as empty" — it
+does not, and that mistaken belief was what made the count look sufficient.
+
+### A15 · A fix to a decision boundary is validated in **both** directions
+
+When a fix moves the line between accept and reject, include and exclude, match
+and skip, it is verified on **both sides** of the new line before it lands. A fix
+validated only against the cases that motivated it reliably overshoots: the
+inputs that used to fall on the correct side of the boundary are exactly the ones
+nobody re-tested.
+
+State the *class* the fix ranges over, enumerate its members mechanically, and
+check every member — not the handful that prompted the change.
+
+*Found by:* the stage-1 review panel, in **three consecutive rounds**, each time
+as a fix relocating its own defect rather than removing it. Round 1's fabricated
+values became round 2's fabricated *list elements* one level up. Round 2's
+recursion guard bounded parser depth, moving the overflow into the consumers.
+Round 3's keyword-prefix fix — added so `recordFoo { }` would parse, since the
+frozen grammar has no word boundary — omitted the check that the remainder is a
+valid `identifier`, so `record0 { }`, `component8A { }` and `package-a:b;` became
+accepted too. The defect moved from under-accepting to over-accepting, and the
+fix's own test list covered only the under-accepting half.
+
+### A16 · A generator is asserted against the strongest property it can check
+
+Shipping the generator ([A13](#a13--the-generator-that-found-a-bug-class-is-what-ships-not-its-instances))
+is necessary and not sufficient. A generator wired to a weak property while a
+stronger oracle sits unused in the same test crate is a mechanism that *looks*
+load-bearing and finds nothing.
+
+When a differential oracle exists, generated input is run against **it**, not
+merely against a self-consistency check.
+
+*Found by:* the stage-1 review panel, round 3. The committed mutation generator
+was asserted only on S5 and byte round-trip; the frozen-parser oracle was
+consulted only over a separate deterministic sweep. Pointing the existing
+generator at the existing oracle produced **81 divergences, 7 of them genuine
+blocking defects, in under four seconds** — three of that round's blocking
+findings were reachable by the stage's own committed code.
+
+Corollary: match the generator to the property. Random token soup exercises
+recovery (both implementations reject nearly all of it, so it finds no
+divergences); mutations of *real programs* exercise the grammar boundary.
+
+### A17 · Test-input selection is stable under renames
+
+Fixture sets sampled by position — `take(n)` over a sorted directory listing,
+every k-th file, a hash of the path — silently re-point when a file is renamed,
+added, or removed. The suite then measures a different population while reporting
+the same metric name, and any number keyed to that population becomes a fact
+about the filesystem rather than about the code.
+
+Select by explicit list or by content, and make the count exact.
+
+*Found by:* the stage-1 review panel, round 3. Renaming one fixture
+(`imported_components.yel` → `extern_components.yel`, from unrelated work on the
+frozen tree) changed which files a name-sorted strided sampler picked, turning
+three of the stage's headline numbers red and shifting a pinned floor from 586 to
+568. Nothing about the parser had changed.
+
 ---
 
 ## B. Front-end shapes (stages 1–3)
@@ -172,6 +357,59 @@ Not two coexisting idioms where the choice is historical.
 *The shape it came from:* §3 — `Diagnostics::error(span, code, msg)` (33 sites)
 coexisting with `Diagnostic::error(msg).with_span().with_code()` (13 sites), of
 which only 4 actually need the builder's `.with_note()`.
+
+### B7 · No unbounded recursion on user-controlled input
+
+A recursive-descent front end carries an **explicit nesting limit** and reports
+exceeding it as a diagnostic. Nesting depth is controlled by whoever typed the
+file; a stack overflow is `abort()`, not a catchable panic, so no
+accumulate-and-continue policy survives it and no recovery node can be produced.
+
+A parser whose stated invariant is "always terminates and always returns" must
+have a bound that makes that true, plus a test that **finds** the bound rather
+than a corpus that never reaches it. The guard trips with real headroom below the
+actual stack limit, not near it — and the limit that matters is the debug build's,
+because that is what `cargo test` and a dev LSP run.
+
+*Found by:* the stage-1 review panel, independently by both reviewers. ~1500
+nested `(` — a ~3 KB file — SIGABRTed a debug build, across five independent
+productions, including the *unclosed* case that is an ordinary editor state. The
+robustness sweep missed it because truncations and single-token deletions of real
+programs never generate deep nesting.
+
+### B8 · Disambiguating lookahead is bounded by the construct, not the file
+
+Where a parser resolves an ambiguity by scanning ahead, the scan terminates at
+the **enclosing construct's boundary even when that boundary is missing**. A scan
+that falls through to end-of-input on unterminated input turns every nesting
+level into a full-tail rescan — and unterminated input is the *normal* state in
+the editor a lossless tree exists to serve.
+
+*Found by:* the stage-1 review panel. `has_depth_zero_arrow` ran to
+end-of-token-stream when the `{` had no match: 1.1 / 3.8 / 14.6 ms for 500 / 1000
+/ 2000 nested opens, a clean 4× per doubling on a 10 KB file.
+
+### B9 · A recovery hole is a node, not a sentinel value
+
+Extends [B2](#b2--no-deferred-name-resolution-encoded-as-a-lie) from types down to
+names and other leaf data. Interning `""` for a name the parser could not read,
+substituting an empty `Vec` for an unparsed parameter list, or truncating an
+over-long argument list to the arity that fits are all the same shape one layer
+down: a value that type-checks as legitimate and is simply wrong.
+
+The IR needs a representation that makes the hole **unrepresentable-as-valid** —
+a `Missing` variant, an `Option`, or an error node — so a consumer cannot
+accidentally treat it as real. "A diagnostic was emitted" is not a substitute,
+because nothing forces the consumer to have read the diagnostics.
+
+The corollary: every recovery position needs an error representation in the data
+model. If a `RecordField` has no error variant, then reporting a bad field and
+pushing nothing is a **silently-dropped subtree**, no matter how good the
+diagnostic was.
+
+*Found by:* the stage-1 review panel. `synthetic_ident` interned `""`, so
+`package ;` produced a package whose namespace and name were equal to each other;
+446 of 300,000 random inputs produced a diagnostic and zero error nodes.
 
 ---
 
@@ -284,3 +522,18 @@ was accurate is why this rewrite is possible at all.
 Behaviour discovered in the old compiler that nobody knew about goes in the
 stage file's **Surprises** section, even when it changes nothing. Costs thirty
 seconds to write at stage 3 and a week to rediscover at stage 5.
+
+### D4 · A doc comment describing usage is a claim under review
+
+"Used as the recovery set where a caller has no synchronising tokens" on a `const`
+with zero references. "Bounded scan" on a scan that runs to end-of-input. "It does
+not guess at what was meant" one line above `intern("")`.
+
+These are **false statements in the artifact reviewers read to decide whether a
+pattern was ported**. A doc comment that asserts *how* something is used is
+checked against its call sites in review, and a divergence is a finding at the
+same severity as the code being wrong — because the doc is what made the code
+look right.
+
+*Found by:* the stage-1 review panel, which caught all three of the above in one
+pass.

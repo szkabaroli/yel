@@ -6,11 +6,29 @@ description = "Yel lexer, lossless green tree, and recursive-descent parser"
 license.workspace = true
 
 [dependencies]
-yelc-base.workspace = true
+# Stack-growth guard for `ast::visit::walk_expr` — the one walk over a structure
+# whose depth the parser does not bound: `parse_binary`/`parse_postfix` are
+# loops, so `a.b.b.b…` builds an arbitrarily long `Box<Expr>` spine from valid
+# input while `MAX_NESTING_DEPTH` reads 2. Same mechanism and same reason as
+# rustc's `rustc_data_structures::stack::ensure_sufficient_stack`. A worklist
+# cannot replace it: the recursion runs through the overridable
+# `Visitor::visit_expr` hook, so flattening it locally would stop calling that
+# hook on spine nodes (anti-spec A3/A11). See plans/rewrite/stage-1-syntax.md,
+# review round 2.
+stacker = "0.1.24"
+# Seedless hashing for the speculation memo table (`Parser::failed_attempts`).
+# std's RandomState would make iteration order — and therefore anything derived
+# from the table — vary run to run; anti-spec A6 forbids that, and the
+# `disallowed_types` lint below denies the std types outright.
 rustc-hash.workspace = true
+yelc-base.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+# Differential harness only (tests/parity.rs): the frozen front-end is the
+# accept/reject oracle for stage 1. Nothing in the library links it, and it goes
+# away with the frozen tree at cutover phase 4 — see plans/rewrite/anti-spec.md A4.
+yel-core.workspace = true
 
 # Determinism guard — see plans/rewrite/anti-spec.md A6.
 [lints.clippy]

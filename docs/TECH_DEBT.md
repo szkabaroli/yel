@@ -282,6 +282,34 @@ deferred bodies) the way `wasm/codegen/` is split.
 - [ ] **`match` not real yet**: `lower_to_lir/component.rs:626` "TODO: Desugar to match expression" — conditional lowering is special-cased rather than general match.
 - [ ] **Error expr reaching LIR is a crash, by design**: `component.rs:790` `todo!("Error expression reached LIR lowering")` — relies on typeck having stopped the pipeline first (see No-Silent-Fallbacks).
 - [ ] **Two unreachable `ErrorCode` variants (dead code)**: `ErrorCode::UnknownUnitSuffix` (E0004) and `ErrorCode::MissingElement` (E0042) are defined and still have emission arms, but neither can fire — an unknown unit suffix and every `ParseError::Missing(...)` site are shadowed by an earlier `E0060` SyntaxError (the pest grammar rejects the malformed input before the semantic arm runs). Found by the diagnostics-fixture sweep: every other error code has a triggering fixture in `tests/fixtures/diagnostics/` (20 reachable codes, verified by actual `error[E00xx]`), but these two are untriggerable. Either delete them + their dead arms, or leave a note if a future grammar relaxation would surface them.
+- [ ] **Closure in a global default panics the compiler; and the fixture that
+      should have caught it is inert.** Found 2026-07-24 by the rewrite's stage-1
+      accept/reject parity harness (`plans/rewrite/stage-1-syntax.md`), confirmed
+      independently by the review panel. Two separate defects, one hiding the other:
+      1. **The panic.** `evens: list<s32> = [1,2,3,4].filter({ x -> x > 2 });`
+         inside a `global` aborts with `index out of bounds: the len is 0 but the
+         index is 0` at `hir/local_scope.rs:73` — the closure parameter is looked
+         up in a scope stack that module-scope lowering never pushed a frame onto.
+         This is the same family as the §1.6 module-scope-filter bug that was
+         closed for *expression arenas*; the **local-scope** half was never fixed.
+      2. **Why nobody knew.** The guard fixture
+         `tests/fixtures/positive/global_filter_default.yel` writes the predicate
+         as `|x| x > 2`, which is not this language — closures are `{ x -> body }`
+         (`grammar.pest:379-423`); `|` is not an operator anywhere in the grammar.
+         pest fails `global_property`, `BLOCK_LEVEL_CATCH_ALL` eats the line, and
+         `parse_global` **discards the catch-all without reporting** (the same hole
+         exists in `parse_record` via an `as_rule() == Rule::record_field` filter;
+         `parse_component`/`parse_element_node` *do* report theirs). `yelc check`
+         prints `OK`. Verified: `evens` appears **zero** times in the fixture's
+         own `.wit` and `.dot` goldens — the whole global vanished, and the
+         regression guard has never guarded anything.
+      Fixing this means editing the frozen tree, so it is **deliberately not
+      bundled into the rewrite**: it is ordinary shipping work that, when it lands,
+      requires regenerating `corpus/` and adding a new baseline row to
+      `plans/rewrite/ratchet.md` (the corpus's provenance is a specific compiler
+      SHA). Until then the corrected program belongs in `known_bugs/`, not
+      re-blessed in `positive/`.
+
 - [ ] **Two inconsistent idioms for emitting a coded diagnostic**: the concise `Diagnostics::error(span, code, msg)` convenience method (**33** call sites) coexists with the fluent `Diagnostic::error(msg).with_span(span).with_code(code)` builder (**13** sites). Only **4** of the builder sites actually need it — they attach `.with_note(...)`, which the convenience method can't express; the other ~9 are just verbose duplicates of what the one-liner does. Standardize: migrate the note-free builder sites to `Diagnostics::error(...)`, and add a note-capable convenience variant (e.g. `error_with_note` or a builder-returning helper) so "code + message + note" has one obvious form too. Low risk (pure call-site refactor; diagnostics are covered by `tests/fixtures/diagnostics/`).
 
 ---

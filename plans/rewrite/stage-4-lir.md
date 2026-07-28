@@ -44,6 +44,14 @@ Watch for:
 - Expr interning: the frozen `intern_expr` "always adds — could deduplicate
   later", so identical exprs get distinct ids. Strings *are* deduped. Decide
   deliberately; either answer is fine, an accident is not.
+- **Does LIR have a function value?**
+  [directions §4](directions.md#4--closures-are-a-value-and-the-new-irs-are-shaped-for-one).
+  Answer it on generic grounds — the flow frontend wants callable values too. A
+  closure representation admitted for `filter`'s sake is UI vocabulary below the
+  seam ([C1](anti-spec.md#c1--no-domain-vocabulary-below-the-frontend-seam)); a
+  general function value that `filter` happens to use is substrate. The frozen
+  `LirExprKind::Closure { params, body }` carries **no environment**, and codegen
+  panics on a captured local — so there is no output to preserve either way.
 - A `LirVisitor`, or a documented decision that a linear arena scan is simpler
   now that every subexpression is its own arena entry
   ([anti-spec A3](anti-spec.md#a3--no-duplicated-walkers)). The frozen
@@ -72,10 +80,25 @@ Specific shortcuts inside not to reproduce:
   and stashed so deferred handler/derived bodies can reference a block before it
   is emitted. Correct, but a subtle ordering dependency that must be modelled
   explicitly rather than re-derived.
+- **Three deferred-body mechanisms where there is one concept** —
+  `DeferredHandlerBody`, `DeferredDerivedBody`, and the inlined filter predicate.
+  `DeferredHandlerBody`'s six env-snapshot fields *are* capture analysis, done
+  here because THIR declined to do it. See
+  [directions §5](directions.md#5--handlers-and-closures-are-one-concept-split-by-trigger):
+  one body node, one capture analysis, one lowering, trigger as a field. It emits
+  the same blocks, so it changes no output — but the capture set must cover all
+  six fields or it is a narrowing that presents as for-loop handlers breaking.
 - `todo!()` cliffs at unsupported for-loop iterables ("no LIR classifier") — keep
   them **loud**; do not soften to a fallback
   ([anti-spec A5](anti-spec.md#a5--no-silent-fallback)).
 - Hard-coded string/signal region sizing.
+
+Open direction, to accept or reject when 4b is briefed:
+[directions §1 — builtins are a table, not a field per builtin](directions.md#1--builtins-are-a-table-not-a-field-per-builtin).
+It pairs with stage 3 — the lowering target and the type scheme come from one
+row — so if stage 3 rejects it, 4b inherits the rejection rather than adopting
+half of it. Whichever way it goes, it must not create a second path by which UI
+names reach `yelc-lir` ([C1](anti-spec.md#c1--no-domain-vocabulary-below-the-frontend-seam)).
 
 `resolve_global_triggers` is a **legitimate whole-module pass, not debt** — it
 must run after every component is lowered because a global's fan-out targets do

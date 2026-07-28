@@ -81,6 +81,7 @@ sequence** — 4a then 4b — never together.
 | [`scope.md`](scope.md) | Frozen vs. free. **First thing in every brief.** |
 | [`anti-spec.md`](anti-spec.md) | Shapes the rewrite may not reproduce. Append-only. |
 | [`keep-list.md`](keep-list.md) | What carries over intact. May not be replaced. |
+| [`directions.md`](directions.md) | Shapes we'd *like* to reach. Recorded intent, **not contract** — binding only once copied into a stage brief. Append-only. |
 | [`ratchet.md`](ratchet.md) | Measured numbers per stage. Append-only, never edited. |
 | [`corpus.md`](corpus.md) | The 2000-seed oracle: provenance, layout, how to sweep. |
 | [`seam-changes.md`](seam-changes.md) | Contract-change log: request, options, decision, date. |
@@ -126,9 +127,20 @@ The fuzz metric is **saturated** and cannot improve. Regressions show up as
 ## Freeze check — run before reading any stage diff
 
 ```bash
-git diff --name-only main... \
-  | grep -E '^crates/(yel-core|yel-wasm-codegen|yelc)/' && echo "FREEZE VIOLATION"
+scripts/freeze-check.sh              # working tree vs HEAD
+scripts/freeze-check.sh <base-ref>   # also catches commits since <base-ref>
 ```
+
+**Use the script, never an inline `git status … | wc -l`.** The obvious one-liner
+is cwd-dependent and **fails open**: run from `crates/`, the pathspec
+`crates/yel-core` resolves to `crates/crates/yel-core`, matches nothing, and
+prints `0` — identical to "clean". git warns; `| wc -l` discards the warning.
+That is a count-based assertion that passes vacuously
+([A8](anti-spec.md#a8--an-invariant-is-asserted-not-observed) /
+[A14](anti-spec.md#a14--test-inputs-are-verified-present-not-merely-counted)),
+and it went undetected for the whole of stage 1 because the number it printed was
+the number expected. The script anchors to the repo root and treats a missing
+frozen path as fatal.
 
 ## Clone setup
 
