@@ -49,7 +49,7 @@ enum_decl = {
 enum_cases = { enum_case ~ ("," ~ enum_case)* ~ ","? }
 
 // Enum case names use kebab-case (lowercase with hyphens)
-enum_case = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
+enum_case = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | ("-" ~ &(ASCII_ALPHA_LOWER | ASCII_DIGIT)))* }
 
 // Variant type declaration (WIT-style, with optional payloads):
 // variant filter { all, none, some(list<string>) }
@@ -67,7 +67,7 @@ variant_case = {
 }
 
 // Variant case names use kebab-case (lowercase with hyphens)
-variant_case_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
+variant_case_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | ("-" ~ &(ASCII_ALPHA_LOWER | ASCII_DIGIT)))* }
 
 // Element type declaration: element HStack { alignment: option<Alignment>; }
 // Elements are intrinsic UI primitives provided by the runtime.
@@ -152,8 +152,8 @@ package_id = {
     package_namespace ~ ":" ~ package_name ~ package_version?
 }
 
-package_namespace = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
-package_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+package_namespace = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ("-" ~ &(ASCII_ALPHANUMERIC | "_")))* }
+package_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ("-" ~ &(ASCII_ALPHANUMERIC | "_")))* }
 package_version = @{ "@" ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)* }
 
 // Component definition: [export] component Name { ... }
@@ -265,7 +265,7 @@ element_node = {
 }
 
 // Element names: lowercase (html-like) or uppercase (component)
-element_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+element_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ("-" ~ &(ASCII_ALPHANUMERIC | "_")))* }
 
 // Element content: items separated by optional commas
 element_content = { element_item ~ (","? ~ element_item)* ~ ","? }
@@ -287,7 +287,7 @@ named_prop = {
 prop_modifier = { "set" | "bind" }
 
 // Attribute names use kebab-case (lowercase with hyphens)
-attr_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
+attr_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | ("-" ~ &(ASCII_ALPHA_LOWER | ASCII_DIGIT)))* }
 
 // If node
 if_node = {
@@ -509,7 +509,7 @@ string_text = @{ (!("\"" | "{") ~ ANY)+ }
 
 // Identifiers - support kebab-case (lowercase with hyphens)
 // e.g., selected-id, on-click, mail-item
-identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ("-" ~ &(ASCII_ALPHANUMERIC | "_")))* }
 
 // Whitespace and comments
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }

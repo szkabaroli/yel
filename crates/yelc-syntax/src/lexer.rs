@@ -12,11 +12,18 @@
 //!
 //! # Behaviours inherited from the frozen grammar
 //!
-//! * `-` is an **identifier character**. `identifier` is
-//!   `(ALPHA|"_") ~ (ALNUM|"_"|"-")*`, so `count-1` is one identifier and
-//!   `count - 1` is a subtraction. Trailing hyphens are legal (`a-` is a name).
-//!   This is the single most surprising lexical rule in the language and it is
-//!   reproduced verbatim.
+//! * `-` is an **identifier character, but only between name characters**.
+//!   `identifier` is `(ALPHA|"_") ~ (ALNUM|"_"|("-" ~ &(ALNUM|"_")))*`, so
+//!   `count-1` and `selected-id` are single identifiers while `count - 1` is a
+//!   subtraction, `count-=1` is a compound assignment, and `s32->p` is a type
+//!   followed by an arrow.
+//!
+//!   The one-character lookahead is what lets a *tokenizing* lexer track a
+//!   *scannerless* PEG here. pest matches `primitive_type`'s bare `"s32"`
+//!   literal and stops after three characters; unconditional maximal munch
+//!   produced `s32-` instead, so `->` never formed and `{ p: s32->p }` was read
+//!   as a record where pest read a closure. Recorded and then fixed — see
+//!   `plans/rewrite/goldens-changed.md`.
 //! * Strings have **no escape sequences** (`string_text` is
 //!   `(!("\"" | "{") ~ ANY)+`), so a backslash is an ordinary character and the
 //!   first unescaped `"` ends the string. Character literals *do* have escapes.
@@ -146,10 +153,36 @@ impl<'a> Lexer<'a> {
 
     // -- identifiers -------------------------------------------------------
 
+    /// `identifier = @{ (ALPHA | "_") ~ (ALPHANUMERIC | "_" | ("-" ~ &(ALPHANUMERIC | "_")))* }`
+    ///
+    /// A `-` joins the identifier **only when another identifier character
+    /// follows it**. That one character of lookahead is what separates
+    /// `selected-id` (one name) from `s32->p` (`s32`, then an arrow), and it is
+    /// the whole reason `->`, `-=` and a trailing `-` reach the parser as
+    /// operators at all.
+    ///
+    /// The lookahead keeps the lexer **context-free**: it is a fact about the
+    /// next character, not about where the parser happens to be. That is the
+    /// property that makes a hand-written lexer able to track a scannerless PEG
+    /// here — pest matches `primitive_type`'s bare `"s32"` literal and stops,
+    /// and this stops in the same place for the same local reason.
     fn read_identifier(&mut self) -> TokenKind {
         let start = self.offset;
         self.eat_char();
-        while self.curr().is_some_and(is_identifier_continue) {
+        while let Some(ch) = self.curr() {
+            if ch == '-' {
+                // The grammar's lookahead is `&(ALPHANUMERIC | "_")`, which
+                // **excludes** a second `-`. So `item--7` is `item` followed by
+                // `--7`, not one identifier: the first hyphen has no name
+                // character after it. Using `is_identifier_continue` here
+                // instead — which admits `-` — made `item--7` a single name and
+                // was a widening the random-mutation sweep caught.
+                if !self.lookahead().is_some_and(is_name_char) {
+                    break;
+                }
+            } else if !is_identifier_continue(ch) {
+                break;
+            }
             self.eat_char();
         }
         let word = &self.content[start..self.offset];
@@ -489,6 +522,15 @@ fn is_identifier_start(ch: char) -> bool {
     ch.is_ascii_alphabetic() || ch == '_'
 }
 
+/// The grammar's kebab lookahead alphabet: `&(ASCII_ALPHANUMERIC | "_")`.
+///
+/// Deliberately **excludes** `-`, so `item--7` is `item` followed by `--7`
+/// rather than one name. Distinct from [`is_identifier_continue`], which admits
+/// `-` because a hyphen *already joined* is an identifier character.
+fn is_name_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
 fn is_identifier_continue(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
 }
@@ -529,22 +571,45 @@ mod tests {
     }
 
     #[test]
-    fn hyphen_is_an_identifier_character() {
+    fn hyphen_joins_an_identifier_only_when_a_name_character_follows() {
+        // Kebab names are unaffected — a name character follows the hyphen.
         assert_eq!(kinds_no_trivia("count-1"), vec![IDENTIFIER]);
+        assert_eq!(kinds_no_trivia("selected-id"), vec![IDENTIFIER]);
+        assert_eq!(kinds_no_trivia("in-out"), vec![IN_OUT_KW]);
         assert_eq!(
             kinds_no_trivia("count - 1"),
             vec![IDENTIFIER, SUB, INT_LITERAL]
         );
-        assert_eq!(kinds_no_trivia("a-"), vec![IDENTIFIER]);
-        assert_eq!(kinds_no_trivia("in-out"), vec![IN_OUT_KW]);
-        assert_eq!(kinds_no_trivia("selected-id"), vec![IDENTIFIER]);
+
+        // A hyphen with no name character after it is an operator, not the last
+        // byte of a name. `a-` used to lex as a single IDENTIFIER; that is what
+        // made `a-=1` an assignment to a variable called `a-`, and `s32->p` a
+        // record.
+        assert_eq!(kinds_no_trivia("a-"), vec![IDENTIFIER, SUB]);
+        assert_eq!(
+            kinds_no_trivia("count-=1"),
+            vec![IDENTIFIER, SUB_EQ, INT_LITERAL]
+        );
     }
 
+    /// The rule this file exists to get right.
+    ///
+    /// `identifier` admits `-`, and `->` is an operator, so maximal munch had to
+    /// pick one. It used to pick the identifier unconditionally, which meant
+    /// `->` glued to a name never produced an `ARROW` at all — and `s32->p`
+    /// parsed as a *record* here while pest read a *closure*, because pest is
+    /// scannerless and matched `primitive_type`'s bare `"s32"` literal, stopping
+    /// after three characters.
+    ///
+    /// One character of lookahead reproduces that without making the lexer
+    /// context-aware: join the hyphen only when a name character follows.
     #[test]
     fn arrow_versus_hyphen_identifier() {
-        // `p->x`: the identifier swallows the hyphen, exactly as pest does.
-        assert_eq!(kinds_no_trivia("p->x"), vec![IDENTIFIER, GT, IDENTIFIER]);
+        assert_eq!(kinds_no_trivia("p->x"), vec![IDENTIFIER, ARROW, IDENTIFIER]);
         assert_eq!(kinds_no_trivia("p -> x"), vec![IDENTIFIER, ARROW, IDENTIFIER]);
+        assert_eq!(kinds_no_trivia("s32->p"), vec![IDENTIFIER, ARROW, IDENTIFIER]);
+        // …and a hyphen between two name characters still joins.
+        assert_eq!(kinds_no_trivia("a-b->c"), vec![IDENTIFIER, ARROW, IDENTIFIER]);
     }
 
     #[test]

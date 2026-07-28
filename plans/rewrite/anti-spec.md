@@ -413,7 +413,7 @@ diagnostic was.
 
 ---
 
-## C. Back-end shapes (stages 4–5)
+## C. Back-end shapes (stages 3–4)
 
 ### C1 · No domain vocabulary below the frontend seam
 
@@ -423,7 +423,7 @@ a **frontend-agnostic substrate** shared by Yel (UI) and the visual flow
 language. New back-end code depends only on the `lir/arena.rs` traits and generic
 `LirOp`s.
 
-*This is the north star, not a style preference.* Stage 4 carries it, and the
+*This is the north star, not a style preference.* Stage 3 carries it, and the
 crate graph enforces it: `yelc-lir` and `yelc-codegen` have no dependency path to
 any frontend crate, so a UI reference below the seam is a build failure rather
 than a review finding.
@@ -521,7 +521,7 @@ was accurate is why this rewrite is possible at all.
 
 Behaviour discovered in the old compiler that nobody knew about goes in the
 stage file's **Surprises** section, even when it changes nothing. Costs thirty
-seconds to write at stage 3 and a week to rediscover at stage 5.
+seconds to write at stage 2 and a week to rediscover at stage 4.
 
 ### D4 · A doc comment describing usage is a claim under review
 

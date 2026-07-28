@@ -19,7 +19,7 @@ simultaneously.
 | Frozen — changing it is a separate, approved decision | Free — expected to change |
 |---|---|
 | Surface syntax as specified in [`LANGUAGE.md`](../../LANGUAGE.md) | Parser implementation, grammar technology (pest → hand-written lexer + recursive descent), AST node shapes |
-| Stage names and their order: **AST → HIR → THIR → LIR → WASM** | Every type, pass, and helper *inside* a stage |
+| Stage names and their order: **AST → HIR → LIR → WASM** — frozen *because differential attribution depends on it*, not because the frozen compiler drew it there. Moving a boundary is an integrator decision logged in [`seam-changes.md`](seam-changes.md) ([2026-07-28](seam-changes.md#log)), and must say which stages lose independent attribution and what replaces the differential for them. THIR was merged into HIR under that rule — one IR, phases 2a/2b. | Every type, pass, and helper *inside* a stage |
 | Exported WIT world and the `yel:ui/dom@0.1.0` host contract | How WIT is constructed and emitted (`wit_ast.rs` internals) |
 | Observable DOM-op behaviour asserted by the **85 execution tests** | The lowering and codegen that produce it |
 | Diagnostic *meaning* for the 23 diagnostic fixtures, and the `diagnostic.rs` API | Which stage reports what; new `ErrorCode` variants; message wording (with a recorded diff) |
@@ -43,11 +43,15 @@ frozen outright — see [`keep-list.md`](keep-list.md) §1.
 
 ### The stage boundary is frozen; the stage's data model is not.
 
-"Keep THIR" means a typed IR still exists between HIR and LIR with a documented
-contract. It does **not** mean `ThirExprKind` keeps its variants. Likewise
-"keep LIR" means a block-based low IR exists — its arena traits, op set, and
-resource model are all free, and stage 4 is expected to change them
+"Keep LIR" means a block-based low IR exists — its arena traits, op set, and
+resource model are all free, and stage 3 is expected to change them
 substantially.
+
+**THIR is no longer a stage.** It merged into HIR on 2026-07-28
+([`seam-changes.md`](seam-changes.md)): one node vocabulary, `types: NodeMap<Ty>`
+empty after phase 2a and total after 2b. What that decision preserved is the
+*obligation* — a typed form still exists before LIR, with a documented contract —
+not the second IR that used to carry it.
 
 ### Parser technology is free, and expected to change.
 
@@ -90,7 +94,7 @@ new one is correct" is a reason; it still gets written down.
 - `crates/yel-host` — the Wasmtime dev host. Frozen because the execution tests
   run against it; not otherwise touched.
 - `crates/yel-flow-*`, `floc` — the experimental flow frontend (gitignored). It
-  is the *reason* stage 4 must be frontend-agnostic, but it is not rewritten
+  is the *reason* stage 3 must be frontend-agnostic, but it is not rewritten
   here.
 - `yel-viewer`, `yel-flow-editor` — not compiler code.
 - Language features that do not exist yet (`match`, closures/capture analysis,

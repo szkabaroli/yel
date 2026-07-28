@@ -22,10 +22,21 @@ started measuring.
 | **baseline (pre-rewrite)** | 2026-07-24 | `ccf2086` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus defined here) | **2** |
 | **baseline (re-freeze)** | 2026-07-28 | `c51b51d` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus regenerated) | **2** |
 | **1 — syntax** | 2026-07-28 | `33e5c71` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | **0** | **2** |
-| 2 — HIR | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
-| 3 — THIR | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
-| 4 — LIR | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
-| 5 — codegen | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
+| 2a — HIR build+resolve | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
+| 2b — HIR check | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
+| 3a — LIR data model | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
+| 3b — LIR lowering | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
+| 4 — codegen | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
+
+**Numbers are contiguous.** HIR and THIR merged into one IR with two phases on
+2026-07-28 ([`seam-changes.md`](seam-changes.md)), and the remaining stages were
+renumbered rather than left with a gap. Row labels here match
+[`README.md`](README.md) § Status and the `stage-N-*.md` files exactly —
+`2a`/`2b` are `yelc-hir`, `3a` is `yelc-lir`, `3b` is `yelc-lower`.
+
+**A row is per landing, not per crate.** 2a and 2b live in one crate but ratchet
+separately, because each lands on its own measured number and the whole point is
+that the number never goes down between them. Same for 3a/3b.
 
 ## Baseline detail (2026-07-24, `ccf2086de2750c3783fd6f930be4a766f2463adb`)
 

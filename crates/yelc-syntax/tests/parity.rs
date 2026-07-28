@@ -528,9 +528,15 @@ fn first_error_lands_on_the_construct_that_is_wrong() {
 /// * [`FIRST_ERROR_OFFSET_AGREEMENT_PERCENT`], the *rate*.
 ///
 /// For calibration the same parser scores 561 of 1408 (39.8%) over the legacy
-/// name-strided selection, against 548 of 1336 (41.0%) here — so the input set
+/// name-strided selection, against 547 of 1336 (40.9%) here — so the input set
 /// moved, the agreement rate did not fall.
-const FIRST_ERROR_OFFSET_AGREEMENTS: usize = 548;
+///
+/// Re-pinned 548 → 547 when the kebab lookahead landed. The denominator is
+/// unchanged at 1336, so **exactly one** input's first-error offset moved — not
+/// the "whole class" the assertion below warns about. Expected: the change moves
+/// where an identifier ends, so for some malformed inputs it moves where the
+/// first error is reported. Recorded in `plans/rewrite/goldens-changed.md`.
+const FIRST_ERROR_OFFSET_AGREEMENTS: usize = 547;
 
 /// Floor on the agreement *rate*, in whole percent.
 ///

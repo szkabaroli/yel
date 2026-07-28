@@ -137,7 +137,7 @@ See anti-spec A6.
 accepts but codegen rejects, that stays. It is a real front/back mismatch, and
 removing the generator case hides it rather than fixing it.
 
-## 10 · The `WitBoundary` witness (stage 5)
+## 10 · The `WitBoundary` witness (stage 4)
 
 The zero-sized witness that forces `canonical_flat_valtypes(ty, WitBoundary::…)`
 and `flatten_core_valtypes(ty, WitBoundary::…)` to name themselves as boundary

@@ -726,49 +726,22 @@ const HANDWRITTEN: &[&str] = &[
 
 /// Inputs in [`HANDWRITTEN`] the two parsers genuinely read differently.
 ///
-/// **One**, and it is a lexer-level divergence, not a `classify_brace` one.
+/// **Empty.** It briefly held `{ p: s32->p }`, where pest read a closure and
+/// this parser read a record: pest is scannerless, so `primitive_type` matched
+/// the bare `"s32"` literal and stopped, leaving `->`; this lexer admitted `-`
+/// into identifiers unconditionally, so maximal munch produced `s32-` `>` and
+/// no `ARROW` ever formed.
 ///
-/// `grammar.pest` is scannerless. `type_annotation` tries `primitive_type`
-/// first, and that rule is a list of **bare string literals** — so `s32` matches
-/// three characters and stops, leaving `->` to match `closure_with_params`'
-/// arrow. This lexer cannot do that: `identifier` admits `-`
-/// (`grammar.pest:512`, kebab names), so maximal munch produces `s32-` `>` and
-/// there is no `ARROW` token for the brace classifier to find. It reads a record.
+/// Fixed in **both** compilers by one character of lookahead — a `-` joins an
+/// identifier only when a name character follows it. The frozen grammar gained
+/// `("-" ~ &(ALNUM|"_"))` on its six kebab rules; the lexer gained the matching
+/// peek. Kebab names are untouched (`selected-id`, `case-a`, `starts-with`),
+/// and `count-=1` and `{p->p}` now mean what they look like.
 ///
-/// The rule is context-dependent, which is what makes the fix narrow and the
-/// bug easy to misdiagnose. Verified against the frozen parser:
-///
-/// | input | frozen | why |
-/// |---|---|---|
-/// | `{ p: s32->p }` | Closure | `primitive_type` stops at the literal |
-/// | `{ p: foo->p }` | Record | `named_type` is `identifier`, absorbs the `-` |
-/// | `{ p->p }` | Closure | no-params closure, body `p- > p` |
-///
-/// So only a *primitive* spelling glued to `->` diverges. `foo->p` and `p->p`
-/// agree.
-///
-/// # Why recorded rather than fixed
-///
-/// **Zero incidence.** 7483 occurrences of `->` across the 2000-program corpus,
-/// all fixtures and all examples; **not one** is glued to an identifier
-/// character. Every one is preceded by `)` or whitespace.
-///
-/// The fix is not where it looks. `parse_prefix_matched_type` already knows
-/// `s32-` is a primitive prefix with a leftover — it reports an error. But the
-/// type parser never runs here, because `classify_brace` has already chosen
-/// `Record`: it saw no `ARROW`, so `has_depth_zero_arrow` was false. So a fix
-/// needs (a) arrow detection that recognises a name ending in `-` followed by
-/// `>`, in a scan that indexes tokens by position where only *widths* are
-/// tracked, and (b) the type parser to split rather than error. That is two
-/// changes, one of them in the brace classifier that review has just shown is
-/// load-bearing for diagnostic quality. Not a change to make for an input no
-/// real program writes.
-///
-/// A related **narrowing** rides along and is recorded here rather than in
-/// `parity.rs` because it has the same single cause: `{ p: s32-> }` (empty
-/// closure body) is accepted by pest and rejected here.
-const KNOWN_IDENTITY_DIVERGENCES: &[&str] =
-    &["component A { xs: list<s32> = [1].filter({ p: s32->p }); }"];
+/// The change is a **surface language change**, so it was gated on evidence
+/// rather than argument: the corpus was regenerated and all 8000 artifacts came
+/// back byte-identical. See `plans/rewrite/goldens-changed.md`.
+const KNOWN_IDENTITY_DIVERGENCES: &[&str] = &[];
 
 #[test]
 fn the_hand_written_table_is_read_the_same_way() {

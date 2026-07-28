@@ -1,4 +1,4 @@
-# Stage 5 — `yelc-codegen`                             status: not started
+# Stage 4 — `yelc-codegen`                             status: not started
 
 Replaces (frozen, never edited): `crates/yel-wasm-codegen/`
 Base: — · Started: — · Landed: —
@@ -12,7 +12,7 @@ Base: — · Started: — · Landed: —
 *To be written.* LIR → WASM component + WIT + DOT.
 
 Depends on `{ yelc-lir, yelc-base }` **and nothing else**. No dependency path to
-any frontend crate; see [stage 4](stage-4-lir.md#why-it-is-split).
+any frontend crate; see [stage 3](stage-3-lir.md#why-it-is-split).
 
 Must honour:
 
@@ -29,7 +29,7 @@ Must honour:
   disallowed-types lint denied.
   [Anti-spec A6](anti-spec.md#a6--no-random-seeded-iteration-reaching-output) —
   this was ~35/200 seeds emitting byte-different modules run-to-run.
-- Carry the `WitBoundary` witness ([keep-list §10](keep-list.md#10--the-witboundary-witness-stage-5)).
+- Carry the `WitBoundary` witness ([keep-list §10](keep-list.md#10--the-witboundary-witness-stage-4)).
 
 Open debt this stage is expected to *fix*, not port — each changes behaviour, so
 each lands as its own enumerated divergence with an execution test:
@@ -64,7 +64,7 @@ when a source omits it. Changing it changes output — separate approved decisio
 
 **Task:** *Delete the frozen compiler.*
 **Owner:** rewrite owner (not delegated to a stage agent).
-**Scheduled:** after stage 5 closes + a **14-day bake period** from the flip.
+**Scheduled:** after stage 4 closes + a **14-day bake period** from the flip.
 The bake is a fixed number of days decided up front — "until we feel confident"
 is not a date, and confidence is not an event.
 
@@ -96,7 +96,7 @@ Plus, in the same PR:
 
 ## Preconditions — all must hold, checked in the deletion PR
 
-- [ ] Stage 5 closed out; ratchet row landed and met.
+- [ ] Stage 4 closed out; ratchet row landed and met.
 - [ ] Zero unexplained corpus divergences across all 2000 seeds.
 - [ ] 85/85 execution tests pass against the new compiler, **unmodified**.
 - [ ] 91 positive fixtures byte-identical; 23 diagnostic fixtures same meaning.

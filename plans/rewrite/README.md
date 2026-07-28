@@ -5,8 +5,10 @@
 > Method: [`/compiler-rewrite`](../../.agents/skills/compiler-rewrite/SKILL.md)
 
 Rewriting yel's compiler internals. The **surface language** (`LANGUAGE.md`) and
-the **stage decomposition** (AST → HIR → THIR → LIR → WASM) are kept; every
-internal data structure, pass, and helper is replaced.
+the **stage decomposition** (AST → HIR → LIR → WASM) are kept; every internal
+data structure, pass, and helper is replaced. HIR is one IR checked in two
+phases — THIR merged into it on 2026-07-28
+([`seam-changes.md`](seam-changes.md)).
 
 ## The three invariants
 
@@ -24,14 +26,23 @@ internal data structure, pass, and helper is replaced.
 |---|-------|-------------------|--------|-------|--------|
 | 0 | — | — | ✅ **done** | orchestrator | 2026-07-24 |
 | 1 | `yelc-syntax` | `yel-core/src/syntax/` | ✅ **landed** | agent + integrator | 2026-07-28 |
-| 2 | `yelc-hir` | `yel-core/src/hir/` | 📝 brief written, blocked on 1 | — | — |
-| 3 | `yelc-thir` | `yel-core/src/thir/` | ⬜ blocked on 2 | — | — |
-| 4a | `yelc-lir` | `yel-core/src/lir/` | ⬜ blocked on 3 | — | — |
-| 4b | `yelc-lower` | `yel-core/src/lower_to_lir/` | ⬜ blocked on 4a | — | — |
-| 5 | `yelc-codegen` | `yel-wasm-codegen/` | ⬜ blocked on 4b | — | — |
+| 2a·2b | `yelc-hir` | `yel-core/src/{hir,thir}/` | 📝 brief written, not briefed | — | — |
+| 3a | `yelc-lir` | `yel-core/src/lir/` | ⬜ blocked on 2 | — | — |
+| 3b | `yelc-lower` | `yel-core/src/lower_to_lir/` | ⬜ blocked on 3a | — | — |
+| 4 | `yelc-codegen` | `yel-wasm-codegen/` | ⬜ blocked on 3b | — | — |
+
+**HIR and THIR merged** into one IR with two phases on 2026-07-28
+([`seam-changes.md`](seam-changes.md)), and the remaining stages were renumbered
+to close the gap: LIR is **3a**/**3b**, codegen is **4**. Stage numbers are
+contiguous — a gap invites someone to "fix" it later.
+
+One row here = one crate and one brief. **[`ratchet.md`](ratchet.md) has one row
+per *landing***, so 2a and 2b appear separately there — each lands on its own
+measured number, and the point of the ratchet is that the number does not go
+down between them.
 
 Cutover phase: **1 — coexist**. Phase 4 (deletion) is a named task, scheduled
-now: [`stage-5-codegen.md` § Final deletion](stage-5-codegen.md#final-deletion--cutover-phase-4).
+now: [`stage-4-codegen.md` § Final deletion](stage-4-codegen.md#final-deletion--cutover-phase-4).
 
 ## Crate layout
 
@@ -45,19 +56,18 @@ crates/
   yelc-base/      diagnostics, SourceMap/Span, Interner/Name, ids, IndexVec   [keep-list]
   yelc-syntax/    lexer, green tree, AST, parser                      stage 1
   yelc-sema/      Ty interner, Definitions, CompilerContext, known/stdlib
-  yelc-hir/       HIR + AST→HIR lowering                              stage 2
-  yelc-thir/      THIR + typeck                                       stage 3
-  yelc-lir/       LIR data model + arena traits + generic passes      stage 4a
-  yelc-lower/     THIR → LIR lowering                                 stage 4b
-  yelc-codegen/   LIR → WASM / WIT / DOT                              stage 5
+  yelc-hir/       one IR: 2a build+resolve, 2b check                  stage 2
+  yelc-lir/       LIR data model + arena traits + generic passes      stage 3a
+  yelc-lower/     HIR → LIR lowering                                  stage 3b
+  yelc-codegen/   LIR → WASM / WIT / DOT                              stage 4
   yelc-driver/    stage selection; binary `yelc2`, becomes `yelc` at flip
 ```
 
 ### The dependency graph is a load-bearing constraint
 
 ```
-  base   ←  syntax  ←  hir  ←  thir  ←  lower
-  base   ←  sema    ←  hir, thir, lower
+  base   ←  syntax  ←  hir  ←  lower
+  base   ←  sema    ←  hir, lower
   base   ←  lir     ←  lower, codegen
 
   yelc-codegen depends on { yelc-lir, yelc-base }   — and nothing else
@@ -70,23 +80,32 @@ reviewer's judgement call — which is how
 [anti-spec C1](anti-spec.md#c1--no-domain-vocabulary-below-the-frontend-seam)
 stops being a matter of vigilance.
 
-This is also why stage 4 is split: the LIR data model must not see frontend
-vocabulary, while THIR→LIR lowering legitimately needs it. They run **in
-sequence** — 4a then 4b — never together.
+This is also why stage 3 is split: the LIR data model must not see frontend
+vocabulary, while HIR→LIR lowering legitimately needs it. They run **in
+sequence** — 3a then 3b — never together. Stage 2 uses the same pattern for the
+same reason (2a then 2b).
 
 ## The documents
 
-| File | What it is |
-|---|---|
-| [`scope.md`](scope.md) | Frozen vs. free. **First thing in every brief.** |
-| [`anti-spec.md`](anti-spec.md) | Shapes the rewrite may not reproduce. Append-only. |
-| [`keep-list.md`](keep-list.md) | What carries over intact. May not be replaced. |
-| [`directions.md`](directions.md) | Shapes we'd *like* to reach. Recorded intent, **not contract** — binding only once copied into a stage brief. Append-only. |
-| [`ratchet.md`](ratchet.md) | Measured numbers per stage. Append-only, never edited. |
-| [`corpus.md`](corpus.md) | The 2000-seed oracle: provenance, layout, how to sweep. |
-| [`seam-changes.md`](seam-changes.md) | Contract-change log: request, options, decision, date. |
-| [`goldens-changed.md`](goldens-changed.md) | Every re-blessed golden, one line, with justification. |
-| `stage-N-*.md` | Per stage: brief, contract, definition of done, numbers, decisions, surprises. |
+**Answer-first index** — go to the one file that answers your question.
+
+| I need to know… | File | Binding? |
+|---|---|---|
+| may I change X? | [`scope.md`](scope.md) | **yes** — first thing in every brief |
+| is this shape forbidden? | [`anti-spec.md`](anti-spec.md) | **yes**, append-only |
+| must I keep this? | [`keep-list.md`](keep-list.md) | **yes** |
+| what does the frozen compiler actually do? | [`findings.md`](findings.md) | evidence, with repro |
+| what do we *want* to reach, and why? | [`directions.md`](directions.md) | **no** — binding only once copied into a brief |
+| why was a contract changed? | [`seam-changes.md`](seam-changes.md) | decisions, append-only |
+| what number must I beat? | [`ratchet.md`](ratchet.md) | **yes**, append-only |
+| how do I sweep the oracle? | [`corpus.md`](corpus.md) | procedure |
+| why was a golden re-blessed? | [`goldens-changed.md`](goldens-changed.md) | log |
+| what am I building? | `stage-N-*.md` | **yes** — brief, contract, DoD, decisions, surprises |
+
+**Rules that keep this usable.** Evidence lives once, in `findings.md`, and is
+**cited** — never restated. A direction is not a contract until a brief copies
+it. Nothing is deleted when it turns out wrong: it is corrected in place, with
+the correction visible.
 
 **This directory is the rewrite's architecture.** `docs/ARCHITECTURE.md` and
 `docs/PIPELINE.md` describe the **frozen** compiler — read them as a description
