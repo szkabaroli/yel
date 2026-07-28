@@ -20,6 +20,7 @@
 | [4](#4--closures-are-a-value-and-the-irs-are-shaped-for-one) | Closures are a value; the IRs are shaped for one | **design obligation** | 2b + 3a | no (modelling only) |
 | [5](#5--handlers-and-closures-are-one-concept-split-by-trigger) | Handlers and closures are one concept, split by trigger | wanted | 2b + 3b | **no** |
 | [6](#6--modules-are-serializable-artifacts) | Modules are serializable artifacts | wanted | 2a/2b seam | no |
+| [7](#7--keywords-get-a-word-boundary--at-cutover-by-deletion) | Keywords get a word boundary | **adopted 2026-07-28** | stage 1 | no — 8000/8000 corpus artifacts byte-identical |
 
 **Dependency order:** §1 → §2. §3 unblocks most of §2. §4 blocks the rest of §2.
 §5 and §6 are independent. §6 is why HIR and THIR merged into one stage
@@ -531,9 +532,57 @@ binary module and recompile from source on mismatch, per Swift's split above.
 
 ## 7 · Keywords get a word boundary — at cutover, by deletion
 
-**Status: wanted, blocked on cutover phase 4 rather than on design.** The
-mechanism is understood, the win is large, and the *only* reason not to do it now
-is that it would blind the differential while the differential is still the
+> **Status: ADOPTED, 2026-07-28, during stage 1 — not at cutover.** Everything
+> below the fold is the pre-adoption reasoning, kept because two of its three
+> predictions were wrong and the record of *how* is worth more than a tidy entry.
+>
+> **What landed.** A keyword ends only where an identifier could not continue,
+> in **both** compilers in one change, for the construct keywords `record enum
+> variant element extern component global package export func callback if else
+> for in key let set bind in-out out`. Not for `unit_suffix` (an ordered prefix
+> match by design) and not for `primitive_type` (`s32x` did not move).
+>
+> **What it deleted**, all in `yelc-syntax`: `Parser::at_keyword_prefix`,
+> `eat_keyword`, `assert_keyword`, the `Follow` enum, `starts_identifier`,
+> `items.rs::keyword_prefix_of`, `item_keyword_prefix` and its `ITEM_KEYWORDS`
+> table, `nodes.rs::next_starts_with_in`, `at_glued_else_if`,
+> `condition_here_is_followed_by_a_block`, and the text-prefix halves of
+> `after_export`, `global_property_direction` and `at_named_prop` — with all ~56
+> call sites. In `yel-core`, `grammar.pest` gained 21 `GLUED_*` rules and 22
+> predicates; **`syntax/parser.rs` was not touched**.
+>
+> **Where this entry was wrong, twice.**
+>
+> 1. **"The frozen half needs the pair-walking work first, and that is the
+>    expensive part."** It does not. Both approaches this entry measured used the
+>    boundary rule *positionally*. Used under a **negative predicate** —
+>    `GLUED_RECORD = @{ "record" ~ IDENT_CONT }`, then
+>    `record_decl = { !GLUED_RECORD ~ "record" ~ … }` — the atomic rule still
+>    kills the implicit whitespace, but a predicate consumes nothing and **emits
+>    no pair**, so the pair tree is unchanged and the 3.3k-line hand-written
+>    parser needed no edit at all. The expensive part did not exist.
+> 2. **"That also retires the `if`/element speculation."** It does not.
+>    `try_parse`, `Speculation`, `failed_attempts` and `Checkpoint` all stay:
+>    `if` followed directly by `{` still has two live readings that gluing had
+>    nothing to do with — `if { a: 1 } { div {} }` is an if-node over a
+>    record-literal condition, `if { span { "x" } }` is an element called `if`.
+>    The ~150–190× amplification on nested glued `if`s does go, because the input
+>    that produced it is now unambiguous. The three speculation probes were
+>    re-pointed, not deleted.
+>
+>    (`split_token` and `partial_offset` staying, which this entry got right and
+>    an earlier draft of it got wrong, is below.)
+>
+> **Why now rather than at cutover.** The blocking argument was that the
+> differential goes blind. It was testable, and it was tested rather than
+> reasoned about: the corpus was regenerated and **all 8000 artifacts came back
+> byte-identical**, so the differential lost nothing. No allow-list entry was
+> added. Full evidence and every moved assertion:
+> [`goldens-changed.md`](goldens-changed.md).
+
+**Original status: wanted, blocked on cutover phase 4 rather than on design.**
+The mechanism is understood, the win is large, and the *only* reason not to do it
+now is that it would blind the differential while the differential is still the
 correctness gate.
 
 ### The shape

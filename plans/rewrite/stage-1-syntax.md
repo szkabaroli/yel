@@ -557,6 +557,19 @@ identifier. Both directions are now reproduced; the class is enumerated in
 but has one as a proper prefix reports and yields a recovery node. No keyword is
 a prefix of another, so at most one can match — asserted.
 
+> **Superseded 2026-07-28.** Everything below about the *narrowing* half —
+> `eat_keyword`, `item_keyword_prefix`, the `for`-site `in` guard and the
+> `callback`-site `(` guard — was deleted when keywords gained a **word
+> boundary** in both compilers. `recordFoo` is one identifier now.
+> [directions §7](directions.md#7--keywords-get-a-word-boundary--at-cutover-by-deletion)
+> · [`goldens-changed.md`](goldens-changed.md). The **widening** half above
+> (`type_keyword_prefix_of`, `at_bool_literal_prefix`) is untouched and still
+> live: the boundary was deliberately not applied to `primitive_type`,
+> `bool_literal` or `unit_suffix`. Kept as written because the three latent
+> defects it exposed — the no-progress guards, `span_between`, and prediction
+> needing lookahead — are why `position()` and the offset-based span check exist,
+> and those did not go away with it.
+
 **2b** (narrowing) **landed**, contrary to the brief's expectation that it might
 have to be reverted. The cursor gained `partial_offset`, and `eat_keyword` pushes
 the prefix as its own green token, advances `offset`, and leaves `token_idx`

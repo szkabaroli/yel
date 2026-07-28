@@ -101,6 +101,33 @@ The ignored count is the easiest number in this table to game and the one that
 silently absorbs regressions. It is tracked for exactly that reason: a stage
 that "passes" by adding `#[ignore]` fails the gate.
 
+## A third baseline is owed (2026-07-28, keyword word boundary)
+
+**The freeze point moved again, and the corrective row is not yet measured.**
+`grammar.pest` gained a keyword word boundary — a **surface language change** on
+the frozen tree, and therefore ordinary shipping work rather than rewrite work,
+the same allowance `c51b51d` used. See
+[`goldens-changed.md`](goldens-changed.md) and
+[directions §7](directions.md#7--keywords-get-a-word-boundary--at-cutover-by-deletion).
+
+What is already established, and what is not:
+
+- **The corpus does not need regenerating.** It was regenerated as the gate on
+  the change and all 8000 artifacts came back byte-identical to the committed
+  digests, so `corpus/` still describes the compiler that exists. This is the one
+  case where a moved freeze point costs nothing: the old artifacts are not stale,
+  they are *provably* the same artifacts.
+- **What is owed is a corrective baseline row** — the `315 / 0 / 2` /
+  `85 / 85` / `200 / 200` sweep re-measured beside the new freeze SHA with
+  `--exclude yelc-syntax --exclude yelc-base`, so stage 1's numbers stay
+  comparable across the move exactly as they did for `c51b51d`. The whole-
+  workspace numbers *were* measured (480 / 0 / 2, 85 / 85, 200 / 200 — unchanged
+  from the stage-1 row); the frozen-only projection of them was not.
+
+Do not regenerate the committed corpus on the strength of this note. The digests
+proved neutral; regenerating anyway would replace a verified artifact set with an
+unverified one for no gain.
+
 ## Why there are two baselines
 
 The freeze point moved. `c51b51d` renamed `import component` to

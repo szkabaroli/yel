@@ -90,20 +90,18 @@ Plus, in the same PR:
 - Every throwaway adapter written during the rewrite. Each is named in its stage
   file; the reviewer checks each one is gone
   ([anti-spec A4](anti-spec.md#a4--no-permanent-bridge)).
-- **The keyword-boundary simplification** —
-  [directions §7](directions.md#7--keywords-get-a-word-boundary--at-cutover-by-deletion).
-  Once the frozen grammar is gone, nothing requires keywords to match *without* a
-  word boundary, so the machinery built to reproduce that goes with it:
-  `at_keyword_prefix`/`eat_keyword`/`assert_keyword` and their call sites, and
-  the `if`/element speculation with its measured ~150–190× parse-time
-  amplification. `yelc-syntax`'s lexer boundaries keywords naturally —
-  `keyword_kind` is called on a complete word — so this is **deletion, not new
-  code**.
-  **`split_token` and `partial_offset` stay**: `split_token`'s other caller is
-  `expect_type_close`, which takes the `>` out of a `>=` so `list<s32>=1` closes
-  the generic. That is a separate scannerless artifact the boundary does not
-  touch. Do it in this PR, while the reason it existed is still visible in the
-  diff.
+- ~~**The keyword-boundary simplification**~~ — **done, 2026-07-28, in stage 1**
+  ([directions §7](directions.md#7--keywords-get-a-word-boundary--at-cutover-by-deletion),
+  evidence in [`goldens-changed.md`](goldens-changed.md)). It did not have to
+  wait for the frozen grammar to be gone: the boundary landed in *both*
+  compilers at once and the corpus came back byte-identical, so the differential
+  never went blind. `at_keyword_prefix`/`eat_keyword`/`assert_keyword` and their
+  ~56 call sites are already deleted. Nothing is owed here at cutover.
+  Two notes for whoever reads this row expecting work: the `if`/element
+  speculation (`try_parse`, `Speculation`, `Checkpoint`) **did not** go with it —
+  `if {` is still ambiguous for reasons gluing had nothing to do with — and
+  `split_token`/`partial_offset` stay, because `expect_type_close` takes the `>`
+  out of a `>=` so `list<s32>=1` closes the generic.
 - The stage-selection seam in `yelc-driver` — once there is only one
   implementation, a selector between implementations is dead weight.
 - Workspace members, path deps, and CI matrix entries for the deleted crates.

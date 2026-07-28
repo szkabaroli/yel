@@ -14,7 +14,7 @@
 //! A branch with no `{` is [`ast::Block::Missing`], not an empty `Vec` — the
 //! same rule the UI-tree bodies follow in `nodes.rs`.
 
-use super::{Follow, Parser};
+use super::Parser;
 use crate::ast;
 use crate::token::{EXPRESSION_FIRST, STATEMENT_FIRST, TokenKind, TokenKind::*};
 use yelc_base::Span;
@@ -149,30 +149,10 @@ impl<'a> Parser<'a> {
     /// Committing on the keyword instead was a silent grammar narrowing: it made
     /// `let`, alone among identifiers, unusable as a variable name.
     ///
-    /// The keyword is also a bare literal with **no word boundary**, so it
-    /// matches a *prefix*: `let_statement = "let" ~ identifier` reads `letx = 1;`
-    /// as a binding called `x`, exactly as `recordFoo { }` is a `record` called
-    /// `Foo`. Matching `is(LET_KW)` alone saw an assignment to a variable called
-    /// `letx` instead — an accept/reject-invisible **misidentification**, caught
-    /// by the construct-identity harness and by nothing else in the suite.
-    ///
-    /// The split only happens when the leftover is a legal `identifier`
-    /// ([`Follow::Name`]): `let8 = 1;` and `let-x = 1;` are assignments to
-    /// variables of those names, because pest's possessive `?` would have
-    /// committed to the keyword and then failed `identifier`.
-    ///
-    /// The glued half also has to see the `:` or the `=`. A split consumes the
-    /// *whole* remainder of the identifier as the bound name, so the very next
-    /// token is `let_statement`'s `(":" ~ type)?` or its mandatory `"="`. When
-    /// it is neither, pest abandons `let_statement` and the **unsplit** reading
-    /// survives: `letx;` is the expression statement `letx`, not a binding of
-    /// `x` to nothing. (`let x;` has no such fallback and is rejected by both.)
+    /// `let` is a word, so `letx = 1;` is an assignment to a variable called
+    /// `letx` and never reaches `let_statement` at all.
     fn at_let_statement(&self) -> bool {
-        if self.is(LET_KW) {
-            return self.nth_is_name(1);
-        }
-        self.at_keyword_prefix("let", Follow::Name)
-            && matches!(self.nth_non_trivia(1), COLON | EQ)
+        self.is(LET_KW) && self.nth_is_name(1)
     }
 
     /// Whether `if` here starts an `if_statement`, or is an ordinary name.
@@ -194,35 +174,22 @@ impl<'a> Parser<'a> {
     /// `condition_scan_table` builds in one pass (anti-spec B8: no per-`if`
     /// scan, and nothing that runs to end of input on unterminated source).
     ///
-    /// # The glued half
-    ///
-    /// `"if"` is a bare literal with no word boundary here too, so `ifx { }` is
-    /// `if x { }` and `ifa > 0 { b(); }` is `if a > 0 { … }`. Both were
-    /// **rejected** while this predicate matched `is(IF_KW)` alone: the
-    /// identifier fell through to `expr_statement`, which then met a `{` where
-    /// it wanted a `;`.
-    ///
-    /// The condition scan starts at the *current* token rather than the next
-    /// one, because a glued condition begins inside the token the keyword was
-    /// split out of. `condition_scan` treats an identifier as an ordinary
-    /// expression token, so the decisive token is the same either way.
+    /// `if` is a word, so `ifx { }` is the expression statement `ifx` followed
+    /// by a stray block, exactly as any other identifier would be.
     fn at_if_statement(&self) -> bool {
-        if self.is(IF_KW) {
-            if !self.nth_is_set(1, EXPRESSION_FIRST) {
-                return false;
-            }
-            return match self.nth_non_trivia_at(1) {
-                Some((index, _)) => self.expression_is_followed_by_a_block(index),
-                None => false,
-            };
+        if !self.is(IF_KW) || !self.nth_is_set(1, EXPRESSION_FIRST) {
+            return false;
         }
-        self.at_keyword_prefix("if", Follow::Expr) && self.condition_here_is_followed_by_a_block()
+        match self.nth_non_trivia_at(1) {
+            Some((index, _)) => self.expression_is_followed_by_a_block(index),
+            None => false,
+        }
     }
 
     /// `let_statement = "let" ~ identifier ~ (":" ~ type_annotation)? ~ "=" ~ expr ~ ";"`
     fn parse_let_stmt(&mut self) -> ast::Stmt {
         self.start_node();
-        self.assert_keyword(LET_KW, "let", Follow::Name);
+        self.assert(LET_KW);
         let name = self.expect_name();
         let ty = if self.eat(COLON) {
             Some(self.parse_type())
@@ -246,7 +213,7 @@ impl<'a> Parser<'a> {
     /// `if_statement = "if" ~ expr ~ "{" ~ statement* ~ "}" ~ ("else" ~ "{" ~ statement* ~ "}")?`
     fn parse_if_stmt(&mut self) -> ast::Stmt {
         self.start_node();
-        self.assert_keyword(IF_KW, "if", Follow::Expr);
+        self.assert(IF_KW);
         let condition = self.parse_expr();
         let then_branch = self.parse_braced_stmt_block();
 
@@ -367,14 +334,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_glued_let_binds_the_remainder() {
-        // `"let" ~ identifier` with no word boundary: `letx = 1;` binds `x`.
+    fn a_name_beginning_with_let_is_not_a_binding() {
+        // `let_statement` is `!GLUED_LET ~ "let" ~ identifier`, so `letx = 1;`
+        // is an assignment to a variable called `letx`. This used to assert the
+        // opposite — it bound `x` — and it is the specification of the keyword
+        // word boundary, so it moved with it; see
+        // `plans/rewrite/goldens-changed.md`.
         let p = parse_ok("component A { div { f: { letx = 1; x } } }");
         let closure = closure_body(&p);
-        let ast::Stmt::Let(stmt) = &closure.body[0] else {
-            panic!("expected a let, got an assignment to a variable called `letx`")
+        let ast::Stmt::Assign(stmt) = &closure.body[0] else {
+            panic!("expected an assignment to a variable called `letx`")
         };
-        assert_eq!(p.name(stmt.name.present().unwrap().name), "x");
+        let ast::ExprKind::Ident(name) = stmt.target.kind else {
+            panic!("expected the assignment target to be a plain name")
+        };
+        assert_eq!(p.name(name), "letx");
     }
 
     #[test]
@@ -407,8 +381,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_glued_if_statement() {
-        let p = parse_ok("component A { div { f: { ifa > 0 { g(); } } } }");
+    fn parse_if_statement() {
+        // The subject used to be `ifa > 0 { … }`, which read as `if a > 0`
+        // through the keyword prefix. `ifa` is one identifier now and both
+        // compilers reject that text — `expr_statement` meets a `{` where it
+        // wants a `;` — so the case moved to a spelled-out `if`.
+        let p = parse_ok("component A { div { f: { if a > 0 { g(); } } } }");
         let closure = closure_body(&p);
         let ast::Stmt::If(stmt) = &closure.body[0] else {
             panic!("expected an if statement")

@@ -665,22 +665,26 @@ fn every_construct_in_every_mutated_program_is_read_the_same_way() {
 // ---------------------------------------------------------------------------
 
 /// The constructs the corpus never writes, and the ones a hand-rolled lexer is
-/// most likely to misread: glued keywords, the `{` alternatives, and the
+/// most likely to misread: keyword-shaped names, the `{` alternatives, and the
 /// positions where `if_node` and `element_node` are both live.
 ///
 /// Every one of these is *accepted by both parsers with no diagnostic*, which
 /// is precisely why `parity.rs` cannot see them.
+///
+/// The keyword word boundary moved eleven rows **out** of this table: with
+/// `ifo > 0 { … }`, `forx in xs { … }` and their siblings now rejected by both
+/// parsers, they are accept/reject cases and live in `parity.rs`'s
+/// keyword-boundary class instead. The rows that stayed are the ones both
+/// parsers still accept — and they now agree on *element*, where they used to
+/// agree on *if*.
 const HANDWRITTEN: &[&str] = &[
-    // -- glued `if` at node position, where `element_node` is also live
+    // -- a name that begins with `if`, at node position, where `element_node`
+    // is the only live alternative
     "component A { ife { div { } } }",
     "component A { ifa { div { } } }",
     "component A { ifx { div { } } }",
-    "component A { ifo > 0 { \"a\" } }",
-    "component A { div { iff (a) { \"\" } } }",
-    "component A { if a { \"a\" } elseif b { \"c\" } }",
-    "component A { iftrue { \"x\" } else if false { \"y\" } }",
-    // …and where it is live *and wins*: a `named_prop` is not a `node`, so
-    // `if_body` cannot swallow this block and pest backtracks to the element.
+    // …and the one that reached the element reading by backtracking before the
+    // boundary landed, and reaches it directly now.
     "component A { iflex { color: red } }",
     "component A { iflex { color: red } else { \"x\" } }",
     // an `if` whose condition is a record literal, and the element called `if`
@@ -688,22 +692,15 @@ const HANDWRITTEN: &[&str] = &[
     "component A { if { a: 1 } { div { } } else { \"x\" } }",
     "component A { if { span { \"x\" } } }",
     "component A { if { a: 1 } }",
-    // -- glued `for`, and the alternatives it must not steal
-    "component A { forx in xs { \"a\" } }",
-    "component A { forx iny { \"a\" } }",
-    "component A { for x iny { \"a\" } }",
+    // -- names beginning with `for`, and the alternatives `for` must not steal
     "component A { format { \"a\" } }",
     "component A { for { span { \"x\" } } }",
-    // -- glued `let` / `if` at statement position
+    // -- names beginning with `let` / `if` at statement position
     "component A { div { f: { letx = 1; } } }",
     "component A { div { f: { letters = 1; } } }",
-    "component A { div { f: { lets: s32 = 1; } } }",
     "component A { div { f: { let8 = 1; } } }",
     "component A { div { f: { let-x = 1; } } }",
     "component A { div { f: { let = 1; } } }",
-    "component A { div { f: { ifx { b(); } } } }",
-    "component A { div { f: { ifa > 0 { b(); } } } }",
-    "component A { div { f: { ifx.a { b(); } } } }",
     "component A { div { f: { ifx = 1; } } }",
     "component A { div { f: { if a { } else } } }",
     "component A { div { f: { if a { b(); } else { c(); } } } }",
@@ -746,7 +743,7 @@ const KNOWN_IDENTITY_DIVERGENCES: &[&str] = &[];
 #[test]
 fn the_hand_written_table_is_read_the_same_way() {
     // Exact, so a case cannot be quietly dropped when it starts failing.
-    assert_eq!(HANDWRITTEN.len(), 39);
+    assert_eq!(HANDWRITTEN.len(), 28);
 
     let mut mismatches = Vec::new();
     for case in HANDWRITTEN {
@@ -841,10 +838,14 @@ fn the_projection_reaches_every_construct_kind_it_names() {
 /// side has to be *caught*.
 #[test]
 fn the_projection_catches_an_injected_misidentification() {
-    // `ife { div { } }` really is an `if`; the element reading is the bug that
-    // shipped. Assert the harness can tell them apart at all.
-    let as_an_if = "component A { ife { div { } } }";
-    let as_an_element = "component A { iflex { color: red } }";
+    // The pair used to be `ife { div { } }` (an `if`) against
+    // `iflex { color: red }` (an element). `ife` is a name now, so the probe
+    // moved to the ambiguity that survives the keyword boundary: `if` followed
+    // directly by `{` is an if-node when the block is a record-literal
+    // condition and an element called `if` when it is not. Both start at the
+    // same offset, which is what the projection has to tell apart.
+    let as_an_if = "component A { if { a: 1 } { div { } } }";
+    let as_an_element = "component A { if { span { \"x\" } } }";
 
     let kind = |list: &[Construct], at: usize| {
         list.iter()

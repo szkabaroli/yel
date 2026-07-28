@@ -20,24 +20,13 @@
 //! `global G { 42 }` and `component A { 42; }` produced a diagnostic and no
 //! `Error` node anywhere in the tree.
 
-use super::{Follow, Parser, TrailingSep, is_kebab_lower, starts_identifier};
+use super::{Parser, TrailingSep, is_kebab_lower};
 use crate::ast;
 use crate::token::{
     ITEM_FIRST, ITEM_RECOVERY, MEMBER_FIRST, MEMBER_RECOVERY, NODE_FIRST, RESYNC_MEMBER, TokenKind,
     TokenKind::*, TokenSet,
 };
 use yelc_base::{Name, Span};
-
-/// Whether `spelling` is a bare-literal prefix of `text` that pest could match
-/// and still find an `identifier` in what is left.
-///
-/// The text-level twin of `Parser::at_keyword_prefix(.., Follow::Name)`, for the
-/// two predictors that work off text without a `Parser` cursor.
-fn keyword_prefix_of(text: &str, spelling: &str) -> bool {
-    text.len() > spelling.len()
-        && text.starts_with(spelling)
-        && starts_identifier(&text[spelling.len()..])
-}
 
 /// `package_version = @{ "@" ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)* }`, minus
 /// the `@` this is called with.
@@ -78,7 +67,7 @@ impl<'a> Parser<'a> {
 
         // `file = SOI ~ package_decl? ~ (top_level_item | CATCH_ALL)* ~ EOI` —
         // the package declaration is only legal in first position.
-        if self.is(PACKAGE_KW) || self.item_keyword_prefix() == Some(PACKAGE_KW) {
+        if self.is(PACKAGE_KW) {
             items.push(ast::ItemKind::Package(self.parse_package_decl()));
         }
 
@@ -108,20 +97,11 @@ impl<'a> Parser<'a> {
     /// sync with the `match` must fall through to the reporting `_` arm, because
     /// `unreachable!()` here would break invariant S6.
     fn parse_item(&mut self) -> ast::ItemKind {
-        let predicted = if self.is_set(ITEM_FIRST) {
-            self.current()
-        } else {
-            // `top_level_item`'s alternatives all start with a bare string
-            // literal, and pest has no word boundary — so `recordFoo { }` is a
-            // `record` named `Foo`. The FIRST set cannot see that, because the
-            // lexer produced one `IDENTIFIER`; the *text* can.
-            match self.item_keyword_prefix() {
-                Some(kind) => kind,
-                None => return self.parse_error_item("expected a top-level declaration"),
-            }
-        };
+        if !self.is_set(ITEM_FIRST) {
+            return self.parse_error_item("expected a top-level declaration");
+        }
 
-        match predicted {
+        match self.current() {
             RECORD_KW => self.parse_record_decl(),
             ENUM_KW => self.parse_enum_decl(),
             VARIANT_KW => self.parse_variant_decl(),
@@ -143,61 +123,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// The `top_level_item` alternatives, in `grammar.pest`'s order.
-    ///
-    /// Order is the disambiguation rule in a PEG, and it matters here for the
-    /// same reason: the first spelling that prefix-matches wins.
-    const ITEM_KEYWORDS: &'static [(TokenKind, &'static str)] = &[
-        (PACKAGE_KW, "package"),
-        (RECORD_KW, "record"),
-        (ENUM_KW, "enum"),
-        (VARIANT_KW, "variant"),
-        (ELEMENT_KW, "element"),
-        (EXTERN_KW, "extern"),
-        (GLOBAL_KW, "global"),
-        (COMPONENT_KW, "component"),
-        (EXPORT_KW, "export"),
-    ];
-
-    /// The item keyword pest would match a bare prefix of the current
-    /// identifier with, if any.
-    ///
-    /// Every alternative here is `"<literal>" ~ identifier` or
-    /// `"<literal>" ~ "<literal>" ~ identifier`, so the leftover must be able to
-    /// begin an `identifier` — [`Follow::Name`]. Without that check `record0`,
-    /// `enum-x` and `component8A` were parsed as declarations named `0`, `-x`
-    /// and `8A`; the frozen parser rejects all three.
-    fn item_keyword_prefix(&self) -> Option<TokenKind> {
-        let text = self.current_text();
-        Self::ITEM_KEYWORDS
-            .iter()
-            .find(|(_, spelling)| keyword_prefix_of(text, spelling))
-            .map(|(kind, _)| *kind)
-    }
-
-    /// What follows `export` — the next token, or, when the two are glued into
-    /// one identifier, what the *rest of that identifier* starts with.
-    ///
-    /// Both directions of gluing occur and they are independent:
-    /// `exportcomponent A { }` glues `export` to the keyword, and
-    /// `export componentApp { }` glues the keyword to the *name*. Matching the
-    /// next token by kind alone saw only the first; the second read as an
-    /// `IDENTIFIER` and was rejected, while the frozen parser accepts it.
+    /// What follows `export` — `global`, `component`, or neither.
     fn after_export(&self) -> TokenKind {
-        let rest = if self.is(EXPORT_KW) {
-            self.nth_text(1)
-        } else {
-            &self.current_text()["export".len()..]
-        };
-        if let Some(kind) = crate::token::keyword_kind(rest) {
-            return kind;
-        }
-        for (kind, spelling) in [(GLOBAL_KW, "global"), (COMPONENT_KW, "component")] {
-            if keyword_prefix_of(rest, spelling) {
-                return kind;
-            }
-        }
-        EOF
+        self.nth_non_trivia(1)
     }
 
     /// The `CATCH_ALL` equivalent: report once, consume at least one token, then
@@ -244,7 +172,7 @@ impl<'a> Parser<'a> {
 
     fn parse_package_decl(&mut self) -> ast::PackageDecl {
         self.start_node();
-        self.assert_keyword(PACKAGE_KW, "package", Follow::Name);
+        self.assert(PACKAGE_KW);
 
         self.start_node();
         let namespace = self.expect_name();
@@ -321,7 +249,7 @@ impl<'a> Parser<'a> {
 
     fn parse_record_decl(&mut self) -> ast::ItemKind {
         self.start_node();
-        self.assert_keyword(RECORD_KW, "record", Follow::Name);
+        self.assert(RECORD_KW);
         let name = self.expect_name();
         if !self.is(L_BRACE) {
             self.expect(L_BRACE);
@@ -366,7 +294,7 @@ impl<'a> Parser<'a> {
 
     fn parse_enum_decl(&mut self) -> ast::ItemKind {
         self.start_node();
-        self.assert_keyword(ENUM_KW, "enum", Follow::Name);
+        self.assert(ENUM_KW);
         let name = self.expect_name();
         if !self.is(L_BRACE) {
             self.expect(L_BRACE);
@@ -422,7 +350,7 @@ impl<'a> Parser<'a> {
 
     fn parse_variant_decl(&mut self) -> ast::ItemKind {
         self.start_node();
-        self.assert_keyword(VARIANT_KW, "variant", Follow::Name);
+        self.assert(VARIANT_KW);
         let name = self.expect_name();
         if !self.is(L_BRACE) {
             self.expect(L_BRACE);
@@ -475,7 +403,7 @@ impl<'a> Parser<'a> {
 
     fn parse_element_decl(&mut self) -> ast::ItemKind {
         self.start_node();
-        self.assert_keyword(ELEMENT_KW, "element", Follow::Name);
+        self.assert(ELEMENT_KW);
         let name = self.expect_name();
         if !self.expect(L_BRACE) {
             return self.finish_error_item();
@@ -510,8 +438,8 @@ impl<'a> Parser<'a> {
 
     fn parse_extern_component(&mut self) -> ast::ItemKind {
         self.start_node();
-        self.assert_keyword(EXTERN_KW, "extern", Follow::Name);
-        if !self.eat_keyword(COMPONENT_KW, "component", Follow::Name) && !self.expect(COMPONENT_KW) {
+        self.assert(EXTERN_KW);
+        if !self.expect(COMPONENT_KW) {
             return self.finish_error_item();
         }
         let name = self.expect_name();
@@ -573,7 +501,7 @@ impl<'a> Parser<'a> {
     fn parse_global_decl(&mut self) -> ast::ItemKind {
         self.start_node();
         let is_export = self.parse_export_modifier();
-        self.assert_keyword(GLOBAL_KW, "global", Follow::Name);
+        self.assert(GLOBAL_KW);
         let name = self.expect_name();
         if !self.expect(L_BRACE) {
             return self.finish_error_item();
@@ -622,16 +550,11 @@ impl<'a> Parser<'a> {
             return ast::GlobalMember::Callback(self.parse_function_decl());
         }
 
-        // `global_callback = "callback" ~ identifier ~ "(" ~ …`, with `callback`
-        // a bare string literal — so `callbackc(a: s32);` declares `c`. Gated on
-        // the `(`: `callbacks: s32;` has none, so pest backtracks out of
-        // `global_callback` and matches a property called `callbacks`.
-        if (self.is(CALLBACK_KW) || self.at_keyword_prefix("callback", Follow::Name))
-            && self.nth_non_trivia(1) == L_PAREN
-        {
-            return ast::GlobalMember::Callback(self.parse_global_callback());
-        }
-        if self.is(CALLBACK_KW) && self.nth_is_name(1) {
+        // `global_callback = "callback" ~ identifier ~ "(" ~ …`. `callback` is a
+        // word now, but it is still not *reserved*: `callbacks: s32;` is a
+        // property, and `callback: func();` was already taken by the
+        // `function_decl` alternative above.
+        if self.is(CALLBACK_KW) && (self.nth_non_trivia(1) == L_PAREN || self.nth_is_name(1)) {
             return ast::GlobalMember::Callback(self.parse_global_callback());
         }
 
@@ -656,26 +579,20 @@ impl<'a> Parser<'a> {
 
     /// What `property_direction?` does to the `global_property` starting here.
     ///
-    /// `property_direction = { "in-out" | "in" | "out" }` and PEG's `?` is
-    /// **possessive**: once it matches, pest never backtracks out of it. The
-    /// spellings are bare literals with no word boundary, so this bites twice
-    /// over — and both halves reject input a "does a direction token start this
-    /// member?" test happily accepts:
+    /// `property_direction` is `(!GLUED_IN_OUT ~ "in-out") | (!GLUED_IN ~ "in")
+    /// | (!GLUED_OUT ~ "out")` and PEG's `?` is **possessive**: once it matches,
+    /// pest never backtracks out of it. So one case still rejects input a "does
+    /// a direction token start this member?" test happily accepts — the
+    /// spelling is the *whole* token but no name follows, `identifier` is
+    /// matched against `:`, fails, and the whole alternative dies.
+    /// `global G { in: s32; }` is **rejected**, not a property called `in`.
+    /// (`global G { in: func(); }` is still fine — `function_decl` is an earlier
+    /// alternative and matched before this one was tried.)
     ///
-    /// * The spelling is the *whole* token but no name follows. `identifier` is
-    ///   then matched against `:`, fails, and the whole alternative dies:
-    ///   `global G { in: s32; }` is **rejected**, not a property called `in`.
-    ///   (`global G { in: func(); }` is still fine — `function_decl` is an
-    ///   earlier alternative and matched before this one was tried.)
-    /// * The spelling is a *prefix* of a longer identifier whose leftover is not
-    ///   an `identifier`: `in8`, `in-a`, `in0`, `out8`, `out-a`, `out0`,
-    ///   `in-out8`, `in-out-a`, `in-out0`. All rejected. When the leftover *is*
-    ///   an identifier the member parses — `input:` is direction `in` on a
-    ///   property called `put`, and `in-outer:` is `in-out` on `er` — which this
-    ///   parser reads as undirected properties named `input` / `in-outer`. That
-    ///   is an AST-shape difference and not an accept/reject one; the enumerated
-    ///   rejecting half is pinned in
-    ///   `tests/parity.rs::accept_reject_parity_over_the_possessive_modifier_class`.
+    /// The spellings are words now, so a longer identifier that merely *starts*
+    /// with one — `input`, `outer`, `in-outer` — is an ordinary property name
+    /// and never reaches the possessive `?` at all. Before the boundary,
+    /// `input:` was direction `in` on a property called `put`.
     ///
     /// The literals are tried in the grammar's order, so `in-out` wins over `in`.
     fn global_property_direction(&self) -> DirectionMatch {
@@ -685,21 +602,6 @@ impl<'a> Parser<'a> {
             } else {
                 DirectionMatch::Dead
             };
-        }
-        if !self.is_name() {
-            return DirectionMatch::Absent;
-        }
-        let text = self.current_text();
-        for spelling in ["in-out", "in", "out"] {
-            if text.len() > spelling.len() && text.starts_with(spelling) {
-                return if starts_identifier(&text[spelling.len()..]) {
-                    // pest reads the leftover as the property name; this parser
-                    // reads the whole token as the name. Same one bit either way.
-                    DirectionMatch::Absent
-                } else {
-                    DirectionMatch::Dead
-                };
-            }
         }
         DirectionMatch::Absent
     }
@@ -756,7 +658,7 @@ impl<'a> Parser<'a> {
     /// `global_callback = "callback" ~ identifier ~ "(" ~ params? ~ ")" ~ ret? ~ ";"`
     fn parse_global_callback(&mut self) -> ast::FunctionDecl {
         self.start_node();
-        self.assert_keyword(CALLBACK_KW, "callback", Follow::Name);
+        self.assert(CALLBACK_KW);
         let name = self.expect_name();
         let signature = self.parse_func_signature();
         self.expect(SEMICOLON);
@@ -775,7 +677,7 @@ impl<'a> Parser<'a> {
     fn parse_component_decl(&mut self) -> ast::ItemKind {
         self.start_node();
         let is_export = self.parse_export_modifier();
-        self.assert_keyword(COMPONENT_KW, "component", Follow::Name);
+        self.assert(COMPONENT_KW);
         let name = self.expect_name();
         if !self.expect(L_BRACE) {
             return self.finish_error_item();

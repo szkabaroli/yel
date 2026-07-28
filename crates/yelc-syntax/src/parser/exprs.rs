@@ -999,8 +999,13 @@ mod tests {
         // `record_literal_field` is `name ":" expr`, and no `expr` contains a
         // `;`, so a depth-zero `;` proves the block is a closure body. pest
         // backtracks out of `record_literal`; committing on `name :` alone
-        // rejected `{ lets: s32 = 1; }`, which is a `let` binding of `s`.
-        let p = parse_ok("component A { div { f: { lets: s32 = 1; } } }");
+        // rejected this block.
+        //
+        // The subject used to be `{ lets: s32 = 1; }`, a `let` binding of `s`
+        // through the keyword prefix. `lets` is one identifier now and both
+        // compilers reject that text, so the case moved to a spelled-out `let`,
+        // which is what it was always testing.
+        let p = parse_ok("component A { div { f: { let s: s32 = 1; } } }");
         let ast::ExprKind::Closure(closure) = &first_prop_value(&p).kind else {
             panic!("expected a closure, not a record literal")
         };

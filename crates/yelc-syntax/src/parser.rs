@@ -144,28 +144,6 @@ pub(crate) struct ShallowMarks {
     pub(crate) semicolon: bool,
 }
 
-/// What `grammar.pest` matches **after** a bare keyword literal.
-///
-/// The keyword literals have no word boundary, so each one matches a prefix of
-/// a longer identifier; whether that is legal is decided entirely by the next
-/// element of the rule. See [`Parser::at_keyword_prefix`].
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub(crate) enum Follow {
-    /// `… ~ identifier` — the leftover must be a legal `identifier`.
-    Name,
-    /// `… ~ expr` — the leftover may be anything an expression can start with.
-    Expr,
-}
-
-/// Whether `text` can begin `grammar.pest`'s `identifier`, which is
-/// `@{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }` (:512).
-///
-/// The same shape as `element_name` (:268), `package_namespace` and
-/// `package_name` (:154-156), so one predicate covers every `Follow::Name` site.
-pub(crate) fn starts_identifier(text: &str) -> bool {
-    matches!(text.as_bytes().first(), Some(byte) if byte.is_ascii_alphabetic() || *byte == b'_')
-}
-
 /// A remembered builder position, so a node can be *started* retroactively —
 /// which is what left-associative binary expressions need, since the node kind
 /// is only known after the left operand has been parsed.
@@ -214,15 +192,17 @@ pub(crate) struct Parser<'a> {
     /// Spans of syntax the typed AST has no recovery slot for. Handed to
     /// `ast::File::recovery_marks` at the end of the parse; see the module docs.
     recovery_marks: Vec<Span>,
-    /// Bytes already consumed from `tokens[token_idx]` by a keyword split.
+    /// Bytes already consumed from `tokens[token_idx]` by a token split.
     ///
-    /// `grammar.pest` spells keywords as bare string literals with no word
-    /// boundary, so `recordFoo { }` is a `record` named `Foo`. The token arrays
-    /// are **never** mutated — `bracket_close`, `condition_scan` and the
-    /// lossless-by-construction green tree all index them — so a split is
-    /// recorded here instead: the prefix is pushed as its own green token,
-    /// `offset` moves past it, and `token_idx` stays put until the remainder is
-    /// consumed too.
+    /// `grammar.pest` has no token layer, so a lexer's maximal munch can glue
+    /// together two things the character-level grammar reads apart: `>=` is a
+    /// `>` closing a type-argument list followed by an `=` (`list<s32>=[1]`).
+    /// The token arrays are **never** mutated — `bracket_close`,
+    /// `condition_scan` and the lossless-by-construction green tree all index
+    /// them — so a split is recorded here instead: the prefix is pushed as its
+    /// own green token, `offset` moves past it, and `token_idx` stays put until
+    /// the remainder is consumed too. See [`Parser::expect_type_close`], the
+    /// only site that splits.
     partial_offset: u32,
     /// Diagnostics produced while a speculative attempt is running.
     ///
@@ -331,14 +311,13 @@ impl<'a> Parser<'a> {
 
     /// Kind of the token the parser is looking at.
     ///
-    /// When a keyword prefix has been split off the current token
+    /// When a prefix has been split off the current token
     /// ([`Parser::partial_offset`]), the *remainder* is what is left, and its
-    /// kind is re-derived from its text: `exportcomponent` leaves `component`,
-    /// which is `COMPONENT_KW`, not `IDENTIFIER`.
+    /// kind is re-derived from its text.
     fn current(&self) -> TokenKind {
         if self.partial_offset > 0 {
-            // The one split that does not cut an identifier: `>=` cut into `>`
-            // and `=`, so a type-argument list can close (`option<s32>=none`).
+            // The only split there is: `>=` cut into `>` and `=`, so a
+            // type-argument list can close (`option<s32>=none`).
             if self.nth(0) == GE {
                 debug_assert_eq!(self.current_text(), "=");
                 return EQ;
@@ -357,7 +336,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Byte width of token `idx` *as the parser still sees it* — the current
-    /// token shrinks by whatever a keyword split has already consumed.
+    /// token shrinks by whatever a split has already consumed.
     fn width_at(&self, idx: usize) -> u32 {
         let width = self.token_widths[idx];
         if idx == self.token_idx {
@@ -403,15 +382,6 @@ impl<'a> Parser<'a> {
     fn expression_is_followed_by_a_block(&self, index: usize) -> bool {
         let decisive = self.condition_scan[index] as usize;
         decisive < self.tokens.len() && self.tokens[decisive] == L_BRACE
-    }
-
-    /// The same question for a condition that starts **inside** the current
-    /// token, which is where a glued keyword leaves it: `ifa > 0 { … }` splits
-    /// `if` off and the condition begins at `a`, still within token
-    /// `token_idx`. `condition_scan` classifies that token as an ordinary
-    /// expression token either way, so the decisive token is unchanged.
-    pub(super) fn condition_here_is_followed_by_a_block(&self) -> bool {
-        self.token_idx < self.tokens.len() && self.expression_is_followed_by_a_block(self.token_idx)
     }
 
     /// `children_node = { "@children" ~ ";"? }` — **one** string literal, so
@@ -523,81 +493,14 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Consume a keyword, **or** the keyword-shaped prefix of an identifier.
-    ///
-    /// `grammar.pest` writes every keyword as a bare string literal with no word
-    /// boundary, so `record` matches the first six bytes of `recordFoo` and the
-    /// rest becomes the next token. A hand-written lexer produces one
-    /// `IDENTIFIER`, so the split happens here instead: the prefix is pushed as
-    /// its own green token, `offset` advances past it, and `token_idx` stays
-    /// where it is until the remainder is consumed. The token arrays are never
-    /// mutated, so `bracket_close`, `condition_scan` and invariants S1/S2 are
-    /// untouched — the same bytes reach the green tree, in the same order, under
-    /// two kinds instead of one.
-    pub(super) fn eat_keyword(&mut self, kind: TokenKind, spelling: &str, follow: Follow) -> bool {
-        if self.is(kind) {
-            self.advance();
-            return true;
-        }
-        if !self.at_keyword_prefix(spelling, follow) {
-            return false;
-        }
-        self.split_token(kind, spelling.len());
-        true
-    }
-
-    /// Whether the current token is an identifier `spelling` is a **proper**
-    /// prefix of, *and* the leftover is something the rule can carry on with.
-    ///
-    /// The second half is not optional. `grammar.pest` writes keywords as bare
-    /// string literals with no word boundary, so the literal always matches the
-    /// prefix — but what pest does next is decided by whatever follows the
-    /// literal **in that rule**, and the two cases differ:
-    ///
-    /// * [`Follow::Name`] — the literal is followed by `identifier`
-    ///   (`"record" ~ identifier`, `"for" ~ identifier`,
-    ///   `"callback" ~ identifier`). `identifier` is
-    ///   `@{ (ASCII_ALPHA | "_") ~ … }` (grammar.pest:512), so a leftover
-    ///   starting with a digit or `-` cannot match it and — PEG choices being
-    ///   possessive — the whole alternative dies. `component8A { }`,
-    ///   `record0 { }`, `enum-x { }`, `package0:b;` and
-    ///   `global G { callback8(a: s32); }` are all **rejected** by the frozen
-    ///   parser, and testing only `starts_with` accepted every one of them.
-    /// * [`Follow::Expr`] — the literal is followed by `expr` (`"in" ~ expr`,
-    ///   `"if" ~ expr`). An expression may start with a digit or a `-`, so
-    ///   `for x in8 { … }` really is `for x in 8 { … }`, and gating it on
-    ///   `identifier` would reject input the frozen parser accepts.
-    pub(super) fn at_keyword_prefix(&self, spelling: &str, follow: Follow) -> bool {
-        if !self.is_name() {
-            return false;
-        }
-        let text = self.current_text();
-        if text.len() <= spelling.len() || !text.starts_with(spelling) {
-            return false;
-        }
-        match follow {
-            Follow::Expr => true,
-            Follow::Name => starts_identifier(&text[spelling.len()..]),
-        }
-    }
-
-    /// [`Parser::eat_keyword`] where the caller has already established the
-    /// keyword is there — exactly [`Parser::assert`]'s contract.
-    pub(super) fn assert_keyword(&mut self, kind: TokenKind, spelling: &str, follow: Follow) {
-        assert!(
-            self.eat_keyword(kind, spelling, follow),
-            "assert keyword {spelling:?}, found {:?}",
-            self.current()
-        );
-    }
-
     /// Push the first `len` bytes of the current token into the green tree as
     /// `kind`, leaving the remainder current.
     ///
-    /// The single primitive behind every split: the token arrays are never
-    /// mutated (`bracket_close`, `condition_scan` and invariants S1/S2 all index
-    /// them), so the consumed prefix is recorded in [`Parser::partial_offset`]
-    /// instead. No trivia can live *inside* a token, so this does not skip any.
+    /// The single primitive behind [`Parser::expect_type_close`]: the token
+    /// arrays are never mutated (`bracket_close`, `condition_scan` and
+    /// invariants S1/S2 all index them), so the consumed prefix is recorded in
+    /// [`Parser::partial_offset`] instead. No trivia can live *inside* a token,
+    /// so this does not skip any.
     fn split_token(&mut self, kind: TokenKind, len: usize) {
         debug_assert!(
             len < self.width_at(self.token_idx) as usize,
@@ -1030,7 +933,7 @@ impl<'a> Parser<'a> {
     /// and abandoned when the modifier turns out not to be there.
     fn parse_export_modifier(&mut self) -> bool {
         self.builder.start_node();
-        if self.eat_keyword(EXPORT_KW, "export", Follow::Name) {
+        if self.eat(EXPORT_KW) {
             self.builder.finish_node(MODIFIER);
             true
         } else {
@@ -1399,7 +1302,15 @@ pub(crate) mod tests {
 
     /// Discriminant name of the first UI node in the first component.
     fn first_node_kind(source: &str) -> String {
-        let parsed = parse_ok(source);
+        node_kind(&parse_ok(source))
+    }
+
+    /// [`first_node_kind`] for input both parsers reject.
+    fn first_node_kind_err(source: &str) -> String {
+        node_kind(&parse_err(source))
+    }
+
+    fn node_kind(parsed: &Parsed) -> String {
         let component = parsed.component(1);
         match component.body().next() {
             Some(ast::UiNode::If(_)) => "If".into(),
@@ -1412,29 +1323,38 @@ pub(crate) mod tests {
         }
     }
 
-    /// The construct-identity cases the review panel found.
+    /// A keyword glued to a name is one identifier, in both compilers.
     ///
-    /// These have the **same accept/reject bit** as the frozen parser, so the
-    /// one-bit parity oracle cannot see them (anti-spec A18). Each expectation
-    /// below was read out of the frozen parser's own AST dump, not decided here.
+    /// These have the **same accept/reject bit** as the frozen parser in the
+    /// `{`-terminated cases, so the one-bit parity oracle cannot see them
+    /// (anti-spec A18). Each expectation below was read out of the frozen
+    /// parser's own AST dump, not decided here.
+    ///
+    /// This test used to assert the opposite for the first case — `ife { … }`
+    /// was an if-node over a condition called `e`. It is the specification of
+    /// the keyword word boundary and moved with it; see
+    /// `plans/rewrite/goldens-changed.md`.
     #[test]
-    fn glued_if_keeps_the_frozen_parsers_construct_identity() {
-        // Frozen: If(condition: Ident("e"), then: [Element(div)]).
+    fn a_keyword_glued_to_a_name_is_one_identifier() {
+        // Frozen: element `ife`. `if_node` needs `!GLUED_IF ~ "if"` and the `e`
+        // is an identifier character, so the alternative never opens.
         assert_eq!(
             first_node_kind("package a:b@0.1.0;\ncomponent A { ife { div {} } }"),
-            "If",
-            "`ife {{ div {{}} }}` is an if-node in the frozen grammar, not an element"
+            "Element",
+            "`ife {{ div {{}} }}` is an element named `ife`, not an if-node"
         );
-        // Frozen: element `iflex` — `color: red` is a named_prop, not a node,
-        // so `if_body` cannot swallow it and pest falls through.
+        // Frozen: element `iflex`, for the same reason. It reached this reading
+        // by backtracking before; now it never leaves it.
         assert_eq!(
             first_node_kind("package a:b@0.1.0;\ncomponent A { iflex { color: red } }"),
             "Element",
         );
-        // The unglued control: `for` was always reproduced correctly.
+        // `forx` is a name, and a name not followed by `{` is not a node at
+        // all — so unlike the two above this one changes the accept/reject bit,
+        // in both compilers together.
         assert_eq!(
-            first_node_kind("package a:b@0.1.0;\ncomponent A { forx in xs { \"a\" } }"),
-            "For",
+            first_node_kind_err("package a:b@0.1.0;\ncomponent A { forx in xs { \"a\" } }"),
+            "Error",
         );
     }
 
@@ -1459,7 +1379,7 @@ pub(crate) mod tests {
             let mut diags = Diagnostics::new();
             let parsed = crate::parse(SourceId(0), &src, &interner, &mut diags);
             let errors = ErrorNodeCounter::run(&parsed.ast).count;
-            let ours = if diags.len() == 0 && errors == 0 {
+            let ours = if diags.is_empty() && errors == 0 {
                 "accept"
             } else {
                 "REJECT"
@@ -1481,8 +1401,9 @@ pub(crate) mod tests {
     fn parsing_is_deterministic() {
         let sources = [
             "package a:b@0.1.0;\ncomponent A { x: s32 = 1; div { \"t\" } }",
-            // speculation-heavy: the glued-`if` site attempts and backtracks
-            "package a:b@0.1.0;\ncomponent A { ife { div {} } iflex { color: red } }",
+            // speculation-heavy: the `if {` site attempts and backtracks — the
+            // record-literal condition commits, the element reading does not
+            "package a:b@0.1.0;\ncomponent A { if { a: 1 } { div {} } if { span { \"x\" } } }",
             // ill-formed, so the diagnostic and recovery paths run too
             "package a:b@;\ncomponent A { f: func( ; record R { a: list<s32 }",
         ];
@@ -1506,16 +1427,21 @@ pub(crate) mod tests {
         }
     }
 
-    /// The glued-`if` decision must not depend on the rest of the file.
+    /// The `if {` decision must not depend on the rest of the file.
     ///
     /// Found by review. The depth diagnostic is latched to once per parse, so a
     /// speculative `parse_if_node` that overflows *after* something else spent
     /// the latch buffers no diagnostic at all — and a criterion of "parsed
-    /// without reporting" accepted it. The same `ife { … }` then read as an
-    /// element on its own and as an `if` when preceded by an unrelated
-    /// deeply-nested declaration in a different component.
+    /// without reporting" accepted it. The same block then read as an element on
+    /// its own and as an `if` when preceded by an unrelated deeply-nested
+    /// declaration in a different component.
+    ///
+    /// The subject was `ife { … }` while keywords had no word boundary. That is
+    /// now unambiguously an element, so the probe moved to the ambiguity that
+    /// survives: `if` followed directly by `{`, which is either a record-literal
+    /// condition or an element literally called `if`.
     #[test]
-    fn the_glued_if_decision_does_not_depend_on_the_rest_of_the_file() {
+    fn the_if_versus_element_decision_does_not_depend_on_the_rest_of_the_file() {
         // The window is narrow — the two readings only disagree right at the
         // depth boundary — so scan across it rather than guessing one value.
         // A hard-coded 300 sits past the window and passes even when the bug is
@@ -1535,7 +1461,7 @@ pub(crate) mod tests {
                 .items
                 .iter()
                 .find_map(|item| match item {
-                    ast::ItemKind::Component(c) if !c.body().next().is_none() => Some(c),
+                    ast::ItemKind::Component(c) if c.body().next().is_some() => Some(c),
                     _ => None,
                 })
                 .expect("a component with a body");
@@ -1548,11 +1474,11 @@ pub(crate) mod tests {
 
         for depth in (MAX_NESTING_DEPTH - 8)..=(MAX_NESTING_DEPTH + 8) {
             let deep = format!("{}\"x\"{}", "dv { ".repeat(depth), " }".repeat(depth));
-            let subject = format!("component A {{ ife {{ {deep} }} }}");
+            let subject = format!("component A {{ if {{ {deep} }} }}");
             assert_eq!(
                 kind_of(&subject),
                 kind_of(&format!("{spender}\n{subject}")),
-                "at nesting {depth}, the same `ife {{ … }}` was read as two \
+                "at nesting {depth}, the same `if {{ … }}` was read as two \
                  different constructs depending on an unrelated declaration \
                  elsewhere in the file"
             );
@@ -1570,21 +1496,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn speculative_failure_restores_across_a_keyword_split() {
+    fn speculative_failure_restores_across_a_token_split() {
         // The checkpoint must be taken with `partial_offset` NON-ZERO, or the
         // field is never exercised. An earlier version of this test just parsed
-        // `recordFoo` from offset 0 and passed even with the `partial_offset`
-        // restore deleted — a vacuous assertion of exactly the kind anti-spec
-        // A8 names. Splitting the keyword first is what makes it bite.
-        let src = "recordFoo { a: s32 }";
+        // from offset 0 and passed even with the `partial_offset` restore
+        // deleted — a vacuous assertion of exactly the kind anti-spec A8 names.
+        // Splitting a token first is what makes it bite.
+        //
+        // The subject used to be a keyword split (`recordFoo` → `record` +
+        // `Foo`). Keywords have a word boundary now, so the only split left is
+        // `expect_type_close` taking the `>` out of a `>=` — a separate
+        // scannerless artifact, and the reason `partial_offset` survives.
+        let src = ">= 1";
         let interner = Interner::new();
         let mut diags = Diagnostics::new();
         let mut p = Parser::new(SourceId(0), src, &interner, &mut diags);
         p.skip_trivia();
 
         assert!(
-            p.eat_keyword(RECORD_KW, "record", Follow::Name),
-            "expected `recordFoo` to split into `record` + `Foo`"
+            p.expect_type_close(),
+            "expected `>=` to split into `>` and `=`"
         );
         assert_ne!(p.partial_offset, 0, "the split left no partial offset");
 
@@ -1599,7 +1530,7 @@ pub(crate) mod tests {
         assert!(outcome.is_none());
         assert_eq!(
             p.partial_offset, split_before,
-            "restore lost the keyword-split cursor"
+            "restore lost the token-split cursor"
         );
         assert_eq!(state(&p), before, "speculative attempt leaked parser state");
     }
@@ -1615,7 +1546,7 @@ pub(crate) mod tests {
         for _ in 0..5 {
             let _ = p.try_parse(Speculation::IfNode, |p| {
                 ran += 1;
-                let _ = p.advance();
+                p.advance();
                 None::<()>
             });
         }

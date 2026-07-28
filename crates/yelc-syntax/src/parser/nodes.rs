@@ -14,7 +14,7 @@
 //!   whose block was never opened is not an `if` with an empty block, and
 //!   `component A { if x "a" }` used to be indistinguishable from `if x { }`.
 
-use super::{Follow, Parser, Speculation, is_kebab_lower};
+use super::{Parser, Speculation, is_kebab_lower};
 use crate::ast;
 use crate::token::{ELEMENT_ITEM_FIRST, NODE_FIRST, RESYNC_MEMBER, TokenKind::*};
 use yelc_base::Span;
@@ -28,6 +28,11 @@ impl<'a> Parser<'a> {
     /// `ident in expr` — so the grammar falls through to `element_node` and the
     /// keyword becomes an *element name*. `if { Foo { … } }` really is an
     /// element called `if` today, and the guards below preserve that.
+    ///
+    /// Keywords are words, so a longer identifier that merely starts with one
+    /// (`ifa`, `iflex`, `format`, `elsewhere`) never reaches these arms at all —
+    /// the lexer produced a single `IDENTIFIER` and it falls through to
+    /// `element_node` like any other name.
     ///
     /// One of the five guarded recursive entry points: `div { div { div { …` is
     /// unbounded recursion through this function alone.
@@ -70,45 +75,18 @@ impl<'a> Parser<'a> {
                     content,
                 })
             }
-            // `for_node = "for" ~ identifier ~ "in" ~ …`, and pest has no word
-            // boundary, so `forx in xs { … }` is a `for` over a binding called
-            // `x`. The `in` is what makes this safe to predict: `format { … }`
-            // also starts with `for`, but pest *backtracks* out of `for_node`
-            // there — no `in` follows — and matches `element_node`. Requiring
-            // the `in` reproduces the outcome of that backtracking without
-            // backtracking.
-            _ if self.at_keyword_prefix("for", Follow::Name) && self.next_starts_with_in() => {
-                ast::UiNode::For(Box::new(self.parse_for_node()))
-            }
-            // `if_node = "if" ~ expr ~ "{" ~ …`, and `if` is a bare literal too,
-            // so `ifcount == 0 { … }` is `if count == 0 { … }`.
+            // A real `if` immediately followed by `{`. Both readings are live
+            // text: the brace may be a record-literal *condition*
+            // (`if { a: 1 } { … }`), or the body of an element literally called
+            // `if` (`if { span { "x" } }`). pest tries `if_node` first and keeps
+            // it unless the alternative chokes, so do exactly that.
             //
-            // No `{` glued to the keyword: `element_node` needs a brace, so it
-            // is not a live alternative and there is nothing to decide.
-            _ if self.at_keyword_prefix("if", Follow::Expr)
-                && self.nth_non_trivia(1) != L_BRACE =>
-            {
-                ast::UiNode::If(Box::new(self.parse_if_node()))
-            }
-            // `if` immediately followed by `{`, glued (`ife { … }`) or not
-            // (`if { a: 1 } { … }`). Both readings are live text: the brace may
-            // be a record-literal *condition*, the body of an element literally
-            // called `if`, or — when glued — the body of an if whose condition
-            // is the suffix. pest tries `if_node` first and keeps it unless the
-            // alternative chokes, so do exactly that.
-            //
-            // Both halves of this used to be lookahead, and both were wrong in
-            // ways the accept/reject oracle could not see:
-            // `glued_if_body_is_all_nodes` asked whether the block held a
-            // depth-zero colon, on the theory that a colon means `named_prop`
-            // and therefore an element — but a *ternary's* colon is depth-zero
-            // too, so `ife { if a ? b : c { "x" } }` was read as an element
-            // while pest read an if-node. Same accept/reject bit, different
-            // tree (anti-spec A18). `if_condition_is_a_record` was the
-            // companion guess for the unglued form. Speculating makes the
-            // question mechanical instead of argued, and retires the
-            // `shallow_marks` table's `colon` half, which existed only for this site.
-            _ if self.is(IF_KW) || self.at_keyword_prefix("if", Follow::Expr) => {
+            // This used to be lookahead, and it was wrong in a way the
+            // accept/reject oracle could not see: `if_condition_is_a_record`
+            // guessed at the shape of the block. Speculating makes the question
+            // mechanical instead of argued, and retires the `shallow_marks`
+            // table's `colon` half, which existed only for this site.
+            IF_KW => {
                 let attempt = self.try_parse(Speculation::IfNode, |p| {
                     let diagnostics = p.buffered_diagnostics.len();
                     let overflows = p.depth_limit_hits;
@@ -138,23 +116,6 @@ impl<'a> Parser<'a> {
                 ast::UiNode::Element(self.parse_element_node())
             }
             _ => self.parse_error_node("expected a node"),
-        }
-    }
-
-    /// Whether the token after the current one is `in`, or an identifier `in`
-    /// is a proper prefix of — `for x iny { … }`.
-    ///
-    /// `"in" ~ expr`, so the leftover only has to start an *expression*
-    /// ([`Follow::Expr`]) — which is also what `parse_for_node`'s
-    /// `eat_keyword(IN_KW, "in", Follow::Expr)` does. The two used to disagree:
-    /// this one excluded `in-out` and that one did not, so `forx in-out { }` was
-    /// rejected here while the identical `for x in-out { }` was accepted three
-    /// lines later. The frozen parser accepts both — `in-out` is `in` followed
-    /// by the expression `-out`.
-    fn next_starts_with_in(&self) -> bool {
-        self.nth_non_trivia(1) == IN_KW || {
-            let text = self.nth_text(1);
-            text.len() > 2 && text.starts_with("in")
         }
     }
 
@@ -228,23 +189,10 @@ impl<'a> Parser<'a> {
     /// not a property called `set` — the modifier is consumed, `attr_name` then
     /// faces `:` and the whole alternative dies. That is why `set`/`bind` at the
     /// head commits here instead of falling through to the no-modifier case.
-    /// The modifier spellings are bare literals with no word boundary, so the
-    /// possessive `?` also fires on a *prefix*: `settings: 1` is the modifier
-    /// `set` on an attribute called `tings`. That reading only survives when the
-    /// leftover is a legal `attr_name` — `@{ ASCII_ALPHA_LOWER ~ … }`
-    /// (grammar.pest:290), which is exactly [`is_kebab_lower`]. When it is not,
-    /// pest has already committed to the modifier and the alternative dies:
-    /// `set8:`, `set-a:`, `set0:`, `bind8:`, `bind-a:` and `bind0:` are all
-    /// **rejected**, and reading them as ordinary attribute names accepted every
-    /// one.
+    /// The modifier spellings are words, so a longer identifier that merely
+    /// starts with one — `settings`, `set8`, `set-a`, `bindings` — never
+    /// reaches the possessive `?` and is an ordinary `attr_name`.
     fn at_named_prop(&self) -> bool {
-        for spelling in ["set", "bind"] {
-            let text = self.current_text();
-            if !self.is_name() || text.len() <= spelling.len() || !text.starts_with(spelling) {
-                continue;
-            }
-            return is_kebab_lower(&text[spelling.len()..]) && self.nth_non_trivia(1) == COLON;
-        }
         let name_index = if matches!(self.current(), SET_KW | BIND_KW) {
             if !self.nth_is_name(1) || self.nth_non_trivia(2) != COLON {
                 return false;
@@ -293,20 +241,17 @@ impl<'a> Parser<'a> {
     /// `if_node = "if" ~ expr ~ "{" ~ if_body ~ "}" ~ else_if_branch* ~ else_branch?`
     fn parse_if_node(&mut self) -> ast::IfNode {
         self.start_node();
-        self.assert_keyword(IF_KW, "if", Follow::Expr);
+        self.assert(IF_KW);
         let condition = self.parse_expr();
         let then_branch = self.parse_node_body();
 
         let mut else_if_branches = Vec::new();
         let mut else_branch = None;
 
-        while self.is(ELSE_KW) || self.at_glued_else_if() {
+        while self.is(ELSE_KW) {
             self.start_node();
-            self.assert_keyword(ELSE_KW, "else", Follow::Expr);
-            // `else if` is two bare literals, so both joins occur: `elseif b`
-            // glues the second to the first, `else iftrue` glues the condition
-            // to the second. Matching `nth(1) == IF_KW` saw neither.
-            if self.eat_keyword(IF_KW, "if", Follow::Expr) {
+            self.assert(ELSE_KW);
+            if self.eat(IF_KW) {
                 let branch_condition = self.parse_expr();
                 let body = self.parse_node_body();
                 let span = self.finish_node(ELSE_IF_BRANCH);
@@ -336,30 +281,12 @@ impl<'a> Parser<'a> {
 
 
 
-    /// Whether the current token glues `else` to the `if` of an `else if`.
-    ///
-    /// Only the `else if` form can be glued: `else_branch = "else" ~ "{"`, and a
-    /// `{` can never be part of an identifier. That matters — `else` is not a
-    /// reserved word, so splitting it out of *any* longer identifier would turn
-    /// `if a { "x" } elsewhere: s32 = 0;` into a malformed else-branch, while
-    /// pest backtracks out of the optional `else_branch` and reads `elsewhere`
-    /// as the next member.
-    fn at_glued_else_if(&self) -> bool {
-        self.at_keyword_prefix("else", Follow::Expr)
-            && self.current_text()["else".len()..].starts_with("if")
-    }
-
     /// `for_node = "for" ~ identifier ~ "in" ~ expr ~ key_clause? ~ "{" ~ for_body ~ "}"`
     fn parse_for_node(&mut self) -> ast::ForNode {
         self.start_node();
-        self.assert_keyword(FOR_KW, "for", Follow::Name);
+        self.assert(FOR_KW);
         let item = self.expect_name();
-        // `in` is a bare string literal too, so `for x iny { … }` binds `x` and
-        // iterates `y`. `"in" ~ expr`, so the leftover only has to start an
-        // expression — `for x in8 { … }` iterates the literal `8`.
-        if !self.eat_keyword(IN_KW, "in", Follow::Expr) {
-            self.expect(IN_KW);
-        }
+        self.expect(IN_KW);
         let iterable = self.parse_expr();
 
         let key = if self.is2(KEY_KW, L_PAREN) {
@@ -499,20 +426,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_glued_if_takes_the_if_reading_when_the_body_is_nodes() {
-        // `if_node` is tried before `element_node`, and `if_body` swallows this
-        // block, so pest never backtracks: `ife { div { } }` is `if e { … }`.
+    fn a_name_beginning_with_if_is_an_element() {
+        // `if_node` is `!GLUED_IF ~ "if"`, so the alternative never opens on
+        // `ife` and `element_node` takes it. This used to assert the opposite —
+        // `ife { div { } }` was `if e { … }` — and it is the specification of
+        // the keyword word boundary, so it moved with it; see
+        // `plans/rewrite/goldens-changed.md`.
         let p = parse_ok("component A { ife { div { } } }");
-        let ast::UiNode::If(node) = p.component(0).body().next().unwrap() else {
-            panic!("expected an if node, got an element named `ife`")
-        };
-        assert!(!node.then_branch.is_missing());
+        let element = first_element(p.component(0));
+        assert_eq!(p.name(element.name.present().unwrap().name), "ife");
     }
 
     #[test]
-    fn parse_glued_if_takes_the_element_reading_when_the_body_has_a_prop() {
-        // A `named_prop` is not a `node`, so `if_body` cannot swallow this and
-        // pest backtracks to `element_node`.
+    fn a_name_beginning_with_if_is_an_element_whatever_the_body_holds() {
+        // The companion to the case above. This one reached `element_node` by
+        // backtracking out of `if_body` before the boundary — a `named_prop` is
+        // not a `node` — and reaches it directly now. Same tree either way,
+        // which is why it is worth keeping both.
         let p = parse_ok("component A { iflex { color: red } }");
         let element = first_element(p.component(0));
         assert_eq!(p.name(element.name.present().unwrap().name), "iflex");
@@ -520,9 +450,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_glued_if_with_a_prop_body_leaves_the_else_to_be_an_element() {
-        // Both readings are live and the element one wins, so the `else` that
-        // follows is an `element_node` of its own — `else` is not reserved.
+    fn an_else_after_an_iflex_element_is_an_element_too() {
+        // `iflex` is an element, so the `else` that follows heads a node of its
+        // own — and `else` is not reserved, so it is an `element_node`.
         let p = parse_ok("component A { iflex { color: red } else { \"x\" } }");
         let mut body = p.component(0).body();
         let ast::UiNode::Element(first) = body.next().unwrap() else {

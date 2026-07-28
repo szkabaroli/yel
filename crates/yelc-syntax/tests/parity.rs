@@ -589,26 +589,27 @@ fn first_error_offset_agrees_with_the_frozen_parser_as_often_as_before() {
 
 /// The **keyword-prefix class**, in both directions, one case per member.
 ///
-/// `grammar.pest` spells every keyword as a bare string literal with no word
-/// boundary, so a keyword matches a *prefix* of the identifier the lexer would
-/// produce. That cuts two ways, and the two halves are not symmetric:
+/// `grammar.pest` spells its *type* keywords as bare string literals with no
+/// word boundary, so one matches a *prefix* of the identifier the lexer would
+/// produce. That is a **widening** risk (frozen rejects, a naive hand-written
+/// lexer accepts): `primitive_type` and `result_type` are complete matches on
+/// their own, so `s32x` is `s32` followed by a stray `x` and the enclosing
+/// production dies. Reproduced — `parser/types.rs::type_keyword_prefix_of`.
 ///
-/// * **Widening** (frozen rejects, a naive hand-written lexer accepts):
-///   `primitive_type` and `result_type` are complete matches on their own, so
-///   `s32x` is `s32` followed by a stray `x` and the enclosing production dies.
-///   Reproduced — `parser/types.rs::type_keyword_prefix_of`.
-/// * **Narrowing** (frozen accepts, a token-kind FIRST set cannot predict): at a
-///   *keyword site* pest commits to the prefix and reads the remainder as the
-///   next token, so `recordFoo { }` is a `record` named `Foo`. Reproduced —
-///   `Parser::eat_keyword` plus text-based prediction in `parse_item`.
+/// The *construct* keywords used to behave the same way in the other direction
+/// — `recordFoo { }` was a `record` named `Foo`, which no FIRST set over token
+/// kinds could predict — and the parser carried `eat_keyword` and a text-based
+/// `parse_item` predictor to reproduce it. Both compilers now give those
+/// keywords a **word boundary**, so `recordFoo` is one identifier and the rows
+/// below record the rejection instead. The boundary was deliberately *not*
+/// applied to `primitive_type` or to `unit_suffix` (an ordered prefix match by
+/// design — `10second` is `10s` + `econd`), which is why the widening half of
+/// this table is unchanged.
 ///
 /// Every row is checked against the frozen parser rather than against a written
 /// expectation, so this test states where each member *currently sits* and fails
-/// the moment one moves — in either direction.
-///
-/// Every row is checked against the frozen parser rather than against a written
-/// expectation, so a wrong belief about the grammar fails the test instead of
-/// being encoded into it.
+/// the moment one moves — in either direction, and a wrong belief about the
+/// grammar fails the test instead of being encoded into it.
 #[test]
 fn accept_reject_parity_over_the_keyword_prefix_class() {
     let cases = [
@@ -650,12 +651,13 @@ fn accept_reject_parity_over_the_keyword_prefix_class() {
         // `primary`, so this half of the class reaches expressions too.
         "component A { x: bool = trueish; }",
         "component A { x: bool = falsey; }",
-        // -- rows where the prefix does *not* change the outcome
+        // -- rows where a keyword-shaped prefix does *not* change the outcome.
         //
-        // The frozen AST differs — `input:` inside a `global` is direction `in`
-        // on a property called `put` — but both parsers accept, and the oracle
-        // records one bit per program, so these are not accept/reject
-        // divergences. They are listed to keep the class complete.
+        // These used to be the subtle half: `input:` inside a `global` was
+        // direction `in` on a property called `put`, and `settings: 1` was the
+        // modifier `set` on an attribute called `tings` — same accept/reject
+        // bit, different tree. The word boundary makes each of them the plain
+        // name it looks like, in both compilers.
         "global S { input: s32; }",
         "global S { outputs: s32; }",
         "component A { div { settings: 1 } }",
@@ -674,10 +676,20 @@ fn accept_reject_parity_over_the_keyword_prefix_class() {
         "component A { elsex: s32 = 0; }",
         "component A { if a { \"x\" } elsex { \"y\" } }",
         "component A { if a { \"x\" } elseif b { \"y\" } }",
-        // -- narrowing half: a keyword site takes the prefix and reads on.
-        // `Parser::eat_keyword` splits the prefix off the identifier token
-        // without mutating the token arrays; `parse_item` predicts these by
-        // *text*, because no FIRST set over token kinds can see them.
+        // Moved here from `tests/identity.rs` when the keyword word boundary
+        // landed: each one used to be accepted by both parsers (as a *glued*
+        // construct) and is now rejected by both, so it is an accept/reject row
+        // rather than a construct-identity one.
+        "component A { ifo > 0 { \"a\" } }",
+        "component A { div { iff (a) { \"\" } } }",
+        "component A { if a { \"a\" } elseif b { \"c\" } }",
+        "component A { iftrue { \"x\" } else if false { \"y\" } }",
+        "component A { div { f: { lets: s32 = 1; } } }",
+        "component A { div { f: { ifa > 0 { b(); } } } }",
+        "component A { div { f: { ifx.a { b(); } } } }",
+        // -- the former narrowing half: a keyword site used to take the prefix
+        // and read on. Every row here was **accepted** before the word boundary
+        // and is **rejected** now, by both compilers together.
         "recordFoo { a: s32, }",
         "componentFoo { }",
         "enumFoo { a }",
@@ -718,20 +730,20 @@ fn accept_reject_parity_over_the_keyword_prefix_class() {
     for (index, case) in cases.iter().enumerate() {
         report.compare(&format!("keyword-prefix#{index}: {case:?}"), case);
     }
-    assert_eq!(report.checked, 75);
+    assert_eq!(report.checked, 82);
     report.assert_agrees("keyword-prefix cases");
 }
 
-/// The `let` / `if` half of the keyword-prefix class, one case per member.
+/// The `let` / `if` half of the keyword class, one case per member.
 ///
-/// `let` and `if` are the two keywords the *statement* grammar spells as bare
-/// literals, and they were the last two with no prefix split in the parser:
-/// `at_let_statement` matched `is(LET_KW)` and `at_if_statement` matched
-/// `is(IF_KW)`, so `letx = 1;` was an assignment to a variable called `letx`
-/// (pest reads a binding called `x`) and `ifx { }` was rejected outright (pest
-/// reads `if x { }`). `if` also reaches *node* position, where `if_node` and
-/// `element_node` are both live, and `else` reaches it through
-/// `else_if_branch* ~ else_branch?`.
+/// `let` and `if` are the two keywords the *statement* grammar spells, and they
+/// were the last two to get a prefix split in the parser: while the frozen
+/// grammar had no word boundary, `letx = 1;` was a binding called `x` and
+/// `ifx { }` was `if x { }`. Both keywords now have a boundary in both
+/// compilers, so `letx` and `ifx` are ordinary names — and about a third of the
+/// rows below moved their accept/reject bit together as a result. `if` also
+/// reaches *node* position, where `if_node` and `element_node` are both live,
+/// and `else` reaches it through `else_if_branch* ~ else_branch?`.
 ///
 /// Every row is checked against the frozen parser rather than against a written
 /// expectation, so a wrong belief about the grammar fails the test instead of
@@ -750,10 +762,9 @@ fn accept_reject_parity_over_the_let_and_if_keyword_class() {
     }
 
     let cases: Vec<String> = [
-        // -- `let_statement = "let" ~ identifier ~ (":" ~ type)? ~ "=" ~ expr ~ ";"`
-        // The keyword is a bare literal, so it splits off any identifier it is a
-        // proper prefix of — but only where the leftover can start an
-        // `identifier`, which is what pest's possessive `?` leaves reachable.
+        // -- `let_statement = !GLUED_LET ~ "let" ~ identifier ~ (":" ~ type)? ~ "=" ~ expr ~ ";"`
+        // The boundary means a name that merely begins with `let` is a name:
+        // `letx`, `letters` and `lets` are all variables, not bindings.
         "let x = 1;",
         "letx = 1;",
         "letters = 1;",
@@ -763,8 +774,8 @@ fn accept_reject_parity_over_the_let_and_if_keyword_class() {
         "let8 = 1;",
         "let-x = 1;",
         "let_x = 1;",
-        // …and where `let` is an ordinary name, because `identifier` cannot
-        // follow: pest fails `let_statement` and `assign_statement` matches.
+        // …and where `let` itself is used as an ordinary name, because no
+        // `identifier` follows it: `assign_statement` matches instead.
         "let = 1;",
         "let;",
         "let.a = 1;",
@@ -777,7 +788,7 @@ fn accept_reject_parity_over_the_let_and_if_keyword_class() {
         "letif = 1;",
         "let x = let;",
         "letx = letx;",
-        // -- `if_statement = "if" ~ expr ~ "{" ~ statement* ~ "}" ~ ("else" ~ "{" …)?`
+        // -- `if_statement = !GLUED_IF ~ "if" ~ expr ~ "{" ~ statement* ~ "}" ~ (… "else" …)?`
         "if a { b(); }",
         "ifa { b(); }",
         "ifx > 0 { b(); }",
