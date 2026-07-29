@@ -32,10 +32,14 @@ impl<'a> Parser<'a> {
         // word, and `f: func;`, `x: func = 0;`, `record R { a: func }` and
         // `list<func>` are all accepted by the frozen parser. Committing on the
         // keyword alone rejected every one of them.
-        // `func(` or `func<` — the second form is a generic signature
-        // (`LANGUAGE.md` § Type Parameters). Without the `LT` arm, `func<T>(…)`
-        // falls through to the named-type branch and `func` is read as an
-        // ordinary type name, which is a silent misparse rather than an error.
+        //
+        // So the set is load-bearing and **must be extended whenever something
+        // new may follow `func`**. `LT` was added on 2026-07-29 for
+        // `func<T>(…)` (`LANGUAGE.md` § Type Parameters); omitting it read
+        // `func` as an ordinary type name and stranded `<T>` as sibling `ERROR`
+        // nodes — a *silent misparse*, since the file still round-trips and S1
+        // is satisfied. Nothing but a node-shape assertion catches that class,
+        // which is what `tests/generics.rs` is for.
         if self.is(FUNC_KW) && matches!(self.nth_non_trivia(1), L_PAREN | LT) {
             return self.parse_func_type();
         }
