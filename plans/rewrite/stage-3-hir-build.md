@@ -150,7 +150,7 @@ fixtures before it lands.
 
 | # | decision | answer |
 |---|---|---|
-| D1 | Do bindings and handlers stay split? | **No — one uniform prop list.** 4 classifies. [log](#d1--bindings-and-handlers-are-one-uniform-prop-list) |
+| D1 | Do bindings and handlers stay split? | **No — one uniform prop list**, classified from the *declared* prop type. ⚠️ Phase placement revised 2026-07-29. [log](#d1--bindings-and-handlers-are-one-uniform-prop-list) |
 | D2 | `For.item_ty: Ty` on the node | **Remove.** [log](#d2--for-does-not-carry-the-item-type) |
 | D3 | `For.item_name` *"stored directly to avoid LocalScope lookup issues"* | **Remove; fix the scope structure.** [log](#d3--for-does-not-carry-the-loop-variable-name) |
 | D4 | Do globals get a body? | **No.** `HirGlobal` carries only its functions; defaults stay in `GlobalDef`. [log](#d4--hirglobal-has-no-body--only-its-functions) |
@@ -1097,6 +1097,39 @@ enumerated in allocation order, against the frozen tree's — not a review remar
 
 Couples to [F1](open-decisions.md#f1--how-is-a-bodys-trigger-determined), which
 is 4's and still open.
+
+#### Phase placement revised 2026-07-29 — classification is a table lookup
+
+The answer above said *"4 classifies, using the declared type."* The **answer**
+stands; the **placement** was wrong, and it matters because the whole UI lowering
+hangs off it.
+
+Whether `clicked: { … }` is a handler depends on the type `Button` *declares* for
+`clicked` — a lookup in `Definitions`, which register-then-lower has already
+populated. It is not an **inferred** type and does not need checking to have run.
+By this file's own rule that is the *"needs the definition tables"* row — **this
+stage, phase 2 or 3** — not the *"needs a type to choose the target"* row.
+
+**Consequence, and it is the large one:** the UI tree lowers to functions and
+calls **before** typechecking, so the checker never sees UI at all. `typeck.rs`'s
+~2.8k lines of element/property/handler/children cases evaporate rather than
+being ported — a bigger simplification than [S1](#s1--adopt-the-builtin-table-1)
+offers for builtins.
+
+**The exception is binders**, and only binders: a UI region that introduces a
+variable — `for item in items`, and a `match` arm binding a payload — takes that
+variable's type from checking. `hir/lower.rs:1152` already writes
+`item_ty: Ty::ERROR, // Will be inferred`, and `thir/typeck.rs:559–575` fills it
+via `locals.set_ty`, so a local outliving its unknown type is the existing
+mechanism rather than a new one. The desugaring emits the structure; checking
+fills the slot.
+
+State the concession plainly in any brief built from this: **a generated region
+function does not have a complete signature at construction.** "Everything
+becomes functions" invites the opposite assumption, and it is wrong for exactly
+`for` and `match` regions.
+
+Full ordering: [directions §9](directions.md#9--match-is-the-general-conditional-everything-desugars-into-it).
 
 ### D2 · `For` does not carry the item type
 
