@@ -11,25 +11,30 @@
 > agent reads.
 >
 > **When a cluster is done**, copy the answers into the owning file's Decision log
-> ([`infra-sema.md`](infra-sema.md), [`stage-2a-hir-build.md`](stage-2a-hir-build.md),
-> [`stage-2b-hir-check.md`](stage-2b-hir-check.md)). This file is a worksheet, not
+> ([`stage-3-hir-build.md`](stage-3-hir-build.md), [`stage-3-hir-build.md`](stage-3-hir-build.md),
+> [`stage-4-hir-check.md`](stage-4-hir-check.md)). This file is a worksheet, not
 > the record.
 
-**10 open.** Cluster E (2a's HIR shape) was answered in full on 2026-07-29 and
-is recorded in [`stage-2a-hir-build.md`](stage-2a-hir-build.md#decision-log) as
+**8 open — B1, C1a, C1b, C1c, C2, D0, D0a, F1.** Seven of the eight are
+`yelc-sema`'s, which is **phase 1 of stage 3**, so stage 3 cannot start on them
+being open. F1 is stage 4's but the brief says decide it with D1.
+
+Cluster A was answered in full on 2026-07-29 (A2's misplaced tick corrected the
+same day). Cluster E (3's HIR shape) was answered in full on 2026-07-29 and
+is recorded in [`stage-3-hir-build.md`](stage-3-hir-build.md#decision-log) as
 D1–D6 — that file is the record, this one is the worksheet. Also decided:
-[D7](stage-2a-hir-build.md#d7--flatten-else-if-chains) (flatten `else if`),
-[D8](stage-2a-hir-build.md#d8--a-module-is-identified-by-itself-not-by-a-file)
+[D7](stage-3-hir-build.md#d7--flatten-else-if-chains) (flatten `else if`),
+[D8](stage-3-hir-build.md#d8--a-module-is-identified-by-itself-not-by-a-file)
 (module identity).
 
 | cluster | # | blocks | parallel? |
 |---|---|---|---|
-| [A · Type representation](#cluster-a--type-representation) | 4 | **everything** | no — answer first |
-| [B · Identity & serialization](#cluster-b--identity--serialization) | 3 | sema's contract | after A |
-| [C · Builtins](#cluster-c--builtins) | 2 | sema's bulk | after A |
-| [D · Context shape](#cluster-d--context-shape) | 1 | sema's API | after B, C |
-| [E · HIR shape](#cluster-e--hir-shape-2a) | ~~6~~ **0** | 2a's seam types | ✅ answered 2026-07-29 |
-| [F · Trigger](#cluster-f--trigger-2b) | 1 | 2b | with E1 |
+| [A · Type representation](#cluster-a--type-representation) | ~~4~~ **0** | **everything** | ✅ answered 2026-07-29 |
+| [B · Identity & serialization](#cluster-b--identity--serialization) | **1** (B1) | sema's contract | **unblocked** — A is answered |
+| [C · Builtins](#cluster-c--builtins) | **4** (C1a–c, C2) | sema's bulk | **unblocked** — A is answered |
+| [D · Context shape](#cluster-d--context-shape) | **2** (D0, D0a) | sema's API | after B, C |
+| [E · HIR shape](#cluster-e--hir-shape-stage-3) | ~~6~~ **0** | 3's seam types | ✅ answered 2026-07-29 |
+| [F · Trigger](#cluster-f--trigger-stage-4) | 1 (F1) | 4 | with E1 |
 
 Not asked here, deliberately: whether to **implement** closure capture
 ([§4](directions.md#4--closures-are-a-value-and-the-irs-are-shaped-for-one)). The
@@ -96,10 +101,10 @@ Swift, Scala and TypeScript all do both.
 - [ ] **1 · None.** Every type concrete at every step, no metavariables. Where
       neither direction determines a type, emit a diagnostic — the frozen tree's
       *"cannot infer the type of this closure without an expected type."*
-- [ ] **2 · Metavariables + unification, no generalization.** Mint an inference
+- [x] **2 · Metavariables + unification, no generalization.** Mint an inference
       variable where nothing determines a type, unify, resolve before the phase
       ends. Rust-like. ← **CHOSEN**
-- [x] **3 · Full Hindley-Milner** — option 2 plus let-generalization.
+- [ ] **3 · Full Hindley-Milner** — option 2 plus let-generalization.
 - [ ] Other: ______
 
 *Hangs on it:* [A4](#a4--does-ty-get-an-infer-variant) follows directly — option 1
@@ -117,12 +122,49 @@ years for that reason. Unification is not in tension; generalization is.
 with HM" in the colloquial sense: HM-*style* inference, minus the
 let-generalization yel has no use for. Recorded 2026-07-29.
 
-**What this accepts.** [T1](stage-2b-hir-check.md#t1--bidirectional-checking-not-unification)
+> **The tick sat on row 3 until 2026-07-29 while the prose said 2.** Corrected to
+> row 2, which is what every other line in this entry already said — the row's own
+> `← CHOSEN` marker, the *Why not 3* paragraph, and the answer sentence. Recorded
+> rather than quietly fixed because rows 2 and 3 are materially different work and
+> [A4](#a4--does-ty-get-an-infer-variant) says it *follows from A2*, so a
+> misreading propagates.
+
+**Why "no use for it" is a fact about yel, not a preference.** Generalization
+needs two things — a binding whose inferred type still has free variables, and
+that binding used at more than one type. Yel has neither, and both halves are
+checkable rather than argued:
+
+1. **No type-parameter syntax exists.** `function_decl = { export_modifier? ~
+   identifier ~ ":" ~ func_type ~ ";" }`, `func_type = { "func" ~ "(" ~
+   func_params? ~ ")" ~ func_return? }` — there is nowhere to write `<T>`. The
+   `T` in `list<T>`, and in `filter: (list<T>, func(T) -> bool) -> list<T>`, is
+   **prose in `LANGUAGE.md`'s builtin table**, not syntax a user can write.
+2. **A `let`-bound closure never reaches a generalizable state.** The shape that
+   would need it:
+
+   ```yel
+   let id = { x -> x };
+   let a: s32 = id(1);
+   let b: string = id("hi");
+   ```
+   ```
+   error[E0002]: cannot infer the type of this closure without an expected type
+   ```
+
+   A closure only checks where the expected type is already concrete. There is no
+   moment at which `id : a → a` with `a` free, so the quantify-at-`let` step would
+   have nothing to quantify.
+
+Measured 2026-07-29 against the frozen compiler. It returns if yel ever gets
+user-written generics — a language change that would reopen
+[A1](#a1--how-are-parameterized-types-represented) first.
+
+**What this accepts.** [T1](stage-4-hir-check.md#t1--bidirectional-checking-not-unification)
 argued against a solver on four grounds; three are unaffected, one is a real cost
 now taken on deliberately: **diagnostics.** Bidirectional-only yields "expected
 `X`, found `Y`" *at the construct*; a solver reports a conflict wherever
 unification failed — different span, different sentence. Diagnostic meaning is
-frozen on 23 fixtures, so this becomes an **explicit obligation on 3b**, not an
+frozen on 23 fixtures, so this becomes an **explicit obligation on 4**, not an
 accident.
 
 ---
@@ -137,7 +179,7 @@ The `T` in `list<T>` — a placeholder in a *declaration*.
 - [ ] Other: ______
 
 *Hangs on it:* structural equality, interner uniquing, and what B1 has to write.
-**Recommendation:** no — [S7](infra-sema.md#s7--does-ty-gain-a-non-concrete-variant).
+**Recommendation:** no — [S7](stage-3-hir-build.md#s7--does-ty-gain-a-non-concrete-variant).
 
 **Answer:**
 
@@ -157,8 +199,8 @@ option 2 requires it. Recorded 2026-07-29.
 
 **Three obligations this creates**, none of which exist under "No":
 
-1. **`Infer` must not survive the phase.** It is legal *during* 3b and illegal
-   after. 3b's postcondition strengthens from "`types` is total" to "`types` is
+1. **`Infer` must not survive the phase.** It is legal *during* 4 and illegal
+   after. 4's postcondition strengthens from "`types` is total" to "`types` is
    total **and contains no unresolved variable**" — rustc's `has_infer()` check.
 2. **It must never be serialized.** A module artifact containing a hole is a bug,
    not a state ([B1](#b1--how-does-ty-cross-a-module-boundary),
@@ -166,7 +208,7 @@ option 2 requires it. Recorded 2026-07-29.
 3. **Structural equality and interner uniquing must account for it** — two
    distinct variables are not the same type. Decide whether variables live in the
    interner at all or in a side unification table
-   ([S7](infra-sema.md#s7--does-ty-gain-a-non-concrete-variant)).
+   ([S7](stage-3-hir-build.md#s7--does-ty-gain-a-non-concrete-variant)).
 
 ---
 
@@ -187,7 +229,7 @@ option 2 requires it. Recorded 2026-07-29.
 *Evidence:* Swift — *"types are always serialized with enough info to regenerate
 them at load time."*
 **Recommendation:** structurally, delete the derive —
-[S2](infra-sema.md#s2--ty-must-not-serialize-as-its-handle).
+[S2](stage-3-hir-build.md#s2--ty-must-not-serialize-as-its-handle).
 
 **Answer:**
 
@@ -202,7 +244,7 @@ them at load time."*
 
 *Hangs on it:* retrofitting touches every downstream holder of a `DefId`, which
 is the whole compiler.
-**Recommendation:** yes — [S5](infra-sema.md#s5--defid-shape).
+**Recommendation:** yes — [S5](stage-3-hir-build.md#s5--defid-shape).
 
 **Answer:**
 
@@ -216,11 +258,11 @@ A name does not identify a definition under overloading: `len` is both
 
 - [x] **`yelc-sema`** — one `OverloadKey`, consumed by both `DefPath` and A1's
       mangling.
-- [ ] **`yelc-hir` (2b)** — it is a resolution concern, sema just stores it.
+- [ ] **`yelc-hir` (4)** — it is a resolution concern, sema just stores it.
 - [ ] **Two mechanisms**, one per consumer.
 - [ ] Other: ______
 
-**Recommendation:** `yelc-sema` — [S6](infra-sema.md#s6--overloadkey).
+**Recommendation:** `yelc-sema` — [S6](stage-3-hir-build.md#s6--overloadkey).
 
 **Answer:**
 
@@ -246,7 +288,7 @@ the table is filled from Rust now; §2 later changes where rows come from.
 
 Three sub-questions, only if C1 lands as a table:
 
-**C1a · One table, or two projections?** Typeck wants the type scheme, 3b wants
+**C1a · One table, or two projections?** Typeck wants the type scheme, 4 wants
 the lowering target, and `yelc-lir` must see neither.
 - [ ] One table, two accessors · [ ] Two tables + a key-alignment test · [ ] Other: ______
 
@@ -274,7 +316,7 @@ C1 settles *functions*. This is the rest of `known.rs`.
 unwrap-or-diagnostic for a case that cannot occur once registration has run
 ([A8](anti-spec.md#a8--an-invariant-is-asserted-not-observed)).
 **Recommendation:** separate home; do not port 413 lines because they exist —
-[S3](infra-sema.md#s3--does-known-survive-at-all).
+[S3](stage-3-hir-build.md#s3--does-known-survive-at-all).
 
 **Answer:**
 
@@ -295,8 +337,8 @@ context *threading*, not the frozen 963-line struct.
 *Already settled by the crate graph, not by preference:* `block_id_counter`,
 `block_names`, `component_lifecycle_blocks` and the fanout table are `yelc-lir`
 types. `sema → lir` is forbidden, so they **cannot compile here** — they belong
-to [3a](stage-3a-lir.md)/[3b](stage-3b-lower.md).
-**Recommendation:** the six — [S4](infra-sema.md#s4--what-stays-on-the-context).
+to [5](stage-5-lir.md)/[6](stage-6-lower.md).
+**Recommendation:** the six — [S4](stage-3-hir-build.md#s4--what-stays-on-the-context).
 
 **Answer:**
 
@@ -306,16 +348,16 @@ side tables, but it is reactivity analysis — a frontend concern, not a sema on
 
 ---
 
-## Cluster E · HIR shape (2a)
+## Cluster E · HIR shape (stage 3)
 
 Runs in parallel with A–D. Only E1 couples outward.
 
 ### E1 · Does HIR keep bindings and handlers as separate lists?
 
-- [x] **No — one uniform prop list.** 2b classifies, using the declared type.
-- [ ] **Yes** — classify syntactically in 2a (value is a closure literal ⇒
+- [x] **No — one uniform prop list.** 4 classifies, using the declared type.
+- [ ] **Yes** — classify syntactically in 3 (value is a closure literal ⇒
       handler).
-- [ ] **One list plus a classification side table** filled by 2b.
+- [ ] **One list plus a classification side table** filled by 4.
 - [ ] Other: ______
 
 *Evidence:* stage 1's AST already unified them into `NamedProp`;
@@ -332,7 +374,7 @@ the split to decide scoping, and `LocalId` ordinals reach the type checker.
 
 ### E2 · Does the `For` node carry the item type?
 
-- [x] **No** — remove `item_ty: Ty`; a side table if 2b needs it keyed by node.
+- [x] **No** — remove `item_ty: Ty`; a side table if 4 needs it keyed by node.
 - [ ] **Yes** — keep it on the node.
 - [ ] Other: ______
 
@@ -398,10 +440,10 @@ the one place "uniform item spine" and "match frozen output" pull apart.
 
 ### E6 · How is a doc comment attached to an item?
 
-Stage 1 explicitly did **not** decide this; 2a owns it.
+Stage 1 explicitly did **not** decide this; 3 owns it.
 
 - [x] **Nearest preceding comment run, no blank line between.**
-- [ ] **Not attached yet** — 2a records trivia positions only.
+- [ ] **Not attached yet** — 3 records trivia positions only.
 - [ ] Other: ______
 
 **Recommendation:** either, but stated — not left implicit.
@@ -410,7 +452,7 @@ Stage 1 explicitly did **not** decide this; 2a owns it.
 
 ---
 
-## Cluster F · Trigger (2b)
+## Cluster F · Trigger (stage 4)
 
 ### F1 · How is a body's trigger determined?
 
@@ -450,7 +492,7 @@ any measurement** — fixing the fixture changes what reaches HIR.
 - [ ] The two silent `_ => {}` parser arms filed as a `known_bugs` entry.
       *Still absent.*
 
-Then: brief 2a. `yelc-sema` and the seam types are no longer separate landings —
-as of 2026-07-29 they are phases 1 and 2 of stage 2a
-([`stage-2a-hir-build.md`](stage-2a-hir-build.md#work-in-scope)), so Cluster A is
+Then: brief 3. `yelc-sema` and the seam types are no longer separate landings —
+as of 2026-07-29 they are phases 1 and 2 of stage 3
+([`stage-3-hir-build.md`](stage-3-hir-build.md#work-in-scope)), so Cluster A is
 the last thing standing between here and briefing.
