@@ -46,6 +46,7 @@ through the WebAssembly Component Model.
   - [Closures](#closures)
   - [Ternary Expressions](#ternary-expressions)
   - [Match](#match)
+  - [Function Bodies](#function-bodies)
   - [Ranges](#ranges)
 - [Statements](#statements)
 - [Built-in Elements](#built-in-elements)
@@ -765,6 +766,45 @@ label: string = match status {
     active -> "running"
     completed -> "done"
 };
+```
+
+### Function Bodies
+
+A function declaration may carry a body, written as a block after the signature:
+
+```yel
+export global Math {
+    double: func(n: s32) -> s32 { n * 2 }
+
+    clamp: func(value: s32, low: s32, high: s32) -> s32 {
+        if value < low { return low; }
+        if value > high { return high; }
+        value
+    }
+}
+```
+
+Parameters are declared **once**, in the signature, and are in scope for the
+body. A block's value is its final expression; a block with no final expression
+produces nothing.
+
+**A function body and a [closure](#closures) body are the same construct** — the
+same statements, the same scoping, the same value rule. The difference is only
+where the parameters come from:
+
+```yel
+double: func(n: s32) -> s32 { n * 2 }   // parameters from the signature
+{ n: s32 -> n * 2 }                     // parameters from the closure head
+```
+
+A declaration **without** a body stays a declaration — that is how a `global`
+declares a callback the host implements, and how a component declares one its
+parent supplies:
+
+```yel
+export global Clock {
+    now: func() -> s64;                 // the host implements this
+}
 ```
 
 ### Ranges

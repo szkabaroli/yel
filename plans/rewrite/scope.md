@@ -189,3 +189,55 @@ only by the cases someone thought of
 
 None of the three moves now. Stage 1 is closed and in the ratchet; they land as
 one scoped reopening after stage 4, with one ratchet row.
+
+### 2026-07-29 — function bodies, sharing `Block` with closures
+
+**Decided.** A function declaration may carry a block body
+([`LANGUAGE.md` § Function Bodies](../../LANGUAGE.md#function-bodies)).
+Parameters come from the signature; a bodyless declaration still means "someone
+else implements this", which is how host callbacks and component-supplied
+functions work today.
+
+**Why.** Found by writing [`stdlib/`](../../stdlib/README.md): yel had **no way
+to give a named function a body at all**. `function_decl` is
+`name: func(…) -> T;`, and bodies existed only as closure literals bound to
+func-typed properties. So `filter`'s implementation had nowhere to live, and
+[§2](directions.md#2--the-stdlib-is-yel-source-embedded-in-the-binary)'s source
+stdlib was blocked on something no analysis had named — four lines of attempted
+`.yel` found it.
+
+**The shared construct is a `Block`, and it does not exist yet.**
+`ClosureExpr { params, body: Vec<Stmt> }` holds a bare statement list. The change
+is to extract
+
+```rust
+pub struct Block { id, span, stmts, tail }
+```
+
+and give it two owners: `ClosureExpr { params, body: Block }` and
+`FunctionDecl { …, body: Option<Block> }`. A function body and a closure body
+then differ **only** in where parameters come from, which is the whole content of
+the decision.
+
+**This is worth more than the feature.** `Block` with an explicit `tail` is
+already the shape [directions §9](directions.md#9--match-is-the-general-conditional-everything-desugars-into-it)
+needs for the conditional collapse — `match` arms, `if` branches and ternary
+arms are all blocks whose tail is their value, and "statement position" versus
+"expression position" stops being a node distinction and becomes *whether the
+block has a tail*. Extracting it here means §9 finds it already built rather than
+inventing a second one.
+
+**Not implemented.** Design and grammar only. The AST refactor touches
+`ClosureExpr`'s field type, so it is a
+[seam change](seam-changes.md) and needs its own entry when it lands.
+
+### The freeze now carries four breaks
+
+`match` · `primitive` (unspent, two options) · `<T>` (parses as of `8daa4b9`) ·
+function bodies. Still additive, still all outside the differential, still one
+scoped reopening rather than four.
+
+The pattern worth naming: **three of the four were found by trying to write yel,
+not by reading the plan.** `<T>` and function bodies came out of `stdlib/`,
+`match` came out of asking what consumes a variant. Analysis found the fourth
+(`primitive`) and has been sitting on it, undecided, longest.
