@@ -458,8 +458,8 @@ diagnostic was.
 
 ### C1 · No domain vocabulary below the frontend seam
 
-Nothing named `mount`, `boundary`, `component`, `dom`, `signal`, or `$Comp` may
-appear in LIR-facing or codegen-facing code. The LIR and the whole back-end are
+Nothing named `mount`, `boundary`, `component`, `dom`, `signal`, `effect`, or
+`$Comp` may appear in LIR-facing or codegen-facing code. The LIR and the whole back-end are
 a **frontend-agnostic substrate** shared by Yel (UI) and the visual flow
 language. New back-end code depends only on the `lir/arena.rs` traits and generic
 `LirOp`s.
@@ -468,6 +468,29 @@ language. New back-end code depends only on the `lir/arena.rs` traits and generi
 crate graph enforces it: `yelc-lir` and `yelc-codegen` have no dependency path to
 any frontend crate, so a UI reference below the seam is a build failure rather
 than a review finding.
+
+**`signal` was always on this list, and the frozen tree violates it** —
+`yel-core/src/lir/signal.rs` and `signal_layout.rs` sit in the backend beside
+`tree_shape.rs`. `effect` was added 2026-07-29 for completeness; both were
+already forbidden in spirit.
+
+**The reactive graph is lowered away before LIR** (decided 2026-07-29). Signals
+become cells, effects become registered callbacks plus a dispatch table, and LIR
+sees only data, functions, calls and that table. Reactivity is *generated code*,
+not IR vocabulary.
+
+This is cheaper than it sounds and the evidence is checkable: the only file in
+`yel-wasm-codegen` naming `LirSignal` / `LirEffect` / `LirBlockEffect` is
+`lir_rust.rs`, which is **dead** (commented out of `lib.rs`). The WASM path does
+not consume the reactive types at all — they sit in the generic substrate without
+it needing them.
+
+**Consequence worth stating, because it is load-bearing:** reactive
+optimisations (dead effects, static regions, narrowing an update to the ops that
+depend on a changed input) must therefore run in
+[stage 6](stage-6-lower.md), *before* the graph is lowered away — the same rule
+as signal deps on HIR before the tree is desugared. **Analyse at the layer where
+the structure exists; lower it away after.**
 
 ### C2 · One representation, chosen at the seam
 

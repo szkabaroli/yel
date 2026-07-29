@@ -318,3 +318,41 @@ accumulating sink, `render(&SourceMap)` — is frozen infrastructure
 ([keep-list §1](keep-list.md#1--diagnostics--yel-coresrcdiagnosticrs-285-lines)). Adding a
 new `ErrorCode` variant is expected and needs no request. Changing the API shape
 does, and the answer is no.
+
+---
+
+## 2026-07-29 — the HIR/THIR merge stands; HIR→THIR is the vocabulary boundary
+
+**Request considered and declined: split HIR and THIR into two IRs.**
+
+**Why it was raised.** The 2026-07-28 merge gave one node vocabulary with types
+in a side table. That removed the layer at which a desugaring can *change the
+vocabulary* — and that is precisely why `Ternary`, `IfStmt` and `IfNode` survive
+all four IRs today ([F18](findings.md#f18)). Splitting looked like the fix.
+
+**Why it was declined.** The missing boundary was never a *crate* boundary. It is
+the point at which the UI tree stops existing, and that point is HIR→THIR whether
+or not they are separate IRs. Once UI lowers there, the three conditionals
+collapse and `Ternary` dies — with the merge intact.
+
+Everything the split was reached for is delivered without it:
+
+| wanted | delivered by |
+|---|---|
+| signal deps computed while the UI tree exists | HIR phase 1 — `signalck.rs` needs no types (426 lines, reads only `Def`/`Local`) |
+| typecheck sees no UI | UI lowers **before** checking; the desugaring needs only *declared* types from `Definitions` |
+| a vocabulary-changing layer | HIR→THIR |
+| good UI diagnostics | provenance recorded by the desugaring — [stage 3's obligation](stage-3-hir-build.md#the-desugarings-diagnostic-obligation) |
+
+**And a MIR was considered for the same job, also declined.** It would have been a
+fifth IR whose only purpose was "UI-free middle language" — which is what THIR
+already is once UI lowers before checking. Separately, rustc's own reasons for
+MIR (borrow checking, drop elaboration, lifetime analysis) do not exist in yel,
+and a CFG would cost a relooper against a target with no arbitrary jumps.
+
+**What the merge keeps**, and why it was worth keeping: one node vocabulary, one
+walker, a lint written once against both phases.
+
+**Recorded so it is not re-proposed.** Both the split and the MIR are reasonable
+readings of a real problem. The problem is real; the fix is the lowering point,
+not another IR.

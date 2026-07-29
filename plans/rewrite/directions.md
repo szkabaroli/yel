@@ -929,19 +929,49 @@ structural.
 
 ### What has to be true for this to work
 
-1. **The HIR/THIR split** ([`seam-changes.md`](seam-changes.md)). THIR is where
-   the vocabulary changes; without a separate typed IR there is nowhere for the
-   three surface forms to become one, which is exactly why `Ternary` survives all
-   four IRs today ([F18](findings.md#f18)).
+1. **HIR→THIR is the vocabulary boundary.** HIR keeps the UI tree; THIR has no
+   UI at all. That boundary is what the three surface forms collapse across —
+   without it there is nowhere for them to become one, which is exactly why
+   `Ternary` survives all four IRs today ([F18](findings.md#f18)).
+   **HIR and THIR stay merged as one crate with two phases**
+   ([`seam-changes.md`](seam-changes.md)); splitting them was considered and
+   dropped, because the boundary that was missing is this one, not a crate
+   boundary.
 2. **Signal deps computed on HIR**, before the UI tree is desugared —
    `signalck.rs` is 426 lines and reads only `Def(def_id)` / `Local(local_id)`,
-   never a type, so it runs unchanged on a name-resolved untyped IR.
-3. **Pattern resolution is type-directed**, so it lands in THIR by necessity: a
-   bare lowercase name is a case pattern when it names a case of the scrutinee's
-   type and a binding otherwise, and only the typed layer knows which.
-4. **Exhaustiveness is checked in THIR** against `Definitions`, as an error.
-   Yel compiles closed-world, so "a later version might add a case" is not a
-   reason to soften it.
+   never a type, so it runs on a name-resolved untyped IR unchanged.
+3. **The UI lowers *before* typechecking, not after.** Everything the desugaring
+   needs is a **declared** type, read from `Definitions` — which element, which
+   property, handler or binding, slot or child. None of it needs an *inferred*
+   type, so the checker never sees UI and its ~2.8k lines of element/property/
+   handler cases evaporate rather than being ported.
+4. **Except binders.** A UI region that introduces a variable gets that
+   variable's type from checking, not from construction:
+
+   | construct | binder | type from |
+   |---|---|---|
+   | `for item in items` | `item` | the iterable's element type |
+   | `match v { some(x) -> … }` | `x` | the scrutinee's case payload |
+
+   Evidence this is the only shape: `hir/lower.rs:1152` writes
+   `item_ty: Ty::ERROR, // Will be inferred`, and `thir/typeck.rs:559–575`
+   derives it from the iterable and calls `locals.set_ty`. A local existing
+   before its type is known is **already the mechanism**, so the desugaring emits
+   the structure and checking fills the slot. The concession to state plainly: a
+   generated region function does **not** have a complete signature at
+   construction. "Everything becomes functions" invites the opposite assumption.
+5. **Pattern resolution is type-directed** and therefore happens at checking, not
+   at desugaring: a bare lowercase name is a case pattern when it names a case of
+   the scrutinee's type and a binding otherwise. This is the same shape as (4) —
+   the arm's *structure* lowers early, the pattern's *meaning* resolves late.
+6. **Exhaustiveness is checked against `Definitions`**, as an error. Yel compiles
+   closed-world, so "a later version might add a case" is not a reason to soften
+   it.
+7. **The desugaring records provenance**, or every UI type error names a function
+   nobody wrote — see
+   [stage 3's diagnostic obligation](stage-3-hir-build.md#the-desugarings-diagnostic-obligation).
+   Not optional: no pinned fixture is both UI-shaped and type-level, so this can
+   regress with the whole suite green.
 
 ### Sequencing — the design lands before the syntax
 

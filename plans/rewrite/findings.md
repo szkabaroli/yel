@@ -430,3 +430,48 @@ records it in the frozen tree where a reader of that tree will find it, and
 `hir`-visible via `yelc ast` · `syntax/parser.rs` `parse_global`/`parse_record` ·
 measured 2026-07-29 · cited by
 [3 phase 0](stage-3-hir-build.md#phase-0--oracle-hygiene---done-2026-07-29-1d12250)
+
+## F21
+
+**`generate_dot` cannot exist in the back-end under the planned crate graph.**
+Not a style objection — a compile error waiting to happen:
+
+```rust
+pub fn generate_dot(
+    components: &[LirResource],   // concrete LIR, bypassing the arena traits
+    ctx: &CompilerContext,        // sema state
+    options: &DotOptions,
+) -> Result<String, CodegenError>
+```
+
+`CompilerContext` belongs to `yelc-sema`, and
+[`README.md`](README.md#the-dependency-graph-is-a-load-bearing-constraint) states
+`yelc-codegen depends on { yelc-lir, yelc-base } — and nothing else`. The second
+parameter is illegal. The first bypasses `lir/arena.rs`, which is supposed to be
+the back-end's only entry.
+
+It compiles today because the frozen tree is one crate with no enforced seam,
+which is the rewrite's premise.
+
+**What it emits is frontend semantics.** `dot.rs` is *"Graphviz DOT output for
+the signal/effect dependency graph"* — signals as ovals, effects as boxes, and an
+extra edge for *"DOM-updating effects"*. A yel-reactive visualiser living in the
+substrate that is supposed to be shared with the flow language.
+
+**It is debt the rewrite reveals, not damage the rewrite causes** — worth stating
+that way, because the two read very differently a year later. And the reveal is
+automatic: once the reactive graph leaves LIR
+([C1](anti-spec.md#c1--no-domain-vocabulary-below-the-frontend-seam)), `dot.rs`
+**stops compiling**. The violation is currently invisible precisely because the
+thing that would expose it — reactive vocabulary below the seam — is itself the
+violation.
+
+**Where it goes:** [stage 6](stage-6-lower.md), which owns the reactive graph
+before lowering it away and legitimately carries frontend vocabulary, so the
+signature that is illegal in codegen is fine there. Two constraints on the move —
+`.dot` is pinned byte-for-byte by the positive fixtures, so it must be provably
+byte-neutral; and `yelc compile -o dot` is a shipped CLI surface that keeps
+working until cutover.
+
+`yel-wasm-codegen/src/dot.rs:52` · measured 2026-07-29 · owed to
+[6](stage-6-lower.md)
