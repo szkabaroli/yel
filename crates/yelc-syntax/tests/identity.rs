@@ -552,21 +552,23 @@ fn comparable(content: &str) -> bool {
 // the sweeps
 // ---------------------------------------------------------------------------
 
-/// Checked-in `.yel` files both parsers accept. Two short of the 2095 swept,
-/// and both exclusions are named rather than counted:
+/// Checked-in `.yel` files both parsers accept. One short of the 2094 swept,
+/// and the exclusion is named rather than counted:
 ///
-/// * `global_filter_default.yel` — ungrammatical text the frozen parser's
-///   `BLOCK_LEVEL_CATCH_ALL` silently swallows (see `parity.rs`), so the new
-///   parser reports it and there is no accepted parse to compare.
 /// * `examples/counter/counter.yel` — rejected by **both**, in agreement.
+///
+/// It was two short of 2095 until 2026-07-29. `global_filter_default.yel` was
+/// the other exclusion — ungrammatical text the frozen parser's
+/// `BLOCK_LEVEL_CATCH_ALL` silently swallowed, leaving no accepted parse to
+/// compare against — and it moved to `known_bugs/`. **The comparable count did
+/// not move**: one fewer file swept, one fewer excused. Removing a file that
+/// could not be compared costs no comparison, which is why this number is the
+/// one to watch rather than the sweep size.
 const COMPARABLE_SOURCES: usize = 2093;
 
-/// The two, by name, so "fewer comparable" can never be explained away by
-/// pointing at a different file.
-const INCOMPARABLE_SOURCES: &[&str] = &[
-    "crates/yel-wasm-codegen/tests/fixtures/positive/global_filter_default.yel",
-    "examples/counter/counter.yel",
-];
+/// By name, so "fewer comparable" can never be explained away by pointing at a
+/// different file.
+const INCOMPARABLE_SOURCES: &[&str] = &["examples/counter/counter.yel"];
 
 #[test]
 fn every_construct_in_every_checked_in_program_is_read_the_same_way() {
@@ -575,7 +577,7 @@ fn every_construct_in_every_checked_in_program_is_read_the_same_way() {
         .chain(positive_fixtures())
         .chain(example_sources())
         .collect();
-    assert_eq!(sources.len(), 2095, "the source sweep changed size");
+    assert_eq!(sources.len(), 2094, "the source sweep changed size");
 
     let mut compared = 0usize;
     let mut skipped = Vec::new();

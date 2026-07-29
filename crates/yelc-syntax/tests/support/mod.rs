@@ -20,7 +20,13 @@
 use std::path::{Path, PathBuf};
 
 pub const CORPUS_COUNT: usize = 2000;
-pub const POSITIVE_FIXTURE_COUNT: usize = 91;
+/// 91 until 2026-07-29, when `global_filter_default.yel` moved to
+/// `known_bugs/`. It wrote `filter(|x| x > 2)`; `|` is not an operator, so the
+/// grammar's catch-all ate the line and the property it existed to guard was
+/// never parsed. Corrected to `{ x -> x > 2 }` it panics the frozen compiler
+/// (`hir/local_scope.rs:73`), which is a known bug, not a positive fixture.
+/// See `plans/rewrite/goldens-changed.md`.
+pub const POSITIVE_FIXTURE_COUNT: usize = 90;
 pub const DIAGNOSTIC_FIXTURE_COUNT: usize = 23;
 pub const EXAMPLE_COUNT: usize = 4;
 pub const ALL_SOURCE_COUNT: usize =
@@ -447,11 +453,17 @@ pub mod catch_all {
     ///
     /// So a `global` body or a `record` field list containing text the grammar
     /// cannot parse is accepted with no diagnostic at all, and the member
-    /// vanishes. `global_filter_default.yel` is the case that reaches a
-    /// checked-in fixture: it writes `[1, 2, 3, 4].filter(|x| x > 2)`, `|` is
-    /// not an operator in this grammar, and the `.filter(…)` regression the
-    /// fixture documents is therefore never parsed — `yelc check` still prints
-    /// OK.
+    /// vanishes.
+    ///
+    /// **No checked-in fixture is on this list any more.** `global_filter_default.yel`
+    /// was, until 2026-07-29 — it wrote `[1, 2, 3, 4].filter(|x| x > 2)`, `|` is
+    /// not an operator in this grammar, and the `.filter(…)` regression it
+    /// documented was therefore never parsed while `yelc check` printed OK. It
+    /// moved to `known_bugs/`, because corrected to `{ x -> x > 2 }` it panics
+    /// the frozen compiler at `hir/local_scope.rs:73`. Every remaining entry is
+    /// a *generated mutation*, so the new parser now reports zero error nodes
+    /// across every hand-written fixture with no exceptions — which is the
+    /// state this list should always be trending toward.
     ///
     /// Reproducing this would mean silently dropping a subtree, which invariant
     /// S5 and anti-spec A5 forbid. The new parser reports; the divergence is
@@ -462,8 +474,6 @@ pub mod catch_all {
     /// tied to the position we reported at, so appending an over-rejection of
     /// ours to this list does not make the suite pass.
     pub const DIVERGENCES: &[&str] = &[
-        // Checked-in fixture.
-        "crates/yel-wasm-codegen/tests/fixtures/positive/global_filter_default.yel",
         // Mutations that land inside a `global` body or a `record` field list.
         "corpus/src/195.yel#delete@3",
         "corpus/src/389.yel#delete@4",
@@ -500,7 +510,12 @@ pub mod catch_all {
     /// one fewer `global`-bodied fixture than the name-strided one did. Every
     /// entry is still the same catch-all class and still carries the same
     /// evidence check.
-    pub const DIVERGENCE_COUNT: usize = 19;
+    ///
+    /// 19 → 18 on 2026-07-29: `global_filter_default.yel` left `positive/` for
+    /// `known_bugs/`, taking the list's only whole-file entry with it. The
+    /// number went **down** by deleting an excuse, which is the only direction
+    /// it is allowed to move without a justification per entry.
+    pub const DIVERGENCE_COUNT: usize = 18;
 
     /// The whole-file entries — the checked-in fixtures whose *unmutated* text
     /// the frozen grammar does not accept. `corpus.rs`'s "known-good files

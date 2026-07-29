@@ -169,3 +169,80 @@ first-error-offset floor unmoved at 547 of 1336 (40%).
 | `parity.rs::accept_reject_parity_over_the_keyword_prefix_class` | 75 rows → 82 | Seven distinct rows migrated in from `identity.rs`. **No expectation moved**: every row in this test is compared against the frozen parser at run time, not against a written verdict, so the whole class — 82 rows, including all the former "narrowing" ones that flipped accept → reject — passes because both compilers flipped together. |
 | `parity.rs::accept_reject_parity_over_the_let_and_if_keyword_class` | **nothing** — 44 rows, unchanged, still green | Recorded because roughly a third of its rows silently changed their accept/reject bit and the test still passes, which is the strongest single piece of evidence that the two compilers moved in step. Only the doc comment was refreshed. |
 | `parity.rs::FIRST_ERROR_OFFSET_AGREEMENTS` | **nothing** — re-measured at 547 of 1336 (40%) | Unlike the kebab lookahead, which moved exactly one input's first-error offset, this change moved none. The floor is not touched. |
+
+---
+
+## 2026-07-29 — `global_filter_default.yel` moves to `known_bugs/`
+
+**Stage 2a phase 0** (oracle hygiene). A fixture that guarded nothing became a
+fixture that pins a real panic. No compiler source changed — this is fixture data
+and test-harness bookkeeping only, so the corpus is untouched and needs no
+regeneration.
+
+### What was wrong
+
+`positive/global_filter_default.yel` existed to guard the module-scope
+`.filter(…)` carrier. It wrote:
+
+```yel
+evens: list<s32> = [1, 2, 3, 4].filter(|x| x > 2);
+```
+
+`|` is not an operator in this grammar. `global_property` fails, `BLOCK_LEVEL_CATCH_ALL`
+eats the line, `parse_global`'s trailing `_ => {}` says nothing, and `yelc check`
+prints OK. **`evens` appears zero times in both goldens** — verified before
+touching anything, not inferred. The guard never guarded.
+
+### What the corrected program does
+
+```yel
+evens: list<s32> = [1, 2, 3, 4].filter({ x -> x > 2 });
+```
+
+**Panics the frozen compiler** at `hir/local_scope.rs:73` — `index out of bounds:
+the len is 0 but the index is 0`. So it could not be re-blessed as a positive
+fixture; there is no output to bless.
+
+Scoped by experiment, because "the module-scope path is broken" is a claim:
+
+| position | result |
+|---|---|
+| `component App { evens: list<s32> = […].filter({ x -> x > 2 }); }` | **OK** |
+| `global Store { func go() { let e = […].filter({ x -> x > 2 }); } }` | **OK** |
+| `global Store { evens: list<s32> = […].filter({ x -> x > 2 }); }` | **PANIC** |
+
+The bug is exactly the global property default — precisely the path the fixture
+claimed to cover.
+
+### What changed
+
+| where | change |
+|---|---|
+| `positive/global_filter_default.{yel,wit,dot}` | **deleted** — 91 positive fixtures → **90** |
+| `known_bugs/global_filter_default.yel` | **added**, corrected syntax, with the scoping experiment in a comment |
+| `known_bugs/global_filter_default.failure` | **added** — `panicked: index out of bounds: the len is 0 but the index is 0` |
+| `known_bugs/README.md` | inventory row; a note that a panicking fixture's signature is coarse |
+
+**No coverage was lost.** `.filter(…)` is exercised by three other positive
+fixtures — `list_filter.yel`, `list_filter_basic.yel`, `for_filter_over_signal.yel`
+— so the only thing unique to this fixture was the broken path, which is now
+pinned rather than silently skipped.
+
+### Four guards fired, and each was updated deliberately
+
+Worth recording in full: this single fixture move tripped four independent
+assertions in stage 1's suite. None was weakened or deleted.
+
+| assertion | change | why it is correct |
+|---|---|---|
+| `support::POSITIVE_FIXTURE_COUNT` | 91 → **90** | The count guard exists so a sweep cannot silently shrink. It shrank on purpose; the constant carries the reason in a doc comment. |
+| `support::catch_all::DIVERGENCES` | the **only whole-file entry** removed | This was the sole checked-in fixture the frozen catch-all excused. Every remaining entry is a generated mutation, so the new parser now reports zero error nodes across every hand-written fixture **with no exceptions**. |
+| `support::catch_all::DIVERGENCE_COUNT` | 19 → **18** | Down by deleting an excuse — the only direction it may move without a per-entry justification ([A10](anti-spec.md#a10)). |
+| `identity.rs::INCOMPARABLE_SOURCES` | 2 names → **1** (`examples/counter/counter.yel`) | `global_filter_default.yel` was incomparable because the frozen parser had no accepted parse to compare against. |
+| `identity.rs` sweep size | 2095 → **2094**; `COMPARABLE_SOURCES` **unchanged at 2093** | One fewer file swept, one fewer excused. Removing a file that could not be compared costs no comparison — which is why the comparable count, not the sweep size, is the number to watch. |
+| `parity.rs::accept_reject_parity_over_the_fixtures` | 118 → **117** | Same fixture, one fewer row. |
+
+### Numbers after
+
+480 workspace / 0 failed / 2 ignored · execution **85 / 85** · fuzz **200 / 200**
+· corpus untouched (no compiler source changed).

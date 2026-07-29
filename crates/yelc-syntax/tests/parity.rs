@@ -145,7 +145,9 @@ fn accept_reject_parity_over_the_fixtures() {
         let content = std::fs::read_to_string(&path).expect("fixture");
         report.compare(&label(&path), &content);
     }
-    assert_eq!(report.checked, 118);
+    // 118 until 2026-07-29, when `global_filter_default.yel` moved from
+    // `positive/` to `known_bugs/` — see `plans/rewrite/goldens-changed.md`.
+    assert_eq!(report.checked, 117);
     report.assert_agrees("fixtures and examples");
 }
 

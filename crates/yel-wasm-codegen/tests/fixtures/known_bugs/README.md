@@ -26,11 +26,21 @@ red test the moment anyone accidentally (or intentionally) fixes them.
 | `option_signal.yel` | Setter for an `option<string>` signal fails wit-component encoding (`failed to classify export [method]app.set-maybe-title`). Root cause: component ABI for setters with option/variant payloads isn't emitted in a shape wit-component accepts. |
 | `nested_records.yel` | Setter for a signal of a record-containing-record type fails the same wit-component classification. Indicates the record-payload setter signature is wrong (likely missing pointer indirection for large record flattening). |
 | `variant_payload.yel` | Setter for a variant signal with mixed payload shapes (unit / string / u32) fails the same wit-component classification. |
+| `global_filter_default.yel` | A closure in a **global property default** panics the compiler at `hir/local_scope.rs:73` — an empty scope stack is indexed while binding the closure parameter in a module-scope initializer. The same closure is fine in a component property default and in a global *function* body, which is what narrows it to the module-scope initializer path. Arrived here from `positive/` on 2026-07-29: it had been written `filter(\|x\| x > 2)`, which `BLOCK_LEVEL_CATCH_ALL` silently swallowed, so the regression it documented was never actually compiled. |
 
-All three share the same error family: the *write* path for complex
+The first three share the same error family: the *write* path for complex
 signal types produces a core-module export whose signature wit-component
 cannot line up with the declared WIT. Reading these signals works; only
-the setter is broken.
+the setter is broken. `global_filter_default.yel` is unrelated — a
+front-end scoping bug, and the only entry here that *panics* rather than
+returning a diagnostic.
+
+**A panicking fixture's signature is coarse.** The harness renders the
+panic message but not its location, so `global_filter_default.failure`
+matches on `index out of bounds: the len is 0 but the index is 0` — which
+any similar panic would also match. It is the strongest signature the
+harness can currently express; a fixture whose bug is a panic is pinned
+less precisely than one whose bug is a diagnostic.
 
 ## Runtime bugs
 
