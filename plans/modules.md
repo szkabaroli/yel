@@ -136,6 +136,55 @@ module. Flat matches the target exactly, and relaxing later is additive.
 unanswerable without whole-program knowledge, and yel has no traits to make them
 necessary.
 
+### The root is the world
+
+`module → interface` was only half the mapping. The other half is that **a
+package's root is its WIT `world`**, and root-level items are world-level
+exports — WIT worlds export functions directly, not only interfaces.
+
+```yel
+package my:app@1.0;
+
+export greet: func(name: string) -> string { … }   // a root item
+
+export module Math {                                // a submodule
+    distance: func(a: Point, b: Point) -> f64 { … }
+}
+```
+```wit
+package my:app@1.0;
+
+interface math {
+    distance: func(a: point, b: point) -> f64;
+}
+
+world app {
+    export greet: func(name: string) -> string;    // freestanding
+    export math;                                    // interface
+}
+```
+
+| yel | WIT |
+|---|---|
+| **package root** | **the `world`** |
+| root item | a world-level `func` export |
+| `module M` | an `interface` |
+| `include` | a world `import` |
+
+Three levels, all flat, each with a counterpart. `export` keeps its one meaning
+throughout: unmarked root items are internal helpers, `export`ed ones cross the
+boundary.
+
+**This gives the symbol table's root its justification.** It is not merely
+"level zero" — it *is* the world, which is why `include`'s module nodes belong
+there: world imports live at the same level as world exports.
+
+**And it retires a claim made earlier in this design.** An earlier step asserted
+yel has no free functions, on the grounds that `min`/`max` are `impl s32`
+methods. Root-level free functions are real, and they are the natural home for
+anything that is not a method on a type — which is the job `module` was
+otherwise going to be stretched to cover at the app level.
+
 ---
 
 ## 4 · Two levels: package and module
@@ -193,6 +242,34 @@ Locators, **two kinds of result**:
 
 The distinction that matters falls out of *what was resolved*, not from saying it
 twice in the syntax.
+
+### `use` takes WIT's grammar, verified against the spec
+
+```ebnf
+use-item       ::= 'use' use-path '.' '{' use-names-list '}' ';'
+use-path       ::= id
+                 | id ':' id '/' id ('@' valid-semver)?
+use-names-item ::= id | id 'as' id
+```
+
+Checked against `WebAssembly/component-model` `design/mvp/WIT.md`, not
+recollection. Three things this adds to what an earlier draft of this file
+specified:
+
+- **`as` renaming** — `use Dom.{ create-element as el };`. This also disposes of
+  a rule that draft had to invent: it said two `use`s bringing the same bare name
+  into one file must be an error. With `as` there is a way out that needs no
+  whole-program knowledge — which is exactly what made `use X.*` unacceptable and
+  makes this acceptable.
+- **A bare `id` path resolves a module in the *same* package** — `use Math.{
+  distance };`, no `include`. That fits [D8](rewrite/stage-3-hir-build.md)
+  directly and the earlier draft had not accounted for it.
+- **Semicolon-terminated**, which the draft already had.
+
+WIT permits `use` inside an interface, inside a world, and at a file's top level.
+Yel's world is synthesized and `module` is the interface, so the two positions
+that map are **top level** and **inside `module`**. Copying exactly means
+allowing both.
 
 ### `include` and `use` are separate because they differ at the boundary
 
@@ -494,6 +571,25 @@ Two things in this section did not survive contact:
 ---
 
 ## 7 · What is not decided
+
+- **Does `include` name a package or a module?** *"Include packages as new
+  modules"* suggests `include std:hash`, but a package holds several modules, so
+  one node named for the package containing them is **three levels** — which
+  `ca905d0` made a *compile error*: `bind_in_module` takes a `DefKind`, and
+  `DefKind` has no `Module` variant, so a module inside a module does not build.
+  That flatness is deliberate, matching WIT.
+
+  §4.1 settled `include std:hash/sha256` — one node, two levels, one-to-one with
+  a world import. A middle option exists: `include std:hash` binds *every* module
+  in the package as a sibling at the root — one statement, N nodes, still flat —
+  at the cost that the source no longer says which names it introduced, and two
+  packages exporting a same-named module collide with no way to disambiguate.
+
+  Now that the root is the world (§3), the constraint tightens: WIT world imports
+  name **interfaces**, one per line, so the one-to-one form is the one that keeps
+  source and emitted WIT corresponding. **Not decided; decide before HIR is built
+  on it.**
+
 
 - **Yel package import: compiled-in or composed?** One WASM artifact (like the
   stdlib) or a separate component linked via WIT. Compiled-in is almost certainly
