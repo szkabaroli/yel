@@ -4048,6 +4048,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "yelc-sema"
+version = "0.1.0"
+dependencies = [
+ "rustc-hash",
+ "yelc-base",
+]
+
+[[package]]
 name = "yelc-syntax"
 version = "0.1.0"
 dependencies = [

@@ -6,6 +6,7 @@ members = [
   "crates/yelc-base",
   "crates/yelc-syntax",
   "crates/yelc-driver",
+  "crates/yelc-sema",
   "crates/yel-host",
   "crates/yel-lsp",
   "crates/yel-smith",
@@ -25,6 +26,7 @@ yel-wasm-codegen = { path = "crates/yel-wasm-codegen" }
 yelc-base = { path = "crates/yelc-base" }
 yelc-syntax = { path = "crates/yelc-syntax" }
 yelc-driver = { path = "crates/yelc-driver" }
+yelc-sema = { path = "crates/yelc-sema" }
 
 # CLI & Error handling
 anyhow = "1"
