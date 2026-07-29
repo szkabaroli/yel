@@ -102,7 +102,7 @@ new one is correct" is a reason; it still gets written down.
   anti-spec B4, C4 — but it does not implement them.
 
 
-## The surface freeze has one planned break: `match`
+## The surface freeze has planned breaks
 
 **Recorded 2026-07-29.** `match` is being added to the language
 ([`LANGUAGE.md` § Match](../../LANGUAGE.md#match),
@@ -127,3 +127,65 @@ What the exception does **not** license:
 - **It does not get a differential.** The frozen compiler will never parse
   `match`, so it has no oracle — see directions §9. `yel-smith` must learn to
   generate it *before* it lands.
+
+
+### 2026-07-29 — `<T>`, explicit type parameters
+
+**Decided.** Functions may declare type parameters
+([`LANGUAGE.md` § Type Parameters](../../LANGUAGE.md#type-parameters)).
+Inference at the call site, no constraints, no generic user-defined types.
+
+**Why now.** [§2](directions.md#2--the-stdlib-is-yel-source-embedded-in-the-binary)
+wants the stdlib written in `.yel`, and its valuable half is generic — every
+`list`, `option` and `result` operation. `filter` is
+`(list<T>, func(T) -> bool) -> list<T>`, and there was **no way to write that
+signature**: `function_decl` and `func_type` carry no parameter list, and the `T`
+in `list<T>` was prose in a documentation table. Without this the stdlib move is
+limited to `min`, `max`, `starts-with` and the `*-to-string` family — the rows
+whose bodies are one intrinsic call each, which is the half worth the least.
+
+**Why declared rather than inferred.** Grain gets a generic stdlib with no
+`<T>` syntax at all, because ML-family let-generalization turns a `let` binding
+into a polymorphic scheme automatically. That path was available and was not
+taken, because it reopens
+[A2](open-decisions.md#a2--how-much-inference-sits-inside-the-bidirectional-checker) —
+decided the same day as option 2, unification **without** generalization.
+
+A2's evidence was sound and is worth re-reading in this light: it established
+that yel has no polymorphic bindings *as the language stands*. §2 changes how the
+language stands. So the choice was which of the two to move, and declared
+parameters move the smaller thing — new grammar, no change to the checking
+algorithm — where generalization would move the algorithm and leave `E0002`'s
+behaviour to be re-derived.
+
+It also composes with [A1](open-decisions.md#a1--how-are-parameterized-types-represented):
+monomorphization is Rust's representation strategy and pairs with declared
+parameters directly. (Grain's path would also have composed — MLton monomorphizes
+whole-program HM — but via a longer argument.)
+
+**What it retires.** [S7](stage-3-hir-build.md#s7--does-ty-gain-a-non-concrete-variant)
+justified `TyKind::Param` by "a generic body is checked once, generically, so
+errors land in the stdlib rather than at the user's call site". That needs
+template *bodies*, which needed §2, which needed this. `Param` was machinery
+ahead of its feature; this is the feature.
+
+**Deliberately excluded, and each is a separate decision if wanted later:**
+constraints/bounds · generic user-defined types · explicit type arguments at a
+call site (turbofish).
+
+### The freeze now carries three breaks — read them together
+
+`match`, `primitive` ([§2](directions.md#2--the-stdlib-is-yel-source-embedded-in-the-binary),
+still unspent with two options), and `<T>`. Three breaks decided one at a time,
+each when it became urgent, is how a freeze stops meaning anything.
+
+They are not independent: `<T>` gates the stdlib, the stdlib motivates
+`primitive`, and all three are additive — everything that parsed before still
+parses. What they share is a cost the differential cannot absorb: **the frozen
+compiler parses none of them**, so every program using them is outside the
+oracle. `yel-smith` must learn each construct *before* it lands, or it is tested
+only by the cases someone thought of
+([A13](anti-spec.md#a13--the-generator-ships-not-its-instances)).
+
+None of the three moves now. Stage 1 is closed and in the ratchet; they land as
+one scoped reopening after stage 4, with one ratchet row.

@@ -18,6 +18,7 @@ through the WebAssembly Component Model.
   - [Records](#records)
   - [Enums](#enums)
   - [Variants](#variants)
+  - [Type Parameters](#type-parameters)
 - [Components](#components)
   - [Properties (State)](#properties-state)
   - [Composition](#composition)
@@ -190,6 +191,38 @@ variant Filter {
 
 The built-in `option<T>` type is a variant with `some(T)` and `none` cases.
 Construct option values with `some(value)` and `none`.
+
+### Type Parameters
+
+A function may declare type parameters, so one definition works for many types:
+
+```yel
+first: func<T>(items: list<T>) -> option<T>;
+map: func<T, U>(items: list<T>, transform: func(T) -> U) -> list<U>;
+```
+
+The parameter list goes after `func` and before the arguments. Parameters are
+named like types (`T`, `U`, `Item`) and are in scope for the whole signature.
+
+**Type arguments are inferred at the call site** from the argument types — there
+is no syntax for passing them explicitly:
+
+```yel
+names: list<string> = ["ana", "bo"];
+head: option<string> = first(names);    // T is string
+```
+
+If a call does not determine every parameter, that is an error at the call, the
+same as any other type that cannot be inferred.
+
+**There are no constraints.** A type parameter accepts any type, and a generic
+body may only do what works for every type — pass it, store it, return it. There
+is no way to require that `T` is comparable or printable, so `func<T>(a: T, b: T)
+-> bool` cannot compare `a` and `b`.
+
+Generic **types** — a user-written `record Pair<T>` — are not part of this. The
+built-in `list<T>`, `option<T>` and `result<T, E>` are the only parameterised
+types, and user types are concrete.
 
 ---
 
