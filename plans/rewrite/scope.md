@@ -291,3 +291,39 @@ So the surface-break list is not five. It is:
 
 Five items, four mechanisms, one scoped reopening after stage 4. `primitive`'s
 "two unspent options" question is answered by not asking it.
+
+#### Shape: `Attribute` / `AttributeList`, and the WIT-passthrough consumer
+
+Following ark's *structure* while rejecting its content
+([`arkc-parser`'s `ModifierList`](https://github.com/szkabaroli/ark) is on
+`Import`/`Module` only, its `Modifier` carries **no name**, and it is marked
+"remove in next step" — nothing to port):
+
+```rust
+pub struct AttributeList { id, span, attributes: Vec<Recovered<Attribute>> }
+pub struct Attribute { id, span, name: MaybeIdent, args: Vec<AttributeArg> }
+```
+
+Nodes with `id`/`span`, not side data — an attribute is source text and has to
+round-trip (S1), so it belongs in the tree.
+
+**Why `args` are `key = value`, not positional.** The first real consumer is
+**WIT passthrough**. WIT's own feature gates are already spelled
+`@since(...)` / `@unstable(...)` / `@deprecated(...)` with **named** arguments,
+so a yel attribute on an exported item can emit near-literally into the WIT
+rather than being translated. That is the reason to design `args` as named pairs
+now instead of discovering it later.
+
+⚠️ **Check the exact WIT gate grammar against the spec before fixing the arg
+form** — `key = value` versus `key: value` is from recollection, not verified,
+and getting it wrong makes "passthrough" a translation layer.
+
+`wit_ast.rs` has **no notion of gates today** — `to_wit_name` (:1322) is the only
+name-level machinery. So this is additive there too.
+
+**The `@children` collision stays unresolved on purpose.** Both spellings live
+together: an attribute precedes a *declaration*, `@children` is a *UI node*.
+Changing `@children` would be the first **non-additive** break — measured at
+**1020 of 2000 corpus programs** — so it waits for cutover, alongside
+[§7](directions.md#7--keywords-get-a-word-boundary--at-cutover-by-deletion)'s
+keyword reservation, where there is no oracle left to invalidate.
