@@ -680,3 +680,107 @@ confirmed to fail under a deliberate break.
 (`cargo test -p yel-wasm-codegen --test execution`); stage 1's parity (12) and
 identity (7) suites pass **unchanged**. Node kinds 82 → 84, with the budget
 assertion updated and the reason recorded in `token.rs`.
+
+## 2026-07-29 — `Stmt` gains `Return(ReturnStmt)`; `return` becomes a token kind
+
+**Seam change, requested and applied.** `yelc-syntax`'s public AST is frozen for
+stage 3, so a new `Stmt` variant is filed rather than edited in.
+
+**What.** One new node, one new variant, one new **token** kind and one new node
+kind:
+
+```rust
+pub struct ReturnStmt { id, span, value: Option<Expr> }
+pub enum Stmt { …, Return(ReturnStmt), … }
+```
+
+| kind | was | is |
+|---|---|---|
+| `TokenKind::RETURN_KW` | — | new **token** (`EOF` 73 → 74) |
+| `TokenKind::RETURN_STMT` | — | new node kind (84 → 85) |
+| `KEYWORD_FIRST` | 24 members | 25 |
+
+Plus `Visitor::visit_return_stmt` / `walk_return_stmt`, `ReturnStmt` in the
+driver's AST dump, and a `stmt:return` arm in `identity.rs`'s projection.
+
+**Why.** `return` was added to the language ([`scope.md`](scope.md),
+2026-07-29), reversing the "no `return`" decision recorded the same day. Found by
+writing [`stdlib/string.yel`](../../stdlib/string.yel): `starts-with` needs to
+stop iterating on the first mismatch and there is no construct that means that.
+
+### This is the first surface change that is **not** additive
+
+The four before it — `<T>`, attributes, function bodies, the `for` statement —
+could each say "every text this claims was a syntax error on both parsers
+before", and that sentence is what made them safe to land without an oracle.
+`return` cannot say it, and `scope.md`'s entry does not notice: it presents the
+reversal as the same kind of change as the other four.
+
+The reason is structural, not incidental. The other four are guarded by a
+production the frozen grammar also rejects — `for` commits only on
+`FOR_KW ~ name ~ IN_KW`, a function body only on a `{` where the frozen grammar
+demands a `;`. `return` has no such head. The frozen grammar has **no `return`
+production at all**, so every `return` it sees is an ordinary *name*, and a
+`return` statement's whole syntax overlaps texts it already accepts.
+
+Measured against the frozen parser, in statement position it accepts all nine of:
+
+| text | frozen reads it as |
+|---|---|
+| `return;` | expression statement about a variable `return` |
+| `g(); return` | the block's trailing expression |
+| `return - 1;` | binary subtraction |
+| `return(x);` | a call whose callee is `return` |
+| `return [0];` | an index into `return` |
+| `return = 1;` · `return += 1;` | assignment to `return` |
+| `return.x = 1;` · `return?.x;` | member access on `return` |
+
+and rejects `return x;`, `return 1;`, `return false;`, `return "s";`,
+`return !x;` — the five shapes the feature exists for. **There is no guard that
+keeps the first list and adds the second**; they overlap.
+
+### The rule is one token, and the narrowing is bounded to statement position
+
+`parse_stmt_inner` commits on `RETURN_KW` unconditionally — one token kind the
+lexer already assigned, no lookahead list, no third outcome. The narrower
+alternative was considered and refused: *"commit only when what follows is in
+`EXPRESSION_FIRST ∪ {;}`"* would preserve `return = 1;` and `return.x;` while
+still taking `return;` and `return -1;`, which buys a smaller narrowing at the
+price of a rule nobody can state — a variable you may assign to but never read —
+and it is the maintained-lookahead shape that silently misparsed `func<T>`.
+
+`RETURN_KW` is in `KEYWORD_FIRST ⊆ NAME_FIRST`, so `return` is still a legal
+*name* everywhere a name is legal: a property, a record field, an element name, a
+`let` binder, a member. The narrowing is confined to statement position, which is
+`tests/returns.rs::return_is_still_an_ordinary_name_outside_statement_position`.
+
+### A `TokenSet` changed — the first one that did
+
+Three landings running reported "no `TokenSet` changed". This one adds a token
+kind, which shifts `EOF` and every kind above it, so **every** set's bit
+positions move. That is safe only because all of them are `const`-folded from the
+enum in `token.rs` and nothing outside serialises a discriminant. Set
+*membership* is unchanged: `RETURN_KW` lands exactly where `return`-as-an-
+`IDENTIFIER` already was, in `KEYWORD_FIRST ⊆ NAME_FIRST ⊆ EXPRESSION_FIRST ⊆
+STATEMENT_FIRST`.
+
+### What `parity.rs` and `identity.rs` cannot see here — and why that is worse than last time
+
+Last time both suites were blind because the frozen parser rejects every program
+containing the new construct. This time they are blind for a different and less
+comfortable reason: the word `return` **does not occur outside a comment in any
+of the 2118 checked-in `.yel` files**, and neither mutation generator can
+introduce a word that is not already in the text (`SOUP_TOKENS` has no
+identifiers, and the deterministic sweep only truncates and deletes). So a real
+accept/reject change and a real construct-identity change both land with parity
+at 12 and identity at 7, unmoved.
+
+The cover is `tests/returns.rs`, which reads the frozen parser directly and
+enumerates the boundary in both directions — nine texts narrowed, five widened,
+each asserted on *both* parsers so neither the premise nor the consequence can
+rot into a claim.
+
+**Additive where it can be, measured.** Workspace **554 → 569 / 0 failed / 2
+ignored**; execution **85 / 85**; parity **12** and identity **7**, unchanged.
+Node kinds 84 → 85 and token kinds 73 → 74, with both halves of
+`token_kind_counts` updated and the reasons recorded there.

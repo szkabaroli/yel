@@ -197,6 +197,7 @@ impl Visitor for Dumper<'_> {
         visit_block(Block) via walk_block;
         visit_let_stmt(LetStmt) via walk_let_stmt;
         visit_if_stmt(IfStmt) via walk_if_stmt;
+        visit_return_stmt(ReturnStmt) via walk_return_stmt;
         visit_assign_stmt(AssignStmt) via walk_assign_stmt;
         visit_expr_stmt(ExprStmt) via walk_expr_stmt;
         visit_expr(Expr) via walk_expr;
@@ -334,6 +335,7 @@ unlabelled!(
     Block,
     LetStmt,
     IfStmt,
+    ReturnStmt,
     AssignStmt,
     ExprStmt,
     RecordFieldInit,

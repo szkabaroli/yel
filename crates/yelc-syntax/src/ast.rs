@@ -919,6 +919,7 @@ pub enum Stmt {
     /// `for item in items { … }` in statement position. The same [`ForNode`]
     /// [`UiNode::For`] carries, holding a [`ForBody::Statements`] body.
     For(Box<ForNode>),
+    Return(ReturnStmt),
     Assign(AssignStmt),
     Expr(ExprStmt),
     Error {
@@ -939,6 +940,7 @@ impl Stmt {
             Stmt::Let(stmt) => stmt.span,
             Stmt::If(stmt) => stmt.span,
             Stmt::For(stmt) => stmt.span,
+            Stmt::Return(stmt) => stmt.span,
             Stmt::Assign(stmt) => stmt.span,
             Stmt::Expr(stmt) => stmt.span,
             Stmt::Error { span, .. } => *span,
@@ -962,6 +964,27 @@ pub struct IfStmt {
     pub condition: Expr,
     pub then_branch: Recovered<Block>,
     pub else_branch: Option<Recovered<Block>>,
+}
+
+/// `return expr;` and `return;`
+///
+/// # `return` is for leaving early, not for producing the result
+///
+/// A block's [`Block::tail`] is still its value; the two coexist in one function
+/// and neither replaces the other (`LANGUAGE.md` § Return). A `return` inside a
+/// closure exits the *closure*, which is why this is a plain statement with no
+/// link to any enclosing declaration — resolving which body it leaves is a later
+/// phase's job, and so is checking `value`'s type against the declared return
+/// type. The parser accepts the grammar, not the language (`lib.rs`).
+///
+/// `value` is `None` for a bare `return;`. It is also `None` when the user wrote
+/// something that cannot start an expression — `return }` — in which case the
+/// missing `;` is reported and marked; nothing is invented to fill the hole.
+#[derive(Debug)]
+pub struct ReturnStmt {
+    pub id: NodeId,
+    pub span: Span,
+    pub value: Option<Expr>,
 }
 
 /// `target = value;` and `target += value;`

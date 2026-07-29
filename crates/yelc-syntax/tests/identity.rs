@@ -464,6 +464,27 @@ mod fresh {
                 }
                 push_for_body(out, &node.body);
             }
+            // `return` in statement position. Unlike `stmt:for`, the frozen
+            // grammar *does* accept some of this text — `return;` is an
+            // expression statement about a variable called `return` there — so
+            // this kind can appear on an input the frozen parser accepts, and
+            // the two projections would disagree at that offset. No corpus
+            // program, fixture, example or mutation writes the word `return`
+            // outside a comment (measured 2026-07-29 over all 2118 checked-in
+            // `.yel` files), so no sweep below reaches the case. Mutation-tested
+            // on 2026-07-29: relabelling this arm `stmt:expr` leaves all seven
+            // suites in this file green, exactly as it does for `stmt:for`.
+            //
+            // It is projected anyway, because the `match` is exhaustive and a
+            // silently skipped subtree is what that buys. The construct identity
+            // that *is* asserted — and the narrowing, which is real and
+            // deliberate — lives in `tests/returns.rs`.
+            na::Stmt::Return(node) => {
+                out.push(("stmt:return", span.start, span.end));
+                if let Some(value) = &node.value {
+                    push_expr(out, value);
+                }
+            }
             na::Stmt::Assign(node) => {
                 out.push(("stmt:assign", span.start, span.end));
                 push_expr(out, &node.target);

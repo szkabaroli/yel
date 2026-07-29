@@ -509,3 +509,54 @@ separate gap, separately evidenced, and not decided here.
 **Revised surface list — nine items, seven mechanisms, three landed:**
 `match` · `<T>` ✅ · function bodies ✅ · `for` statement ✅ · attributes +
 `@unsafe` ✅ · `ref` · `primitive` · **`return`** · *(`if`-as-expression, open)*
+
+#### Correction — the sixth, and the first about a change's *shape* rather than a name
+
+Found by implementing `return` (2026-07-29). Left in place with the correction
+visible, like the five before it.
+
+**6. The entry above treats `return` as one more additive break. It is not one,
+and it is the only one that cannot be.**
+
+The list this entry revises — `<T>`, function bodies, `for`, attributes — is
+described three times as "still additive", and each of those four earns it: each
+commits on a head the frozen grammar also rejects (`for` on
+`FOR_KW ~ name ~ IN_KW`; a function body on a `{` where the frozen grammar wants
+a `;`), so every text they claim was a syntax error on both parsers.
+
+`return` has no such head. The frozen grammar contains **no `return` production
+at all**, so every `return` it sees is an ordinary name — and a `return`
+statement's syntax overlaps texts it already accepts. Nine of them, measured:
+`return;` · a bare `return` as a trailing expression · `return - 1;` ·
+`return(x);` · `return [0];` · `return = 1;` · `return += 1;` ·
+`return.x = 1;` · `return?.x;`. No guard keeps those and adds `return false;`;
+the two sets overlap. **Adding `return` narrows the language, necessarily.**
+
+The narrowing was taken, bounded to *statement position* — `RETURN_KW` is in
+`KEYWORD_FIRST ⊆ NAME_FIRST`, so `return` remains a legal property, field,
+element, binder and member — and the whole boundary is enumerated in both
+directions in `crates/yelc-syntax/tests/returns.rs`, read off the frozen parser
+rather than asserted. Full reasoning and the rejected alternative:
+[`seam-changes.md`](seam-changes.md) (2026-07-29).
+
+**Two second-order consequences the entry also does not anticipate:**
+
+- **A `TokenSet` changed.** Three landings running recorded "no `TokenSet`
+  changed" as a property of additive surface work. `return` needs a *token* kind,
+  which shifts `EOF` and every kind above it. Safe — every set is `const`-folded
+  from the enum and no discriminant is serialised — but the streak was a
+  coincidence of those four features, not a rule.
+- **`parity.rs` and `identity.rs` are blind to it**, and for a worse reason than
+  last time. Not "the frozen parser rejects the construct" but: the word `return`
+  **does not occur outside a comment in any of the 2118 checked-in `.yel`
+  files**, and neither mutation generator can introduce a word that is not
+  already in the text. A real accept/reject change landed with parity at 12 and
+  identity at 7, unmoved. The oracle's coverage is bounded by the corpus's
+  *vocabulary*, not only by its grammar — which is
+  [A13](anti-spec.md#a13--the-generator-ships-not-its-instances) arriving from a
+  direction the rule does not name.
+
+**Revised surface list — nine items, seven mechanisms, four landed:**
+`match` · `<T>` ✅ · function bodies ✅ · `for` statement ✅ · attributes +
+`@unsafe` ✅ · `ref` · `primitive` · **`return` ✅** ·
+*(`if`-as-expression, open)*

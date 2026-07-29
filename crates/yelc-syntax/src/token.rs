@@ -16,13 +16,13 @@
 //!
 //! - trivia (whitespace, line comment, block comment): 3
 //! - literals + identifier (incl. string/template segments): 10
-//! - keywords: 24
+//! - keywords: 25 (24 until `return`, 2026-07-29)
 //! - delimiters, punctuation, operators, compound assignment: 35
 //! - `UNKNOWN`, `EOF`: 2
-//! - **total tokens: 74** (`EOF` has discriminant 73)
+//! - **total tokens: 75** (`EOF` has discriminant 74)
 //!
-//! 74 < 128, so `u128` is sufficient and the seam does **not** need
-//! `TokenSet([u64; N])`. Node kinds (84 as of 2026-07-29; the count and every
+//! 75 < 128, so `u128` is sufficient and the seam does **not** need
+//! `TokenSet([u64; N])`. Node kinds (85 as of 2026-07-29; the count and every
 //! change to it are recorded in `tests::token_kind_counts`) live above `EOF`
 //! and are never members
 //! of a `TokenSet`, so they do not consume set capacity — but they do consume
@@ -113,6 +113,7 @@ pub const KEYWORD_FIRST: TokenSet = TokenSet::new(&[
     IF_KW,
     ELSE_KW,
     FOR_KW,
+    RETURN_KW,
     IN_KW,
     OUT_KW,
     IN_OUT_KW,
@@ -257,6 +258,12 @@ pub enum TokenKind {
     IF_KW,
     ELSE_KW,
     FOR_KW,
+    /// Contextual like every other keyword here: it is in [`KEYWORD_FIRST`] and
+    /// therefore in [`NAME_FIRST`], so `return` remains a legal *name* — a
+    /// property, a record field, an element, a `let` binder. What it is **not**
+    /// is a legal expression in *statement* position; see
+    /// `Parser::parse_return_stmt`.
+    RETURN_KW,
     IN_KW,
     OUT_KW,
     /// `in-out` — one identifier-shaped token, because `-` is an identifier
@@ -397,6 +404,7 @@ pub enum TokenKind {
     LET_STMT,
     IF_STMT,
     FOR_STMT,
+    RETURN_STMT,
     ASSIGN_STMT,
     EXPR_STMT,
     STMT_BLOCK,
@@ -466,6 +474,7 @@ impl TokenKind {
             IF_KW => "if",
             ELSE_KW => "else",
             FOR_KW => "for",
+            RETURN_KW => "return",
             IN_KW => "in",
             OUT_KW => "out",
             IN_OUT_KW => "in-out",
@@ -537,6 +546,7 @@ pub fn keyword_kind(word: &str) -> Option<TokenKind> {
         "if" => IF_KW,
         "else" => ELSE_KW,
         "for" => FOR_KW,
+        "return" => RETURN_KW,
         "in" => IN_KW,
         "out" => OUT_KW,
         "in-out" => IN_OUT_KW,
@@ -567,7 +577,25 @@ mod tests {
     #[test]
     fn token_kind_counts() {
         // Reported in the stage file; a change here is a change to the budget.
-        assert_eq!(TokenKind::EOF as u8, 73, "token kind count changed");
+        //
+        // 73 → 74 on 2026-07-29: RETURN_KW, the **first new token kind** since
+        // the seam landed — `<T>`, attributes, function bodies and the `for`
+        // statement all reused tokens that already existed. `return` could not:
+        // the lexer produced an ordinary IDENTIFIER for it and the only `RETURN`
+        // in this file was the FUNC_RETURN *node* kind.
+        //
+        // A new token kind is not free the way a node kind is. It shifts `EOF`
+        // and every kind above it, so `TokenSet` bit positions all move — which
+        // is safe only because every set is `const`-folded from these variants
+        // in this file. Nothing outside serialises a discriminant.
+        //
+        // It does **not** move any FIRST or recovery set's *membership*:
+        // `RETURN_KW` joins `KEYWORD_FIRST` ⊆ `NAME_FIRST` ⊆ `EXPRESSION_FIRST`
+        // ⊆ `STATEMENT_FIRST`, which is exactly where `return` already was as an
+        // IDENTIFIER. So `return` stays a legal name everywhere a name is legal;
+        // what changed is the *statement* dispatch, and only there. See
+        // `parser/stmts.rs::parse_return_stmt` and `tests/returns.rs`.
+        assert_eq!(TokenKind::EOF as u8, 74, "token kind count changed");
         // 76 → 78 on 2026-07-29: TYPE_PARAM_LIST and TYPE_PARAM, for
         // `func<T>(…)` (LANGUAGE.md § Type Parameters). Purely additive — no
         // existing kind moved, which is what keeps the corpus comparable.
@@ -594,6 +622,20 @@ mod tests {
         // `STATEMENT_FIRST` — every keyword is a legal identifier here — so
         // STATEMENT_FIRST is bit-for-bit what it was.
         //
+        // 84 → 85 on 2026-07-29: RETURN_STMT, for `return expr;` / `return;`
+        // (`plans/rewrite/scope.md` § *`return`, reversing the decision two
+        // entries above*). One kind: the value is an ordinary `expr` and the
+        // statement has no block of its own.
+        //
+        // **Inserted, next to FOR_STMT — not appended.** The blind spot named
+        // below means an appended kind would leave this assertion green, so a
+        // new kind goes where it belongs in the grouping and the number moves.
+        //
+        // Unlike every entry above it, this change *did* add a token kind
+        // (RETURN_KW) — see the `EOF` assertion. Both halves of this test move
+        // together and neither subsumes the other: `EOF` counts tokens,
+        // `INDEX_EXPR - EOF` counts node kinds.
+        //
         // ⚠️ **This assertion measures `INDEX_EXPR`'s position, not the length
         // of the list.** It catches every kind *inserted* before `INDEX_EXPR` —
         // which is every change so far, and the change that matters, since an
@@ -607,7 +649,7 @@ mod tests {
         // in an enum whose members are all real.
         assert_eq!(
             TokenKind::INDEX_EXPR as u8 - TokenKind::EOF as u8,
-            84,
+            85,
             "node kind count changed"
         );
     }

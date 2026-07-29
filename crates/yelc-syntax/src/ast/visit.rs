@@ -134,6 +134,9 @@ pub trait Visitor: Sized {
     fn visit_if_stmt(&mut self, node: &IfStmt) {
         walk_if_stmt(self, node);
     }
+    fn visit_return_stmt(&mut self, node: &ReturnStmt) {
+        walk_return_stmt(self, node);
+    }
     fn visit_assign_stmt(&mut self, node: &AssignStmt) {
         walk_assign_stmt(self, node);
     }
@@ -519,6 +522,7 @@ pub fn walk_stmt<V: Visitor>(v: &mut V, node: &Stmt) {
         Stmt::Let(s) => v.visit_let_stmt(s),
         Stmt::If(s) => v.visit_if_stmt(s),
         Stmt::For(s) => v.visit_for_node(s),
+        Stmt::Return(s) => v.visit_return_stmt(s),
         Stmt::Assign(s) => v.visit_assign_stmt(s),
         Stmt::Expr(s) => v.visit_expr_stmt(s),
         Stmt::Error { id, span } => v.visit_error(*id, *span),
@@ -538,6 +542,18 @@ pub fn walk_if_stmt<V: Visitor>(v: &mut V, node: &IfStmt) {
     walk_recovered(v, &node.then_branch, |v, block| v.visit_block(block));
     if let Some(else_branch) = &node.else_branch {
         walk_recovered(v, else_branch, |v, block| v.visit_block(block));
+    }
+}
+
+/// `value` is the same hand-wired-`Option` shape as `FunctionDecl::body` and
+/// `Block::tail`: the exhaustive `match` above turns a new `Stmt` **variant**
+/// into a compile error here, and a walk that dropped this `if let` would
+/// silently skip the returned expression with everything still compiling.
+/// `tests/returns.rs::the_walker_reaches_the_returned_expression` is the
+/// assertion that it does not.
+pub fn walk_return_stmt<V: Visitor>(v: &mut V, node: &ReturnStmt) {
+    if let Some(value) = &node.value {
+        v.visit_expr(value);
     }
 }
 

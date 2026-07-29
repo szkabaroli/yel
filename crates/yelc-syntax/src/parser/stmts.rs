@@ -1,4 +1,5 @@
-//! Statement blocks: `let`, `if`, `for`, assignment, and expression statements.
+//! Statement blocks: `let`, `if`, `for`, `return`, assignment, and expression
+//! statements.
 //!
 //! Split out of `exprs.rs`, which had grown past anti-spec A2's ~800-line
 //! threshold for one unit.
@@ -131,6 +132,9 @@ impl<'a> Parser<'a> {
         if self.at_for_statement() {
             return StmtOrTail::Stmt(self.parse_for_stmt());
         }
+        if self.is(RETURN_KW) {
+            return StmtOrTail::Stmt(self.parse_return_stmt());
+        }
 
         let mark = self.mark();
         let target = self.parse_expr();
@@ -251,6 +255,63 @@ impl<'a> Parser<'a> {
             ast::ForBody::Statements(p.parse_braced_stmt_block())
         });
         ast::Stmt::For(Box::new(node))
+    }
+
+    /// `return_statement = "return" ~ expr? ~ ";"`
+    ///
+    /// # There is no `at_return_statement`, and that is the decision
+    ///
+    /// `let`, `if` and `for` each have a guard because each of them is a name
+    /// the frozen grammar reads as one — `{ let = 1; }` is an assignment to a
+    /// variable called `let`, and a guard is what keeps it one. `return` cannot
+    /// be given the same treatment, because the frozen grammar has **no**
+    /// `return` production at all: every `return` it accepts is a name, so
+    /// *any* commitment narrows. Measured against the frozen parser, in
+    /// statement position it accepts `return;` · `return` (as a trailing
+    /// expression) · `return - 1;` · `return(x);` · `return [0];` ·
+    /// `return = 1;` · `return += 1;` · `return.x = 1;` · `return?.x;` — and
+    /// rejects `return x;`, `return 1;`, `return false;`, `return "s";`. There
+    /// is no guard that keeps the accepted list and adds the rejected one; the
+    /// two overlap. `tests/returns.rs::the_frozen_parser_accepts_every_shape_we_now_narrow`
+    /// pins that measurement against the oracle so it cannot rot into a claim.
+    ///
+    /// So the rule commits on `RETURN_KW`, unconditionally, in statement
+    /// position: **one token kind the lexer already assigned**, no lookahead
+    /// list to maintain and no third outcome. The alternative considered was
+    /// "commit only when what follows is in `EXPRESSION_FIRST ∪ {;}`", which
+    /// preserves `return = 1;` and `return.x;` while still taking `return;` and
+    /// `return -1;`. It was rejected: it buys a strictly smaller narrowing at
+    /// the cost of a rule nobody can state — a variable you may assign to but
+    /// never read — and it is the maintained-lookahead shape that silently
+    /// misparsed `func<T>`.
+    ///
+    /// The narrowing is confined to statement position. `RETURN_KW` is in
+    /// `KEYWORD_FIRST` ⊆ `NAME_FIRST`, so `return` is still a property name, a
+    /// record field, an element name, a `let` binder and a member — every
+    /// position that reads an `identifier`. See
+    /// `plans/rewrite/seam-changes.md` (2026-07-29).
+    ///
+    /// The value is optional, and its presence is decided by `EXPRESSION_FIRST`
+    /// rather than by "is the next token `;`". That is the same question a
+    /// FIRST set exists to answer, and it keeps `return }` from being read as a
+    /// return of a broken expression: the `}` cannot start one, so the value is
+    /// absent and the missing `;` is what gets reported.
+    fn parse_return_stmt(&mut self) -> ast::Stmt {
+        self.start_node();
+        self.assert(RETURN_KW);
+        let value = if self.is_set(EXPRESSION_FIRST) {
+            Some(self.parse_expr())
+        } else {
+            None
+        };
+        self.expect(SEMICOLON);
+        let span = self.finish_node(RETURN_STMT);
+
+        ast::Stmt::Return(ast::ReturnStmt {
+            id: self.new_node_id(),
+            span,
+            value,
+        })
     }
 
     /// `let_statement = "let" ~ identifier ~ (":" ~ type_annotation)? ~ "=" ~ expr ~ ";"`
