@@ -370,6 +370,91 @@ to get wrong in a loader:
 
 ---
 
+## 6.6 · The artifact format and the version stamp
+
+**Buildable today.** The payload (HIR) waits for stage 3, but every mechanism the
+serializer needs already exists in `yelc-sema`: `Ty` + `TypeInterner`, `DefPath`,
+`OverloadKey`, `Definitions`. Building it now hands stage 3 **a trait it must
+implement** instead of the paragraph it currently has
+([stage 3 § Designed for serialization](rewrite/stage-3-hir-build.md)) — the same
+move as landing seam types before the stage that consumes them.
+
+### Shape
+
+```
+Artifact {
+    stamp:   Stamp,
+    package: PackageName { ns, name, version },
+    types:   Vec<StructuralTy>,     // artifact-local table
+    defs:    Vec<SerializedDef>,    // ty: index into `types`, never a Ty
+    // stage 3 adds: hir nodes + the total `types` NodeMap
+}
+```
+
+**Types are written structurally into a table and referenced by an
+artifact-local index** — never as a `Ty` handle, whose meaning is the producing
+compilation's interning order. On load the table is walked and re-interned into
+the consumer's `TypeInterner`, producing a remap that every `defs` entry is
+resolved through.
+
+That is decision [B1](rewrite/open-decisions.md) made concrete, and it is why
+`Ty` deliberately does not derive `Serialize`: the wrong thing is a **type
+error** rather than a silent index.
+
+### The id rule is narrower than "no ids"
+
+Only ids that must be interpreted by a **different compilation** need paths:
+
+| id | in an artifact | why |
+|---|---|---|
+| `DefId` crossing a package boundary | **`DefPath`** | the consumer's registration order differs |
+| `HirId` inside the artifact | **a plain index** | the whole HIR travels together; the ids only have to agree with themselves |
+| `Ty` | **an index into `types`** | re-interned on load |
+
+Worth stating explicitly, because a blanket *"ids cannot be serialized"* reading
+of B1/B2 would path-ify the entire HIR for no reason. The rule is about
+*cross-compilation interpretation*, not about ids.
+
+### The stamp
+
+```
+Stamp { compiler: &'static str, format: u32 }
+```
+
+**Mismatch on either field ⇒ reject the artifact and rebuild from source. Never
+attempt a partial load.**
+
+The reason is that the failure mode is silent. A compiler change can alter what a
+HIR node *means* without altering its encoding, so a stale artifact deserializes
+successfully and miscompiles with no diagnostic — the exact shape
+[A8](rewrite/anti-spec.md) is about, at the worst possible place to have it.
+Rejecting is cheap; the artifact is a cache and source is always available.
+
+`format` is bumped by hand when the schema changes; `compiler` is the build's own
+version. Two fields because they fail for different reasons and a reader should
+be able to tell which happened.
+
+### Encoding — decide before building
+
+Criteria, in order: **schema stability across crate versions** (an artifact
+should not be invalidated by a dependency bump), **compactness**, and **no
+self-describing overhead** — the schema is known to both sides, so field names on
+the wire are waste.
+
+`postcard` and `bincode` both fit; the frozen tree and `arkc` both use `bincode`.
+Not decided here, and worth ten minutes on their stability guarantees, because
+this choice is what the `format` field is protecting against and getting it wrong
+means bumping the stamp on every dependency update.
+
+### Do this before stage 3
+
+The round-trip over `Definitions` + `Ty` + `DefPath` **validates B1
+empirically**. Today nothing round-trips, so a `Ty` written as its interner index
+would be invisible — the decision is currently argued rather than tested, which
+is the standard everything else in this rewrite is held to.
+
+---
+
 ## 7 · What is not decided
 
 - **Yel package import: compiled-in or composed?** One WASM artifact (like the
