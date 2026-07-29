@@ -284,6 +284,92 @@ the noun is off by one level.
 
 ---
 
+## 6.5 · Resolution: `deps/`, no manifest
+
+**Decided: take WIT's model, not Go's.** A package is a directory; its
+dependencies are *vendored* into `deps/`; there is **no manifest file and no
+version resolver**.
+
+```
+my-app/
+  app.yel            ← all declare `package my:app@1.0;`
+  widgets.yel
+  deps/
+    yel-ui/*.wit     ← a WIT interface package
+    std-hash/*.yel   ← a yel package, as source
+    std-json/*.yelp  ← a yel package, precompiled (§6)
+```
+
+| | Go | WIT | **yel** |
+|---|---|---|---|
+| unit | directory | directory | directory |
+| identity | `go.mod` declares it | the `package …@ver;` **in the source** | **in the source** |
+| dependencies | `require` + module cache | **`deps/`, vendored** | **`deps/`, vendored** |
+| version resolution | minimal version selection | **none** | **none** |
+
+### Why WIT's and not Go's
+
+**Yel already has the identity half.** Every file carries
+`package ns:name@version;`. A directory knows what it is without a manifest —
+which is the exact job `go.mod` exists to do, and yel does not need it done.
+
+**Closed-world compilation does not benefit from a resolver.** The optimisation
+story rests on `--gufa --closed-world`. A build-time version solver is machinery
+in service of a flexibility that a single closed-world artifact cannot use.
+
+**Zero new file formats.** `deps/` is a convention, not a schema: nothing to
+design, nothing to version, nothing to parse. And it keeps the property that
+motivated the whole model — **a yel package directory stays literally usable as a
+WIT package directory**.
+
+So dependency resolution needs **no new mechanism in yel at all**: a directory
+convention and a walker. [§6](rewrite/directions.md) then reduces to *"a `deps/`
+entry may be an artifact instead of source"*, which is a far smaller change than
+introducing a package manager.
+
+**The cost, stated:** no automatic upgrades, no dedup across transitive
+dependencies, vendoring by hand. That is what the component-model ecosystem does
+today, and it is the right trade while yel's output is one artifact.
+
+### The CLI must become directory-oriented, and currently is not
+
+Go's CLI selects a **package** from a path defaulting to cwd (`go build`,
+`go build ./widgets`, `go build ./...`) and finds the module root by walking up.
+WIT's tooling takes the **directory** (`wasm-tools component wit ./wit`).
+
+**Yel's CLI is file-oriented** — `yelc compile -o wasm path.yel`, and
+[`stage-2-driver.md`](rewrite/stage-2-driver.md) specifies `yelc2 [OPTIONS]
+<FILE>`. That disagrees with the model: a file-oriented CLI cannot express
+*"compile this package"*, so it cannot name the unit the design is built around,
+and would have to infer the package from a file's siblings — the same information
+arrived at backwards.
+
+This is a **consequence for stage 2 that nobody recorded**. The current signature
+is right for a parser-only driver and wrong at the design level, so it changes
+when packages become real:
+
+```
+yelc2 build            # the package in cwd
+yelc2 build ./widgets  # a specific package
+```
+
+Not urgent — nothing consumes packages yet — but it should not be discovered
+during stage 6.
+
+### Unverified against the spec
+
+Four WIT details are load-bearing here and are recollection rather than checked.
+All are cheap to confirm in one pass against `wit-parser`, and all are expensive
+to get wrong in a loader:
+
+1. whether every `.wit` file in a package must repeat the `package` declaration,
+   or only one may
+2. whether `deps/` resolves **transitively** (a dep's own `deps/`)
+3. the exact feature-gate grammar — `key = value` vs `key: value` (§4)
+4. whether an `interface` may hold a `resource` alongside plain functions (§3)
+
+---
+
 ## 7 · What is not decided
 
 - **Yel package import: compiled-in or composed?** One WASM artifact (like the
