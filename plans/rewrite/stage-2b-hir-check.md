@@ -106,6 +106,24 @@ a side effect.
 | Generics | none ([F1](findings.md#f1)) | adopt [§3](directions.md#3--generics-are-monomorphization-by-name), or keep the `Ty::ERROR` placeholder? |
 | `match` | does not exist; conditionals special-cased | model the general form now so lowering has one path — [B4](anti-spec.md#b4--no-special-cased-control-flow-where-a-general-form-exists) |
 | `color`/`brush` as property types | rejected — two storage shapes for one name | unify, or keep rejecting *with the same diagnostic*? — [C4](anti-spec.md#c4--no-type-whose-storage-shape-depends-on-where-it-appears) |
+| **Coercions are not materialized** | `types_compatible` returns `bool` and discards *which* conversion applies; no `Coerce` node exists. `list<s32>` → `list<s64>` typechecks and the encoder rejects it ([F17](findings.md#f17)) | materialize an explicit conversion node — see below |
+
+### Materialize coercions — the rustc THIR lesson
+
+rustc makes **adjustments explicit** at THIR (auto-deref, auto-ref, unsizing,
+overloaded operators) precisely so MIR building never re-derives them. Yel does
+the opposite: [F17](findings.md#f17) — typeck decides a coercion is legal and
+records nothing, so every consumer re-derives it from the use site, and the
+conversions are *not* uniform (`s32→s64` sign-extends, `u32→u64` zero-extends,
+`Color→Brush` changes representation).
+
+**The strongest argument is not tidiness, it is that the bug becomes
+unconstructible.** With an explicit node, typeck must *build* the conversion —
+and there is no conversion from `list<s32>` to `list<s64>` short of an
+element-wise map, so failing to build it **is** the rejection, at the right span,
+with a message. Today the same program reaches the encoder and dies there.
+
+This phase owns it: coercion is type-directed, so it cannot live in 3a.
 
 ## Directions in play
 
@@ -129,6 +147,18 @@ a side effect.
   execution test.
 - [§6](directions.md#6--modules-are-serializable-artifacts) — the artifact this
   phase ends at.
+- [§8](directions.md#8--the-reactive-plan-is-an-artifact-and-its-shape-is-open) —
+  **this phase emits the reactive plan.** Dependency sets already exist
+  (`thir/signalck.rs` is the model); §5 adds the trigger; §4 adds the capture set.
+  The plan is those three per body, as a **declared output in the seam** — not a
+  `CompilerContext` side table, which would be
+  [A1](anti-spec.md#a1--no-side-channel-ir) side-channel IR.
+
+  **It carries reactive *units*, not function identities.** A unit is "this body
+  runs when these signals change". How units are packaged into functions is
+  [4b's](stage-3b-lower.md) choice, and naming functions here would silently make
+  it. Ids are frontend ids — `BlockId` is a `yelc-lir` type this crate cannot
+  reach.
 
 ## Contract
 
@@ -158,6 +188,17 @@ so it is **byte-comparable** — recovering the artifact-level differential that
 neither the old stage-2 boundary nor 2a alone could provide
 ([F14](findings.md#f14)).
 
+**`yelc2 --emit-hir` gains the type map.** The same dump 2a lands
+([why it is yel-flavoured and not round-trippable](stage-2a-hir-build.md#yelc2---emit-hir--the-dump-is-a-deliverable-not-a-convenience))
+now annotates every expression with its `Ty`, plus the trigger kind and capture
+set this phase settles.
+
+That makes this phase's central postcondition **directly visible**: `types` is
+total, so a rendered expression with no type is a bug the dump shows rather than
+a bug a later stage trips over. It is the cheapest possible check on the DoD line
+below, and it doubles as the artifact 2a could not have
+([F14](findings.md#f14)).
+
 Plus, unchanged from 2a and re-run here:
 
 1. **Diagnostics** — meaning, span, and order — over the 2000-seed corpus, 91
@@ -168,7 +209,8 @@ Plus, unchanged from 2a and re-run here:
 ## Definition of done
 
 - [ ] `types` total after 2b; asserted by a walk over every corpus program that
-      every expression node has an entry.
+      every expression node has an entry — and **visible in `--emit-hir`**, which
+      renders an untyped expression as such rather than omitting it.
 - [ ] Diagnostic *meaning* identical on all 23 diagnostic fixtures; any wording
       diff read and recorded in [`goldens-changed.md`](goldens-changed.md).
 - [ ] Accumulate-and-continue verified: a program with three independent type

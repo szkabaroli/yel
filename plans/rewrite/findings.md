@@ -27,6 +27,10 @@
 | [F12](#f12) | Builtins are a field per builtin across 1,442 lines | builtins |
 | [F13](#f13) | `bind` desugars to getter + empty setter at HIR | lowering |
 | [F14](#f14) | There is no HIR dump, so 2a has no artifact of its own | verification |
+| [F15](#f15) | `filter` is already monomorphized **per call site**, not per type | code size |
+| [F16](#f16) | Signal dispatch is already **fully static** — no runtime effect registry | reactivity |
+| [F17](#f17) | Coercions are decided and **discarded** — no `Coerce` node exists; `list<T>` coercion is a front/back mismatch | types |
+| [F18](#f18) | `Range`, `Ternary` and **three separate conditional forms** are carried by all four IRs | desugaring |
 
 ---
 
@@ -231,3 +235,138 @@ order — `DefId`s are ordinals that reach output), HIR-stage diagnostics via
 `yelc check`, and total-lowering-without-panic.
 
 cited by [2a](stage-2a-hir-build.md#verification), [2b](stage-2b-hir-check.md#verification), [§6](directions.md)
+
+## F15
+
+**The frozen compiler already monomorphizes, and with the worst possible key.**
+`collect_filter_calls` records one entry per
+`(component, list-expr-id, predicate-expr-id)` (`wasm/mod.rs:1684`), so two
+`filter` calls over the *same* element type with the *same* predicate shape emit
+two generated functions.
+
+```yel
+a: list<s32>; b: list<s32>; t: s32 = 2;
+for x in a.filter({ v -> v > t }) { … }
+for y in b.filter({ v -> v > t }) { … }
+```
+→ `$filter_0 $filter_1 $filter_2 $filter_3` — **4 symbols for 2 call sites**.
+
+Consequence for [§3](directions.md#3--generics-are-monomorphization-by-name):
+per-*type* monomorphization is a **reduction** against this baseline, not an
+increase. The comparison "monomorphization costs code size" is measured against
+zero duplication; the actual baseline is worse than what §3 proposes.
+
+Also measured: `-Oz` took the module 17,927 → 8,900 bytes but left the function
+count at 10 — it did not merge them. *Caveat:* the two functions genuinely differ
+(they read different globals), so this does **not** show whether wasm-opt merges
+*identical* instantiations. That test needs §3 built.
+
+`wasm/mod.rs:1661-1690` · measured 2026-07-28 ·
+cited by [§3](directions.md#3--generics-are-monomorphization-by-name),
+[A1](open-decisions.md#a1--how-are-parameterized-types-represented)
+
+## F16
+
+**Signal dispatch is fully static. There is no runtime effect registry, and no
+dirty mask.**
+
+`emit_trigger_for_signal` (`lower_to_lir/blocks.rs:5554`):
+
+- **Component-local signal** — looks up `signal_to_update_blocks`, a
+  *compile-time* map, and emits **direct `CallBlock`s** to each dependent.
+- **Global signal** — emits a `TriggerEffects { signal }` placeholder, because
+  the observer set is unknowable mid-lowering (other components are not lowered
+  yet). The module-level `resolve_global_triggers` pass expands each one into
+  direct `CallBlock`s to the observing components' fanout blocks.
+- `TriggerEffects` **must not reach codegen** — that arm is a hard
+  `CodegenError::InvalidIR` (`op_emit.rs:909`).
+
+`effects_by_signal` (`lir/node.rs:173`) is compile-time metadata driving that
+resolution, **not** a runtime table.
+
+**Correction to how this was first read.** The DOT output shows
+`effect 0 → if-update-b0 → {mount, unmount}` and was initially taken for a
+Solid-style runtime registry. It is a **compile-time call graph**. The frozen
+compiler already uses the dispatch strategy that
+[§8](directions.md#8--the-reactive-plan-is-an-artifact-and-its-shape-is-open)
+was about to propose as an improvement.
+
+`lower_to_lir/blocks.rs:5554-5580`, `lir/block.rs:818-830`, `op_emit.rs:909` ·
+2026-07-28 · cited by [§8](directions.md#8--the-reactive-plan-is-an-artifact-and-its-shape-is-open)
+
+## F17
+
+**Coercions are decided and thrown away.** `types_compatible`
+(`thir/typeck.rs:2651`) returns **`bool`**. It permits integer widening, float
+widening, int→float, `Color → Brush`, and recurses through `List`/`Option` — then
+records **nothing**. There is no `Cast`, `Coerce`, `Convert` or `Adjust` node in
+either `thir/expr.rs` or `lir/expr.rs`.
+
+So every consumer must re-derive *which* conversion applies from the types at the
+use site — and the cases are not uniform: `s32→s64` sign-extends, `u32→u64`
+zero-extends, `s32→f64` converts, `f32→f64` promotes, and **`Color → Brush` is a
+representation change** ([C4](anti-spec.md#c4--no-type-whose-storage-shape-depends-on-where-it-appears)
+is about exactly those two types).
+
+**The recursive `List` arm is a front/back mismatch.** Measured:
+
+```yel
+a: list<s32> = [1, 2, 3];
+b: list<s64> = a;
+```
+```
+yelc check    → OK: 1 component(s) checked
+yelc compile  → encoding error: type mismatch: expected (ref null $type), found (ref null $type)
+```
+
+Typeck accepts, because element types are "compatible"; nothing converts the
+elements, so a `list<s32>` GC array reaches a `list<s64>` slot. It fails **loudly
+at the encoder**, not silently — but it is a program the front end accepts and
+the back end cannot emit. `known_bugs` material.
+
+**Why a materialized coercion node prevents this by construction**, rather than
+catching it later: typeck would have to *build* the conversion, and there is no
+conversion from `list<s32>` to `list<s64>` short of an element-wise map. Being
+unable to construct the node **is** the rejection, at the right place, with a
+span. This is what rustc's THIR does with adjustments, and the reason it does it.
+
+`thir/typeck.rs:2651-2680` · measured 2026-07-28 ·
+cited by [3b](stage-2b-hir-check.md)
+
+## F18
+
+**Sugar that never desugars, carried by every layer.**
+
+| construct | AST | HIR | THIR | LIR |
+|---|---|---|---|---|
+| `Range` (`0..10`, `0..=10`) | ✓ | ✓ | ✓ | ✓ |
+| `Ternary` (`c ? a : b`) | ✓ | ✓ | ✓ | ✓ |
+| `If` **statement** | ✓ | ✓ | ✓ | ✓ |
+| `If` **UI node** | ✓ | ✓ | ✓ | ✓ |
+
+`ExprKind` has `Ternary` and **no `If`**, so yel carries **three unrelated
+constructs for one concept** — a conditional *expression*, a conditional
+*statement*, and a conditional *UI node* — each with its own variant in each of
+four IRs. That is [B4](anti-spec.md#b4--no-special-cased-control-flow-where-a-general-form-exists)
+at four times the scale of [F11](#f11)'s `else_if_branches`.
+
+For contrast, the two constructs that *do* desugar: `MethodCall` exists in HIR
+and is gone by THIR (typeck resolves it); `Interpolation` survives to THIR and is
+gone by LIR (lowering turns it into `concat`).
+
+**Neither `Range` nor `Ternary` can be desugared today**, and the reason is the
+same in both cases — *the target form does not exist*:
+
+- `Ternary` would desugar to a conditional expression or a `match`. Yel has
+  neither; `match` is listed as a gap in
+  [3b](stage-2b-hir-check.md#gaps-inherited-as-decisions-not-copies).
+- `Range` would desugar to a `Range { start, end }` struct literal, the way Rust
+  does. Yel has no `Range` type to desugar *into* — but the stdlib is planned, so
+  this is **a requirement on
+  [§2's contents](directions.md#what-the-stdlib-must-provide-not-just-what-can-move-into-it)**,
+  not a blocker. It is not generic, so it does not wait on §3 either.
+
+So `Ternary` waits on an open decision; `Range` waits only on sequencing.
+
+`yelc-syntax/src/ast.rs` (`ExprKind`), `{hir,thir,lir}/{expr,node}.rs` ·
+measured 2026-07-28 · cited by [3a](stage-2a-hir-build.md#what-lowerings-belong-here)

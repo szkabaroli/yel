@@ -416,4 +416,7 @@ any measurement** — fixing the fixture changes what reaches HIR.
 - [ ] The two silent `_ => {}` parser arms filed as a `known_bugs` entry.
       *Still absent.*
 
-Then: land `yelc-sema` → land 2a's seam types → brief 2a.
+Then: brief 2a. `yelc-sema` and the seam types are no longer separate landings —
+as of 2026-07-29 they are phases 1 and 2 of stage 2a
+([`stage-2a-hir-build.md`](stage-2a-hir-build.md#work-in-scope)), so Cluster A is
+the last thing standing between here and briefing.

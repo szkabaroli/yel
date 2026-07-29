@@ -49,8 +49,7 @@ what gets *written*.
 | — | `yelc-base` | keep-list items | ✅ **landed** (infrastructure, no stage) | — | 2026-07-28 |
 | 1 | `yelc-syntax` | `yel-core/src/syntax/` | ✅ **landed** | agent + integrator | 2026-07-28 |
 | 2 | `yelc-driver` | — (new: the observation instrument, binary `yelc2`) | ✅ **landed** | integrator | 2026-07-28 |
-| — | `yelc-sema` | `context.rs`, `definitions.rs`, `known.rs`, `stdlib_lookup.rs`, `types/` (~3.5k) | 📝 [brief](infra-sema.md), **next** — blocks 3a | — | — |
-| 3a | `yelc-hir` | `yel-core/src/hir/` | 📝 [brief](stage-2a-hir-build.md), not briefed | — | — |
+| 3a | `yelc-hir` | `yel-core/src/hir/` **+ `yelc-sema`** (`context.rs`, `definitions.rs`, `known.rs`, `stdlib_lookup.rs`, `types/`, ~3.5k) | 📝 [brief](stage-2a-hir-build.md), **next** — blocked on [Cluster A](open-decisions.md#cluster-a--type-representation) | — | — |
 | 3b | `yelc-hir` | `yel-core/src/thir/` | 📝 [brief](stage-2b-hir-check.md), blocked on 3a | — | — |
 | 4a | `yelc-lir` | `yel-core/src/lir/` | ⬜ [stub](stage-3a-lir.md), blocked on 3b | — | — |
 | 4b | `yelc-lower` | `yel-core/src/lower_to_lir/` | ⬜ [stub](stage-3b-lower.md), blocked on 4a | — | — |
@@ -74,8 +73,14 @@ which are two crates. A phase is the unit an agent owns end to end.
 
 **Rows marked `—` are infrastructure, not stages** — they transform no IR and get
 no ratchet row, but they must land before the stage that depends on them.
-`yelc-base` is the precedent. `yelc-sema` is the same category and is **the open
-blocker for 2a** — brief: [`infra-sema.md`](infra-sema.md).
+`yelc-base` is the precedent and is now the only one.
+
+**`yelc-sema` stopped being a separate landing on 2026-07-29** and became phase 1
+of stage 2a ([`stage-2a-hir-build.md` § Work in scope](stage-2a-hir-build.md#work-in-scope));
+its brief is still [`infra-sema.md`](infra-sema.md). The two oracle-hygiene items
+and 2a's seam types moved the same way. **2a is correspondingly larger** — ~3.5k
+lines of sema plus the whole HIR build — and the phase boundaries are where it
+splits if it has to.
 
 Cutover phase: **1 — coexist**. Phase 4 (deletion) is a named task, scheduled
 now: [`stage-4-codegen.md` § Final deletion](stage-4-codegen.md#final-deletion--cutover-phase-4).

@@ -77,7 +77,27 @@ names reach `yelc-lir`
 ([C1](anti-spec.md#c1--no-domain-vocabulary-below-the-frontend-seam)).
 
 [§5 — handlers and closures are one concept](directions.md#5--handlers-and-closures-are-one-concept-split-by-trigger)
-is the single lowering this phase owns; 2b owns the node.
+is the single lowering this phase owns; the frontend owns the node.
+
+[§8 — the reactive plan](directions.md#8--the-reactive-plan-is-an-artifact-and-its-shape-is-open).
+This phase **consumes** the plan and **owns the granularity decision**: how the
+plan's reactive units are packaged into emitted functions — one per site (frozen
+shape), one `update(mask)` per component, or inlined at the write site.
+
+Two things that narrow it:
+
+- **Dispatch is not in question.** [F16](findings.md#f16): a signal write already
+  emits **direct `CallBlock`s** resolved at compile time — no runtime registry, no
+  dirty mask. That is the right mechanism for a closed-world AOT compiler and it
+  carries over. Only packaging is open.
+- **Components are small** — measured across 83 fixture components/globals: max
+  14 reactive properties, median 2, p90 4. There is little for a mask to
+  amortise over, which argues the frozen per-site granularity is closer to right
+  than it first appears.
+
+Whatever is chosen **changes output** and lands as its own enumerated divergence
+set — the 85 execution tests pin DOM-op behaviour, so the comparison is module
+bytes and update cost, not correctness.
 
 ## Not debt
 

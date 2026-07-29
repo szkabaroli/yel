@@ -6,9 +6,13 @@ Phase **2a** of the merged HIR stage; phase 2b is
 
 Base: — · Started: — · Landed: —
 
-> **Gate.** Stage 1 landed (`33e5c71`, 0 corpus divergences). Still **not
-> briefed**: seam types are not on `main` and D1–D6 are unanswered. See
-> [Prerequisites](#prerequisites).
+> **Gate.** Stage 1 landed (`33e5c71`, 0 corpus divergences); D1–D6 answered
+> 2026-07-29. Still **not briefed**: [Cluster A](open-decisions.md#cluster-a--type-representation)
+> is open, and it is now the only thing in the way.
+>
+> **Scope grew on 2026-07-29.** `yelc-sema` (~3.5k lines), the seam types, and
+> the two oracle-hygiene items were prerequisites; they are now
+> [phases of this stage](#work-in-scope).
 
 ## The shape (shared with 2b)
 
@@ -458,55 +462,104 @@ applies: stable ordering, byte-identical across runs.
 The artifact-level differential arrives after
 [2b](stage-2b-hir-check.md#verification).
 
-## Prerequisites
+## Gate
 
 1. ~~Stage 1 closed out~~ ✅ `33e5c71`, 2026-07-28.
-2. **`global_filter_default.yel` resolved.** Stage 1 found it writes
+2. ~~**D1–D6 answered in writing**~~ ✅ 2026-07-29. D7 and D8 were already
+   decided. **D5 carries an obligation into the stage** — the corpus item-order
+   differential; see its log entry.
+3. **Cluster A answered** — [`open-decisions.md`](open-decisions.md#cluster-a--type-representation).
+   Type representation gates everything, and this stage's seam types include
+   `TypeId` and `type_of`. ❌ **open.**
+
+That is the whole gate. Everything that used to sit here is now *work*, below.
+
+## Work in scope
+
+**Changed 2026-07-29.** Four items were previously prerequisites — things that had
+to land before the stage could be briefed. They are now **phases of the stage
+itself**. The stage is bigger and there are fewer handoffs; the ordering
+constraints that made them prerequisites still hold, and are stated per phase.
+
+Phases run in order. Phase 0 must complete before any number is taken.
+
+### Phase 0 · Oracle hygiene
+
+Both items change *what the frozen compiler produces*, so they touch the oracle
+and must land **before** the differential runs. This is the one ordering
+constraint that survived the move intact — a corpus baseline that shifts
+mid-stage makes every later divergence unattributable, which is the whole reason
+[one stage is in flight at a time](../../.agents/skills/compiler-rewrite/rules/stage-gate-sequential.md).
+
+1. **`global_filter_default.yel` resolved.** Stage 1 found it writes
    `[1,2,3,4].filter(|x| x > 2)` — `|` is not an operator, the catch-all ate the
    line, and *the module-scope filter path it guards has never been exercised*.
-   Rewriting to `{ x -> x > 2 }` and re-blessing changes what reaches HIR, so it
-   happens **before** numbers are taken, with a line in
-   [`goldens-changed.md`](goldens-changed.md).
-3. **The two silent `_ => {}` parser arms** filed as a `known_bugs` entry.
-   *Verified absent 2026-07-28* — `known_bugs/` holds only `README.md` and
-   `runtime/s32_to_string_aliasing.yel`.
-4. **`yelc-sema` exists** — brief: [`infra-sema.md`](infra-sema.md).
-   ⚠️ **The real blocker, and larger than "seam types" sounds.** This phase's
-   input is `&mut CompilerContext` *from `yelc-sema`*, a crate that does not yet
-   exist while six plan documents depend on it. Frozen equivalent, minus what
-   `yelc-base` already carries:
+   Rewrite to `{ x -> x > 2 }` and re-bless **from the frozen compiler**, with a
+   line in [`goldens-changed.md`](goldens-changed.md).
+2. **The two silent `_ => {}` parser arms** filed as a `known_bugs` entry.
+   Bookkeeping, no code — but it is the record of a real frozen-compiler defect,
+   and the rewrite's free win is only free if someone wrote it down.
 
-   | frozen file | lines |
-   |---|---|
-   | `context.rs` | 963 |
-   | `stdlib_lookup.rs` | 1,029 |
-   | `definitions.rs` | 742 |
-   | `known.rs` | 413 |
-   | `types/interner.rs` | 389 |
-   | **total** | **~3,536** |
+### Phase 1 · `yelc-sema` (~3,536 lines)
 
-   `ids.rs`, `index_vec.rs`, `interner.rs`, `source.rs`, `diagnostic.rs` are
-   **already done** in `yelc-base`.
+Was [`infra-sema.md`](infra-sema.md), a separate landing. Now this stage's first
+build phase. Frozen equivalent, minus what `yelc-base` already carries:
 
-   **The precedent is `yelc-base`:** shared infrastructure, no stage number,
-   landed before the stage that needs it. `yelc-sema` is the same category — it
-   is not a pipeline stage, it transforms no IR. But it carries real design
-   decisions ([§1](directions.md#1--builtins-are-a-table-not-a-field-per-builtin)
-   lives entirely inside it; so does the
-   [`DefId`/`DefPath` split](#designed-for-serialization--what-2a-owes-6) and
-   `Ty`'s structural serialization), so it needs a written scope before someone
-   starts, not just a `cargo new`.
+| frozen file | lines |
+|---|---|
+| `context.rs` | 963 |
+| `stdlib_lookup.rs` | 1,029 |
+| `definitions.rs` | 742 |
+| `known.rs` | 413 |
+| `types/interner.rs` | 389 |
+| **total** | **~3,536** |
 
-   Unlike 2a it **does** have a standalone artifact: `lookup_known_definitions`
-   registers builtins from no input at all, so the resulting `Definitions` table
-   is comparable against the frozen one before any source is parsed.
+`ids.rs`, `index_vec.rs`, `interner.rs`, `source.rs`, `diagnostic.rs` are
+**already done** in `yelc-base`.
 
-5. **2a's own seam types landed on `main`** as compiling Rust — `HirId`,
-   `BodyId`, `HirMap`, `HirModule`, `NodeMap`, `TypeId`, `type_of`,
-   `lower_files`.
-6. ~~**D1–D6 answered in writing** in the Decision log~~ ✅ 2026-07-29. D7 and D8
-   were already decided. **D5 carries an obligation into the stage** — the
-   corpus item-order differential; see its log entry.
+It transforms no IR, but it carries real design decisions —
+[§1](directions.md#1--builtins-are-a-table-not-a-field-per-builtin) lives
+entirely inside it, as do the [`DefId`/`DefPath` split](#designed-for-serialization--what-2a-owes-6)
+and `Ty`'s structural serialization. Its open questions are Clusters A–D of
+[`open-decisions.md`](open-decisions.md), and **Cluster A gates the phase**.
+
+**Take its checkpoint even though it is no longer a landing.**
+`lookup_known_definitions` registers builtins from *no input at all*, so the
+resulting `Definitions` table is comparable against the frozen one before a
+single source file is parsed. That was the argument for giving sema its own
+ratchet row, and folding it into 2a does not make the checkpoint less real — it
+makes it easier to skip. Compare the table, and record the result in Numbers.
+
+### Phase 2 · 2a's seam types on `main`
+
+`HirId`, `BodyId`, `HirMap`, `HirModule`, `NodeMap`, `TypeId`, `type_of`,
+`lower_files` — as compiling Rust, before the lowering body is written.
+
+Previously a separate landing under
+[`contract-before-fanout`](../../.agents/skills/compiler-rewrite/rules/contract-before-fanout.md),
+whose purpose is that parallel authors cannot each invent a plausible `Ty`. With
+one agent owning the stage end to end there are no parallel authors, so this
+becomes internal sequencing rather than a handoff. **The sequencing still
+matters**: types first, body second, because a seam discovered while writing the
+body gets shaped by the body's convenience.
+
+### Phase 3 · HIR build + resolve
+
+The stage proper — [Brief](#brief), [Contract](#contract), [D1–D6](#decisions).
+
+### What this restructuring costs
+
+Stated because it is a real cost, not a free simplification:
+
+- **The stage is now ~3.5k lines of `yelc-sema` plus the whole HIR build.** The
+  skill's guidance is that a stage which will not fit in one agent's context
+  contains an internal seam worth contracting. Phases 1 and 2 *are* that seam,
+  now written down — if the stage has to split, it splits there, and the split is
+  already drawn.
+- **Sema loses its own ratchet row**, so its independent checkpoint is now a line
+  in this stage's Numbers rather than a gate that cannot be passed silently.
+  Phase 1 says to take it anyway; that instruction is the mitigation, and it is
+  weaker than a gate.
 
 ## Reference
 
@@ -522,6 +575,11 @@ The artifact-level differential arrives after
 
 ## Definition of done
 
+- [ ] **Phase 0 landed before any measurement** — `global_filter_default.yel`
+      re-blessed from the frozen compiler, `_ => {}` arms filed.
+- [ ] **`yelc-sema` exists**, and its builtin `Definitions` table is compared
+      against the frozen one — the standalone checkpoint, recorded in Numbers.
+- [ ] **Seam types landed as compiling Rust before the lowering body was written.**
 - [ ] `yelc-hir` compiles; depends on `yelc-base`, `yelc-syntax`, `yelc-sema`
       and no other **workspace** crate (third-party is not what this clause is
       about — see the stacker precedent in [`seam-changes.md`](seam-changes.md)).

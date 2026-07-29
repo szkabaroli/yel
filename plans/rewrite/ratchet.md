@@ -24,8 +24,7 @@ started measuring.
 | **1 — syntax** | 2026-07-28 | `33e5c71` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | **0** | **2** |
 | **baseline (re-freeze 2)** | 2026-07-28 | `3ef3568` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus proved neutral, not regenerated) | **2** |
 | **2 — driver** | 2026-07-28 | `2505f8d` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | **0** | **2** |
-| — `yelc-sema` (infra) | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
-| 2a — HIR build+resolve | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
+| 2a — HIR build+resolve (incl. `yelc-sema`) | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 2b — HIR check | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 3a — LIR data model | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 3b — LIR lowering | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
@@ -35,10 +34,14 @@ started measuring.
 2026-07-28 ([`seam-changes.md`](seam-changes.md)), and the remaining stages were
 renumbered rather than left with a gap. Row labels here match
 [`README.md`](README.md) § Status and the `stage-N-*.md` files exactly —
-`2a`/`2b` are `yelc-hir`, `3a` is `yelc-lir`, `3b` is `yelc-lower`. Rows marked
-`—` are **infrastructure, not stages** ([`infra-sema.md`](infra-sema.md)): they
-transform no IR, but they land on `main`, so the rule that landing never lowers
-the number applies to them too.
+`2a`/`2b` are `yelc-hir`, `3a` is `yelc-lir`, `3b` is `yelc-lower`.
+
+**`yelc-sema` lost its own row on 2026-07-29**, when it became phase 1 of stage
+2a rather than a separate landing. Its measurement did not disappear with the
+row: the builtin `Definitions` table is comparable against the frozen one before
+any source is parsed, and 2a owes that comparison in its Numbers. Worth naming
+the cost — a line in a stage's Numbers is weaker than a row that cannot be passed
+silently ([A19](anti-spec.md#a19--a-number-is-produced-by-a-command)).
 
 **Stage 2's workspace count is flat at 480 on purpose.** `yelc-driver` adds no
 tests, because nothing in `tests/` may assert on a dump's text — the moment

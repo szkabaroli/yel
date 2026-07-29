@@ -1,5 +1,19 @@
 # `yelc-sema` — shared semantic infrastructure       status: brief written
 
+> **This is no longer a separate landing.** As of 2026-07-29 it is **phase 1 of
+> stage 2a** ([`stage-2a-hir-build.md` § Work in scope](stage-2a-hir-build.md#work-in-scope)),
+> not its own row on the board. This file stays as the brief — the scope, the
+> S1–S7 decisions and every cross-reference to them are unchanged, and the design
+> questions it raises (Clusters A–D of [`open-decisions.md`](open-decisions.md))
+> are still open and still gate the work.
+>
+> What changed is only *who owns it*: 2a's agent, as its first phase, instead of
+> a handoff between two briefs. **Keep the standalone checkpoint** —
+> `lookup_known_definitions` registers builtins from no input at all, so the
+> resulting `Definitions` is comparable against the frozen table before a single
+> source file is parsed. That comparison now lands in 2a's Numbers rather than in
+> its own ratchet row, which makes it easier to skip and no less required.
+
 Replaces (frozen, never edited): `yel-core/src/{context.rs, definitions.rs,
 known.rs, stdlib_lookup.rs, types/}` — **in part**; see [Scope](#scope).
 

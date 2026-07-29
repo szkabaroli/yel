@@ -21,6 +21,7 @@
 | [5](#5--handlers-and-closures-are-one-concept-split-by-trigger) | Handlers and closures are one concept, split by trigger | wanted | 2b + 3b | **no** |
 | [6](#6--modules-are-serializable-artifacts) | Modules are serializable artifacts | wanted | 2a/2b seam | no |
 | [7](#7--keywords-get-a-word-boundary--at-cutover-by-deletion) | Keywords get a word boundary | **adopted 2026-07-28** | stage 1 | no — 8000/8000 corpus artifacts byte-identical |
+| [8](#8--the-reactive-plan-is-an-artifact-and-its-shape-is-open) | The reactive plan is an artifact — and its shape is open | wanted; shape **undecided** | 2b emits, 3b consumes | depends on the shape |
 
 **Dependency order:** §1 → §2. §3 unblocks most of §2. §4 blocks the rest of §2.
 §5 and §6 are independent. §6 is why HIR and THIR merged into one stage
@@ -116,6 +117,40 @@ stays frozen, cost is two grammars in one parser).
 | C′ — blocked on parametrization **and** closures | `filter` | §3 **and** [§4](#4--closures-are-a-value-and-the-irs-are-shaped-for-one) |
 | D — probably never source | builtin elements with attribute schemas, `yel:ui/dom` imports | a declaration form / a `foreign` analogue |
 
+### What the stdlib must provide, not just what can move into it
+
+The tier table above asks *"which existing builtins can be written in yel?"* That
+is only half the question. The other half: **which types must the stdlib provide
+because the compiler wants to desugar into them?**
+
+| the compiler wants to desugar | into | exists today? |
+|---|---|---|
+| `0..10`, `0..=10` | a `Range { start, end, inclusive }` value | **no** — `Range` is carried as a dedicated node by all four IRs ([F18](findings.md#f18)) |
+| `#ff0000` | `Color.rgba((r,g,b,a))` | yes — the mechanism already works |
+| `"a {x} b"` | `concat(…)` | yes |
+
+`Range` is the live one, and it reverses the dependency: an earlier draft of
+[3a's candidate list](stage-2a-hir-build.md#candidates-and-what-blocks-each)
+called the range desugaring *"blocked on §2"*, which treats the stdlib as an
+obstacle. It is planned work. **So the desugaring is a requirement on §2's
+contents, and `Range` belongs on the list of what the stdlib ships.**
+
+Two consequences:
+
+- **§1's table must cover types the compiler names**, not only functions the user
+  calls. The frozen tree already does this for `Color` — the literal desugaring
+  needs the `Color` def — so the mechanism exists; the question is whether the
+  new table keeps it ([C2](open-decisions.md#c2--what-happens-to-builtin-elements-enums-and-variants)).
+- **`Range` is probably not generic.** `LANGUAGE.md` uses ranges over integers
+  with `for` and list operations, so it is tier A/B, not the tier C that waits on
+  [§3](#3--generics-are-monomorphization-by-name). It does not inherit that
+  blocker.
+
+Generalised, because it will recur: **when the compiler desugars, it desugars
+*into* something, and that something is a stdlib design requirement.** Collect
+those requirements as desugarings are decided rather than discovering them when
+the stdlib is written.
+
 **No module system, and this must not invent one.** There is no `import`/`use`
 and no `Import` item kind. The stdlib is an **implicit prelude** — in scope
 everywhere, no import syntax, preserving current behaviour exactly. Grain's
@@ -165,6 +200,52 @@ It also matches the target: on WASM-GC you want a concrete struct type per
 instantiation. A uniform polymorphic representation would force boxing at exactly
 the seam [C2](anti-spec.md#c2--one-representation-chosen-at-the-seam) keeps
 single.
+
+### Code size — the argument against, and the middle path
+
+For a web target this is a first-class constraint, not a footnote. An earlier
+draft of this entry dismissed duplication as "a non-issue at this scale"; that
+was too glib. Three things bound the cost, and one option remains open.
+
+1. **The generic surface is small** — about five stdlib functions (`len`,
+   `filter`, `some`/`none`, `list.get`, `append`) with tiny bodies, over perhaps
+   5–15 concrete types in a real application.
+2. **The baseline is already worse than what §3 proposes.**
+   [F15](findings.md#f15): the frozen compiler monomorphizes `filter` per **call
+   site** — two identical filters over one type emit four symbols. Per-*type*
+   instantiation is a reduction, not an increase.
+3. **Monomorphization feeds the optimizer that already runs.** Release mode is
+   `--gufa --type-merging -O3 --converge -Oz --closed-world`. A specialized
+   instantiation under a closed world inlines and constant-folds; a *generic*
+   body that must handle any type stays general because it has to. **Erasure
+   ships one copy that handles cases the program never uses — it fights
+   dead-code elimination rather than feeding it.**
+
+**The middle path, if measurement says the cost is real: GC-shape stenciling**
+(Go 1.18's approach). Instantiate once per *memory shape* rather than per type.
+On WASM-GC the shape partition is tiny — roughly `{i32, i64, f32, f64, ref}` — so
+`list<Person>` and `list<Address>` share one `$len_list_ref`, and every generic
+function is bounded at ~5 copies **regardless of how many user types exist**.
+
+> **This is not a fork in the road.** Stenciling *is* monomorphization with a
+> coarser instantiation key: `(template, concrete args)` becomes
+> `(template, shapes(args))`. Same memo table, same pass, different key function.
+> Adopting §3 does not foreclose it, and coarsening later is a local change —
+> which is the main reason §3 is safe to adopt before the measurement exists.
+
+Cost if adopted: a second concept (shape ≠ type), and the mangling key becomes
+the shape, which interacts with [`infra-sema.md` S6](infra-sema.md#s6--overloadkey).
+
+**The measurement that settles it:** build one generic at two instantiations with
+the same GC shape and check whether `--gufa --type-merging` already merges them.
+If it does, stenciling is redundant and the plain key is correct.
+
+**The two closed alternatives**, for completeness: *erasure/boxing* reintroduces
+a second value representation ([C2](anti-spec.md#c2--one-representation-chosen-at-the-seam))
+and distributes cast code across every use site; *witness tables* (Swift's
+answer) need function values, which
+[§4](#4--closures-are-a-value-and-the-irs-are-shaped-for-one) ruled out and the
+canonical ABI has no type for.
 
 **Instantiation is on-demand and memoized** on `(template, concrete args)`.
 The eager closed-set alternative is rejected on a fact, not taste: `list<Person>`
@@ -684,3 +765,120 @@ It is a surface change and gets the same evidence the kebab lookahead got
 regenerate the corpus, and require all 8000 artifacts byte-identical. Real yel
 writes `if a {`, not `ifa {`, so that is a plausible outcome — but the frozen
 half needs the pair-walking work above first, and that is the expensive part.
+
+---
+
+## 8 · The reactive plan is an artifact, and its shape is open
+
+| | |
+|---|---|
+| **Status** | the *split* is wanted; the *granularity* is an open design question |
+| **Decided by** | **3b** (`yelc-hir` check) emits the plan · **4b** (`yelc-lower`) chooses granularity |
+| **Not touched by** | **4a** (`yelc-lir`) — it must never learn what a signal is ([C1](anti-spec.md#c1--no-domain-vocabulary-below-the-frontend-seam)) |
+| **Changes output** | the split: no · the granularity choice: **yes** |
+
+### Which stage does which
+
+The two halves land in different stages, and the line is the same
+analysis-vs-representation test that decides everything else here:
+
+| | stage | why |
+|---|---|---|
+| **the plan** — what work runs when which signal changes | **3b**, as a declared output | it is derived from dep sets, triggers and captures, all of which 3b already has. Nothing about it needs the target. |
+| **granularity** — how that work is packaged into functions | **4b** | how many WASM functions to emit, and how coarse, is a *representation* choice. 4b also knows the lowered body sizes, which is the input the decision actually needs. |
+
+**Consequence for the plan's shape, and it is a correction to the first draft:**
+the plan must carry **reactive units** — a body, its trigger, its dependency set —
+**not function identities**. If 3b names functions, it has already made 4b's
+decision. A unit is "this work runs when these signals change"; packaging units
+into one function per site, one per component, or inlined at the write site is
+then entirely 4b's call, and can even differ per component.
+
+This also keeps 3b's output stable if the granularity choice is revisited later:
+re-packaging is a 4b change with no frontend churn.
+
+### The part that is settled: plan, then transcribe
+
+After 2b the compiler knows the UI tree, every dependency set
+(`thir/signalck.rs` already computes these), every body and its trigger
+([§5](#5--handlers-and-closures-are-one-concept-split-by-trigger)), and every
+capture set ([§4](#4--closures-are-a-value-and-the-irs-are-shaped-for-one)). From
+those, **which functions exist and who calls whom is fully determined without
+knowing anything about the target.**
+
+So 2b emits a **plan** — function identities, their trigger, their dependencies,
+which body each runs — and 3b emits the *bodies*. This is the pattern already
+used once in this codebase (`410d874`: *"plan the module-start globals-init in
+LIR; codegen only transcribes it"*), one layer up.
+
+**Why it is worth doing.** `blocks.rs` is 8,500 lines with 50+ mutating fields
+largely because it **discovers structure while emitting it**.
+`pending_block_id_override` exists so a deferred body can reference a block
+before it is emitted; [F9](findings.md#f9)'s six env-snapshot fields exist because
+the walk that finds captures is the walk that emits. Both are symptoms of one
+pass doing two jobs. Separate them and each half is small.
+
+**Two constraints:**
+
+- **The plan is part of the seam, not the context.** `signal_deps` lives on
+  `CompilerContext` today (`context.rs:77`); a plan stashed there is
+  [A1](anti-spec.md#a1--no-side-channel-ir) side-channel IR. As a declared output
+  of 2b consumed by 3b it is just the contract. Feeds
+  [S4](infra-sema.md#s4--what-stays-on-the-context).
+- **Frontend ids only.** The plan cannot name `BlockId` — a `yelc-lir` type the
+  frontend crates cannot reach. It carries its own identity and 3b maps it, the
+  same shape as the `HirId ↔ NodeId` map.
+
+### The part that is NOT settled: what decomposition the plan describes
+
+**An earlier draft of this entry listed "effects, update functions, mount/unmount
+functions, derived recomputes, handlers, predicates" as though that were a fact
+about compiling reactivity. It is not — it is the frozen compiler's
+decomposition, read off its own DOT output.** The rewrite is greenfield and does
+not owe it.
+
+**A second correction, larger.** That draft also had a table ranking three
+strategies and claimed the frozen compiler used the worst of them (a Solid-style
+runtime effect registry). **It does not** — [F16](findings.md#f16): dispatch is
+already **fully static**, direct `CallBlock`s resolved at compile time, with no
+runtime registry and no dirty mask. The DOT graph that suggested otherwise is a
+*compile-time call graph*. The strategy that draft was building toward
+recommending is the one already in use.
+
+What that leaves is a real question, but a narrower and better-posed one, because
+**dispatch and granularity are orthogonal** and the draft conflated them:
+
+| axis | options | frozen |
+|---|---|---|
+| **dispatch** — how a write reaches its dependents | direct static calls · runtime registry · dirty-mask scan | **direct static calls** — and this is the best of the three for a closed-world AOT compiler. Not in question. |
+| **granularity** — how coarse the called functions are | one function per reactive site · one per component · inlined at the write site | **one per site**, plus separate mount/unmount and an update-function layer |
+
+**The open question is granularity, and it is a code-size question.** With direct
+dispatch and per-site functions, a component with N reactive sites emits N
+functions and each writer emits a call per dependent. The alternatives:
+
+- **Coarser functions** — one `update(mask)` per component, called directly (still
+  static dispatch). Fewer functions, branch tests inside. This is Svelte-3's
+  *granularity* without its *dispatch*; the two are separable and the draft
+  treated them as one choice.
+- **Inline at the write site** — no function at all for a small body; duplicate it
+  per writer. Smallest for one writer, worst for many.
+
+Component sizes bear on this directly: measured across 83 fixture
+components/globals, **max 14 reactive properties, median 2, p90 4**. At those
+sizes there is very little for a mask to amortise over, which argues the frozen
+granularity is closer to right than the draft assumed.
+
+### Open
+
+- **What granularity?** Genuinely undecided — but note dispatch is *not* in
+  question ([F16](findings.md#f16)). Measurable: the 85 execution tests pin
+  behaviour, so the comparison is module bytes and update cost, not correctness.
+- **One granularity, or chosen per component?** Two reactive sites and fifty want
+  different answers. A hybrid is possible, and it is how a plan-based design earns
+  its keep — the plan is the natural place to make that choice per component.
+- **Does mount/unmount need to be two functions**, or one parameterized by
+  direction? Same question for the effect indirection: it may simply be
+  removable.
+- **This changes output**, so whichever strategy is chosen lands as its own
+  enumerated divergence set. It is not a refactor.
