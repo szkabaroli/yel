@@ -401,6 +401,84 @@ lowering. *Asserted by* exhaustive matches and a fixture per `Error` variant.
 Carries stage 1's S5 forward — the invariant the frozen parser broke for its
 entire life.
 
+## The desugaring's diagnostic obligation
+
+**Binding, not aspirational.** The UI tree is lowered to functions and calls here,
+which means every error about a UI construct is reported against code the user
+never wrote. Preserving spans is not sufficient — it gets the *location* right and
+the *sentence* wrong.
+
+```
+Button { label: 42 }        ⟶   __mount_button(label: 42)
+
+  what the checker sees:  argument 1 of `__mount_button` expects string, found s32
+  what the user needs:    property `label` on `Button` expects string, found s32
+```
+
+Same span. One of those names a function nobody wrote.
+
+This is a known tax on desugaring early, not a yel problem: rustc added
+`DesugaringKind` precisely because desugared `for` / `?` / `await` produced errors
+phrased in terms of generated code. It is payable, and the price is that the
+lowering records **provenance**, not just spans.
+
+### Why this is an obligation rather than a quality goal
+
+**The oracle is silent here.** Of the 23 diagnostic fixtures, **not one is both
+UI-shaped and type-level** — the UI-shaped ones (`children_no_slot`,
+`duplicate_children`, `invalid_value_binding`, `recursive_instantiation`) are
+structural or resolution checks, and every type-level one is about expressions,
+records, enums or numbers.
+
+So this stage can lower the UI tree, regress **every** UI type-error message to
+name generated functions, and the entire frozen suite stays green. The
+differential cannot see it either — both compilers accept the same programs, and
+these are programs that compile. There is no measurement that fails.
+
+That is the exact shape [A8](anti-spec.md#a8--an-invariant-is-asserted-not-observed)
+exists for, so it is written as a deliverable with tests attached rather than
+left to review.
+
+### What is owed
+
+1. **Provenance recorded for every generated node**, by the lowering that
+   generates it — element, property, handler, child, `for` region, match arm.
+   Not reconstructed downstream; the lowering is the only place that knows.
+2. **Diagnostics name the written construct.** A type error on a UI property says
+   *property `X` on `Y`*. No generated function name (`__mount_*`, `__ui_*`)
+   appears in any user-visible message, ever.
+3. **New fixtures**, because none exist: at minimum a property type mismatch, a
+   handler signature mismatch, and a `for`-bound item used at the wrong type.
+   These are additions to the diagnostic corpus, which is a **gain** in oracle
+   coverage rather than a golden change — nothing existing is re-blessed
+   ([`oracle-never-rebless`](../../.agents/skills/compiler-rewrite/rules/oracle-never-rebless.md)).
+4. **A test that no generated identifier reaches a diagnostic.** Grep the rendered
+   output of the whole diagnostic corpus for the generated-name prefix and assert
+   zero hits. Cheap, and it fails loudly the first time someone adds a lowering
+   that forgets provenance.
+
+### Open sub-decision · where provenance lives
+
+Not settled; decide before the lowering is written, because it is the lowering
+that populates it.
+
+- **On `Span`** — rustc's choice: an interned context id, propagating
+  automatically, so the *renderer* rewords without every emit site knowing.
+  Costs a `u32` on a type copied everywhere.
+- **On `SourceMap`** — it already maps spans to source text; mapping spans to
+  provenance is the same shape, and `Diagnostic::with_span` stays unchanged.
+- **A `NodeMap<Origin>` side table** — cheapest, and already this stage's idiom
+  ([B3](anti-spec.md#b3--no-analysis-result-stored-on-the-node-it-describes)), but
+  every emit site must look it up, which means every emit site must remember to.
+
+The first two put the rewording in one place; the third distributes it. Prefer
+one place — a diagnostic obligation discharged at N sites is discharged at N−1
+sites within a year.
+
+**Note this is provenance, not analysis.** B3 forbids storing an *analysis
+result* on the node it describes. Where a node came from is established at
+construction and never recomputed, so it is not the shape B3 is about.
+
 ## Verification
 
 **3 has no artifact of its own** ([F14](findings.md#f14)) — and pretending
@@ -919,6 +997,12 @@ Stated because it is a real cost, not a free simplification:
 - [ ] `HirModule` carries a `ModuleId` and a *set* of `SourceId`s — not one
       source. A module is built from the file set (H1), so a single-source field
       is a category error.
+- [ ] **Provenance recorded for every node the UI desugaring generates**, and no
+      generated identifier appears in any rendered diagnostic — asserted over the
+      whole diagnostic corpus, not reviewed.
+- [ ] **New UI type-error fixtures** (property mismatch, handler signature,
+      `for`-bound item) — the frozen suite has none, so this area currently has
+      no oracle at all.
 - [x] D1–D6 recorded with reasoning. ✅ 2026-07-29
 - [ ] **D5's item-order divergence measured, not asserted.** The 815 corpus
       programs containing both a global and a component are byte-identical, or

@@ -9,6 +9,17 @@ Base: — · Started: — · Landed: —
 > **Gate.** Not briefed until 3 lands. 4 is a separate pass over 3's output,
 > so a divergence is bisected by dumping after 3.
 
+> **Inherited obligation.** The UI tree is gone before this phase runs — it is
+> lowered to functions and calls in
+> [stage 3](stage-3-hir-build.md#the-desugarings-diagnostic-obligation), so every
+> type error about a UI construct is reported against generated code. Stage 3
+> records the provenance; **this phase is where it is rendered.** A type error on
+> a UI property must name *property `X` on `Y`*, never `__mount_*`.
+>
+> The frozen suite cannot catch a regression here: none of the 23 diagnostic
+> fixtures is both UI-shaped and type-level, so every UI type message can degrade
+> with the suite green.
+
 ## What this phase is
 
 Bidirectional type checking over 3's nodes, filling `types: NodeMap<Ty>` from
