@@ -688,8 +688,40 @@ disagree on purpose (`yel-core/src/hir/lower.rs:128–160`):
 | lowering (3) | **components** → **globals** |
 
 So *registration* is already globals-first; this decision makes **lowering** agree
-with it. One order in the file instead of two, which is the argument for it. The
-frozen comment concedes components-first is inherited rather than required —
+with it.
+
+**The reason is the dependency direction, not tidiness.** Components reference
+globals; globals cannot reference components. Lowering in dependency order means
+a body is lowered after everything it can refer to, and the file reads in the
+direction the language actually depends. "One order instead of two" is a
+consequence, not the argument.
+
+The grammar backs the asymmetry: `global_member = { function_decl |
+global_callback | global_property | BLOCK_LEVEL_CATCH_ALL }` — **a global has no
+UI tree**, and a component is only ever instantiated inside one. There is no
+syntactic position in a global where a component can be used.
+
+**Two things this reason does *not* buy, stated so nobody assumes them later:**
+
+1. **It is not a correctness requirement, because register-then-lower already
+   decouples resolution from lowering order.** Every name is registered in phases
+   1b and 2 before any body lowers, which is precisely what makes forward
+   references work in both directions. Globals-first is the right order on the
+   merits; it is not load-bearing for resolution, and a test asserting that
+   lowering order makes a reference resolve would be asserting something the
+   registration phase already guarantees
+   ([A8](anti-spec.md#a8--an-invariant-is-asserted-not-observed)). Where the
+   direction *does* become load-bearing is [3b](stage-3b-lower.md) —
+   initialization order, and `resolve_global_triggers`.
+2. **Name resolution does not currently enforce it.** `lower.rs:1169–1174`
+   resolves a bare identifier through `Value → Type → Component`, and that path
+   is shared by global function bodies — so a bare component name written inside
+   a global resolves to `HirExprKind::Def(component_def_id)` today. The direction
+   holds because the grammar gives a global no place to *use* a component, not
+   because resolution refuses. If 2a wants the rule enforced rather than merely
+   unreachable, that is a check to add deliberately, with a diagnostic.
+
+The frozen comment concedes components-first is inherited rather than required —
 *"so the type-check order (and therefore diagnostic order) matches the previous
 components-then-globals pipeline"* — and shedding compatibility with a pipeline
 that no longer exists is what the rewrite is for.
@@ -709,9 +741,17 @@ flows to THIR → LIR → codegen and can reorder WIT exports and DOT nodes.
 
 **The obligation this creates, and it is 2a's:** run the corpus differential and
 show the 815 either byte-identical or diverging *only* in item order, with the
-divergence enumerated in [`goldens-changed.md`](goldens-changed.md). If WIT bytes
-move, this decision is not free and comes back for a second look — a reordered
-WIT export list is a real interface change, not a cosmetic one.
+divergence enumerated in [`goldens-changed.md`](goldens-changed.md).
+
+**If WIT bytes move, that is a deliberate golden change, not a reason to
+reverse.** The dependency-direction argument settles the order on the merits, so
+a reordered export list gets documented and re-blessed **from the frozen
+compiler's rules, never from the new compiler's output**
+([`oracle-never-rebless`](../../.agents/skills/compiler-rewrite/rules/oracle-never-rebless.md)).
+What the differential is for here is *knowing* what moved, not deciding whether
+the order was right — measuring it is still mandatory, because "we expected only
+item order to change" is a claim, and an unmeasured claim is how a miscompile
+gets waved through as an expected reordering.
 
 `Definitions` order is **not** at risk: registration order is unchanged.
 

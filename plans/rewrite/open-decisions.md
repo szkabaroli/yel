@@ -347,8 +347,9 @@ is defensible; the requirement is that it is **chosen**, not inherited.
 
 - [ ] **All components, then all globals** — frozen behaviour, which preserves
       type-check and therefore diagnostic order.
-- [x] **Globals then components** — reverses the frozen *lowering* order so it
-      agrees with the *registration* order, which is already globals-first.
+- [x] **Globals then components** — dependency order: components reference
+      globals, globals cannot reference components. Also makes *lowering* agree
+      with *registration*, which is already globals-first.
       ⚠️ Carries an obligation; see the log entry.
 - [ ] **Source order, with diagnostics sorted before rendering.**
 - [ ] Other: ______
