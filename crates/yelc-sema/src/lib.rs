@@ -27,8 +27,8 @@
 //! | B1 | `Ty` **must not** derive `Serialize` | [`types`] |
 //! | B2 | [`DefId`] is module-qualified from day one | [`ids`] |
 //! | B3 | one [`OverloadKey`], two consumers | [`ids`] |
-//! | C1 | builtins are **one table**, two accessors | pending |
-//! | C1c | arity has a **variadic** form | pending |
+//! | C1 | builtins are **one table**, two accessors | [`builtins`] |
+//! | C1c | arity has a **variadic** form | [`builtins`] |
 //! | C2 | builtin elements/enums/variants get a separate home, holding `DefId` not `Option<DefId>` | pending |
 //! | D0 | the context holds **six** fields | pending |
 //!
@@ -44,8 +44,12 @@
 //! `effect` below the frontend seam, and `signal_deps` belongs to `yelc-hir`
 //! (decision D0a) because it is analysis about a program, not infrastructure.
 
+pub mod builtins;
+pub mod definitions;
 pub mod ids;
 pub mod types;
 
+pub use builtins::{Arity, Builtin, BuiltinId, BuiltinTable, LoweringTarget};
+pub use definitions::{Definition, Definitions, Duplicate, Namespace};
 pub use ids::{DefId, DefPath, ModuleId, OverloadKey};
 pub use types::{Ty, TyKind, TypeInterner};
