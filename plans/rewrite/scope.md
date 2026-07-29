@@ -241,3 +241,53 @@ The pattern worth naming: **three of the four were found by trying to write yel,
 not by reading the plan.** `<T>` and function bodies came out of `stdlib/`,
 `match` came out of asking what consumes a variant. Analysis found the fourth
 (`primitive`) and has been sitting on it, undecided, longest.
+
+### 2026-07-29 — attributes on items, and `unsafe`
+
+**Decided.** Items may carry attributes, written `@name` or `@name(args)` before
+the declaration. `@unsafe` is the first, gating the primitive/cast machinery the
+[uniform-ref stdlib](../../stdlib/README.md) needs.
+
+```yel
+@unsafe
+@primitive("@wasm.ref_array_any_get")
+array-any-get: func(a: ref, i: s32) -> ref;
+```
+
+**`@` is already taken, and this is the part to get right.** `AT` is a token, it
+is a member of the `NODE_START` set, and `@children` is a **UI node** — two of
+the 23 diagnostic fixtures are about it (*"component `Panel` does not declare
+`@children`"*, *"component already has a `@children` slot"*).
+
+The two are separable by position: an attribute precedes a **declaration**, and
+`@children` appears in a **UI tree body**. So no new sigil is needed. But the
+parser must not decide by lookahead over the name — `@children` and `@unsafe`
+differ only in the identifier, and a lookahead list is exactly what silently
+misparsed `func<T>` (see [`seam-changes.md`](seam-changes.md), and the
+`parse_type` dispatch comment). Decide by **context**, not by which name follows
+the `@`.
+
+**Unknown attributes are an error**, not ignored. An attribute that is silently
+dropped is the `_ => {}` shape ([F20](findings.md#f20)) with a friendlier face —
+the user writes `@unsfae` and gets working code with no gate.
+
+### This collapses two breaks into one
+
+With attributes, **`primitive` does not need to be a keyword.** A primitive is a
+bodyless declaration carrying `@primitive("@op")`, which is one mechanism instead
+of two and removes a top-level item form from the grammar. Grain has both — an
+`@unsafe` decorator *and* a `primitive` keyword — but that is a historical shape,
+not a requirement.
+
+So the surface-break list is not five. It is:
+
+| break | shape |
+|---|---|
+| `match` | new expression / node / statement form |
+| `<T>` | ✅ parses (`8daa4b9`) |
+| function bodies | a `Block` shared with closures (`5ac81f3`) |
+| attributes + `@unsafe` | one mechanism; **subsumes `primitive`** |
+| `ref` opaque type | one type name |
+
+Five items, four mechanisms, one scoped reopening after stage 4. `primitive`'s
+"two unspent options" question is answered by not asking it.
