@@ -800,9 +800,20 @@ checked mechanically against the frozen AST — see Review round 2 §4.
 The rewritten parser reports it, which invariant S5 and anti-spec A5 require.
 Two follow-ups for the orchestrator, neither an agent decision:
 
-- the fixture should be rewritten to `{ x -> x > 2 }` and re-blessed, at which
-  point the module-scope filter path is actually exercised for the first time;
-- the two silent `_ => {}` arms are a `known_bugs` entry the rewrite fixes.
+- ~~the fixture should be rewritten to `{ x -> x > 2 }` and re-blessed~~ —
+  **done 2026-07-29 (`1d12250`), and it could not be re-blessed.** The corrected
+  program *panics* the frozen compiler at `hir/local_scope.rs:73`, so it moved to
+  `known_bugs/` rather than staying in `positive/`. The panic is specific to a
+  **global property default**; the same closure is fine in a component property
+  default and in a global function body. The prediction above — "the module-scope
+  filter path is actually exercised for the first time" — was wrong in an
+  informative way: the path is not merely untested, it is broken.
+- ~~the two silent `_ => {}` arms are a `known_bugs` entry~~ — **no fixture is
+  owed.** They are an under-rejection, and the `known_bugs` harness asserts
+  compilation *fails*; a fixture there would report itself fixed. The 18 entries
+  in `support::catch_all::DIVERGENCES`, each proved causally by
+  `explains_our_report`, are the record. See
+  [`stage-2a-hir-build.md` § Phase 0](stage-2a-hir-build.md#phase-0--oracle-hygiene---done-2026-07-29-1d12250).
 
 ### 2. `if` followed directly by `{` is an element named `if`
 

@@ -483,22 +483,41 @@ constraints that made them prerequisites still hold, and are stated per phase.
 
 Phases run in order. Phase 0 must complete before any number is taken.
 
-### Phase 0 · Oracle hygiene
+### Phase 0 · Oracle hygiene — ✅ **done 2026-07-29** (`1d12250`)
 
-Both items change *what the frozen compiler produces*, so they touch the oracle
-and must land **before** the differential runs. This is the one ordering
-constraint that survived the move intact — a corpus baseline that shifts
-mid-stage makes every later divergence unattributable, which is the whole reason
-[one stage is in flight at a time](../../.agents/skills/compiler-rewrite/rules/stage-gate-sequential.md).
+1. ~~**`global_filter_default.yel` resolved.**~~ ✅ **It could not be re-blessed.**
+   Corrected to `{ x -> x > 2 }` the program **panics the frozen compiler** at
+   `hir/local_scope.rs:73`, so there is no output to bless. It moved to
+   `known_bugs/` instead, and the panic is scoped by experiment: the same closure
+   is fine in a component property default and in a global *function* body, and
+   panics only in a **global property default** — exactly the path the fixture
+   claimed to guard. Positive fixtures 91 → 90; no coverage lost, `.filter` is
+   exercised by three other positive fixtures. Full log in
+   [`goldens-changed.md`](goldens-changed.md); new baseline row `1d12250` in
+   [`ratchet.md`](ratchet.md).
 
-1. **`global_filter_default.yel` resolved.** Stage 1 found it writes
-   `[1,2,3,4].filter(|x| x > 2)` — `|` is not an operator, the catch-all ate the
-   line, and *the module-scope filter path it guards has never been exercised*.
-   Rewrite to `{ x -> x > 2 }` and re-bless **from the frozen compiler**, with a
-   line in [`goldens-changed.md`](goldens-changed.md).
-2. **The two silent `_ => {}` parser arms** filed as a `known_bugs` entry.
-   Bookkeeping, no code — but it is the record of a real frozen-compiler defect,
-   and the rewrite's free win is only free if someone wrote it down.
+2. ~~**The two silent `_ => {}` arms** filed as a `known_bugs` entry.~~
+   ✅ **Filed differently, on purpose.** They are an **under**-rejection — the
+   frozen parser *accepts* a `global` body containing garbage and drops the
+   member — and the `known_bugs` harness asserts that compilation **fails**. A
+   fixture there would compile cleanly and the harness would report
+   *"the bug appears to be fixed, graduate this to positive/"*, which is the
+   opposite of the truth. The frozen suite has no shape for "accepts what it
+   should reject".
+
+   It is already pinned, in `yelc-syntax`'s own suite and more strongly than a
+   fixture could manage: `support::catch_all::DIVERGENCES` lists 18 cases, and
+   `explains_our_report` proves each one **causally** rather than by
+   co-location — it excises exactly the bytes the frozen parser discarded,
+   re-parses, and requires our diagnostic to disappear. An over-rejection of ours
+   cannot be appended to that list and pass. That is the record; no fixture is
+   owed.
+
+**The ordering constraint that made this a prerequisite held, and cost nothing.**
+Both items were done before any 2a measurement. The corpus did not need
+regenerating: `git status --porcelain` over every frozen `src/` and `Cargo.*`
+came back empty, so the frozen binary is byte-identical and the oracle cannot
+have moved.
 
 ### Phase 1 · `yelc-sema` (~3,536 lines)
 

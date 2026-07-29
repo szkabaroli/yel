@@ -44,7 +44,7 @@ Answer all four in one sitting — each constrains the others.
 
 ### A1 · How are parameterized types represented?
 
-- [ ] **Monomorphization by type.** `list<T>` instantiates to concrete
+- [x] **Monomorphization by type.** `list<T>` instantiates to concrete
       `$list_s32`, `$list_Person`. No type variables, no unification. Internal
       only — `list<s32>` stays the surface. Key: `(template, concrete args)`.
 - [ ] **Monomorphization by GC shape** (Go 1.18's stenciling). Same machinery,
@@ -86,7 +86,7 @@ merges them. [§3](directions.md#3--generics-are-monomorphization-by-name).
 
 ### A2 · What algorithm does 2b type-check with?
 
-- [ ] **Bidirectional** — `Mode::{Infer, Check}`, no solver, types concrete at
+- [x] **Bidirectional** — `Mode::{Infer, Check}`, no solver, types concrete at
       every step.
 - [ ] **Unification** — generate constraints with fresh variables, solve.
 - [ ] **Bidirectional now, solver later** behind the same API.
@@ -109,7 +109,7 @@ The `T` in `list<T>` — a placeholder in a *declaration*.
 
 - [ ] **No** — templates are carried as **syntax** (AST `TypeRef` + a
       substitution) and interned only once concrete.
-- [ ] **Yes** — templates are represented as `Ty`, so a parameter needs a variant.
+- [x] **Yes** — templates are represented as `Ty`, so a parameter needs a variant.
 - [ ] Other: ______
 
 *Hangs on it:* structural equality, interner uniquing, and what B1 has to write.

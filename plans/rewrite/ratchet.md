@@ -24,6 +24,7 @@ started measuring.
 | **1 — syntax** | 2026-07-28 | `33e5c71` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | **0** | **2** |
 | **baseline (re-freeze 2)** | 2026-07-28 | `3ef3568` | **315 passed / 0 failed** | **85 / 85** | **200 / 200** | — (corpus proved neutral, not regenerated) | **2** |
 | **2 — driver** | 2026-07-28 | `2505f8d` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | **0** | **2** |
+| **baseline (re-freeze 3)** | 2026-07-29 | `1d12250` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | — (corpus untouched; no frozen `src/` changed) | **2** |
 | 2a — HIR build+resolve (incl. `yelc-sema`) | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 2b — HIR check | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 3a — LIR data model | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
@@ -51,6 +52,21 @@ supposed to be the cheap-to-change one
 recorded there: 2000 / 2000 programs round-tripped byte-identically through the
 shipping binary, 0 driver failures. That is the first check of invariant S1 from
 *outside* `yelc-syntax`.
+
+**The 2026-07-29 re-freeze is the one kind that costs nothing.** `1d12250`
+changed *fixture data only* — `global_filter_default.yel` moved from `positive/`
+to `known_bugs/` ([`goldens-changed.md`](goldens-changed.md)). No file under any
+frozen `src/` or `Cargo.*` changed, checked with `git status --porcelain`, so the
+frozen binary is byte-identical and the corpus **cannot** have moved. This is
+weaker evidence than `3ef3568`'s (which regenerated 8000 digests and compared
+them) and it is weaker on purpose: there is nothing to compare when the compiler
+is the same bytes. The claim to verify was "no source changed", and that is what
+was verified.
+
+Two counts moved and are recorded here so a later reader is not surprised:
+**positive fixtures 91 → 90**, **known_bugs 3 → 4**. The workspace test count did
+not move — `positive_fixtures` and `known_bugs_fixtures` are one test each,
+looping over a directory.
 
 **A row is per landing, not per crate.** 2a and 2b live in one crate but ratchet
 separately, because each lands on its own measured number and the whole point is
