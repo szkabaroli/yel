@@ -327,3 +327,56 @@ Changing `@children` would be the first **non-additive** break — measured at
 **1020 of 2000 corpus programs** — so it waits for cutover, alongside
 [§7](directions.md#7--keywords-get-a-word-boundary--at-cutover-by-deletion)'s
 keyword reservation, where there is no oracle left to invalidate.
+
+#### Corrections — three statements above are wrong
+
+Found by implementing them (`a68e127`). Left in place with corrections rather than
+edited away, because each was wrong for a reason worth keeping.
+
+**1. "Separable by position" is false.** The claim was that an attribute precedes
+a *declaration* while `@children` sits in a *UI tree body*, so context
+disambiguates. It does not: `export component App { @children }` is a legal
+**direct component member** — it is a row in `identity.rs`'s hand-written table
+(:730). An attributed member and a `@children` node occupy the same position in
+the same parse function, so "which parse function am I in" returns the same
+answer for both.
+
+The implemented rule is total instead: **an `AT` whose next raw token is
+`CHILDREN_KW` is the slot marker; every other `AT` in a declaration position
+opens an attribute list.** It reads one token kind the lexer already assigned
+rather than a table of attribute spellings, so it cannot drift as attributes are
+added, and it has no third outcome. Consequence, accepted deliberately:
+`@children` can never be spelled as an attribute.
+
+**2. `@primitive("@wasm…")` contradicted the named-args decision** three
+paragraphs below it. Both could not hold.
+
+**3. And it is moot — `primitive` is a top-level item form after all.**
+
+```yel
+primitive array-any-get: func(a: ref, i: s32) -> ref = "@wasm.ref_array_any_get";
+```
+
+Keyword, name, **type**, `=`, op string. So `@primitive(op = …)` is not needed:
+`@unsafe` stays an attribute, `primitive` is an item, and the two mechanisms do
+not overlap. The earlier "attributes subsume `primitive`" collapse is withdrawn.
+
+**Keep the type in the source, unlike Grain.** Every Grain primitive is a
+function and carries **no type annotation** — `provide primitive load =
+"@wasm.load_int32"` — so its compiler owns the signature, keyed off the op
+string. That makes the stdlib opaque: you cannot read `wasmi32.gr` and learn a
+single type. Yel's builtin table already stores `params`/`ret`, so the type must
+exist somewhere; putting it in the source makes the stdlib self-describing.
+
+**The cost, and the fix already in use.** Type-in-source means the *declared*
+type and the *op's actual* signature are two things that must agree — which is
+[F12](findings.md)'s shape. The compiler knows each op's true signature, so it
+**verifies the declared type against it once, at registration**, failing there
+with every mismatch listed. That is exactly [C2](stage-3-hir-build.md)'s
+lang-items pattern: one assertion where the invariant is established, not trust
+plus re-checking at each use. It validates the op string for free — `op = "@typo"`
+fails at registration rather than lowering to nothing.
+
+**Revised surface list:** `match` · `<T>` ✅ · function bodies · attributes +
+`@unsafe` ✅ (`a68e127`) · `ref` type · `primitive` item form. Six items, five
+mechanisms.

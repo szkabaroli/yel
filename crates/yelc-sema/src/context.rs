@@ -104,7 +104,6 @@ impl Default for CompilerContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::definitions::Namespace;
     use crate::known::Known;
     use yelc_base::{SourceId, Span};
 
