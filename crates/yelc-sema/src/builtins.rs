@@ -70,6 +70,21 @@ pub enum LoweringTarget {
     },
 }
 
+/// Whether a user may write this name.
+///
+/// `concat` and the `*-to-string` family are real rows the checker must type
+/// and lowering must find, but `LANGUAGE.md` documents none of them because a
+/// user never writes one — they are targets of desugarings. Recording that as a
+/// field beats omitting them, which is how `concat` ended up with a comment
+/// saying it was variadic and a declaration saying it took nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Visibility {
+    /// Documented in `LANGUAGE.md`; resolvable from source.
+    UserFacing,
+    /// A desugaring target. Not name-resolvable from source.
+    Internal,
+}
+
 /// One builtin, in one place.
 #[derive(Clone, Debug)]
 pub struct Builtin {
@@ -80,6 +95,7 @@ pub struct Builtin {
     pub params: Vec<Ty>,
     pub ret: Option<Ty>,
     pub lowering: LoweringTarget,
+    pub visibility: Visibility,
 }
 
 /// Index into [`BuiltinTable`]. Dense, stable within one table.
@@ -180,6 +196,7 @@ mod tests {
             params: Vec::new(),
             ret: Some(Ty::STRING),
             lowering: LoweringTarget::Op("concat"),
+            visibility: Visibility::Internal,
         });
         table.register(Builtin {
             name: interner.intern("len"),
@@ -187,6 +204,7 @@ mod tests {
             params: vec![Ty::STRING],
             ret: Some(Ty::S32),
             lowering: LoweringTarget::Op("string_len"),
+            visibility: Visibility::UserFacing,
         });
         (interner, table)
     }
@@ -232,6 +250,7 @@ mod tests {
             params: vec![Ty::ERROR], // list<T>, once generics exist
             ret: Some(Ty::S32),
             lowering: LoweringTarget::Op("list_len"),
+            visibility: Visibility::UserFacing,
         });
         assert_eq!(table.overloads(interner.intern("len")).len(), 2);
     }

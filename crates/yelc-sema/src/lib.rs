@@ -21,7 +21,7 @@
 //!
 //! | | decision | where |
 //! |---|---|---|
-//! | A1 | generics are monomorphized **by type** | builtin table (pending) |
+//! | A1 | generics are monomorphized **by type** | [`stdlib`] uses one `Param(0)` |
 //! | A3 | `Ty` gains [`TyKind::Param`] | [`types`] |
 //! | A4 | `Ty` gains [`TyKind::Infer`] | [`types`] |
 //! | B1 | `Ty` **must not** derive `Serialize` | [`types`] |
@@ -49,9 +49,10 @@ pub mod context;
 pub mod definitions;
 pub mod ids;
 pub mod known;
+pub mod stdlib;
 pub mod types;
 
-pub use builtins::{Arity, Builtin, BuiltinId, BuiltinTable, LoweringTarget};
+pub use builtins::{Arity, Builtin, BuiltinId, BuiltinTable, LoweringTarget, Visibility};
 pub use context::CompilerContext;
 pub use definitions::{Definition, Definitions, Duplicate, Namespace};
 pub use ids::{DefId, DefPath, ModuleId, OverloadKey};
