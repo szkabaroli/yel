@@ -12,7 +12,7 @@ Base: — · Started: — · Landed: —
 *To be written.* LIR → WASM component + WIT + DOT.
 
 Depends on `{ yelc-lir, yelc-base }` **and nothing else**. No dependency path to
-any frontend crate; see [stage 3a](stage-3a-lir.md#why-3a-and-3b-are-separate-crates).
+any frontend crate; see [stage 5](stage-5-lir.md#why-stages-5-and-6-are-separate-crates).
 
 Must honour:
 
@@ -29,7 +29,7 @@ Must honour:
   disallowed-types lint denied.
   [Anti-spec A6](anti-spec.md#a6--no-random-seeded-iteration-reaching-output) —
   this was ~35/200 seeds emitting byte-different modules run-to-run.
-- Carry the `WitBoundary` witness ([keep-list §10](keep-list.md#10--the-witboundary-witness-stage-4)).
+- Carry the `WitBoundary` witness ([keep-list §10](keep-list.md#10--the-witboundary-witness-stage-7)).
 
 Open debt this stage is expected to *fix*, not port — each changes behaviour, so
 each lands as its own enumerated divergence with an execution test:

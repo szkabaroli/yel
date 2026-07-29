@@ -295,6 +295,47 @@ frozen tree) changed which files a name-sorted strided sampler picked, turning
 three of the stage's headline numbers red and shifting a pinned floor from 586 to
 568. Nothing about the parser had changed.
 
+
+### A18 · A number is produced by a command
+
+A figure reasoned onto the page is indistinguishable, once written, from one that
+was run. Both are bold, both are cited, both get relied on — the difference
+surfaces only when something depends on it being true. Arithmetic is the usual
+route (*"315 workspace tests plus the ~80 the new crate adds, so 395"*);
+estimation is the other (*"duplication is a non-issue at this scale"*).
+
+**Every number carries the command that produced it, near enough to re-run
+without hunting.** A number without one is a claim, and is labelled as a claim or
+deleted.
+
+Two corollaries, both learned the hard way:
+
+- **Where a number lives decides whether it can be skipped.** A row in
+  [`ratchet.md`](ratchet.md) is a gate that fails loudly; the same figure as a
+  line of prose in a stage's Numbers is a note that can be quietly not-taken.
+  Moving a measurement from a row to a line is a real loss of rigour even when
+  the number is identical, and is stated as a cost when it happens.
+- **A measurement of the wrong population is worse than none**, because it
+  reports a plausible number under the right name — see
+  [A14](#a14--test-inputs-are-verified-present-not-merely-counted) and
+  [A17](#a17--test-input-selection-is-stable-under-renames).
+
+This is [A8](#a8--an-invariant-is-asserted-not-observed)'s sibling: A8 governs
+invariants a **test** asserts, A18 governs figures a **document** reports. Same
+failure, two surfaces, and the second has no compiler to catch it.
+
+*Found by:* the baseline row in `ratchet.md`. Its first draft read **395**
+workspace tests — derived from the old count plus the new crate's expected
+additions rather than from `cargo test --workspace`. Caught before it landed, and
+the row now names the command beside every column. The freeze check had the same
+disease in a different costume: `git status … | wc -l` printed the expected
+number while matching nothing at all, and went undetected for the whole of stage
+1 *because the number it printed was the number expected*.
+
+*Numbering note:* cited as `A19` in `ratchet.md` before it existed — the citation
+was written from a miscount, and the reference was corrected to A18 rather than
+leaving a permanent hole at A18. Nothing was renumbered; A18 had never been used.
+
 ---
 
 ## B. Front-end shapes (stages 1–3)

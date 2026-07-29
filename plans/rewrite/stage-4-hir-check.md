@@ -1,24 +1,24 @@
-# Stage 2b — `yelc-hir`, check                      status: brief written
+# Stage 4 — `yelc-hir`, check                      status: brief written
 
 Replaces (frozen, never edited): `crates/yel-core/src/thir/`.
-Phase **2b** of the merged HIR stage; phase 2a is
-[`stage-2a-hir-build.md`](stage-2a-hir-build.md). Same crate, run after 2a.
+Phase **4** of the merged HIR stage; phase 3 is
+[`stage-3-hir-build.md`](stage-3-hir-build.md). Same crate, run after 3.
 
 Base: — · Started: — · Landed: —
 
-> **Gate.** Not briefed until 2a lands. 2b is a separate pass over 2a's output,
-> so a divergence is bisected by dumping after 2a.
+> **Gate.** Not briefed until 3 lands. 4 is a separate pass over 3's output,
+> so a divergence is bisected by dumping after 3.
 
 ## What this phase is
 
-Bidirectional type checking over 2a's nodes, filling `types: NodeMap<Ty>` from
+Bidirectional type checking over 3's nodes, filling `types: NodeMap<Ty>` from
 empty to total. **No new IR** — the merge decision
 ([`seam-changes.md`](seam-changes.md), 2026-07-28) means there is one node
 vocabulary and one walker, both owned by
-[2a](stage-2a-hir-build.md#the-shape-shared-with-2b).
+[3](stage-3-hir-build.md#the-shape-shared-with-stage-4).
 
 Already true when this phase starts, and not to be redone: **declared types are
-already `Ty`** in the definition tables (2a phase 2 —
+already `Ty`** in the definition tables (3 phase 2 —
 [F5](findings.md#f5)). This phase types **expressions**, nothing else.
 
 ## Brief
@@ -32,18 +32,18 @@ already `Ty`** in the definition tables (2a phase 2 —
 - **Carry the frozen visitor split forward.** `thir/visit.rs` (`ThirVisitor` +
   `walk_expr`/`walk_stmt`, exhaustive, with a `visit_closure` descent hook) is
   **the model**, not debt — the one place the duplicated-walker problem was
-  actually solved. In the merged design it becomes *the* walker, shared with 2a,
+  actually solved. In the merged design it becomes *the* walker, shared with 3,
   not a second one ([A3](anti-spec.md#a3--no-duplicated-walkers)).
 - **Split `typeck.rs`** (2.8k in the frozen tree) —
   [A2](anti-spec.md#a2--no-god-pass).
-- **Type-directed lowerings land here**, not in 2a: string interpolation →
+- **Type-directed lowerings land here**, not in 3: string interpolation →
   `concat` needs each part's type; `MethodCall` resolution (`len`, `filter`)
-  likewise. See [2a § What lowerings belong here](stage-2a-hir-build.md#what-lowerings-belong-here)
+  likewise. See [3 § What lowerings belong here](stage-3-hir-build.md#what-lowerings-belong-here)
   for the full split.
 
 ## Decisions this phase must make
 
-Prefix `T` so they do not collide with 2a's `D` or `yelc-sema`'s `S`.
+Prefix `T` so they do not collide with 3's `D` or `yelc-sema`'s `S`.
 
 | # | decision | status |
 |---|---|---|
@@ -84,7 +84,7 @@ wording exercise — and it is the single most likely way this phase fails its
 diagnostic gate.
 
 **`Infer` must not survive this phase.** See
-[S7](infra-sema.md#s7--does-ty-gain-a-non-concrete-variant) for the full
+[S7](stage-3-hir-build.md#s7--does-ty-gain-a-non-concrete-variant) for the full
 obligation set; the part this phase owns is the postcondition below.
 
 ## Gaps inherited as decisions, not copies
@@ -117,7 +117,7 @@ and there is no conversion from `list<s32>` to `list<s64>` short of an
 element-wise map, so failing to build it **is** the rejection, at the right span,
 with a message. Today the same program reaches the encoder and dies there.
 
-This phase owns it: coercion is type-directed, so it cannot live in 3a.
+This phase owns it: coercion is type-directed, so it cannot live in 3.
 
 ## Directions in play
 
@@ -132,7 +132,7 @@ This phase owns it: coercion is type-directed, so it cannot live in 3a.
   model the value form; do **not** implement capture. The design obligation is
   unconditional, the implementation is a separate scope call.
 - [§5](directions.md#5--handlers-and-closures-are-one-concept-split-by-trigger) —
-  **changes no output.** The node merge is 2a's shape question; the sub-decision
+  **changes no output.** The node merge is 3's shape question; the sub-decision
   here is *how the trigger is determined*. §5 records options A (a keyword — a
   frozen-surface change) and B (the trigger on the slot's function type, carried
   by the `Check` direction). Picking by default is how a language change gets
@@ -150,16 +150,16 @@ This phase owns it: coercion is type-directed, so it cannot live in 3a.
 
   **It carries reactive *units*, not function identities.** A unit is "this body
   runs when these signals change". How units are packaged into functions is
-  [4b's](stage-3b-lower.md) choice, and naming functions here would silently make
+  [6's](stage-6-lower.md) choice, and naming functions here would silently make
   it. Ids are frontend ids — `BlockId` is a `yelc-lir` type this crate cannot
   reach.
 
 ## Contract
 
-2b **adds nothing to the seam** except making `types` total. Everything else —
+4 **adds nothing to the seam** except making `types` total. Everything else —
 `HirId`, `HirMap`, `HirModule`, `NodeMap`, `TypeId`, `type_of`,
-[H1–H5](stage-2a-hir-build.md#invariants-this-phase-establishes) — is owned and
-established by [2a](stage-2a-hir-build.md#contract) and assumed here.
+[H1–H5](stage-3-hir-build.md#invariants-this-phase-establishes) — is owned and
+established by [3](stage-3-hir-build.md#contract) and assumed here.
 
 **Postcondition, strengthened by [T1](#t1--bidirectional-checking-not-unification):**
 `types` has an entry for every expression node, **and no entry contains an
@@ -169,34 +169,34 @@ miscompiles downstream. If a type could not be determined, the entry is
 `Ty::ERROR` and a diagnostic was emitted
 ([A5](anti-spec.md#a5--no-silent-fallback)).
 
-### What stage 3a may NOT assume
+### What stage 3 may NOT assume
 
 - **No `HirId` stability** across reparses, same as `NodeId`.
 - **No classification of element props** into bindings vs handlers, if
-  [D1](stage-2a-hir-build.md#d1) lands as recommended.
+  [D1](stage-3-hir-build.md#d1) lands as recommended.
 - **No capture sets** unless [§4](directions.md#4--closures-are-a-value-and-the-irs-are-shaped-for-one)
   is adopted into this brief.
 
 ## Verification
 
-This is where the stage gets a real artifact. After 2b the module is
+This is where the stage gets a real artifact. After 4 the module is
 **serializable and typed** ([§6](directions.md#6--modules-are-serializable-artifacts)),
 so it is **byte-comparable** — recovering the artifact-level differential that
-neither the old stage-2 boundary nor 2a alone could provide
+neither the old stage-2 boundary nor 3 alone could provide
 ([F14](findings.md#f14)).
 
-**`yelc2 --emit-hir` gains the type map.** The same dump 2a lands
-([why it is yel-flavoured and not round-trippable](stage-2a-hir-build.md#yelc2---emit-hir--the-dump-is-a-deliverable-not-a-convenience))
+**`yelc2 --emit-hir` gains the type map.** The same dump 3 lands
+([why it is yel-flavoured and not round-trippable](stage-3-hir-build.md#yelc2---emit-hir--the-dump-is-a-deliverable-not-a-convenience))
 now annotates every expression with its `Ty`, plus the trigger kind and capture
 set this phase settles.
 
 That makes this phase's central postcondition **directly visible**: `types` is
 total, so a rendered expression with no type is a bug the dump shows rather than
 a bug a later stage trips over. It is the cheapest possible check on the DoD line
-below, and it doubles as the artifact 2a could not have
+below, and it doubles as the artifact 3 could not have
 ([F14](findings.md#f14)).
 
-Plus, unchanged from 2a and re-run here:
+Plus, unchanged from 3 and re-run here:
 
 1. **Diagnostics** — meaning, span, and order — over the 2000-seed corpus, 91
    positive and 23 diagnostic fixtures, via frozen `yelc check`. This is the
@@ -205,12 +205,12 @@ Plus, unchanged from 2a and re-run here:
 
 ## Definition of done
 
-- [ ] `types` total after 2b; asserted by a walk over every corpus program that
+- [ ] `types` total after 4; asserted by a walk over every corpus program that
       every expression node has an entry — and **visible in `--emit-hir`**, which
       renders an untyped expression as such rather than omitting it.
 - [ ] **No `Infer` variable survives the phase** — a `has_infer()`-style assert
       over the whole map, not a spot check ([T1](#t1--bidirectional-checking-not-unification),
-      [S7](infra-sema.md#s7--does-ty-gain-a-non-concrete-variant)).
+      [S7](stage-3-hir-build.md#s7--does-ty-gain-a-non-concrete-variant)).
 - [ ] **Unification failures report at the construct that introduced the
       expectation**, not where the solver noticed. Verified against the 23
       diagnostic fixtures.
@@ -218,7 +218,7 @@ Plus, unchanged from 2a and re-run here:
       diff read and recorded in [`goldens-changed.md`](goldens-changed.md).
 - [ ] Accumulate-and-continue verified: a program with three independent type
       errors reports three, not one.
-- [ ] One walker shared with 2a — no second visitor
+- [ ] One walker shared with 3 — no second visitor
       ([A3](anti-spec.md#a3--no-duplicated-walkers)).
 - [ ] No pass over ~800 lines without written justification
       ([A2](anti-spec.md#a2--no-god-pass)).
@@ -235,7 +235,7 @@ Plus, unchanged from 2a and re-run here:
 
 - **Frozen** `yel-core/src/thir/` — `typeck.rs` (2.8k), `visit.rs` (the model to
   carry forward), `node.rs`, `expr.rs`.
-- **2a's contract** — [`stage-2a-hir-build.md`](stage-2a-hir-build.md#contract).
+- **3's contract** — [`stage-3-hir-build.md`](stage-3-hir-build.md#contract).
 
 ## Numbers · Decision log · Surprises
 

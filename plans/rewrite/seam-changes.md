@@ -33,16 +33,16 @@ granted one, and stops the same request arriving three times.
 **Requested by:** the integrator. Supersedes the "stage numbering downstream is
 unchanged" clause in the entry below.
 
-**Request.** After HIR and THIR merged, the stages read 1, 2a/2b, *(nothing)*,
-4a/4b, 5. Close the gap, in file names too.
+**Request.** After HIR and THIR merged, the stages read 1, 3/4, *(nothing)*,
+5/6, 5. Close the gap, in file names too.
 
 | was | is | crate |
 |---|---|---|
-| 4a | **3a** | `yelc-lir` |
-| 4b | **3b** | `yelc-lower` |
+| 5 | **3** | `yelc-lir` |
+| 6 | **4** | `yelc-lower` |
 | 5 | **4** | `yelc-codegen` |
 
-`stage-4-lir.md` → `stage-3-lir.md`; `stage-5-codegen.md` → `stage-4-codegen.md`.
+`stage-4-lir.md` → `stage-3-lir.md`; `stage-7-codegen.md` → `stage-7-codegen.md`.
 
 **Why the earlier reasoning did not hold.** The merge entry argued renumbering
 "would break every existing cross-reference to buy nothing", citing
@@ -60,7 +60,7 @@ overloaded in this repo:
    5e-4" appear throughout `crates/yel-core/src/lir/` and
    `crates/yel-wasm-codegen/`. Different scheme, frozen code, **untouched**.
 2. **Cutover phases are not stage numbers.** "cutover phase 4" (deletion) in
-   `stage-4-codegen.md`, `README.md`, `corpus.md` and `stage-1-syntax.md`,
+   `stage-7-codegen.md`, `README.md`, `corpus.md` and `stage-1-syntax.md`,
    including the `#final-deletion--cutover-phase-4` anchor, **untouched**.
 
 **Blast radius.** `plans/rewrite/*.md` only — 8 files plus 2 renames. Two
@@ -76,7 +76,7 @@ boundary relaxation logged immediately below; that entry's requirements are
 answered here.
 
 **Request.** Stages 2 (`yelc-hir`) and 3 (`yelc-thir`) become **one crate with
-two sequential phases** — `yelc-hir`, phase **2a** build + resolve, phase **2b**
+two sequential phases** — `yelc-hir`, phase **3** build + resolve, phase **4**
 check. The stage list becomes **AST → HIR → LIR → WASM**; THIR ceases to exist
 as a stage name.
 
@@ -91,7 +91,7 @@ as a stage name.
    The first draft of this entry said "yel has no lints". **Yel will have
    lints**, so that justification is withdrawn. It was also confused: rustc's
    lints run on **HIR**, and THIR is not a lint surface at all. "HIR is the lint
-   surface" argues for HIR existing — which it does, as the IR before phase 2b
+   surface" argues for HIR existing — which it does, as the IR before phase 4
    fills the type map — not for a *second* IR after it. What genuinely does not
    transfer is THIR's actual job: pattern-exhaustiveness desugaring for `match`,
    which yel has no `match` for. Swift — the reference §6 is named after —
@@ -103,8 +103,8 @@ as a stage name.
    free and let a lint be written once. Two IRs would force lint authors to pick
    a vocabulary, or write the lint twice.
 
-The shape: **one node vocabulary, `types: NodeMap<Ty>` empty after 2a and total
-after 2b.** Types live beside nodes, not on them
+The shape: **one node vocabulary, `types: NodeMap<Ty>` empty after 3 and total
+after 4.** Types live beside nodes, not on them
 ([B3](anti-spec.md#b3--no-analysis-result-stored-on-the-node-it-describes)).
 
 **Options considered.**
@@ -114,9 +114,9 @@ after 2b.** Types live beside nodes, not on them
 2. **One undivided stage.** Simplest table, largest single agent task in the
    rewrite — the skill's own guidance says a stage that will not fit one agent
    contains a seam worth contracting.
-3. **2a + 2b in one crate, run in sequence.** Chosen.
+3. **3 + 4 in one crate, run in sequence.** Chosen.
 
-**Decision: granted as option 3**, mirroring the existing 3a/3b precedent
+**Decision: granted as option 3**, mirroring the existing 3/4 precedent
 exactly, so the process around it is unchanged.
 
 ### What is lost, and what replaces it
@@ -124,25 +124,25 @@ exactly, so the process around it is unchanged.
 The relaxation entry requires this section, so it is answered plainly.
 
 **Lost:** independent attribution between building/resolution and checking. A
-divergence that would have been "stage 2 or stage 3" is now "stage 2a or 2b".
+divergence that would have been "stage 2 or stage 3" is now "stage 3 or 4".
 
 **Replaced by — and this is a net gain, not a mitigation:** stage 2 previously
 had **no artifact whatsoever**. HIR is not dumpable, the frozen tree may not be
 edited to add a dump, and the two HIRs were designed to differ in shape, so
 nothing could be diffed
-([2a § Verification](stage-2a-hir-build.md#verification)). The merged stage ends
+([3 § Verification](stage-3-hir-build.md#verification)). The merged stage ends
 at a **serializable typed module**, which is byte-comparable. Attribution between
-2a and 2b is recovered the cheap way: 2b runs as a separate pass over the output
-of 2a, so a divergence is bisected by dumping after 2a.
+3 and 4 is recovered the cheap way: 4 runs as a separate pass over the output
+of 3, so a divergence is bisected by dumping after 3.
 
-### Consequence: 2a's output is a public surface, not an internal intermediate
+### Consequence: 3's output is a public surface, not an internal intermediate
 
-Because lints are coming, the IR after phase 2a is **read by consumers that do
+Because lints are coming, the IR after phase 3 is **read by consumers that do
 not transform it** — early lints, and the LSP. That is a design requirement on
 the merged stage, not a later concern:
 
 - **Both lint classes are phase positions, not IRs.** Syntactic lints run after
-  2a (type map empty); type-aware lints run after 2b (type map total). Same
+  3 (type map empty); type-aware lints run after 4 (type map total). Same
   nodes, same walker, one lint written once.
 - **Lint results are side tables**, like every other analysis output —
   [B3](anti-spec.md#b3--no-analysis-result-stored-on-the-node-it-describes).
@@ -150,14 +150,14 @@ the merged stage, not a later concern:
 - **Node identity and spans must be good enough to point a diagnostic at**,
   which H2 and H3 already require for a different reason. Lints and the LSP want
   exactly what the differential wants: stable ids, real spans, one exhaustive
-  walker. No new mechanism is owed — but "2a's output is inspectable" moves from
+  walker. No new mechanism is owed — but "3's output is inspectable" moves from
   a testing convenience to a contract.
 
 **Blast radius.**
 - `scope.md` stage-order row: THIR removed.
 - `README.md`: status table, crate layout, dependency graph.
 - `stage-2-hir.md`: absorbed stage 3's brief, then split per phase into
-  `stage-2a-hir-build.md` + `stage-2b-hir-check.md`.
+  `stage-3-hir-build.md` + `stage-4-hir-check.md`.
 - `stage-3-thir.md`: **deleted.** Its content moved into the stage-2 files — none
   discarded, including the inherited-gap table (closure capture, function-type
   inference, generics, `match`, `color`/`brush`) and the §5 trigger
@@ -172,7 +172,7 @@ the merged stage, not a later concern:
   on renaming being expensive to verify. It is not: a mechanical link-and-anchor
   check over `plans/rewrite/` makes it cheap and provable, and a permanent
   numbering gap with no marker is a standing invitation to "fix" it wrongly.
-  Stages were renumbered to 3a/3b (LIR) and 4 (codegen).
+  Stages were renumbered to 3/4 (LIR) and 4 (codegen).
 - `yelc-thir` is never created. The crate layout loses a row rather than gaining
   a transitional one ([A4](anti-spec.md#a4--no-permanent-bridge)).
 

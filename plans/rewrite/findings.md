@@ -17,7 +17,7 @@
 | [F2](#f2) | The grammar has no generic type application | types |
 | [F3](#f3) | `intern_ast_ty` runs during registration, so named types become `Unknown` | resolution |
 | [F4](#f4) | Cross-file references are order-dependent | resolution |
-| [F5](#f5) | The definition tables are typed, and 2a types them | resolution |
+| [F5](#f5) | The definition tables are typed, and 3 types them | resolution |
 | [F6](#f6) | A closure capturing an enclosing local panics in codegen | closures |
 | [F7](#f7) | Codegen matches the `filter` builtin by string | closures |
 | [F8](#f8) | A block typechecks and compiles against a `func()` prop | closures |
@@ -26,7 +26,7 @@
 | [F11](#f11) | `else_if_branches` propagates through three IRs | control flow |
 | [F12](#f12) | Builtins are a field per builtin across 1,442 lines | builtins |
 | [F13](#f13) | `bind` desugars to getter + empty setter at HIR | lowering |
-| [F14](#f14) | There is no HIR dump, so 2a has no artifact of its own | verification |
+| [F14](#f14) | There is no HIR dump, so 3 has no artifact of its own | verification |
 | [F15](#f15) | `filter` is already monomorphized **per call site**, not per type | code size |
 | [F16](#f16) | Signal dispatch is already **fully static** — no runtime effect registry | reactivity |
 | [F17](#f17) | Coercions are decided and **discarded** — no `Coerce` node exists; `list<T>` coercion is a front/back mismatch | types |
@@ -55,7 +55,7 @@ no `Named<Args>` form, so a user cannot write `Box<T>`.
 `Result` stores `args: Vec<TypeRef>` **as written**, not `{ok, err}`, because
 `result<a,b,c>` is real input and truncating drops a subtree (stage-1 S5).
 
-`yelc-syntax/src/ast.rs:604` · cited by [§3](directions.md), [2a](stage-2a-hir-build.md)
+`yelc-syntax/src/ast.rs:604` · cited by [§3](directions.md), [3](stage-3-hir-build.md)
 
 ## F3
 
@@ -72,7 +72,7 @@ AstTyKind::Named(_) => {
 A record field typed as a user record is `Unknown` in the definition table.
 
 `types/interner.rs:331`, called from `hir/lower.rs:206` and 11 other sites ·
-anti-spec B2 · cited by [2a H1](stage-2a-hir-build.md#h1)
+anti-spec B2 · cited by [3 H1](stage-3-hir-build.md#h1)
 
 ## F4
 
@@ -89,7 +89,7 @@ yelc check a.yel b.yel   # error[E0002]: cannot infer type of anonymous record l
 ```
 
 Same defect class as [F3](#f3), one level up. Measured 2026-07-28 ·
-cited by [2a § Multiple files](stage-2a-hir-build.md#multiple-files)
+cited by [3 § Multiple files](stage-3-hir-build.md#multiple-files)
 
 ## F5
 
@@ -101,7 +101,7 @@ So "HIR is untyped" is false as stated: *item signatures* are typed at stage 2,
 *expressions* are not. This is rustc's `type_of(def_id)`-before-body-check split,
 not a deviation from it. The frozen bug is only *when* it runs — see [F3](#f3).
 
-`definitions.rs:130,143,156,171,184` · cited by [2a H1](stage-2a-hir-build.md#h1)
+`definitions.rs:130,143,156,171,184` · cited by [3 H1](stage-3-hir-build.md#h1)
 
 ## F6
 
@@ -186,7 +186,7 @@ if n==1 {…} else { if n==2 {…} else {…} }
 
 The frozen lowering treats `else if` as a flat N-way selector at one anchor and
 nested `if` as two independent 1-way selectors. Measured via `compile -o dot`,
-2026-07-28 · cited by [2a D7](stage-2a-hir-build.md#d7--flatten-else-if-chains)
+2026-07-28 · cited by [3 D7](stage-3-hir-build.md#d7--flatten-else-if-chains)
 
 ## F11
 
@@ -194,7 +194,7 @@ nested `if` as two independent 1-way selectors. Measured via `compile -o dot`,
 (`hir/node.rs`), THIR (`thir/node.rs:144`), LIR (`lir/node.rs:363`) — so every
 `If` consumer in three stages handles three shapes where one would do.
 
-anti-spec B4 · cited by [2a D7](stage-2a-hir-build.md#d7--flatten-else-if-chains)
+anti-spec B4 · cited by [3 D7](stage-3-hir-build.md#d7--flatten-else-if-chains)
 
 ## F12
 
@@ -220,7 +220,7 @@ Implemented with `HashMap<String, _>` plus a parallel `binding_order:
 Vec<String>` to recover the determinism the map destroyed.
 
 `hir/lower.rs:967-1018` · undocumented in `docs/PIPELINE.md` ·
-cited by [2a](stage-2a-hir-build.md#what-lowerings-belong-here)
+cited by [3](stage-3-hir-build.md#what-lowerings-belong-here)
 
 ## F14
 
@@ -229,12 +229,12 @@ cited by [2a](stage-2a-hir-build.md#what-lowerings-belong-here)
 the two HIRs are designed to differ in shape, so a serialized byte-diff would be
 meaningless.
 
-Consequence: 2a has **no artifact** and cannot be differentially verified on
-its own; the artifact arrives after 2b. What is comparable instead: the `Definitions` table (contents *and*
+Consequence: 3 has **no artifact** and cannot be differentially verified on
+its own; the artifact arrives after 4. What is comparable instead: the `Definitions` table (contents *and*
 order — `DefId`s are ordinals that reach output), HIR-stage diagnostics via
 `yelc check`, and total-lowering-without-panic.
 
-cited by [2a](stage-2a-hir-build.md#verification), [2b](stage-2b-hir-check.md#verification), [§6](directions.md)
+cited by [3](stage-3-hir-build.md#verification), [4](stage-4-hir-check.md#verification), [§6](directions.md)
 
 ## F15
 
@@ -331,7 +331,7 @@ unable to construct the node **is** the rejection, at the right place, with a
 span. This is what rustc's THIR does with adjustments, and the reason it does it.
 
 `thir/typeck.rs:2651-2680` · measured 2026-07-28 ·
-cited by [3b](stage-2b-hir-check.md)
+cited by [4](stage-4-hir-check.md)
 
 ## F18
 
@@ -359,7 +359,7 @@ same in both cases — *the target form does not exist*:
 
 - `Ternary` would desugar to a conditional expression or a `match`. Yel has
   neither; `match` is listed as a gap in
-  [3b](stage-2b-hir-check.md#gaps-inherited-as-decisions-not-copies).
+  [4](stage-4-hir-check.md#gaps-inherited-as-decisions-not-copies).
 - `Range` would desugar to a `Range { start, end }` struct literal, the way Rust
   does. Yel has no `Range` type to desugar *into* — but the stdlib is planned, so
   this is **a requirement on
@@ -369,7 +369,7 @@ same in both cases — *the target form does not exist*:
 So `Ternary` waits on an open decision; `Range` waits only on sequencing.
 
 `yelc-syntax/src/ast.rs` (`ExprKind`), `{hir,thir,lir}/{expr,node}.rs` ·
-measured 2026-07-28 · cited by [3a](stage-2a-hir-build.md#what-lowerings-belong-here)
+measured 2026-07-28 · cited by [3](stage-3-hir-build.md#what-lowerings-belong-here)
 
 ## F19
 
@@ -402,7 +402,7 @@ one-arm suggestion with no ambiguity to resolve — the cheap end of diagnostic
 work, and the exact case a Rust-literate newcomer hits first.
 
 `yelc-syntax/src/lexer.rs:410` · measured 2026-07-29 with `yelc2` ·
-owed to [2b](stage-2b-hir-check.md), which owns diagnostics
+owed to [4](stage-4-hir-check.md), which owns diagnostics
 
 ## F20
 
@@ -429,4 +429,4 @@ records it in the frozen tree where a reader of that tree will find it, and
 
 `hir`-visible via `yelc ast` · `syntax/parser.rs` `parse_global`/`parse_record` ·
 measured 2026-07-29 · cited by
-[2a phase 0](stage-2a-hir-build.md#phase-0--oracle-hygiene---done-2026-07-29-1d12250)
+[3 phase 0](stage-3-hir-build.md#phase-0--oracle-hygiene---done-2026-07-29-1d12250)

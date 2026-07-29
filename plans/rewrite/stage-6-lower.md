@@ -1,8 +1,8 @@
-# Stage 3b — `yelc-lower`, HIR → LIR                 status: not started
+# Stage 6 — `yelc-lower`, HIR → LIR                 status: not started
 
 Replaces (frozen, never edited): `crates/yel-core/src/lower_to_lir/`.
-Phase **3b**; phase 3a is [`stage-3a-lir.md`](stage-3a-lir.md). Briefed only
-after 3a lands — [why they are separate](stage-3a-lir.md#why-3a-and-3b-are-separate-crates).
+Phase **6**; phase 5 is [`stage-5-lir.md`](stage-5-lir.md). Briefed only
+after 5 lands — [why they are separate](stage-5-lir.md#why-stages-5-and-6-are-separate-crates).
 
 Base: — · Started: — · Landed: —
 
@@ -27,7 +27,7 @@ a written justification in this file.
 
 `yelc-lower` is where UI vocabulary legitimately lives; it depends on `yelc-hir`
 + `yelc-sema` + `yelc-lir`. Nothing it knows may leak downward into
-[3a](stage-3a-lir.md) ([C1](anti-spec.md#c1--no-domain-vocabulary-below-the-frontend-seam)).
+[5](stage-5-lir.md) ([C1](anti-spec.md#c1--no-domain-vocabulary-below-the-frontend-seam)).
 
 ## Shortcuts inside not to reproduce
 
@@ -54,7 +54,7 @@ a written justification in this file.
 
 ## Inherited obligations
 
-**From [2a's D7](stage-2a-hir-build.md#d7--flatten-else-if-chains) — this phase
+**From [3's D7](stage-3-hir-build.md#d7--flatten-else-if-chains) — this phase
 must recognise the `else if` chain.** A nested `If` whose `else` branch holds
 exactly one `If` and nothing else lowers as the **flat N-way selector at one
 anchor**. Uniform IR, smart lowering. Without it, every `else if` in the corpus
@@ -70,8 +70,8 @@ two — and every diverging program gets a line in
 
 [§1 — builtins are a table](directions.md#1--builtins-are-a-table-not-a-field-per-builtin),
 to accept or reject when this phase is briefed. It pairs with
-[2b](stage-2b-hir-check.md) — the lowering target and the type scheme come from
-one row — so if 2b rejects it, 3b inherits the rejection rather than adopting
+[4](stage-4-hir-check.md) — the lowering target and the type scheme come from
+one row — so if 4 rejects it, 4 inherits the rejection rather than adopting
 half of it. Whichever way it goes, it must not create a second path by which UI
 names reach `yelc-lir`
 ([C1](anti-spec.md#c1--no-domain-vocabulary-below-the-frontend-seam)).

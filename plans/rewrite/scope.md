@@ -19,7 +19,7 @@ simultaneously.
 | Frozen — changing it is a separate, approved decision | Free — expected to change |
 |---|---|
 | Surface syntax as specified in [`LANGUAGE.md`](../../LANGUAGE.md) | Parser implementation, grammar technology (pest → hand-written lexer + recursive descent), AST node shapes |
-| Stage names and their order: **AST → HIR → LIR → WASM** — frozen *because differential attribution depends on it*, not because the frozen compiler drew it there. Moving a boundary is an integrator decision logged in [`seam-changes.md`](seam-changes.md) ([2026-07-28](seam-changes.md#log)), and must say which stages lose independent attribution and what replaces the differential for them. THIR was merged into HIR under that rule — one IR, phases 2a/2b. | Every type, pass, and helper *inside* a stage |
+| Stage names and their order: **AST → HIR → LIR → WASM** — frozen *because differential attribution depends on it*, not because the frozen compiler drew it there. Moving a boundary is an integrator decision logged in [`seam-changes.md`](seam-changes.md) ([2026-07-28](seam-changes.md#log)), and must say which stages lose independent attribution and what replaces the differential for them. THIR was merged into HIR under that rule — one IR, phases 3/4. | Every type, pass, and helper *inside* a stage |
 | Exported WIT world and the `yel:ui/dom@0.1.0` host contract | How WIT is constructed and emitted (`wit_ast.rs` internals) |
 | Observable DOM-op behaviour asserted by the **85 execution tests** | The lowering and codegen that produce it |
 | Diagnostic *meaning* for the 23 diagnostic fixtures, and the `diagnostic.rs` API | Which stage reports what; new `ErrorCode` variants; message wording (with a recorded diff) |
@@ -49,7 +49,7 @@ substantially.
 
 **THIR is no longer a stage.** It merged into HIR on 2026-07-28
 ([`seam-changes.md`](seam-changes.md)): one node vocabulary, `types: NodeMap<Ty>`
-empty after phase 2a and total after 2b. What that decision preserved is the
+empty after phase 3 and total after 4. What that decision preserved is the
 *obligation* — a typed form still exists before LIR, with a documented contract —
 not the second IR that used to carry it.
 

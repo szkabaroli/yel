@@ -15,9 +15,11 @@
 > [`stage-4-hir-check.md`](stage-4-hir-check.md)). This file is a worksheet, not
 > the record.
 
-**8 open — B1, C1a, C1b, C1c, C2, D0, D0a, F1.** Seven of the eight are
-`yelc-sema`'s, which is **phase 1 of stage 3**, so stage 3 cannot start on them
-being open. F1 is stage 4's but the brief says decide it with D1.
+**1 open — F1**, and it is stage 4's. Every `yelc-sema` question (B1, C1a–c,
+C2, D0, D0a) was answered on 2026-07-29 and is recorded in
+[`stage-3-hir-build.md`](stage-3-hir-build.md#decisions) under S1–S4 — that file
+is the record, this one is the worksheet. The brief says decide F1 with D1, so it
+is worth closing before stage 4 is briefed rather than after.
 
 Cluster A was answered in full on 2026-07-29 (A2's misplaced tick corrected the
 same day). Cluster E (3's HIR shape) was answered in full on 2026-07-29 and
@@ -30,9 +32,9 @@ D1–D6 — that file is the record, this one is the worksheet. Also decided:
 | cluster | # | blocks | parallel? |
 |---|---|---|---|
 | [A · Type representation](#cluster-a--type-representation) | ~~4~~ **0** | **everything** | ✅ answered 2026-07-29 |
-| [B · Identity & serialization](#cluster-b--identity--serialization) | **1** (B1) | sema's contract | **unblocked** — A is answered |
-| [C · Builtins](#cluster-c--builtins) | **4** (C1a–c, C2) | sema's bulk | **unblocked** — A is answered |
-| [D · Context shape](#cluster-d--context-shape) | **2** (D0, D0a) | sema's API | after B, C |
+| [B · Identity & serialization](#cluster-b--identity--serialization) | ~~1~~ **0** | sema's contract | ✅ answered 2026-07-29 |
+| [C · Builtins](#cluster-c--builtins) | ~~4~~ **0** | sema's bulk | ✅ answered 2026-07-29 |
+| [D · Context shape](#cluster-d--context-shape) | ~~2~~ **0** | sema's API | ✅ answered 2026-07-29 |
 | [E · HIR shape](#cluster-e--hir-shape-stage-3) | ~~6~~ **0** | 3's seam types | ✅ answered 2026-07-29 |
 | [F · Trigger](#cluster-f--trigger-stage-4) | 1 (F1) | 4 | with E1 |
 
@@ -221,7 +223,7 @@ option 2 requires it. Recorded 2026-07-29.
 `pub struct Ty(pub u32)` **already derives `Serialize`/`Deserialize`**
 (`types/interner.rs:13`), so a naive derive writes the interner index.
 
-- [ ] **Structurally, and delete the derive** — the wrong thing stops compiling.
+- [x] **Structurally, and delete the derive** — the wrong thing stops compiling.
 - [ ] **Structurally, keep the derive** for in-memory/debug use, rely on review.
 - [ ] **As a handle plus a remap table** applied on load.
 - [ ] Other: ______
@@ -290,15 +292,15 @@ Three sub-questions, only if C1 lands as a table:
 
 **C1a · One table, or two projections?** Typeck wants the type scheme, 4 wants
 the lowering target, and `yelc-lir` must see neither.
-- [ ] One table, two accessors · [ ] Two tables + a key-alignment test · [ ] Other: ______
+- [x] One table, two accessors · [ ] Two tables + a key-alignment test · [ ] Other: ______
 
 **C1b · Do builtin *elements* go in it?** `KnownElements` is 15 fields of UI
 vocabulary with no "lowering target" in the same sense.
-- [ ] Yes · [ ] No, separate home · [ ] Other: ______
+- [ ] Yes · [x] No, separate home · [ ] Other: ______
 
 **C1c · Variadics.** `concat` is registered with an empty parameter list and a
 comment saying it is really variadic. A table with a declared arity must answer.
-- [ ] Arity gains a variadic form · [ ] `concat` becomes N fixed arities ·
+- [x] Arity gains a variadic form · [ ] `concat` becomes N fixed arities ·
       [ ] Other: ______
 
 ---
@@ -308,7 +310,8 @@ comment saying it is really variadic. A table with a declared arity must answer.
 C1 settles *functions*. This is the rest of `known.rs`.
 
 - [ ] **Same table** as functions.
-- [ ] **A separate table** — they have no lowering target.
+- [x] **A separate table** — they have no lowering target. Shaped as resolved
+      lang-items: `DefId`, not `Option<DefId>`.
 - [ ] **Delete** — they resolve through the normal definition tables.
 - [ ] Other: ______
 
@@ -329,7 +332,7 @@ unwrap-or-diagnostic for a case that cannot occur once registration has run
 [keep-list §5](keep-list.md#5--context-threading--yel-coresrccontextrs) keeps
 context *threading*, not the frozen 963-line struct.
 
-- [ ] **Six fields** — interner, type interner, definitions, builtin table,
+- [x] **Six fields** — interner, type interner, definitions, builtin table,
       source map, diagnostics.
 - [ ] **Fewer** — pass some explicitly instead. Name which: ______
 - [ ] **More** — name what and why: ______
@@ -344,7 +347,7 @@ to [5](stage-5-lir.md)/[6](stage-6-lower.md).
 
 **D0a · Where does `signal_deps` live?** Cited as the *positive* precedent for
 side tables, but it is reactivity analysis — a frontend concern, not a sema one.
-- [ ] `yelc-sema` · [ ] `yelc-hir` · [ ] Other: ______
+- [ ] `yelc-sema` · [x] `yelc-hir` · [ ] Other: ______
 
 ---
 

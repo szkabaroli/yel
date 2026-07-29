@@ -49,14 +49,14 @@ what gets *written*.
 | — | `yelc-base` | keep-list items | ✅ **landed** (infrastructure, no stage) | — | 2026-07-28 |
 | 1 | `yelc-syntax` | `yel-core/src/syntax/` | ✅ **landed** | agent + integrator | 2026-07-28 |
 | 2 | `yelc-driver` | — (new: the observation instrument, binary `yelc2`) | ✅ **landed** | integrator | 2026-07-28 |
-| 3a | `yelc-hir` | `yel-core/src/hir/` **+ `yelc-sema`** (`context.rs`, `definitions.rs`, `known.rs`, `stdlib_lookup.rs`, `types/`, ~3.5k) | 📝 [brief](stage-2a-hir-build.md), **next** — blocked on [Cluster A](open-decisions.md#cluster-a--type-representation) | — | — |
-| 3b | `yelc-hir` | `yel-core/src/thir/` | 📝 [brief](stage-2b-hir-check.md), blocked on 3a | — | — |
-| 4a | `yelc-lir` | `yel-core/src/lir/` | ⬜ [stub](stage-3a-lir.md), blocked on 3b | — | — |
-| 4b | `yelc-lower` | `yel-core/src/lower_to_lir/` | ⬜ [stub](stage-3b-lower.md), blocked on 4a | — | — |
-| 5 | `yelc-codegen` | `yel-wasm-codegen/` | ⬜ [stub](stage-4-codegen.md), blocked on 4b | — | — |
+| 3 | `yelc-hir` | `yel-core/src/hir/` **+ `yelc-sema`** (`context.rs`, `definitions.rs`, `known.rs`, `stdlib_lookup.rs`, `types/`, ~3.5k) | 📝 [brief](stage-3-hir-build.md) — **ready to brief**, all decisions answered | — | — |
+| 4 | `yelc-hir` | `yel-core/src/thir/` | 📝 [brief](stage-4-hir-check.md), blocked on 3 | — | — |
+| 5 | `yelc-lir` | `yel-core/src/lir/` | ⬜ [stub](stage-5-lir.md), blocked on 4 | — | — |
+| 6 | `yelc-lower` | `yel-core/src/lower_to_lir/` | ⬜ [stub](stage-6-lower.md), blocked on 5 | — | — |
+| 7 | `yelc-codegen` | `yel-wasm-codegen/` | ⬜ [stub](stage-7-codegen.md), blocked on 6 | — | — |
 
-> **Filenames still carry the old numbers** (`stage-2a-hir-build.md` is now stage
-> 3a, and so on). That is deliberate: renaming them would break every existing
+> **Filenames still carry the old numbers** (`stage-3-hir-build.md` is now stage
+> 3, and so on). That is deliberate: renaming them would break every existing
 > cross-reference to buy tidiness, which is
 > [A17](anti-spec.md#a17--test-input-selection-is-stable-under-renames) in spirit
 > — stable identifiers beat consistent ones. The table is the index; the
@@ -64,11 +64,22 @@ what gets *written*.
 
 **HIR and THIR merged** into one IR with two phases on 2026-07-28
 ([`seam-changes.md`](seam-changes.md)), and the remaining stages were renumbered
-to close the gap: LIR is **3a**/**3b**, codegen is **4**. Stage numbers are
+to close the gap: LIR is **3**/**4**, codegen is **4**. Stage numbers are
 contiguous — a gap invites someone to "fix" it later.
 
-**One row = one phase = one brief file = one ratchet row.** 2a and 2b share the
-crate `yelc-hir` but are briefed, landed and measured separately; so are 3a/3b,
+**Stage numbers are flat — no `3a`/`3b`.** One stage = one number = one brief
+file = one ratchet row = one agent. What the old lettering encoded is now said in
+words, because it was never the same relationship twice:
+
+- **3 and 4 are one crate** (`yelc-hir`) run as two sequential passes over one
+  IR — 4 is a second pass over 3's output, so a divergence bisects by dumping
+  after 3.
+- **5 and 6 are two crates** (`yelc-lir`, `yelc-lower`) run in sequence, split so
+  that `use yelc_sema::…` below the seam is a cargo error rather than a
+  reviewer's judgement call.
+
+**One row = one phase = one brief file = one ratchet row.** 3 and 4 share the
+crate `yelc-hir` but are briefed, landed and measured separately; so are 3/4,
 which are two crates. A phase is the unit an agent owns end to end.
 
 **Rows marked `—` are infrastructure, not stages** — they transform no IR and get
@@ -76,14 +87,14 @@ no ratchet row, but they must land before the stage that depends on them.
 `yelc-base` is the precedent and is now the only one.
 
 **`yelc-sema` stopped being a separate landing on 2026-07-29** and became phase 1
-of stage 2a ([`stage-2a-hir-build.md` § Work in scope](stage-2a-hir-build.md#work-in-scope));
-its brief is still [`infra-sema.md`](infra-sema.md). The two oracle-hygiene items
-and 2a's seam types moved the same way. **2a is correspondingly larger** — ~3.5k
+of stage 3 ([`stage-3-hir-build.md` § Work in scope](stage-3-hir-build.md#work-in-scope));
+its brief is still [`stage-3-hir-build.md`](stage-3-hir-build.md). The two oracle-hygiene items
+and 3's seam types moved the same way. **3 is correspondingly larger** — ~3.5k
 lines of sema plus the whole HIR build — and the phase boundaries are where it
 splits if it has to.
 
 Cutover phase: **1 — coexist**. Phase 4 (deletion) is a named task, scheduled
-now: [`stage-4-codegen.md` § Final deletion](stage-4-codegen.md#final-deletion--cutover-phase-4).
+now: [`stage-7-codegen.md` § Final deletion](stage-7-codegen.md#final-deletion--cutover-phase-4).
 
 ## Crate layout
 
@@ -96,11 +107,11 @@ outlives its transition ([anti-spec A4](anti-spec.md#a4--no-permanent-bridge)).
 crates/
   yelc-base/      diagnostics, SourceMap/Span, Interner/Name, ids, IndexVec   [keep-list]
   yelc-syntax/    lexer, green tree, AST, parser                      stage 1
-  yelc-sema/      Ty interner, Definitions, CompilerContext, known/stdlib
-  yelc-hir/       one IR: 2a build+resolve, 2b check                  stage 2
-  yelc-lir/       LIR data model + arena traits + generic passes      stage 3a
-  yelc-lower/     HIR → LIR lowering                                  stage 3b
-  yelc-codegen/   LIR → WASM / WIT / DOT                              stage 4
+  yelc-sema/      Ty interner, Definitions, CompilerContext, known/stdlib   stage 3 ph.1
+  yelc-hir/       one IR, built then checked                   stages 3 + 4
+  yelc-lir/       LIR data model + arena traits + generic passes      stage 5
+  yelc-lower/     HIR → LIR lowering                                  stage 6
+  yelc-codegen/   LIR → WASM / WIT / DOT                              stage 7
   yelc-driver/    stage selection; binary `yelc2`, becomes `yelc` at flip
 ```
 
@@ -123,8 +134,8 @@ stops being a matter of vigilance.
 
 This is also why stage 3 is split: the LIR data model must not see frontend
 vocabulary, while HIR→LIR lowering legitimately needs it. They run **in
-sequence** — 3a then 3b — never together. Stage 2 uses the same pattern for the
-same reason (2a then 2b).
+sequence** — 3 then 4 — never together. Stage 2 uses the same pattern for the
+same reason (3 then 4).
 
 ## The documents
 

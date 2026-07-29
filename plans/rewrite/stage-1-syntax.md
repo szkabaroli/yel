@@ -552,7 +552,7 @@ identifier. Both directions are now reproduced; the class is enumerated in
 | `callback: func();` in a `global` | **narrowed** (pre-existing, found here) | accepted — `function_decl` is the earlier alternative and `callback` is not reserved |
 | `input:` / `outputs:` in a `global`, `settings:` / `bindings:` / `keyx:` in an element, `funcx()`, `letx` | agreed | agreed — the frozen **AST** differs (direction `in` + property `put`), but both parsers accept, and the oracle records one bit per program |
 
-**2a** (widening) is `parser/types.rs::type_keyword_prefix_of` plus
+**3** (widening) is `parser/types.rs::type_keyword_prefix_of` plus
 `exprs.rs::at_bool_literal_prefix`: an identifier that is not exactly a keyword
 but has one as a proper prefix reports and yields a recovery node. No keyword is
 a prefix of another, so at most one can match — asserted.
@@ -570,7 +570,7 @@ a prefix of another, so at most one can match — asserted.
 > needing lookahead — are why `position()` and the offset-based span check exist,
 > and those did not go away with it.
 
-**2b** (narrowing) **landed**, contrary to the brief's expectation that it might
+**4** (narrowing) **landed**, contrary to the brief's expectation that it might
 have to be reverted. The cursor gained `partial_offset`, and `eat_keyword` pushes
 the prefix as its own green token, advances `offset`, and leaves `token_idx`
 alone until the remainder is consumed. The token arrays are never mutated, so
@@ -815,7 +815,7 @@ Two follow-ups for the orchestrator, neither an agent decision:
   the `known_bugs/runtime/` subdirectory pattern could. The 18 entries in
   `support::catch_all::DIVERGENCES`, each proved causally by
   `explains_our_report`, remain the stronger record. See
-  [`stage-2a-hir-build.md` § Phase 0](stage-2a-hir-build.md#phase-0--oracle-hygiene---done-2026-07-29-1d12250).
+  [`stage-3-hir-build.md` § Phase 0](stage-3-hir-build.md#phase-0--oracle-hygiene---done-2026-07-29-1d12250).
 
 ### 2. `if` followed directly by `{` is an element named `if`
 

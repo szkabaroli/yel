@@ -174,7 +174,7 @@ first-error-offset floor unmoved at 547 of 1336 (40%).
 
 ## 2026-07-29 — `global_filter_default.yel` moves to `known_bugs/`
 
-**Stage 2a phase 0** (oracle hygiene). A fixture that guarded nothing became a
+**Stage 3 phase 0** (oracle hygiene). A fixture that guarded nothing became a
 fixture that pins a real panic. No compiler source changed — this is fixture data
 and test-harness bookkeeping only, so the corpus is untouched and needs no
 regeneration.
@@ -273,7 +273,7 @@ paired with its own test.
 `file.globals[*].properties`, `…callbacks` and `file.records[*].fields` and
 requires the name to be absent. Asserting on the WIT instead would have been
 weak evidence — globals emit no WIT interface at all, so the name would be
-missing whether or not the bug existed ([A11](anti-spec.md#a11)).
+missing whether or not the bug existed ([A11](anti-spec.md#a11--a-bound-measures-the-quantity-that-actually-fails)).
 
 **It guards its own guard.** A `.dropped` entry that does not appear in the
 fixture source is a failure, not a pass — otherwise a typo would make the

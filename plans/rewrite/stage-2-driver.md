@@ -105,7 +105,7 @@ structure — which does not happen until LIR lowering.
 kinds and widths. A flag that silently did nothing is worse than its absence.
 
 **`--emit-hir` / `--emit-ir`.** They would print nothing today. They arrive with
-`yelc-hir` (stage 2a) and `yelc-lir` (stage 3a) as one line each in `run()`.
+`yelc-hir` (stage 3) and `yelc-lir` (stage 3) as one line each in `run()`.
 
 ## Deferred: `diff`
 

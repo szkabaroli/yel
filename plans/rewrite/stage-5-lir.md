@@ -1,14 +1,14 @@
-# Stage 3a — `yelc-lir`, the data model              status: not started
+# Stage 5 — `yelc-lir`, the data model              status: not started
 
 Replaces (frozen, never edited): `crates/yel-core/src/lir/`.
-Phase **3a**; phase 3b is [`stage-3b-lower.md`](stage-3b-lower.md). Two crates,
-run **in sequence** — 3a then 3b — never together.
+Phase **5**; phase 6 is [`stage-6-lower.md`](stage-6-lower.md). Two crates,
+run **in sequence** — 3 then 4 — never together.
 
 Base: — · Started: — · Landed: —
 
 > **Stub.** Written out fully before the phase is briefed.
 
-## Why 3a and 3b are separate crates
+## Why stages 5 and 6 are separate crates
 
 `yelc-lir` depends only on `yelc-base`. It has **no dependency path to
 `yelc-sema` or `yelc-hir`**, so `use yelc_sema::Definitions` inside the LIR or
@@ -18,7 +18,7 @@ the back-end is a hard cargo error.
 `yel:ui/dom` below the seam — stops being a matter of reviewer vigilance and
 becomes a build failure.
 
-[`yelc-lower`](stage-3b-lower.md) sits above the seam, depends on `yelc-hir` +
+[`yelc-lower`](stage-6-lower.md) sits above the seam, depends on `yelc-hir` +
 `yelc-sema` + `yelc-lir`, and is where UI vocabulary legitimately lives. This is
 the same substrate the visual flow language shares.
 
@@ -38,7 +38,7 @@ Watch for:
   The typed-GC migration is *done* in the frozen tree (`TECH_DEBT.md` §1.5, all
   boxes ticked); the new LIR starts from the finished state and must not
   reintroduce a second value representation. Carry the `WitBoundary` witness
-  mechanism ([keep-list §10](keep-list.md#10--the-witboundary-witness-stage-4)).
+  mechanism ([keep-list §10](keep-list.md#10--the-witboundary-witness-stage-7)).
 - [C5 — no hard-coded sizing](anti-spec.md#c5--no-hard-coded-sizing)
   (`lir/layout.rs:160,166` — user-defined variant sizes are still uncomputed).
 - [C6 — no classification placeholder](anti-spec.md#c6--no-classification-placeholder)
@@ -69,11 +69,11 @@ Watch for:
   ([A3](anti-spec.md#a3--no-duplicated-walkers)). The frozen
   `boundary_rewrite.rs` / `dedupe.rs` op-stream walkers are the remaining
   hand-rolled pair.
-- **`else_if_branches` does not exist here.** 2a flattens `else if` into nested
-  `If` ([D7](stage-2a-hir-build.md#d7--flatten-else-if-chains)), so the LIR `If`
+- **`else_if_branches` does not exist here.** 3 flattens `else if` into nested
+  `If` ([D7](stage-3-hir-build.md#d7--flatten-else-if-chains)), so the LIR `If`
   drops its third field — the shape is removed from all three IRs
   ([F11](findings.md#f11)). Reconstructing the flat selector is
-  [3b](stage-3b-lower.md)'s job, not a data-model concern.
+  [6](stage-6-lower.md)'s job, not a data-model concern.
 
 ## Contract · Reference · Definition of done · Numbers · Decision log · Surprises
 

@@ -15,13 +15,13 @@
 | § | Direction | Status | Decided by | Changes output? |
 |---|---|---|---|---|
 | [1](#1--builtins-are-a-table-not-a-field-per-builtin) | Builtins are a table, not a field per builtin | ✅ **adopted 2026-07-29** | `yelc-sema` (S1) | no |
-| [2](#2--the-stdlib-is-yel-source-embedded-in-the-binary) | The stdlib is yel source, embedded in the binary | wanted | stage 2b+ | yes, enumerated |
-| [3](#3--generics-are-monomorphization-by-name) | Generics are monomorphization by name | ✅ **adopted 2026-07-29** — by *type*, with a `Param` variant | 3b (A1, A3) | yes, enumerated |
-| [4](#4--closures-are-a-value-and-the-irs-are-shaped-for-one) | Closures are a value; the IRs are shaped for one | **design obligation** | 2b + 3a | no (modelling only) |
-| [5](#5--handlers-and-closures-are-one-concept-split-by-trigger) | Handlers and closures are one concept, split by trigger | wanted | 2b + 3b | **no** |
-| [6](#6--modules-are-serializable-artifacts) | Modules are serializable artifacts | wanted | 2a/2b seam | no |
+| [2](#2--the-stdlib-is-yel-source-embedded-in-the-binary) | The stdlib is yel source, embedded in the binary | wanted | stage 4+ | yes, enumerated |
+| [3](#3--generics-are-monomorphization-by-name) | Generics are monomorphization by name | ✅ **adopted 2026-07-29** — by *type*, with a `Param` variant | 4 (A1, A3) | yes, enumerated |
+| [4](#4--closures-are-a-value-and-the-irs-are-shaped-for-one) | Closures are a value; the IRs are shaped for one | **design obligation** | 4 + 3 | no (modelling only) |
+| [5](#5--handlers-and-closures-are-one-concept-split-by-trigger) | Handlers and closures are one concept, split by trigger | wanted | 4 + 4 | **no** |
+| [6](#6--modules-are-serializable-artifacts) | Modules are serializable artifacts | wanted | 3/4 seam | no |
 | [7](#7--keywords-get-a-word-boundary--at-cutover-by-deletion) | Keywords get a word boundary | **adopted 2026-07-28** | stage 1 | no — 8000/8000 corpus artifacts byte-identical |
-| [8](#8--the-reactive-plan-is-an-artifact-and-its-shape-is-open) | The reactive plan is an artifact — and its shape is open | wanted; shape **undecided** | 2b emits, 3b consumes | depends on the shape |
+| [8](#8--the-reactive-plan-is-an-artifact-and-its-shape-is-open) | The reactive plan is an artifact — and its shape is open | wanted; shape **undecided** | 4 emits, 4 consumes | depends on the shape |
 
 **Dependency order:** §1 → §2. §3 unblocks most of §2. §4 blocks the rest of §2.
 §5 and §6 are independent. §6 is why HIR and THIR merged into one stage
@@ -33,13 +33,13 @@
 
 | | |
 |---|---|
-| **Status** | ✅ **adopted 2026-07-29** ([C1](open-decisions.md#c1--how-are-builtins-registered)) — recorded as [S1](infra-sema.md) |
-| **Home** | `yelc-sema`; read by 3b and 4b |
+| **Status** | ✅ **adopted 2026-07-29** ([C1](open-decisions.md#c1--how-are-builtins-registered)) — recorded as [S1](stage-3-hir-build.md) |
+| **Home** | `yelc-sema`; read by 4 and 6 |
 | **Changes output** | no |
 
 **Decision.** One table keyed by a stable name, whose row carries everything
 downstream needs: `name → { arity, type scheme, lowering target }`. Typeck asks
-the table for the type scheme; 3b asks the same row for the lowering target.
+the table for the type scheme; 4 asks the same row for the lowering target.
 Adding a builtin is one row; an unread row is visibly dead
 ([A9](anti-spec.md#a9--a-ported-construct-is-load-bearing-or-it-is-deleted)).
 An unknown name is a hard error at registration.
@@ -130,7 +130,7 @@ because the compiler wants to desugar into them?**
 | `"a {x} b"` | `concat(…)` | yes |
 
 `Range` is the live one, and it reverses the dependency: an earlier draft of
-[3a's candidate list](stage-2a-hir-build.md#candidates-and-what-blocks-each)
+[3's candidate list](stage-3-hir-build.md#candidates-and-what-blocks-each)
 called the range desugaring *"blocked on §2"*, which treats the stdlib as an
 obstacle. It is planned work. **So the desugaring is a requirement on §2's
 contents, and `Range` belongs on the list of what the stdlib ships.**
@@ -171,7 +171,7 @@ per-invocation check)?
 | | |
 |---|---|
 | **Status** | ✅ **adopted 2026-07-29** — monomorphization **by type**, and with a `Param` variant ([A1](open-decisions.md#a1--how-are-parameterized-types-represented), [A3](open-decisions.md#a3--does-ty-get-a-param-variant)) |
-| **Decided by** | 3b |
+| **Decided by** | 4 |
 | **Changes output** | yes — unblocks tier C of §2 |
 
 > **One thing this entry argued that the decision reversed.** §3 was written
@@ -181,7 +181,7 @@ per-invocation check)?
 > generically** rather than at each instantiation. That is Rust's arrangement,
 > not C++'s, and it removes the error-message cost this entry accepted. The
 > monomorphization half is unchanged; see
-> [S7](infra-sema.md#s7--does-ty-gain-a-non-concrete-variant).
+> [S7](stage-3-hir-build.md#s7--does-ty-gain-a-non-concrete-variant).
 
 **Decision.** No type variables, no unification, no generalization. A
 parameterized item is a template instantiated per concrete type it is used at:
@@ -193,8 +193,8 @@ never parsed and never rendered.
 **Scope of the claim.** This removes the need for a **type parameter** variant
 (`Param`) — the `T` in `list<T>` — *if* templates are carried as syntax and
 interned only once concrete. It says nothing about **inference variables**
-(`Infer`), which are a separate question owned by 2b's function-type-inference
-gap. See [`infra-sema.md` S7](infra-sema.md#s7--does-ty-gain-a-non-concrete-variant);
+(`Infer`), which are a separate question owned by 4's function-type-inference
+gap. See [`stage-3-hir-build.md` S7](stage-3-hir-build.md#s7--does-ty-gain-a-non-concrete-variant);
 conflating the two is a mistake this file made once already.
 
 **Why it fits.** There are no type variables to remove — [F1](findings.md#f1).
@@ -202,7 +202,7 @@ The choice is not "real generics vs. a compromise" but:
 
 | | cost |
 |---|---|
-| real generics | add `TyVar`, substitution, unification, generalization, **plus a polymorphic-representation decision at the LIR seam** — stages 2b *and* 4 |
+| real generics | add `TyVar`, substitution, unification, generalization, **plus a polymorphic-representation decision at the LIR seam** — stages 4 *and* 4 |
 | monomorphization by name | a substitution pass + a memo table; `Ty`, the IR, LIR and codegen unchanged |
 
 It also matches the target: on WASM-GC you want a concrete struct type per
@@ -243,7 +243,7 @@ function is bounded at ~5 copies **regardless of how many user types exist**.
 > which is the main reason §3 is safe to adopt before the measurement exists.
 
 Cost if adopted: a second concept (shape ≠ type), and the mangling key becomes
-the shape, which interacts with [`infra-sema.md` S6](infra-sema.md#s6--overloadkey).
+the shape, which interacts with [`stage-3-hir-build.md` S6](stage-3-hir-build.md#s6--overloadkey).
 
 **The measurement that settles it:** build one generic at two instantiations with
 the same GC shape and check whether `--gufa --type-merging` already merges them.
@@ -287,7 +287,7 @@ set of monomorphic names, resolved by one lookup on (name, argument types).
 means §3 can only parameterize spellings the grammar already has. Extending to
 `record Box<T>` needs type application in the surface: a scope move, not an
 implementation detail. · Where does the pass run (instantiation is type-directed
-so it wants 2b; it generates *definitions*, which 2a owns — likely a loop worth
+so it wants 4; it generates *definitions*, which 3 owns — likely a loop worth
 designing rather than discovering)? · Do `option`/`result` stop being
 `InternedTyKind` variants and become `Adt(DefId)`? Attractive, changes output,
 its own decision.
@@ -299,7 +299,7 @@ its own decision.
 | | |
 |---|---|
 | **Status** | the **design obligation** is not optional; the *implementation* is a separate scope call |
-| **Decided by** | 2b (representation), 3a (whether LIR has a function value) |
+| **Decided by** | 4 (representation), 3 (whether LIR has a function value) |
 | **Changes output** | no — modelling only |
 
 **Read the frozen tree as evidence, not as a constraint.** Every finding about
@@ -326,7 +326,7 @@ consequences:
    ([A5](anti-spec.md#a5--no-silent-fallback)).
 
 **The obligation — model it, do not implement it.** `scope.md` already says
-closures must not be *foreclosed*, and stage 2b carries the same pattern for
+closures must not be *foreclosed*, and stage 4 carries the same pattern for
 `match` (*"model the general form now so lowering has one path"*). None of the
 below emits an instruction:
 
@@ -336,7 +336,7 @@ below emits an instruction:
   the generated filter function's signature instead of hardcoding one parameter
   plus `$Comp`. Same output where it works today; a **diagnostic instead of a
   panic** where it does not.
-- **LIR (3a).** Whether a function value exists is answered on **generic**
+- **LIR (3).** Whether a function value exists is answered on **generic**
   grounds — the flow frontend wants callable values too. A closure representation
   admitted for `filter`'s sake is UI vocabulary below the seam
   ([C1](anti-spec.md#c1--no-domain-vocabulary-below-the-frontend-seam)); a
@@ -373,7 +373,7 @@ an integrator decision.
 | | |
 |---|---|
 | **Status** | wanted; **the only entry that changes no output** |
-| **Decided by** | 2b (the node), 3b (the single lowering) |
+| **Decided by** | 4 (the node), 4 (the single lowering) |
 | **Changes output** | **no** — same blocks from the same bodies |
 
 **Decision.** One node — parameters, body, capture set, **trigger** — with one
@@ -418,7 +418,7 @@ execution test ([A5](anti-spec.md#a5--no-silent-fallback)).
 
 ### How the trigger is determined — two options, neither adopted
 
-Stage 2b must pick one. Picking by default is how a surface change gets made
+Stage 4 must pick one. Picking by default is how a surface change gets made
 without anyone deciding to make one.
 
 **Option A — a keyword on the closure.** The trigger becomes a syntactic fact: no
@@ -450,7 +450,7 @@ boundary — if the trigger is internal-only that must be *arranged*, not assume
 | | |
 |---|---|
 | **Status** | wanted; **caused the 2+3 merge** ([`seam-changes.md`](seam-changes.md)) |
-| **Decided by** | the 2a/2b seam |
+| **Decided by** | the 3/4 seam |
 | **Changes output** | no |
 
 **Decision.** A compiled module is written to disk with its declarations resolved
@@ -474,7 +474,7 @@ types, a type-aware lint wants the same nodes with types, and two phases over on
 vocabulary give both while a lint gets written once.
 
 > **The shape: one IR, two phases, types in a side table.** `types: NodeMap<Ty>`
-> is empty after 2a and total after 2b. Serialization writes nodes plus that
+> is empty after 3 and total after 4. Serialization writes nodes plus that
 > table. Satisfies [A3](anti-spec.md#a3--no-duplicated-walkers) (one walker) and
 > [B3](anti-spec.md#b3--no-analysis-result-stored-on-the-node-it-describes)
 > (types beside the node) at once.
@@ -556,7 +556,7 @@ defensible and both deterministic *given deterministic data* — which is our
 problem, not the codec's. The separator is **wire-format stability independent of
 dependency bumps**: postcard commits to a documented wire spec, so the bytes move
 only when *our* schema moves. That matters because
-[2b byte-compares the serialized module](stage-2b-hir-check.md#verification); with
+[4 byte-compares the serialized module](stage-4-hir-check.md#verification); with
 a codec whose encoding can shift under a version bump, every artifact diff lights
 up for a reason that has nothing to do with the compiler. (`borsh` is canonical
 by design and would serve equally; the tiebreak was ecosystem familiarity, not
@@ -764,7 +764,7 @@ and becomes a deletion PR:
 Nothing is blocked by waiting: the machinery is built, tested, and correct
 against the frozen grammar today. Waiting costs nothing and removes all the risk.
 
-**Cross-reference:** [`stage-4-codegen.md` § Final deletion](stage-4-codegen.md#final-deletion--cutover-phase-4)
+**Cross-reference:** [`stage-7-codegen.md` § Final deletion](stage-7-codegen.md#final-deletion--cutover-phase-4)
 carries this as a checklist item so it is picked up rather than rediscovered.
 
 ### If it is ever wanted *before* cutover
@@ -782,8 +782,8 @@ half needs the pair-walking work above first, and that is the expensive part.
 | | |
 |---|---|
 | **Status** | the *split* is wanted; the *granularity* is an open design question |
-| **Decided by** | **3b** (`yelc-hir` check) emits the plan · **4b** (`yelc-lower`) chooses granularity |
-| **Not touched by** | **4a** (`yelc-lir`) — it must never learn what a signal is ([C1](anti-spec.md#c1--no-domain-vocabulary-below-the-frontend-seam)) |
+| **Decided by** | **4** (`yelc-hir` check) emits the plan · **6** (`yelc-lower`) chooses granularity |
+| **Not touched by** | **5** (`yelc-lir`) — it must never learn what a signal is ([C1](anti-spec.md#c1--no-domain-vocabulary-below-the-frontend-seam)) |
 | **Changes output** | the split: no · the granularity choice: **yes** |
 
 ### Which stage does which
@@ -793,30 +793,30 @@ analysis-vs-representation test that decides everything else here:
 
 | | stage | why |
 |---|---|---|
-| **the plan** — what work runs when which signal changes | **3b**, as a declared output | it is derived from dep sets, triggers and captures, all of which 3b already has. Nothing about it needs the target. |
-| **granularity** — how that work is packaged into functions | **4b** | how many WASM functions to emit, and how coarse, is a *representation* choice. 4b also knows the lowered body sizes, which is the input the decision actually needs. |
+| **the plan** — what work runs when which signal changes | **4**, as a declared output | it is derived from dep sets, triggers and captures, all of which 4 already has. Nothing about it needs the target. |
+| **granularity** — how that work is packaged into functions | **6** | how many WASM functions to emit, and how coarse, is a *representation* choice. 6 also knows the lowered body sizes, which is the input the decision actually needs. |
 
 **Consequence for the plan's shape, and it is a correction to the first draft:**
 the plan must carry **reactive units** — a body, its trigger, its dependency set —
-**not function identities**. If 3b names functions, it has already made 4b's
+**not function identities**. If 4 names functions, it has already made 6's
 decision. A unit is "this work runs when these signals change"; packaging units
 into one function per site, one per component, or inlined at the write site is
-then entirely 4b's call, and can even differ per component.
+then entirely 6's call, and can even differ per component.
 
-This also keeps 3b's output stable if the granularity choice is revisited later:
-re-packaging is a 4b change with no frontend churn.
+This also keeps 4's output stable if the granularity choice is revisited later:
+re-packaging is a 6 change with no frontend churn.
 
 ### The part that is settled: plan, then transcribe
 
-After 2b the compiler knows the UI tree, every dependency set
+After 4 the compiler knows the UI tree, every dependency set
 (`thir/signalck.rs` already computes these), every body and its trigger
 ([§5](#5--handlers-and-closures-are-one-concept-split-by-trigger)), and every
 capture set ([§4](#4--closures-are-a-value-and-the-irs-are-shaped-for-one)). From
 those, **which functions exist and who calls whom is fully determined without
 knowing anything about the target.**
 
-So 2b emits a **plan** — function identities, their trigger, their dependencies,
-which body each runs — and 3b emits the *bodies*. This is the pattern already
+So 4 emits a **plan** — function identities, their trigger, their dependencies,
+which body each runs — and 4 emits the *bodies*. This is the pattern already
 used once in this codebase (`410d874`: *"plan the module-start globals-init in
 LIR; codegen only transcribes it"*), one layer up.
 
@@ -832,10 +832,10 @@ pass doing two jobs. Separate them and each half is small.
 - **The plan is part of the seam, not the context.** `signal_deps` lives on
   `CompilerContext` today (`context.rs:77`); a plan stashed there is
   [A1](anti-spec.md#a1--no-side-channel-ir) side-channel IR. As a declared output
-  of 2b consumed by 3b it is just the contract. Feeds
-  [S4](infra-sema.md#s4--what-stays-on-the-context).
+  of 4 consumed by 4 it is just the contract. Feeds
+  [S4](stage-3-hir-build.md#s4--what-stays-on-the-context).
 - **Frontend ids only.** The plan cannot name `BlockId` — a `yelc-lir` type the
-  frontend crates cannot reach. It carries its own identity and 3b maps it, the
+  frontend crates cannot reach. It carries its own identity and 4 maps it, the
   same shape as the `HirId ↔ NodeId` map.
 
 ### The part that is NOT settled: what decomposition the plan describes

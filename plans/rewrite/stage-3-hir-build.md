@@ -1,8 +1,8 @@
-# Stage 2a — `yelc-hir`, build + resolve            status: brief written
+# Stage 3 — `yelc-hir`, build + resolve            status: brief written
 
 Replaces (frozen, never edited): `crates/yel-core/src/hir/` (1,995 lines).
-Phase **2a** of the merged HIR stage; phase 2b is
-[`stage-2b-hir-check.md`](stage-2b-hir-check.md). Same crate, run in sequence.
+Phase **3** of the merged HIR stage; phase 4 is
+[`stage-4-hir-check.md`](stage-4-hir-check.md). Same crate, run in sequence.
 
 Base: — · Started: — · Landed: —
 
@@ -14,19 +14,19 @@ Base: — · Started: — · Landed: —
 > the two oracle-hygiene items were prerequisites; they are now
 > [phases of this stage](#work-in-scope).
 
-## The shape (shared with 2b)
+## The shape (shared with stage 4)
 
 **One IR, two phases, types in a side table.** One node vocabulary, one walker.
-`types: NodeMap<Ty>` is empty after 2a and total after 2b —
+`types: NodeMap<Ty>` is empty after 3 and total after 4 —
 [`seam-changes.md`](seam-changes.md), 2026-07-28.
 
 | phase | does | produces |
 |---|---|---|
-| **2a** *(this file)* | AST → HIR; register items; resolve names; collect declared types | HIR + `Definitions` typed |
-| **2b** | bidirectional type checking over the same nodes | `types` map total |
+| **3** *(this file)* | AST → HIR; register items; resolve names; collect declared types | HIR + `Definitions` typed |
+| **4** | bidirectional type checking over the same nodes | `types` map total |
 
-**2a's output is a public surface, not an internal intermediate.** Yel will have
-lints, and early (syntactic) lints run here while type-aware lints run after 2b.
+**3's output is a public surface, not an internal intermediate.** Yel will have
+lints, and early (syntactic) lints run here while type-aware lints run after 4.
 Same nodes, same walker, a lint written once. Lint results are side tables like
 every other analysis output
 ([B3](anti-spec.md#b3--no-analysis-result-stored-on-the-node-it-describes)).
@@ -50,7 +50,7 @@ separated from items by id, analysis results in side tables.
 - **One walker**, exhaustive, no `_` arm ([A3](anti-spec.md#a3--no-duplicated-walkers)).
   The frozen tree has a second, hand-rolled one: `collect_children_slots`
   (`lower.rs:52`) re-walks the node tree with its own match over every kind.
-  2b shares this walker; it does not get its own.
+  4 shares this walker; it does not get its own.
 - **One uniform item spine** for globals and components
   ([D1](anti-spec.md#d1--the-compilation-unit-is-the-file-not-the-component)).
   The frozen tree already models this correctly — `HirItem` is a real
@@ -81,15 +81,15 @@ Four of stage 1's eight Surprises change what arrives here:
 
 ## What lowerings belong here
 
-**HIR is name-resolved before it is typed, so a desugaring belongs in 2a iff it
+**HIR is name-resolved before it is typed, so a desugaring belongs in 3 iff it
 is decidable from names alone.**
 
 | needs | belongs in |
 |---|---|
-| nothing but the syntax tree | 2a, any phase |
-| the definition tables | 2a, **phase 2 or 3** — never phase 1 ([H1](#h1)) |
-| a *type* to choose the target | [2b](stage-2b-hir-check.md) |
-| the whole module (fan-out, ordering) | [3b](stage-3b-lower.md) — e.g. `resolve_global_triggers` |
+| nothing but the syntax tree | 3, any phase |
+| the definition tables | 3, **phase 2 or 3** — never phase 1 ([H1](#h1)) |
+| a *type* to choose the target | [4](stage-4-hir-check.md) |
+| the whole module (fan-out, ordering) | [6](stage-6-lower.md) — e.g. `resolve_global_triggers` |
 
 **The five the frozen tree performs** (`docs/PIPELINE.md` lists four):
 
@@ -119,7 +119,7 @@ constructs (`for`, `while`, `while let`, `if let`, `?`, `let else`) collapse to
 
 | candidate | today | blocked on |
 |---|---|---|
-| `Ternary` → a general conditional | carried by **all four IRs**; `ExprKind` has `Ternary` and no `If`, so yel has *three* unrelated conditional constructs — expression, statement, UI node ([F18](findings.md#f18)) | the `match` / general-conditional decision in [3b's gap table](stage-2b-hir-check.md#gaps-inherited-as-decisions-not-copies). **The target form does not exist yet.** |
+| `Ternary` → a general conditional | carried by **all four IRs**; `ExprKind` has `Ternary` and no `If`, so yel has *three* unrelated conditional constructs — expression, statement, UI node ([F18](findings.md#f18)) | the `match` / general-conditional decision in [4's gap table](stage-4-hir-check.md#gaps-inherited-as-decisions-not-copies). **The target form does not exist yet.** |
 | `Range` → a struct literal | carried by all four IRs | **not blocked — scheduled.** There is no `Range` type to desugar into *yet*, and [§2 § What the stdlib must provide](directions.md#what-the-stdlib-must-provide-not-just-what-can-move-into-it) now carries it as a requirement. Not generic, so it does **not** wait on §3. |
 | `MethodCall` → `Call` | already desugars — gone by the typed layer | — |
 | `Interpolation` → `concat` | already desugars — gone by LIR | — |
@@ -150,7 +150,7 @@ fixtures before it lands.
 
 | # | decision | answer |
 |---|---|---|
-| D1 | Do bindings and handlers stay split? | **No — one uniform prop list.** 2b classifies. [log](#d1--bindings-and-handlers-are-one-uniform-prop-list) |
+| D1 | Do bindings and handlers stay split? | **No — one uniform prop list.** 4 classifies. [log](#d1--bindings-and-handlers-are-one-uniform-prop-list) |
 | D2 | `For.item_ty: Ty` on the node | **Remove.** [log](#d2--for-does-not-carry-the-item-type) |
 | D3 | `For.item_name` *"stored directly to avoid LocalScope lookup issues"* | **Remove; fix the scope structure.** [log](#d3--for-does-not-carry-the-loop-variable-name) |
 | D4 | Do globals get a body? | **No.** `HirGlobal` carries only its functions; defaults stay in `GlobalDef`. [log](#d4--hirglobal-has-no-body--only-its-functions) |
@@ -165,7 +165,7 @@ Recommendation: **one uniform prop list.** Stage 1's AST already unified them
 into `NamedProp { modifier, name, value }`; re-deriving two lists is an analysis
 result on the node (B3). HIR *cannot* classify correctly anyway — whether
 `bumped: { … }` is a handler depends on `bumped`'s declared type, which
-[2b](stage-2b-hir-check.md) owns ([F8](findings.md#f8)). And the payload param
+[4](stage-4-hir-check.md) owns ([F8](findings.md#f8)). And the payload param
 falls out: the frozen `HirHandler.param` exists so `drop: (payload) { … }` binds
 a body-scoped local, which in the landed AST is just `ClosureExpr { params, body }`.
 
@@ -181,7 +181,7 @@ parity." Verify local allocation order is unchanged before declaring D1 free.
 > ([`contract-before-fanout`](../../.agents/skills/compiler-rewrite/rules/contract-before-fanout.md)).
 > A needed change is a request in [`seam-changes.md`](seam-changes.md).
 >
-> **2a owns this contract**; 2b assumes it and adds only the `types` map.
+> **3 owns this contract**; 4 assumes it and adds only the `types` map.
 
 **Input:** `&[yelc_syntax::ParsedFile]` — the **whole file set** — plus
 `&mut CompilerContext` (from `yelc-sema`: interner, `Definitions`, diagnostics).
@@ -207,7 +207,7 @@ pub struct HirModule {
     pub items:   IndexVec<HirItemId, HirItem>,
     pub bodies:  IndexVec<BodyId, HirBody>,
     pub map:     HirMap,
-    pub types:   NodeMap<Ty>,     // empty after 2a, total after 2b
+    pub types:   NodeMap<Ty>,     // empty after 3, total after 4
 }
 
 /// Side table. One value per HirId, write-once.
@@ -230,10 +230,10 @@ pub fn type_of(&mut self, ty: TypeId) -> Ty;
 pub fn lower_files(parsed: &[ParsedFile], ctx: &mut CompilerContext) -> HirModule;
 ```
 
-### Designed for serialization — what 2a owes §6
+### Designed for serialization — what stage 3 owes §6
 
 [§6](directions.md#6--modules-are-serializable-artifacts) needs the module to be
-writable and re-readable. **None of that is implemented here**; what 2a owes is
+writable and re-readable. **None of that is implemented here**; what 3 owes is
 that it stays *possible*, which costs three decisions made now and nothing later.
 Swift's mechanism is the reference — see §6 for the `XREF` citation.
 
@@ -323,8 +323,8 @@ duplicated enum **is** the "second tree" the stub said to avoid.
 
 | | typed by | mechanism |
 |---|---|---|
-| **declared types** — fields, property types, params/returns, variant payloads | **2a, phase 2** | `type_of` → `Ty` into the definition tables |
-| **expressions** | **[2b](stage-2b-hir-check.md)** | bidirectional inference → `types` map |
+| **declared types** — fields, property types, params/returns, variant payloads | **3, phase 2** | `type_of` → `Ty` into the definition tables |
+| **expressions** | **[4](stage-4-hir-check.md)** | bidirectional inference → `types` map |
 
 The definition tables carry real `Ty` and always have ([F5](findings.md#f5)) —
 rustc's `type_of(def_id)`-before-body-check split, not a deviation. **The frozen
@@ -372,7 +372,7 @@ Each sweeps **every file** before the next begins.
 |---|---|---|
 | 1 · register | a `DefId` + name for every item | call `type_of` — no name is guaranteed to exist |
 | 2 · collect | `type_of` every **declared** type into the definition tables | look at any body |
-| 3 · lower | lower bodies; expressions stay untyped until 2b | register new items |
+| 3 · lower | lower bodies; expressions stay untyped until 4 | register new items |
 
 A body may reference any item regardless of source order, **and so may a declared
 type, and so may either across file boundaries.** *Asserted by* two fixtures: a
@@ -403,7 +403,7 @@ entire life.
 
 ## Verification
 
-**2a has no artifact of its own** ([F14](findings.md#f14)) — and pretending
+**3 has no artifact of its own** ([F14](findings.md#f14)) — and pretending
 otherwise is the failure mode this section prevents. What is comparable,
 strongest first:
 
@@ -439,7 +439,7 @@ dump to be *readable* instead of *faithful*, which is the more useful of the two
 | | |
 |---|---|
 | resolved names | `count#12` — the `DefId` the name bound to |
-| declared types | from H1 phase 2; expressions stay untyped until 2b |
+| declared types | from H1 phase 2; expressions stay untyped until 4 |
 | desugarings, made visible | the five in [What lowerings belong here](#what-lowerings-belong-here) |
 | dependency sets | `thir/signalck.rs` is the model |
 | trigger kind | [§5](directions.md#5--handlers-and-closures-are-one-concept-split-by-trigger) |
@@ -460,7 +460,7 @@ The dump is output, so [A6](anti-spec.md#a6--no-random-seeded-iteration-reaching
 applies: stable ordering, byte-identical across runs.
 
 The artifact-level differential arrives after
-[2b](stage-2b-hir-check.md#verification).
+[4](stage-4-hir-check.md#verification).
 
 ## Gate
 
@@ -527,15 +527,15 @@ Phases run in order. Phase 0 must complete before any number is taken.
    tree will find it; the divergence list pins it against the new parser.
 
 **The ordering constraint that made this a prerequisite held, and cost nothing.**
-Both items were done before any 2a measurement. The corpus did not need
+Both items were done before any 3 measurement. The corpus did not need
 regenerating: `git status --porcelain` over every frozen `src/` and `Cargo.*`
 came back empty, so the frozen binary is byte-identical and the oracle cannot
 have moved.
 
 ### Phase 1 · `yelc-sema` (~3,536 lines)
 
-Was [`infra-sema.md`](infra-sema.md), a separate landing. Now this stage's first
-build phase. Frozen equivalent, minus what `yelc-base` already carries:
+Was a separate landing (`stage-3-hir-build.md`, now merged here). Now this stage's
+first build phase; everything that brief said lives below. Frozen equivalent, minus what `yelc-base` already carries:
 
 | frozen file | lines |
 |---|---|
@@ -551,7 +551,7 @@ build phase. Frozen equivalent, minus what `yelc-base` already carries:
 
 It transforms no IR, but it carries real design decisions —
 [§1](directions.md#1--builtins-are-a-table-not-a-field-per-builtin) lives
-entirely inside it, as do the [`DefId`/`DefPath` split](#designed-for-serialization--what-2a-owes-6)
+entirely inside it, as do the [`DefId`/`DefPath` split](#designed-for-serialization--what-stage-3-owes-6)
 and `Ty`'s structural serialization. Its open questions are Clusters A–D of
 [`open-decisions.md`](open-decisions.md), and **Cluster A gates the phase**.
 
@@ -559,10 +559,293 @@ and `Ty`'s structural serialization. Its open questions are Clusters A–D of
 `lookup_known_definitions` registers builtins from *no input at all*, so the
 resulting `Definitions` table is comparable against the frozen one before a
 single source file is parsed. That was the argument for giving sema its own
-ratchet row, and folding it into 2a does not make the checkpoint less real — it
+ratchet row, and folding it into 3 does not make the checkpoint less real — it
 makes it easier to skip. Compare the table, and record the result in Numbers.
 
-### Phase 2 · 2a's seam types on `main`
+#### `context.rs` is a cross-pipeline god object and cannot be ported
+
+Measured: **40 functions, 7 of them LIR-flavoured**, plus this state —
+
+```rust
+block_names:                RefCell<HashMap<(DefId, BlockId), BlockDebugName>>,
+block_id_counter:           Cell<u32>,
+component_lifecycle_blocks: RefCell<HashMap<DefId, ComponentLifecycleBlocks>>,
+// + the per-(observer, global signal) fanout block table
+```
+
+That is **LIR state living on the shared context** because it was convenient —
+[A1](anti-spec.md#a1--no-side-channel-ir) and
+[A2](anti-spec.md#a2--no-god-pass).
+
+It is also a hard crate-graph error. `BlockId`, `BlockDebugName` and
+`ComponentLifecycleBlocks` are `yelc-lir` types, so porting them here creates
+`sema → lir`, which the [dependency graph](README.md) forbids:
+
+```
+base ← sema ← hir, lower          sema must NOT reach lir
+base ← lir  ← lower, codegen
+```
+
+**So the LIR half is not descoped for tidiness — it does not compile here.**
+It belongs to [5](stage-5-lir.md) (the ids and their allocation) and
+[6](stage-6-lower.md) (the lifecycle and fanout tables, which are lowering
+bookkeeping). That is a note *for those briefs*, and it is written down here
+because this is where someone will first notice.
+
+#### Decisions this phase must make
+
+Numbered `S` so they do not collide with this stage's `D`.
+
+Answers come from [`open-decisions.md`](open-decisions.md); this table is the
+record.
+
+| # | decision | status |
+|---|---|---|
+| S1 | Adopt [§1](directions.md#1--builtins-are-a-table-not-a-field-per-builtin)'s builtin table? | ✅ **yes** — one table, replacing `stdlib_lookup.rs` + `known.rs` (C1, 2026-07-29) |
+| S2 | How does `Ty` serialize? | ⬜ **open** (B1) |
+| S3 | Does `known.rs` survive? | ⬜ **open** (C2) |
+| S4 | What stays on `CompilerContext`? | ⬜ **open** (D0) |
+| S5 | `DefId` shape, given `DefPath` | ✅ **module-qualified from day one** — `DefId { module, index }` (B2, 2026-07-29) |
+| S6 | Who owns `OverloadKey` — here or 4? | ✅ **here** — one key, consumed by `DefPath` and §3's mangling (B3, 2026-07-29) |
+| S7 | Does `Ty` gain a non-concrete variant? | ✅ **yes — both** `Param` *and* `Infer` (A3, A4, 2026-07-29). **Reverses this file's recommendation** — see below |
+
+### S1 · Adopt the builtin table (§1)
+
+`stdlib_lookup.rs` (1,029 lines) and `known.rs` (413) implement one builtin as
+four things that must agree and are checked by nothing
+([F12](findings.md#f12)). §1 replaces them with one row per builtin:
+`name → { arity, type scheme, lowering target }`.
+
+This is the single largest simplification available to this crate, and it is
+**not** blocked on [§2](directions.md#2--the-stdlib-is-yel-source-embedded-in-the-binary)
+(the source stdlib) — the table is populated from Rust now, and §2 later swaps
+*where the rows come from*, not what they are.
+
+Open, from §1: one table or two projections · do builtin **elements** belong in
+it (`KnownElements` is 15 fields of UI vocabulary with no lowering target) ·
+variadics (`concat` is registered with an empty param list and a comment saying
+it is really variadic).
+
+**Decided 2026-07-29.**
+
+**C1a — one table, two accessors.** Not two tables with a key-alignment test.
+[F12](findings.md#f12) is exactly the failure of *"four things that must agree,
+checked by nothing"*; replacing four unchecked things with two unchecked things
+is the same bug at smaller scale, and the alignment test is the part that rots
+first because it passes for years. One row, two accessors makes misalignment
+**unrepresentable** rather than tested. The constraint that `yelc-lir` must see
+neither is already enforced by the crate graph — lir has no dependency path to
+sema, so it cannot name either accessor — so it does not need to be paid for in
+table shape.
+
+**C1b — no, builtin elements do not go in it.** The row is
+`{ arity, type scheme, lowering target }`. An element has no arity, no type
+scheme in that sense, and no lowering target — three dead columns for every
+element row. A table whose columns are meaningless for half its rows is two
+tables sharing a name. They go to C2's home.
+
+**C1c — arity gains a variadic form.** `concat` is genuinely variadic; the frozen
+registration says so in a comment it cannot enforce
+(`stdlib_lookup.rs:293`, `// concat: func(string...) -> string`). Interpolation
+desugars to `concat` with **one argument per part**, and a 10-part interpolation
+compiles today — so "N fixed arities" has no principled N, and the N+1 case would
+fail on a call **the user never wrote**, since the desugaring is compiler-
+generated. The diagnostic would name `concat` at a source position containing a
+string literal. So: `Arity::{ Fixed(n), Variadic { min, element } }`, and the
+table can state the property instead of commenting it.
+
+### S2 · `Ty` must not serialize as its handle
+
+`pub struct Ty(pub u32)` **already derives `Serialize`/`Deserialize`**
+(`types/interner.rs:13`). Carrying that derive forward means every struct
+containing a `Ty` silently writes an **interner index** — the exact bug
+[§6](directions.md#6--modules-are-serializable-artifacts) exists to prevent, and
+one that compiles perfectly.
+
+Required: serialized positions write the type's *structure*; loading re-interns.
+Swift's rule — *"types are always serialized with enough info to regenerate them
+at load time"*. The cheapest enforcement is to **not derive `Serialize` on `Ty`
+at all** and make the structural writer the only path, so the wrong thing does
+not typecheck.
+
+**Decided 2026-07-29 (B1): structurally, and delete the derive.**
+
+Deleting `Serialize`/`Deserialize` from `Ty` is the decision, not merely the
+recommended enforcement. Keeping the derive "for debug use" leaves a path where
+the wrong thing compiles; removing it makes writing a `Ty` handle a **type
+error**, which is the only version of this that survives contact with a
+contributor who has not read this file.
+
+What it costs, stated so it is not a surprise: any inspection path that wanted a
+cheap `Ty` dump now goes through the structural writer. That is slower and it is
+correct, and `yelc2` is where such a dump belongs anyway.
+
+### S3 · Does `known` survive at all?
+
+`KnownDefinitions` is five sub-structs of `Option<DefId>`. S1 removes the
+*functions* half outright. What is left is the question of builtin **elements**,
+**enums** and **variants** — UI vocabulary with no lowering target, which may
+genuinely want a different home than a call table. Decide; do not port 413 lines
+because they exist.
+
+Note the `Option` is load-bearing nowhere: every read is an unwrap-or-diagnostic
+for a case that cannot occur once registration has run
+([A8](anti-spec.md#a8--an-invariant-is-asserted-not-observed)).
+
+**Decided 2026-07-29 (C2): a separate home, shaped as resolved lang-items.**
+
+Neither "same table" (wrong shape — see C1b) nor "delete". Delete is tempting and
+wrong: these **are** registered in `Definitions`, which is how ordinary name
+lookup finds them, but the compiler *itself* also needs to say "the `Color`
+record" or "the `option` variant" while lowering. A cache of the `DefId`s the
+compiler references by name is rustc's `lang_items`, and it is a real pattern
+rather than inherited clutter.
+
+**The defect to fix is the `Option`, not the existence.** There are **47**
+`Option<DefId>` fields across the six `Known*` structs. Every read is an
+unwrap-or-diagnostic for a case that cannot occur once registration has run
+([A8](anti-spec.md#a8--an-invariant-is-asserted-not-observed)). So the new home
+holds `DefId`, resolved once at construction, failing **there** if a builtin is
+missing — one assertion at the point the invariant is established, instead of 47
+re-checks at points that cannot observe it.
+
+### S4 · What stays on the context
+
+Keep-list §5 keeps context *threading*, not the god object. The test for each
+field: **is it produced and consumed within sema, or is it a later stage's state
+parked here?** The LIR fields fail that test and cannot compile here anyway.
+
+Watch for the same shape re-forming: `signal_deps` keyed by `DefId` is cited as
+the *positive* precedent for side tables
+([B3](anti-spec.md#b3--no-analysis-result-stored-on-the-node-it-describes)) — but
+it is reactivity analysis, which is a frontend concern, not a sema one. Decide
+where it lives rather than inheriting its address.
+
+**Decided 2026-07-29.**
+
+**D0 — the six fields:** interner, type interner, `Definitions`, the builtin
+table, source map, diagnostics. Nothing else. The LIR fields
+(`block_id_counter`, `block_names`, `component_lifecycle_blocks`, the fanout
+table) are settled by the crate graph rather than by preference — `sema → lir` is
+forbidden, so they **cannot compile here**.
+
+**D0a — `signal_deps` moves to `yelc-hir`.** It is cited as the positive
+precedent for side tables and it stays one, keyed by `DefId`
+([B3](anti-spec.md#b3--no-analysis-result-stored-on-the-node-it-describes)) — but
+a side table is a shape, not an address. Sema's test is *produced and consumed
+within sema*; reactivity analysis is produced by the frontend and consumed by
+lowering, and fails it. Keeping it on the context because that is where it
+happens to live today is how the god object re-forms one justified field at a
+time.
+
+### S5 · `DefId` shape
+
+`DefId` stays a dense module-local index — it is used everywhere in-process and
+must stay O(1). What changes is that it is **module-qualified from day one**, so
+that `DefPath` (the serialized form) is derivable and nothing downstream has to
+be retrofitted later. See
+[3 § Designed for serialization](#designed-for-serialization--what-stage-3-owes-6).
+
+### S6 · `OverloadKey`
+
+Needed twice: by [§6](directions.md#6--modules-are-serializable-artifacts)'s
+`DefPath` (Swift's `XREF_VALUE_PATH_PIECE` carries the type, because a name does
+not identify a decl under overloading) and by
+[§3](directions.md#3--generics-are-monomorphization-by-name)'s mangling
+(`len` is both `list<T> -> s32` and `string -> s32`). **Same key, settle once
+here.**
+
+### S7 · Does `Ty` gain a non-concrete variant?
+
+**Decided 2026-07-29: yes, both.** `InternedTyKind` gains `Param` (A3) *and*
+`Infer` (A4). **This reverses the recommendation previously written here**, which
+was "no" on both. The reasoning that recommendation rested on is recorded below,
+along with why it did not survive — a recommendation that loses is more useful
+kept than deleted.
+
+Two holes, two lifetimes, and they are **not interchangeable**:
+
+| variant | means | legal | must be gone by |
+|---|---|---|---|
+| `Param(idx)` | the `T` in a declaration | in a template's stored signature | substitution at instantiation |
+| `Infer(var)` | unknown, to be solved | during 4 checking | the end of 4 |
+
+##### Why "no" lost
+
+The recommendation assumed templates would be carried as **syntax** (an AST
+`TypeRef` plus a substitution), interned only once concrete. That works, and it
+keeps `Ty` entirely concrete — but it forces **checking at instantiation**: a
+template body cannot be typechecked until a concrete type is substituted, so an
+error inside `filter` reports at the *user's* call site. That is the C++ template
+error-message problem.
+
+`Param` buys the opposite: the body is checked **once, generically**, against the
+parameter. Errors land in the stdlib, where they belong. Combined with
+[A1](open-decisions.md#a1--how-are-parameterized-types-represented)'s
+monomorphization, this is Rust's arrangement — generic bodies checked once, then
+specialized per instantiation — and it was dismissed here too quickly on the
+grounds that "there are no type variables today" ([F1](findings.md#f1)), which is
+evidence about the frozen compiler, not an argument about the new one.
+
+##### What both variants now oblige
+
+1. **Neither may ever be serialized.** A module artifact containing a `Param` or
+   an `Infer` is a bug, not a state. This tightens
+   [S2](#s2--ty-must-not-serialize-as-its-handle): the structural writer must
+   *refuse* them, not merely encode them faithfully.
+2. **`Infer` must not outlive 4.** 4's postcondition strengthens from "`types`
+   is total" to "`types` is total **and contains no unresolved variable**" —
+   rustc's `has_infer()` check, asserted rather than assumed.
+3. **`Param` must not outlive substitution.** A `Param` reaching 5 is the same
+   class of error: the instantiation did not happen.
+4. **Structural equality must distinguish them.** Two `Param(0)`s from different
+   templates are not the same type; two distinct `Infer` variables are never
+   equal. Decide whether variables live in the interner at all or in a side
+   unification table — interning a value that is *about to change* is the usual
+   mistake here.
+5. **The interner's uniquing invariant weakens.** Today equal types share a
+   handle. With `Infer`, two handles may become equal *later*, which every
+   `Ty == Ty` comparison in the checker must be written knowing.
+
+#### Phase-1 contract — what `yelc-sema` exports
+
+> Lands on `main` as compiling Rust before Phase 3 starts
+> ([`contract-before-fanout`](../../.agents/skills/compiler-rewrite/rules/contract-before-fanout.md)).
+
+```rust
+// identity
+pub struct ModuleId(u32);
+pub struct DefId { module: ModuleId, index: u32 }   // dense, in-process, never serialized
+pub struct DefPath { module: ModuleId, pieces: Vec<PathPiece> }  // serialized, resolved by lookup
+
+// types
+pub struct Ty(u32);                      // handle; NOT Serialize — see S2
+pub enum InternedTyKind { /* … */ }
+pub struct TyInterner;                   // intern / lookup / structural write
+
+// definitions
+pub struct Definitions;                  // alloc, register_name, lookup, span, as_*
+pub enum Namespace { Type, Value, Component, Global }
+
+// builtins
+pub struct BuiltinTable;                 // §1: name → { arity, type scheme, lowering target }
+
+// threading
+pub struct CompilerContext {             // S4 decides the fields; NOT the frozen 963 lines
+    pub interner:   Arc<Interner>,       // from yelc-base
+    pub types:      TyInterner,
+    pub defs:       Definitions,
+    pub builtins:   BuiltinTable,
+    pub source_map: SourceMap,           // from yelc-base
+    pub diagnostics: Diagnostics,        // from yelc-base
+}
+```
+
+**Depends on:** `yelc-base` only. **Must not depend on:** `yelc-syntax`,
+`yelc-hir`, `yelc-lir` — a `use yelc_lir::BlockId` here is the error this brief
+exists to prevent, and cargo will say so.
+
+### Phase 2 · 3's seam types on `main`
 
 `HirId`, `BodyId`, `HirMap`, `HirModule`, `NodeMap`, `TypeId`, `type_of`,
 `lower_files` — as compiling Rust, before the lowering body is written.
@@ -663,7 +946,7 @@ moves. And visit order is unchanged (`a, b, c` either way), so D5 is unaffected.
 independent 1-way selectors.
 
 **Obligations.**
-1. **[Stage 3b](stage-3b-lower.md) must recognise the chain** — a nested `If`
+1. **[Stage 6](stage-6-lower.md) must recognise the chain** — a nested `If`
    whose `else` holds exactly one `If` and nothing else lowers as the flat N-way
    selector. Uniform IR, smart lowering. Without it, every `else if` in the
    corpus diverges.
@@ -716,11 +999,11 @@ in-process compilation never did.
 
 **Decided 2026-07-29: one uniform prop list.** No `HirBinding`/`HirHandler`
 split; HIR carries what stage 1's AST already carries — `NamedProp { modifier,
-name, value }` — and [2b](stage-2b-hir-check.md) classifies using the declared
+name, value }` — and [4](stage-4-hir-check.md) classifies using the declared
 type.
 
 The rationale is above under [D1](#d1) and does not repeat here. The **caveat is
-binding and is 2a's to discharge, not to note**: the frozen lowering uses the
+binding and is 3's to discharge, not to note**: the frozen lowering uses the
 split to decide scoping, `LocalId` ordinals reach the type checker, and
 `HirHandler`'s doc says typeck re-defines the param "to produce the THIR
 `LocalId` with matching arena parity." A uniform lowering must produce the same
@@ -729,13 +1012,13 @@ enumerated in allocation order, against the frozen tree's — not a review remar
 ([A8](anti-spec.md#a8--an-invariant-is-asserted-not-observed)).
 
 Couples to [F1](open-decisions.md#f1--how-is-a-bodys-trigger-determined), which
-is 2b's and still open.
+is 4's and still open.
 
 ### D2 · `For` does not carry the item type
 
 **Decided 2026-07-29: remove `item_ty: Ty`.**
 [B3](anti-spec.md#b3--no-analysis-result-stored-on-the-node-it-describes)
-verbatim — a typeck result stored on an untyped IR node. If 2b needs it keyed by
+verbatim — a typeck result stored on an untyped IR node. If 4 needs it keyed by
 node, that is a `NodeMap` side table it owns.
 
 ### D3 · `For` does not carry the loop-variable name
@@ -807,14 +1090,14 @@ syntactic position in a global where a component can be used.
    lowering order makes a reference resolve would be asserting something the
    registration phase already guarantees
    ([A8](anti-spec.md#a8--an-invariant-is-asserted-not-observed)). Where the
-   direction *does* become load-bearing is [3b](stage-3b-lower.md) —
+   direction *does* become load-bearing is [6](stage-6-lower.md) —
    initialization order, and `resolve_global_triggers`.
 2. **Name resolution does not currently enforce it.** `lower.rs:1169–1174`
    resolves a bare identifier through `Value → Type → Component`, and that path
    is shared by global function bodies — so a bare component name written inside
    a global resolves to `HirExprKind::Def(component_def_id)` today. The direction
    holds because the grammar gives a global no place to *use* a component, not
-   because resolution refuses. If 2a wants the rule enforced rather than merely
+   because resolution refuses. If 3 wants the rule enforced rather than merely
    unreachable, that is a check to add deliberately, with a diagnostic.
 
 The frozen comment concedes components-first is inherited rather than required —
@@ -835,7 +1118,7 @@ concern: corpus programs are valid Yel and emit no diagnostics. It is an
 **item-order** concern. Lowering order determines the order of `HirItem`s, which
 flows to THIR → LIR → codegen and can reorder WIT exports and DOT nodes.
 
-**The obligation this creates, and it is 2a's:** run the corpus differential and
+**The obligation this creates, and it is 3's:** run the corpus differential and
 show the 815 either byte-identical or diverging *only* in item order, with the
 divergence enumerated in [`goldens-changed.md`](goldens-changed.md).
 
@@ -857,7 +1140,7 @@ gets waved through as an expected reordering.
 blank line between it and the item.**
 
 Stage 1 deliberately left this open — the green tree holds trivia and decides
-nothing about ownership ([`stage-1-syntax.md`](stage-1-syntax.md)), so 2a owns
+nothing about ownership ([`stage-1-syntax.md`](stage-1-syntax.md)), so 3 owns
 the rule. The rule is stated positively so it can be tested rather than inferred:
 
 - The run ends at the item's first token, with only whitespace between.

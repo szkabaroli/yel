@@ -26,24 +26,24 @@ started measuring.
 | **2 — driver** | 2026-07-28 | `2505f8d` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | **0** | **2** |
 | **baseline (re-freeze 3)** | 2026-07-29 | `1d12250` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | — (corpus untouched; no frozen `src/` changed) | **2** |
 | **baseline (re-freeze 4)** | 2026-07-29 | `f2bd1bc` | **481 pass / 0 fail** | **85 / 85** | **200 / 200** | — (corpus untouched; `tests/` only) | **2** |
-| 2a — HIR build+resolve (incl. `yelc-sema`) | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
-| 2b — HIR check | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
-| 3a — LIR data model | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
-| 3b — LIR lowering | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
-| 4 — codegen | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
+| 3 — HIR build+resolve (incl. `yelc-sema`) | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
+| 4 — HIR check | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
+| 5 — LIR data model | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
+| 6 — LIR lowering | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
+| 7 — codegen | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 
 **Numbers are contiguous.** HIR and THIR merged into one IR with two phases on
 2026-07-28 ([`seam-changes.md`](seam-changes.md)), and the remaining stages were
 renumbered rather than left with a gap. Row labels here match
 [`README.md`](README.md) § Status and the `stage-N-*.md` files exactly —
-`2a`/`2b` are `yelc-hir`, `3a` is `yelc-lir`, `3b` is `yelc-lower`.
+`3`/`4` are `yelc-hir`, `3` is `yelc-lir`, `4` is `yelc-lower`.
 
 **`yelc-sema` lost its own row on 2026-07-29**, when it became phase 1 of stage
-2a rather than a separate landing. Its measurement did not disappear with the
+3 rather than a separate landing. Its measurement did not disappear with the
 row: the builtin `Definitions` table is comparable against the frozen one before
-any source is parsed, and 2a owes that comparison in its Numbers. Worth naming
+any source is parsed, and 3 owes that comparison in its Numbers. Worth naming
 the cost — a line in a stage's Numbers is weaker than a row that cannot be passed
-silently ([A19](anti-spec.md#a19--a-number-is-produced-by-a-command)).
+silently ([A18](anti-spec.md#a18--a-number-is-produced-by-a-command)).
 
 **Stage 2's workspace count is flat at 480 on purpose.** `yelc-driver` adds no
 tests, because nothing in `tests/` may assert on a dump's text — the moment
@@ -69,9 +69,9 @@ Two counts moved and are recorded here so a later reader is not surprised:
 not move — `positive_fixtures` and `known_bugs_fixtures` are one test each,
 looping over a directory.
 
-**A row is per landing, not per crate.** 2a and 2b live in one crate but ratchet
+**A row is per landing, not per crate.** 3 and 4 live in one crate but ratchet
 separately, because each lands on its own measured number and the whole point is
-that the number never goes down between them. Same for 3a/3b.
+that the number never goes down between them. Same for 3/4.
 
 ## Baseline detail (2026-07-24, `ccf2086de2750c3783fd6f930be4a766f2463adb`)
 
@@ -181,7 +181,7 @@ That is the evidence the rename was behaviour-neutral for everything except the
 keyword itself, and it is why stage 1's numbers stay comparable across the move.
 
 (The first draft of this row said 395, reasoned from arithmetic rather than
-measured. That is the A19 violation this file exists to prevent, caught before it
+measured. That is the A18 violation this file exists to prevent, caught before it
 landed. Every number here comes from the command named beside it.)
 
 ## Why there are three baselines
