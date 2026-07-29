@@ -777,9 +777,9 @@ export global Math {
     double: func(n: s32) -> s32 { n * 2 }
 
     clamp: func(value: s32, low: s32, high: s32) -> s32 {
-        if value < low { return low; }
-        if value > high { return high; }
-        value
+        if value < low { low }
+        else if value > high { high }
+        else { value }
     }
 }
 ```
