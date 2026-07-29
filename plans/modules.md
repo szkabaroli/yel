@@ -482,9 +482,14 @@ Two things in this section did not survive contact:
   handle, and `Name` *does* derive `Serialize`) and its `OverloadKey` holds `Ty`
   handles. It is the resolution-independent *in-process* form; the wire needs a
   third representation.
-- **`DefPath` cannot name a definition.** `Definitions` keys on
-  `(Name, Namespace)` and a record may share a name with a component;
-  `DefPath` has no namespace field, so it cannot tell them apart.
+- **`DefPath` cannot name a definition.** `Definitions` keyed on
+  `(Name, Namespace)` and a record could share a name with a component;
+  `DefPath` has no namespace field, so it could not tell them apart.
+  **Overtaken 2026-07-29:** the symbol table is single-namespace, so a name
+  names one definition and a path no longer needs a discriminator to resolve.
+  The wire form keeps a `kind` for a different job — a loaded definition has to
+  be *rebuilt* as the right thing. See
+  [`plans/rewrite/scope.md`](rewrite/scope.md).
 
 ---
 
@@ -497,11 +502,12 @@ Two things in this section did not survive contact:
   because the syntax is trivial beside it.
 - ~~**The serialized-module format** — §6.~~ Built 2026-07-29
   (`crates/yelc-sema/src/artifact/`). B1 and B2 are now tested rather than
-  argued. **B3 is not**, and cannot be: `Definitions` keys names by
-  `(Name, Namespace)` with no overload discriminator, so the second `len` is a
-  duplicate and an overload set cannot be registered at all.
-  `SerializedDefPath.overload` is carried, always empty, and fills in without a
-  format change the day `Definitions` learns the key. Still open above it: what
+  argued. **B3 is half:** `Definitions` can hold an overload set as of
+  2026-07-29 (`register_overload`, one `Name` key, `SmallVec<[Sym; 1]>` values),
+  but the **loader** cannot rebuild one — it registers in pass 1 and resolves the
+  type table in pass 2, so a `Ty`-valued key does not exist yet when registration
+  needs it. `SerializedDefPath.overload` is carried, always empty, and filling it
+  wants a key independent of the type table. Still open above it: what
   the artifact does about an **input hash** and about **cross-package**
   `DefId`s — writing one panics today rather than guessing.
 - **Whether `impl` may appear outside the stdlib.** Closed-world makes coherence

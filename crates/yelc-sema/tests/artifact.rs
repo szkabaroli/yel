@@ -16,7 +16,7 @@
 use pretty_assertions::assert_eq;
 use yelc_base::{Interner, SourceId, Span};
 use yelc_sema::artifact::{SerializedDefPath, StructuralTy, decode, encode};
-use yelc_sema::definitions::Namespace;
+use yelc_sema::definitions::DefKind;
 use yelc_sema::ids::PackageId;
 use yelc_sema::{Artifact, Definitions, LoadError, PackageName, Stamp, Ty, TyKind, TypeInterner};
 
@@ -48,10 +48,10 @@ impl Producer {
         }
     }
 
-    fn declare(&mut self, name: &str, namespace: Namespace, ty: Option<Ty>) -> yelc_sema::DefId {
+    fn declare(&mut self, name: &str, kind: DefKind, ty: Option<Ty>) -> yelc_sema::DefId {
         let id = self
             .defs
-            .register(self.names.intern(name), namespace, span(), true)
+            .register(self.names.intern(name), kind, span(), true)
             .expect("unique in this fixture");
         if let Some(ty) = ty {
             self.defs.set_ty(id, ty);
@@ -119,10 +119,10 @@ fn render(types: &TypeInterner, defs: &Definitions, names: &Interner, ty: Ty) ->
     }
 }
 
-fn path(name: &str, namespace: Namespace) -> SerializedDefPath {
+fn path(name: &str, kind: DefKind) -> SerializedDefPath {
     SerializedDefPath {
         package: package(),
-        namespace,
+        kind,
         segments: vec![name.to_string()],
         overload: Vec::new(),
     }
@@ -148,7 +148,7 @@ fn a_type_survives_a_differently_populated_interner() {
     // list<option<s32>> — producer interning order: option<s32>, then list<…>.
     let option_s32 = producer.types.intern(TyKind::Option(Ty::S32));
     let list_option_s32 = producer.types.intern(TyKind::List(option_s32));
-    producer.declare("holder", Namespace::Value, Some(list_option_s32));
+    producer.declare("holder", DefKind::Value, Some(list_option_s32));
 
     let artifact = producer.build();
 
@@ -174,7 +174,7 @@ fn a_type_survives_a_differently_populated_interner() {
 
     let holder = loaded
         .defs()
-        .lookup(consumer_names.intern("holder"), Namespace::Value)
+        .lookup_def(consumer_names.intern("holder"), DefKind::Value)
         .expect("registered by the load");
 
     let consumer_ty = loaded
@@ -211,7 +211,7 @@ fn a_type_survives_a_differently_populated_interner() {
 fn the_same_interner_round_trip_proves_nothing() {
     let mut producer = Producer::new();
     let ty = producer.types.intern(TyKind::List(Ty::S32));
-    producer.declare("x", Namespace::Value, Some(ty));
+    producer.declare("x", DefKind::Value, Some(ty));
 
     let artifact = producer.build();
     let loaded = artifact
@@ -220,7 +220,7 @@ fn the_same_interner_round_trip_proves_nothing() {
 
     let x = loaded
         .defs()
-        .lookup(producer.names.intern("x"), Namespace::Value)
+        .lookup_def(producer.names.intern("x"), DefKind::Value)
         .unwrap();
     assert_eq!(loaded.defs().get(x).ty, Some(ty));
 }
@@ -230,10 +230,10 @@ fn the_same_interner_round_trip_proves_nothing() {
 #[test]
 fn an_adt_survives_a_differently_populated_interner() {
     let mut producer = Producer::new();
-    let widget = producer.declare("Widget", Namespace::Type, None);
+    let widget = producer.declare("Widget", DefKind::Type, None);
     let widget_ty = producer.types.intern(TyKind::Adt(widget));
     let list_widget = producer.types.intern(TyKind::List(widget_ty));
-    producer.declare("widgets", Namespace::Value, Some(list_widget));
+    producer.declare("widgets", DefKind::Value, Some(list_widget));
 
     let artifact = producer.build();
 
@@ -248,7 +248,7 @@ fn an_adt_survives_a_differently_populated_interner() {
 
     let widgets = loaded
         .defs()
-        .lookup(consumer_names.intern("widgets"), Namespace::Value)
+        .lookup_def(consumer_names.intern("widgets"), DefKind::Value)
         .unwrap();
     let ty = loaded.defs().get(widgets).ty.unwrap();
     assert_ne!(ty, list_widget, "the interners must be skewed");
@@ -279,7 +279,7 @@ fn an_adt_survives_a_differently_populated_interner() {
 #[test]
 fn a_path_resolves_to_a_local_defid_with_a_different_index() {
     let mut producer = Producer::new();
-    let produced = producer.declare("Panel", Namespace::Type, None);
+    let produced = producer.declare("Panel", DefKind::Type, None);
     assert_eq!(produced.index, 0, "first registration in the producer");
 
     let artifact = producer.build();
@@ -291,7 +291,7 @@ fn a_path_resolves_to_a_local_defid_with_a_different_index() {
         consumer_defs
             .register(
                 consumer_names.intern(existing),
-                Namespace::Type,
+                DefKind::Type,
                 span(),
                 false,
             )
@@ -303,7 +303,7 @@ fn a_path_resolves_to_a_local_defid_with_a_different_index() {
         .unwrap();
 
     let resolved = loaded
-        .def(&path("Panel", Namespace::Type))
+        .def(&path("Panel", DefKind::Type))
         .expect("the path resolves");
     assert_eq!(resolved.package, PackageId(2));
     assert_eq!(
@@ -320,14 +320,47 @@ fn a_path_resolves_to_a_local_defid_with_a_different_index() {
     );
 }
 
-/// The namespace is part of the path. Without it, a record and a component
-/// sharing a name — which `Definitions` explicitly permits — resolve to each
-/// other.
+/// **Inverted deliberately on 2026-07-29.** This test was
+/// `a_path_distinguishes_two_namespaces_sharing_a_name` and asserted that a
+/// record and a component sharing a name load as two definitions, because
+/// `Definitions` permitted the reuse. The symbol table is now
+/// single-namespace: the pair cannot be produced, and an artifact that carries
+/// it anyway is rejected rather than half-loaded. Flipped rather than deleted so
+/// the reversal stays visible — see `plans/rewrite/scope.md`.
+///
+/// The artifact is hand-built because `Producer::declare` can no longer make
+/// one, which is itself the point.
 #[test]
-fn a_path_distinguishes_two_namespaces_sharing_a_name() {
+fn two_kinds_sharing_a_name_no_longer_load_as_two_definitions() {
+    let mut artifact = Producer::new().build();
+    artifact.defs.push(yelc_sema::artifact::SerializedDef {
+        path: path("Panel", DefKind::Type),
+        ty: None,
+        is_export: true,
+    });
+    artifact.defs.push(yelc_sema::artifact::SerializedDef {
+        path: path("Panel", DefKind::Component),
+        ty: None,
+        is_export: true,
+    });
+
+    let consumer_names = Interner::new();
+    let consumer_types = TypeInterner::new();
+    assert!(matches!(
+        artifact.load(PackageId(1), &consumer_names, &consumer_types),
+        Err(LoadError::DuplicateDefinition(_)),
+    ));
+}
+
+/// The path's `kind` field survived the single-namespace change with a different
+/// job: it no longer disambiguates, it **reconstructs**. Without it a loaded
+/// record would be indistinguishable from a loaded component.
+#[test]
+fn a_definitions_kind_survives_the_round_trip() {
     let mut producer = Producer::new();
-    producer.declare("Panel", Namespace::Type, Some(Ty::S32));
-    producer.declare("Panel", Namespace::Component, Some(Ty::BOOL));
+    for &kind in yelc_sema::DefKind::ALL {
+        producer.declare(&format!("{kind:?}"), kind, None);
+    }
 
     let artifact = producer.build();
     let consumer_names = Interner::new();
@@ -336,11 +369,13 @@ fn a_path_distinguishes_two_namespaces_sharing_a_name() {
         .load(PackageId(1), &consumer_names, &consumer_types)
         .unwrap();
 
-    let as_type = loaded.def(&path("Panel", Namespace::Type)).unwrap();
-    let as_component = loaded.def(&path("Panel", Namespace::Component)).unwrap();
-    assert_ne!(as_type, as_component);
-    assert_eq!(loaded.defs().get(as_type).ty, Some(Ty::S32));
-    assert_eq!(loaded.defs().get(as_component).ty, Some(Ty::BOOL));
+    for &kind in yelc_sema::DefKind::ALL {
+        let id = loaded
+            .defs()
+            .lookup_def(consumer_names.intern(&format!("{kind:?}")), kind)
+            .unwrap_or_else(|| panic!("{kind:?} did not load as a {kind:?}"));
+        assert_eq!(loaded.defs().get(id).kind, kind);
+    }
 }
 
 #[test]
@@ -352,26 +387,69 @@ fn an_unknown_path_does_not_resolve() {
     let loaded = artifact.load(PackageId(1), &names, &types).unwrap();
 
     assert!(matches!(
-        loaded.def(&path("Nope", Namespace::Type)),
+        loaded.def(&path("Nope", DefKind::Type)),
         Err(LoadError::UnresolvedDefPath(_)),
     ));
 }
 
-/// `Definitions` cannot represent an overload set, so an artifact carrying one
-/// is rejected rather than silently losing a definition.
+/// The **loader** cannot rebuild an overload set — its registration pass runs
+/// before the type table resolves — so an artifact carrying one is rejected
+/// rather than silently losing a definition.
+///
+/// The producer *can* now hold one; see
+/// [`an_overload_set_is_refused_by_the_loader_not_lost`], which reaches this
+/// same rejection from a real registration instead of a hand-built artifact.
 #[test]
 fn a_colliding_definition_is_rejected_not_dropped() {
     let mut artifact = Producer::new().build();
     artifact.defs.push(yelc_sema::artifact::SerializedDef {
-        path: path("len", Namespace::Value),
+        path: path("len", DefKind::Value),
         ty: None,
         is_export: true,
     });
     artifact.defs.push(yelc_sema::artifact::SerializedDef {
-        path: path("len", Namespace::Value),
+        path: path("len", DefKind::Value),
         ty: None,
         is_export: true,
     });
+
+    let names = Interner::new();
+    let types = TypeInterner::new();
+    assert!(matches!(
+        artifact.load(PackageId(1), &names, &types),
+        Err(LoadError::DuplicateDefinition(_)),
+    ));
+}
+
+/// B3, as far as it reaches: `Definitions` holds the overload set, the writer
+/// flattens both entries to the same path because
+/// `SerializedDefPath::overload` cannot be filled, and the loader refuses
+/// loudly. A silent drop here would lose a definition with no diagnostic.
+#[test]
+fn an_overload_set_is_refused_by_the_loader_not_lost() {
+    let mut producer = Producer::new();
+    let len = producer.names.intern("len");
+    for param in [Ty::STRING, Ty::S32] {
+        producer
+            .defs
+            .register_overload(
+                len,
+                span(),
+                true,
+                yelc_sema::OverloadKey {
+                    params: vec![param],
+                },
+            )
+            .expect("distinct keys form an overload set");
+    }
+    assert_eq!(producer.defs.lookup(len).len(), 2, "the set was registered");
+
+    let artifact = producer.build();
+    assert_eq!(artifact.defs.len(), 2);
+    assert_eq!(
+        artifact.defs[0].path, artifact.defs[1].path,
+        "the wire cannot yet tell two overloads apart — that is why load refuses",
+    );
 
     let names = Interner::new();
     let types = TypeInterner::new();
@@ -443,14 +521,14 @@ fn a_format_mismatch_rejects_the_artifact() {
 #[test]
 fn a_rejected_artifact_touches_no_table() {
     let mut producer = Producer::new();
-    producer.declare("Widget", Namespace::Type, Some(Ty::S32));
+    producer.declare("Widget", DefKind::Type, Some(Ty::S32));
     let mut artifact = producer.build();
     artifact.stamp.format = 999;
 
     let names = Interner::new();
     let types = TypeInterner::new();
     let mut defs = Definitions::new(PackageId(1));
-    defs.register(names.intern("existing"), Namespace::Value, span(), false)
+    defs.register(names.intern("existing"), DefKind::Value, span(), false)
         .unwrap();
 
     let types_before = types.len();
@@ -481,8 +559,8 @@ fn param_and_infer_survive_and_stay_distinct() {
     let param = producer.types.intern(TyKind::Param(0));
     let infer = producer.types.intern(TyKind::Infer(0));
     assert_ne!(param, infer, "distinct in the producer to begin with");
-    producer.declare("templated", Namespace::Value, Some(param));
-    producer.declare("unsolved", Namespace::Value, Some(infer));
+    producer.declare("templated", DefKind::Value, Some(param));
+    producer.declare("unsolved", DefKind::Value, Some(infer));
 
     let artifact = producer.build();
 
@@ -498,7 +576,7 @@ fn param_and_infer_survive_and_stay_distinct() {
     let get = |name: &str| {
         let id = loaded
             .defs()
-            .lookup(consumer_names.intern(name), Namespace::Value)
+            .lookup_def(consumer_names.intern(name), DefKind::Value)
             .unwrap();
         loaded.defs().get(id).ty.unwrap()
     };
@@ -516,14 +594,14 @@ fn param_and_infer_survive_and_stay_distinct() {
 fn an_inference_hole_is_reported_to_the_producer() {
     let mut producer = Producer::new();
     let param = producer.types.intern(TyKind::Param(0));
-    producer.declare("fine", Namespace::Value, Some(param));
+    producer.declare("fine", DefKind::Value, Some(param));
     assert!(
         producer.build().inference_holes().is_empty(),
         "a Param is not a hole",
     );
 
     let infer = producer.types.intern(TyKind::Infer(3));
-    producer.declare("broken", Namespace::Value, Some(infer));
+    producer.declare("broken", DefKind::Value, Some(infer));
     let holes = producer.build().inference_holes();
     assert_eq!(holes.len(), 1, "the Infer is found");
     assert_eq!(
@@ -580,7 +658,7 @@ fn every_composite_shape_survives() {
         ("error", Ty::ERROR, "error"),
     ];
     for (name, ty, _) in expected {
-        producer.declare(name, Namespace::Value, Some(ty));
+        producer.declare(name, DefKind::Value, Some(ty));
     }
 
     let artifact = producer.build();
@@ -613,7 +691,7 @@ fn every_composite_shape_survives() {
     for (name, produced, rendered) in expected {
         let id = loaded
             .defs()
-            .lookup(consumer_names.intern(name), Namespace::Value)
+            .lookup_def(consumer_names.intern(name), DefKind::Value)
             .unwrap();
         let ty = loaded.defs().get(id).ty.unwrap();
         assert_eq!(
@@ -635,8 +713,8 @@ fn every_composite_shape_survives() {
 fn equal_types_share_one_table_entry() {
     let mut producer = Producer::new();
     let ty = producer.types.intern(TyKind::List(Ty::S32));
-    producer.declare("a", Namespace::Value, Some(ty));
-    producer.declare("b", Namespace::Value, Some(ty));
+    producer.declare("a", DefKind::Value, Some(ty));
+    producer.declare("b", DefKind::Value, Some(ty));
 
     let artifact = producer.build();
     assert_eq!(
@@ -654,10 +732,10 @@ fn equal_types_share_one_table_entry() {
 #[test]
 fn an_artifact_round_trips_through_bytes() {
     let mut producer = Producer::new();
-    let widget = producer.declare("Widget", Namespace::Type, None);
+    let widget = producer.declare("Widget", DefKind::Type, None);
     let widget_ty = producer.types.intern(TyKind::Adt(widget));
     let list = producer.types.intern(TyKind::List(widget_ty));
-    producer.declare("widgets", Namespace::Value, Some(list));
+    producer.declare("widgets", DefKind::Value, Some(list));
 
     let artifact = producer.build();
     let decoded = decode(&encode(&artifact)).expect("valid bytes decode");
@@ -670,11 +748,68 @@ fn encoding_is_deterministic() {
     let mut producer = Producer::new();
     for name in ["zeta", "alpha", "mu"] {
         let ty = producer.types.intern(TyKind::List(Ty::S32));
-        producer.declare(name, Namespace::Value, Some(ty));
+        producer.declare(name, DefKind::Value, Some(ty));
     }
     let artifact = producer.build();
     assert_eq!(encode(&artifact), encode(&artifact));
     assert_eq!(encode(&producer.build()), encode(&artifact));
+}
+
+/// **The guard `Stamp::FORMAT` cannot be given by itself.**
+///
+/// Renaming `SerializedDefPath.namespace: Namespace` to `kind: DefKind`
+/// (2026-07-29) changed the wire *schema* and not one byte of the encoding: the
+/// two enums have the same four variants in the same order, and postcard writes
+/// neither field names nor variant names. So nothing in this file could have
+/// noticed a missing `FORMAT` bump, and a stale artifact would have loaded and
+/// been reinterpreted silently — the exact failure the stamp exists to prevent.
+///
+/// This pins the bytes of one fixed artifact. Any change to [`wire`]'s shape
+/// moves them and fails here; a change that does *not* move them still fails,
+/// because `FORMAT` is in the bytes. Either way the author is made to look, and
+/// the decision to bump becomes deliberate.
+///
+/// **When this fails:** re-read `wire.rs`, decide whether old artifacts can
+/// still be read (they almost never can), bump `Stamp::FORMAT`, and re-bless the
+/// constant below with the diff explained.
+///
+/// [`wire`]: yelc_sema::artifact::wire
+#[test]
+fn the_wire_bytes_are_pinned_so_a_schema_change_cannot_be_silent() {
+    let mut producer = Producer::new();
+    let list = producer.types.intern(TyKind::List(Ty::S32));
+    producer.declare("Widget", DefKind::Type, None);
+    producer.declare("widgets", DefKind::Value, Some(list));
+    producer.declare("Panel", DefKind::Component, None);
+    producer.declare("State", DefKind::Global, None);
+
+    /// The format version is byte 6; `FORMAT_BYTE` below pins that.
+    const PINNED: &[u8] = &[
+        5, 48, 46, 49, 46, 48, 2, 4, 116, 101, 115, 116, 8, 97, 114, 116, 105, 102, 97, 99, 116, 5,
+        49, 46, 48, 46, 48, 2, 3, 13, 0, 4, 4, 116, 101, 115, 116, 8, 97, 114, 116, 105, 102, 97,
+        99, 116, 5, 49, 46, 48, 46, 48, 0, 1, 6, 87, 105, 100, 103, 101, 116, 0, 0, 1, 4, 116, 101,
+        115, 116, 8, 97, 114, 116, 105, 102, 97, 99, 116, 5, 49, 46, 48, 46, 48, 1, 1, 7, 119, 105,
+        100, 103, 101, 116, 115, 0, 1, 1, 1, 4, 116, 101, 115, 116, 8, 97, 114, 116, 105, 102, 97,
+        99, 116, 5, 49, 46, 48, 46, 48, 2, 1, 5, 80, 97, 110, 101, 108, 0, 0, 1, 4, 116, 101, 115,
+        116, 8, 97, 114, 116, 105, 102, 97, 99, 116, 5, 49, 46, 48, 46, 48, 3, 1, 5, 83, 116, 97,
+        116, 101, 0, 0, 1,
+    ];
+
+    assert_eq!(
+        encode(&producer.build()),
+        PINNED,
+        "the artifact encoding moved. If `wire.rs` changed shape, bump \
+         `Stamp::FORMAT` before re-blessing this — old artifacts must not load \
+         into a schema that means something else.",
+    );
+    // The stamp's `format` is byte 6 — after a length-prefixed "0.1.0". Pinned
+    // positionally, because `contains` would be satisfied by any of the length
+    // prefixes and this guard would be blind to the one case it exists for.
+    assert_eq!(
+        u32::from(PINNED[6]),
+        Stamp::FORMAT,
+        "the pinned bytes do not carry the current format version",
+    );
 }
 
 /// Criterion 3 of the codec choice, asserted rather than trusted: both sides
@@ -682,7 +817,7 @@ fn encoding_is_deterministic() {
 #[test]
 fn the_encoding_carries_no_field_names() {
     let mut producer = Producer::new();
-    producer.declare("Widget", Namespace::Type, Some(Ty::S32));
+    producer.declare("Widget", DefKind::Type, Some(Ty::S32));
     let bytes = encode(&producer.build());
 
     for name in [
@@ -755,7 +890,7 @@ fn a_path_with_no_segments_is_rejected() {
     artifact.defs.push(yelc_sema::artifact::SerializedDef {
         path: SerializedDefPath {
             package: package(),
-            namespace: Namespace::Type,
+            kind: DefKind::Type,
             segments: Vec::new(),
             overload: Vec::new(),
         },
@@ -781,10 +916,10 @@ fn export_visibility_and_declared_types_survive() {
     let types = TypeInterner::new();
     let mut defs = Definitions::new(PackageId::LOCAL);
     let public = defs
-        .register(names.intern("shown"), Namespace::Value, span(), true)
+        .register(names.intern("shown"), DefKind::Value, span(), true)
         .unwrap();
     let private = defs
-        .register(names.intern("hidden"), Namespace::Value, span(), false)
+        .register(names.intern("hidden"), DefKind::Value, span(), false)
         .unwrap();
     defs.set_ty(public, Ty::STRING);
 
@@ -797,11 +932,11 @@ fn export_visibility_and_declared_types_survive() {
 
     let shown = loaded
         .defs()
-        .lookup(consumer_names.intern("shown"), Namespace::Value)
+        .lookup_def(consumer_names.intern("shown"), DefKind::Value)
         .unwrap();
     let hidden = loaded
         .defs()
-        .lookup(consumer_names.intern("hidden"), Namespace::Value)
+        .lookup_def(consumer_names.intern("hidden"), DefKind::Value)
         .unwrap();
     assert!(loaded.defs().get(shown).is_export);
     assert!(!loaded.defs().get(hidden).is_export);
@@ -820,7 +955,7 @@ fn export_visibility_and_declared_types_survive() {
 #[test]
 fn a_span_does_not_cross_the_boundary() {
     let mut producer = Producer::new();
-    producer.declare("x", Namespace::Value, None);
+    producer.declare("x", DefKind::Value, None);
     assert_eq!(producer.defs.get(yelc_sema::DefId::local(0)).span, span());
 
     let artifact = producer.build();
@@ -829,7 +964,7 @@ fn a_span_does_not_cross_the_boundary() {
     let loaded = artifact.load(PackageId(1), &names, &types).unwrap();
     let x = loaded
         .defs()
-        .lookup(names.intern("x"), Namespace::Value)
+        .lookup_def(names.intern("x"), DefKind::Value)
         .unwrap();
     assert_eq!(loaded.defs().get(x).span, Span::default());
     assert!(!loaded.defs().get(x).span.source.is_valid());

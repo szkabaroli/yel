@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::definitions::Namespace;
+use crate::definitions::DefKind;
 
 use super::PackageName;
 
@@ -103,24 +103,29 @@ pub enum StructuralTy {
 /// written structurally. So `DefPath` is the *resolution-independent in-process*
 /// form, one step short of the wire. This is that last step.
 ///
-/// # The `namespace` field is not in the recorded design
+/// # The `kind` field is not in the recorded design, and its job changed
 ///
-/// [`Definitions`](crate::Definitions) keys names by `(Name, Namespace)` and its
-/// own test asserts that a record and a component may share a name. A path
-/// without the namespace therefore cannot name one of them, and `DefPath` has no
-/// namespace field. Added here; recorded in `plans/rewrite/seam-changes.md`.
+/// It was added (2026-07-29, `9a54ad1`) because [`Definitions`](crate::Definitions)
+/// keyed names by `(Name, Namespace)` and a path without the namespace could not
+/// name one of a record and a component sharing a name. The symbol table is now
+/// single-namespace, so a path **no longer needs it to disambiguate** — a name
+/// names one definition.
+///
+/// It stays for a different reason: loading *reconstructs* a definition, and
+/// `register` needs to know which [`DefKind`] to build. Dropping it would make a
+/// loaded record indistinguishable from a loaded component. Recorded in
+/// `plans/rewrite/seam-changes.md`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct SerializedDefPath {
     /// The owning package, by name. Not [`PackageId`](crate::PackageId), which
     /// is an index into the consumer's own dependency list.
     ///
-    /// Note the vocabulary clash with [`namespace`](Self::namespace): a package
-    /// *namespace* is WIT's first path segment (`yel` in `yel:ui@0.1.0`), a
-    /// definition [`Namespace`] is an index space. Both names are the right ones
-    /// for their own domain.
+    /// Note the vocabulary clash with [`kind`](Self::kind)'s neighbourhood: a
+    /// package *namespace* is WIT's first path segment (`yel` in
+    /// `yel:ui@0.1.0`), and it is unrelated to name resolution.
     pub package: PackageName,
-    /// Which index space the definition lives in.
-    pub namespace: Namespace,
+    /// What the definition is, so the loader can rebuild it as the right thing.
+    pub kind: DefKind,
     /// Path segments from the package root, outermost first.
     ///
     /// One segment today, because `Definitions` is flat. `module M { }`
@@ -129,8 +134,18 @@ pub struct SerializedDefPath {
     /// The overload discriminator (decision B3): parameter types, in
     /// declaration order, as indices into the artifact's type table.
     ///
-    /// Always empty today — see [`super`] on what `Definitions` cannot yet
-    /// represent.
+    /// Always empty today, and no longer for the reason recorded in `9a54ad1`.
+    /// [`Definitions`](crate::Definitions) *can* now hold an overload set —
+    /// `register_overload` is the API — but the loader cannot rebuild one: its
+    /// pass 1 registers definitions **before** pass 2 resolves the type table,
+    /// because a declared type may name an ADT that only exists once the
+    /// definitions do. A `Ty`-valued key is therefore unavailable at the moment
+    /// registration needs it. Breaking that cycle wants a key that does not
+    /// depend on the type table (Swift mangles one into the path); it is a
+    /// separate decision and is not made here. Until then an artifact carrying
+    /// an overload set is rejected with
+    /// [`LoadError::DuplicateDefinition`](super::LoadError::DuplicateDefinition)
+    /// rather than silently keeping one.
     pub overload: Vec<TypeIndex>,
 }
 

@@ -26,7 +26,7 @@
 //! | A4 | `Ty` gains [`TyKind::Infer`] | [`types`] |
 //! | B1 | `Ty` **must not** derive `Serialize` | [`types`] |
 //! | B2 | [`DefId`] is package-qualified from day one | [`ids`] |
-//! | B3 | one [`OverloadKey`], two consumers | [`ids`] |
+//! | B3 | one [`OverloadKey`], two consumers | [`ids`], [`definitions`] |
 //! | C1 | builtins are **one table**, two accessors | [`builtins`] |
 //! | C1c | arity has a **variadic** form | [`builtins`] |
 //! | C2 | builtin elements/enums/variants get a separate home, holding `DefId` not `Option<DefId>` | [`known`] |
@@ -38,6 +38,15 @@
 //! loads into a *differently populated* interner
 //! (`tests/artifact.rs`) — a same-interner round trip passes either way and
 //! proves nothing.
+//!
+//! # The one place this crate narrows the language
+//!
+//! [`Definitions`] is a **single-namespace** symbol table: a name binds to one
+//! thing, so `record Point` beside `component Point` — which the frozen compiler
+//! accepts — is now rejected. That is a deliberate, approved surface change and
+//! the first non-additive one; the ledger entry is in `plans/rewrite/scope.md`
+//! and the boundary is enumerated against the frozen compiler in
+//! `tests/single_namespace.rs`, because `parity.rs` cannot see it.
 //!
 //! # What is deliberately absent
 //!
@@ -63,7 +72,7 @@ pub mod types;
 pub use artifact::{Artifact, LoadError, LoadedPackage, PackageName, Stamp};
 pub use builtins::{Arity, Builtin, BuiltinId, BuiltinTable, LoweringTarget, Visibility};
 pub use context::CompilerContext;
-pub use definitions::{Definition, Definitions, Duplicate, Namespace};
-pub use ids::{DefId, DefPath, OverloadKey, PackageId};
+pub use definitions::{Collision, DefKind, Definition, Definitions, Module, Sym};
+pub use ids::{DefId, DefPath, ModuleId, OverloadKey, PackageId};
 pub use known::{Known, KnownItems, MissingKnownItems};
 pub use types::{Ty, TyKind, TypeInterner};

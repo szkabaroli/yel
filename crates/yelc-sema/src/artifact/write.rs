@@ -144,10 +144,10 @@ impl<'a> ArtifactWriter<'a> {
         let definition = self.defs.get(def);
         SerializedDefPath {
             package: self.package.clone(),
-            namespace: definition.namespace,
+            kind: definition.kind,
             segments: vec![self.names.str(definition.name).to_string()],
-            // Empty until `Definitions` can store an OverloadKey — see the
-            // `artifact` module docs.
+            // Empty even though `Definitions` now holds an `OverloadKey`: the
+            // loader cannot consume one. See `wire::SerializedDefPath::overload`.
             overload: Vec::new(),
         }
     }

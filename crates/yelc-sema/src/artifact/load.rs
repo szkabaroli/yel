@@ -177,7 +177,7 @@ impl Artifact {
             let id = defs
                 .register(
                     names.intern(leaf),
-                    serialized.path.namespace,
+                    serialized.path.kind,
                     // A producer span cannot be rendered by a consumer that has
                     // not read the producer's sources — see `wire::SerializedDef`.
                     Span::default(),

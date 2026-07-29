@@ -942,3 +942,112 @@ rot into a claim.
 ignored**; execution **85 / 85**; parity **12** and identity **7**, unchanged.
 Node kinds 84 → 85 and token kinds 73 → 74, with both halves of
 `token_kind_counts` updated and the reasons recorded there.
+
+## 2026-07-29 — `yelc-sema` — `Namespace` is deleted; `Definitions` becomes a single-namespace symbol table
+
+**Requested by:** stage 3 phase 1 (`yelc-sema`), integrator-approved in advance.
+
+**Request.** `Definitions` keyed names by `(Name, Namespace)`. Replace that with
+one scope keyed by `Name`, whose values are a multi-valued `Sym`:
+
+```rust
+pub enum Sym { Type(DefId), Value(DefId), Component(DefId), Global(DefId), Module(ModuleId) }
+by_name: FxHashMap<Name, SmallVec<[Sym; 1]>>
+```
+
+**Blast radius.** `Namespace` was public API of `yelc-sema` and appeared on the
+wire. Both change, and nothing outside `yelc-sema` consumed either yet:
+
+| was | is |
+|---|---|
+| `definitions::Namespace` | **deleted** |
+| `Definition.namespace: Namespace` | `Definition.kind: DefKind` |
+| `Definitions::lookup(name, ns) -> Option<DefId>` | `lookup(name) -> &[Sym]` · `lookup_def(name, kind) -> Option<DefId>` |
+| `Duplicate { existing: DefId }` | `Collision { name, existing: Sym, existing_span, attempted, span }` |
+| `Known::namespace()` | `Known::kind()` |
+| `SerializedDefPath.namespace: Namespace` | `SerializedDefPath.kind: DefKind` |
+| `Stamp::FORMAT = 1` | `= 2` |
+| — | `ids::ModuleId`, `definitions::{Sym, Module}`, `Definitions::{register_overload, register_module, bind_in_module, lookup_in_module, module, modules, span_of}` |
+
+**Decision: granted.** The surface consequence — a record and a component may no
+longer share a name — is recorded in [`scope.md`](scope.md) as the first
+non-additive, non-`return` break. The rest is design, and three parts of it are
+worth writing down.
+
+### The tag survives; the key dies
+
+`DefKind` has the same four variants `Namespace` had, and a reviewer is entitled
+to ask what actually changed. What changed is that **nothing looks a name up
+inside a kind**. `lookup` takes a `Name` and returns whatever is bound to it;
+`lookup_def(name, kind)` is a *filter on the one binding*, not a second index, so
+a `Color` declared as a global makes `Known::Color` **missing** rather than
+found-elsewhere.
+
+The tag itself cannot go, for two reasons that are not the old one:
+
+- a diagnostic must say *"`Point` is already a type"*, and
+- **loading an artifact reconstructs a definition**, so `register` has to be told
+  what to build. That is the new job of `SerializedDefPath.kind`, and it is why
+  the field survived a change that removed its original purpose.
+
+### `Sym` and `DefKind` are two enums, deliberately
+
+They are not the same set. `Sym::Module` has no `DefKind` counterpart, and that
+absence is load-bearing rather than tidy: `bind_in_module` takes a `DefKind`, so
+**a module inside a module does not compile**. The two-level limit that
+[`plans/modules.md` §3](../modules.md) argues for on WIT grounds is carried by a
+signature instead of a depth check. `DefKind::sym(DefId) -> Sym` is the one
+bridge between them, so they cannot drift.
+
+### `Sym::Module(ModuleId)`, not `Sym::Module(PackageId)`
+
+`PackageId` was the obvious payload and is wrong: a package holds several
+modules, and [`modules.md` §4.1](../modules.md) settled that an `include` names a
+*module*, one node per `include` — so two `include`s of one package would be
+indistinguishable. A `DefId` is wrong too: a module has no declared type, no
+export flag and no row in the definition table.
+
+What the resolution path actually needs from `Sym::Module` is **a scope to look
+the next segment up in**. `ModuleId` indexes the symbol table's own module arena,
+and the node it reaches carries the `PackageId` its definitions belong to — which
+is what lets a `DefId` resolved through the module be read out of that package's
+own `Definitions` (`artifact/load.rs::LoadedPackage`). Nothing populates a module
+scope yet; `include` does not parse. The shape is here so the thing that will
+populate it has somewhere correct to go.
+
+### The format bump is invisible in the bytes, so it got a guard
+
+`Namespace` and `DefKind` have the same four variants in the same order, and
+postcard writes neither field names nor variant names. **The encoding did not
+move by a single byte.** A missing `FORMAT` bump would therefore have let a stale
+artifact load into a schema that means something else, with no diagnostic — the
+exact failure `Stamp` exists to prevent, arriving in the one form `Stamp` cannot
+detect on its own.
+
+`tests/artifact.rs::the_wire_bytes_are_pinned_so_a_schema_change_cannot_be_silent`
+pins the bytes of a fixed artifact and asserts byte 6 equals `Stamp::FORMAT`.
+Any future `wire.rs` change either moves the bytes or does not; either way the
+author is made to look. Confirmed by reverting `FORMAT` to `1`, which fails it.
+
+### B3 is half-unblocked, and the other half has a blocker no plan names
+
+`9a54ad1` recorded *"B3 is unreachable: `Definitions` keys on `(Name, Namespace)`
+with no discriminator"*. That blocker is gone — `register_overload` takes an
+`OverloadKey`, and a name may carry several `Sym::Value`s with distinct non-empty
+keys.
+
+The **loader** still cannot rebuild one, for a reason that is not the map's
+shape: `load_into` registers definitions in pass 1 and resolves the type table in
+pass 2, because a declared type may name an ADT that only exists once the
+definitions do. A `Ty`-valued overload key is therefore unavailable at the exact
+moment registration needs it. `SerializedDefPath.overload` stays empty and an
+artifact carrying an overload set is rejected with `DuplicateDefinition` — now
+reachable from a real registration, not only from a hand-built artifact
+(`an_overload_set_is_refused_by_the_loader_not_lost`). Breaking the cycle wants a
+key that does not depend on the type table; Swift mangles one into the path.
+That is a separate decision and is not made here.
+
+**Measured.** Workspace **594 → 612 / 0 failed / 2 ignored**; execution
+**85 / 85**; parity **12** and identity **7**, unchanged — and *unchanged is not
+evidence here*, see [`scope.md`](scope.md). freeze-check clean. 17 deliberate
+breakages, 17 caught; one no-op control, correctly not caught.

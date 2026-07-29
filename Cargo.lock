@@ -4055,6 +4055,8 @@ dependencies = [
  "pretty_assertions",
  "rustc-hash",
  "serde",
+ "smallvec",
+ "yel-core",
  "yelc-base",
 ]
 

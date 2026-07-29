@@ -560,3 +560,118 @@ rather than asserted. Full reasoning and the rejected alternative:
 `match` · `<T>` ✅ · function bodies ✅ · `for` statement ✅ · attributes +
 `@unsafe` ✅ · `ref` · `primitive` · **`return` ✅** ·
 *(`if`-as-expression, open)*
+
+### 2026-07-29 — one namespace for names, the first **non-additive** break
+
+**Decided, and it breaks programs.** `yelc-sema`'s symbol table keys names by
+`Name` alone. A name binds to one thing, so a record and a component may no
+longer share one. The frozen compiler **accepts** both of these — verified by
+running `yelc check` on the frozen binary, not inferred:
+
+```yel
+record Point { x: s32, y: s32 }
+export component Point { … }        → OK: 1 component(s) checked
+
+record S { x: s32 }
+global S { y: s32 = 1; }            → OK: 1 component(s) checked
+```
+
+Both are rejected now. That is the change, not a side effect of it.
+
+**Why it is worth the break.** Four namespaces mean `Point` can be two
+definitions and every later stage has to carry the discriminator to say which:
+`DefPath` needed a namespace field it was not designed with (`9a54ad1`), a
+lang-item lookup needed one to avoid matching the wrong `Color`, and every
+resolution site would need one forever. The cost is paid at every use to buy a
+capability no checked-in program uses — **measured: not one of the 2117
+corpus, fixture and example `.yel` files reuses a top-level name across kinds** (`no_checked_in_program_reuses_a_name_across_kinds`).
+Reusing a name across kinds is also, on the evidence of every language that
+allows it, a readability cost rather than a feature.
+
+**What it enables.** The scope is multi-valued (`SmallVec<[Sym; 1]>`), which is
+what an **overload set** needs — B3's structural blocker, recorded as unreachable
+in `9a54ad1`, is gone. See [`seam-changes.md`](seam-changes.md) for the half of
+B3 that is still blocked, and why.
+
+#### This is the first non-additive break that is not `return`
+
+The ledger above is careful about this and should stay careful. `<T>`, function
+bodies, `for`, attributes are all additive; `return` was the first that is not,
+and its narrowing is confined to *statement position* in the **parser**. This one
+is different in kind again: it narrows what **checks**, not what parses. Every
+program above parses identically on both front-ends and is rejected only when
+names are registered.
+
+So the surface-break list now has two shapes in it, and the distinction is the
+one that decides whether the differential can see a change at all:
+
+| break | where it bites | can `parity.rs` see it? |
+|---|---|---|
+| `<T>` · bodies · `for` · attributes | parser, additive | no — frozen rejects the text |
+| `return` | parser, narrowing | no — the *word* is in no corpus file |
+| **single namespace** | **checker, narrowing** | **no — parity compares parsers** |
+
+#### `parity.rs` cannot observe it, for two independent reasons
+
+Both measured rather than asserted, in
+`crates/yelc-sema/tests/single_namespace.rs`:
+
+1. `parity.rs` and `identity.rs` compare **parsers**. This change is in name
+   registration, downstream of parsing. There is no version of a parser
+   differential that could see it.
+2. Even a *checking* differential over the corpus would not see it, because **no
+   checked-in `.yel` file reuses a name across kinds** — and neither mutation
+   generator can introduce a second declaration of an existing name, any more
+   than either could introduce the word `return`. `parity` stayed at 12 and
+   `identity` at 7 through this landing, and that is not evidence.
+
+The cover is `tests/single_namespace.rs`, which drives the **frozen compiler's
+own `check`** — parse → lower → type-check, the same three calls
+`yelc/src/main.rs::check` makes — and enumerates the boundary in both directions:
+
+- **30 programs narrowed.** Every ordered pair of the seven top-level
+  declaration forms whose kinds differ. Each asserts *premise* (the frozen
+  compiler accepts) and *consequence* (the new table rejects), plus a control
+  that each declaration alone still registers — otherwise "rejects the pair"
+  would also be satisfied by a table that rejects everything.
+- **19 programs unmoved.** Every same-kind pair, rejected by both, so the
+  narrowing is shown to be exactly the cross-kind set and not a general
+  tightening.
+- **1 widening.** An overload set — two values under one name — which the frozen
+  `Definitions` cannot hold at all, read off the frozen table directly.
+- **The form table is itself checked** against the frozen compiler's
+  `Definitions`, so a pair cannot silently be two forms the frozen tree puts in
+  the *same* namespace.
+
+#### The conformance number did not move
+
+Measured, not assumed. Workspace **594 → 612 / 0 failed / 2 ignored** (+18, all
+new tests, none removed — two inverted in place with the reason in a comment);
+execution **85 / 85**; parity **12**; identity **7**; freeze-check clean. The
+corpus is unaffected because no corpus program contains the construct, which is
+the same fact that makes the differential blind.
+
+#### Correction — the seventh disproved statement, and it is about `stdlib.rs`
+
+Found by implementing it. Left visible, like the six before it.
+
+**7. "`stdlib.rs` registers `len` for `list<T>` and `len` for `string` and the
+second silently overwrites the first" is false, and so is the recorded claim it
+came from.** `9a54ad1` filed *"B3 is unreachable: `Definitions` keys on
+`(Name, Namespace)` with no discriminator, so `stdlib.rs`'s two `len`s cannot
+both register"*. `stdlib.rs` does not register into `Definitions` at all — it
+registers into `BuiltinTable`, whose `by_name` has been `FxHashMap<Name,
+Vec<BuiltinId>>` since it was written. Both `len`s register, both are reachable,
+and `stdlib::tests::len_has_two_overloads_that_lower_differently` has been
+asserting exactly that since before this change. There was nothing to fix on that
+line.
+
+The *conclusion* B3 was unreachable was right; the evidence for it was the wrong
+table. The real blocker was `Definitions`, and the real blocker **after** this
+change is neither table but the artifact loader — recorded in
+[`seam-changes.md`](seam-changes.md).
+
+**Revised surface list — ten items, eight mechanisms, five landed:**
+`match` · `<T>` ✅ · function bodies ✅ · `for` statement ✅ · attributes +
+`@unsafe` ✅ · `ref` · `primitive` · `return` ✅ · **one namespace ✅** ·
+*(`if`-as-expression, open)*

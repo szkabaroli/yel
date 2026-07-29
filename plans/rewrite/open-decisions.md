@@ -286,12 +286,31 @@ A name does not identify a definition under overloading: `len` is both
 
 **Recommendation:** `yelc-sema` — [S6](stage-3-hir-build.md#s6--overloadkey).
 
-**Answer: `yelc-sema`** — one `OverloadKey`, as recorded. **Untested, and
-currently unreachable:** `Definitions` keys names by `(Name, Namespace)` with no
-discriminator, so `stdlib.rs`'s two `len`s cannot both be registered. The
-artifact carries the field (`SerializedDefPath.overload`), always empty, and it
-fills in without a format change the day `Definitions` learns the key. Until
-then an artifact holding an overload set is **rejected**, not half-loaded.
+**Answer: `yelc-sema`** — one `OverloadKey`, as recorded.
+
+~~**Untested, and currently unreachable:** `Definitions` keys names by
+`(Name, Namespace)` with no discriminator, so `stdlib.rs`'s two `len`s cannot
+both be registered.~~ **Two things wrong with that, corrected 2026-07-29.**
+
+- `stdlib.rs` never registered into `Definitions`. It registers into
+  `BuiltinTable`, whose `by_name` has always been `Name → Vec<BuiltinId>`; both
+  `len`s register, and
+  `stdlib::tests::len_has_two_overloads_that_lower_differently` has always
+  asserted it. The conclusion was right; the evidence named the wrong table.
+- The real blocker — `Definitions`' key — is **gone**. It is a single-namespace
+  symbol table keyed by `Name` with `SmallVec<[Sym; 1]>` values, and
+  `register_overload` takes an `OverloadKey`
+  ([`scope.md`](scope.md), [`seam-changes.md`](seam-changes.md), 2026-07-29).
+
+**What is still blocked, and it is not a table.** The artifact **loader**
+registers definitions in pass 1 and resolves the type table in pass 2 — a
+declared type may name an ADT that only exists once the definitions do — so a
+`Ty`-valued key is unavailable at the moment registration needs it.
+`SerializedDefPath.overload` stays empty and an artifact holding an overload set
+is **rejected**, not half-loaded; that rejection is now reachable from a real
+registration rather than only from a hand-built artifact. Filling the field wants
+a key that does not depend on the type table (Swift mangles one into the path),
+which is a separate decision.
 
 ---
 

@@ -71,6 +71,9 @@ indexmap = "2.0"
 parking_lot = "0.12"
 # Fast non-cryptographic hasher for internal compiler maps (no DoS surface).
 rustc-hash = "2"
+# Inline-capacity vectors. Used for the symbol table's per-name symbol list,
+# which holds exactly one entry for every name that is not an overload set.
+smallvec = "1"
 
 # Fuzzing
 arbitrary = { version = "1.3", features = ["derive"] }

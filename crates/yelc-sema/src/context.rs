@@ -111,12 +111,7 @@ mod tests {
         for &item in Known::ALL {
             let name = ctx.names.intern(item.source_name());
             ctx.defs
-                .register(
-                    name,
-                    item.namespace(),
-                    Span::new(SourceId::new(0), 0, 1),
-                    false,
-                )
+                .register(name, item.kind(), Span::new(SourceId::new(0), 0, 1), false)
                 .unwrap();
         }
     }

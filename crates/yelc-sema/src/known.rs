@@ -27,7 +27,7 @@
 use rustc_hash::FxHashMap;
 use yelc_base::{Interner, Name};
 
-use crate::definitions::{Definitions, Namespace};
+use crate::definitions::{DefKind, Definitions};
 use crate::ids::DefId;
 
 /// A definition the compiler refers to by name.
@@ -45,10 +45,10 @@ pub enum Known {
 impl Known {
     pub const ALL: &'static [Known] = &[Known::Color];
 
-    /// The name and namespace to resolve this against.
-    const fn spec(self) -> (&'static str, Namespace) {
+    /// The name and kind to resolve this against.
+    const fn spec(self) -> (&'static str, DefKind) {
         match self {
-            Known::Color => ("Color", Namespace::Type),
+            Known::Color => ("Color", DefKind::Type),
         }
     }
 
@@ -56,7 +56,13 @@ impl Known {
         self.spec().0
     }
 
-    pub const fn namespace(self) -> Namespace {
+    /// What the definition must *be*.
+    ///
+    /// Not a namespace to look in — lookup is single-namespace. It is a check on
+    /// the one definition the name resolves to: a `Color` declared as a global
+    /// means the program has no `Color` record, and reporting it missing is then
+    /// the correct answer rather than a lookup miss.
+    pub const fn kind(self) -> DefKind {
         self.spec().1
     }
 }
@@ -100,7 +106,7 @@ impl KnownItems {
 
         for &item in Known::ALL {
             let name: Name = interner.intern(item.source_name());
-            match defs.lookup(name, item.namespace()) {
+            match defs.lookup_def(name, item.kind()) {
                 Some(id) => {
                     resolved.insert(item, id);
                 }
@@ -137,7 +143,7 @@ mod tests {
         for &item in Known::ALL {
             defs.register(
                 interner.intern(item.source_name()),
-                item.namespace(),
+                item.kind(),
                 span(),
                 false,
             )
@@ -180,13 +186,18 @@ mod tests {
         }
     }
 
-    /// A `Known` resolved in the wrong namespace is missing, not silently
-    /// matched against a same-named definition of another kind.
+    /// A `Known` whose name is taken by a definition of another kind is
+    /// **missing**, not silently matched against it.
+    ///
+    /// The lookup is single-namespace, so this is no longer "it looked in a
+    /// different index space" — the name resolves to exactly one definition and
+    /// that definition is the wrong kind. The answer is the same and the reason
+    /// is not.
     #[test]
-    fn namespace_is_part_of_the_lookup() {
+    fn a_known_of_the_wrong_kind_is_missing() {
         let interner = Interner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
-        defs.register(interner.intern("Color"), Namespace::Value, span(), false)
+        defs.register(interner.intern("Color"), DefKind::Value, span(), false)
             .unwrap();
         assert!(KnownItems::resolve(&defs, &interner).is_err());
     }

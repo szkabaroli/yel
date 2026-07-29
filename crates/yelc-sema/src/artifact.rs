@@ -46,12 +46,13 @@
 //!
 //! # What this cannot represent yet, stated rather than worked around
 //!
-//! - **Overload sets.** [`Definitions`] keys names by `(Name, Namespace)` with
-//!   no overload discriminator, so two definitions sharing a name in one
-//!   namespace cannot be registered — and therefore cannot be loaded.
-//!   [`SerializedDefPath::overload`] exists and is always empty; the day
-//!   `Definitions` learns [`OverloadKey`](crate::OverloadKey), it fills in
-//!   without a format change. Until then a colliding artifact is rejected with
+//! - **Overload sets.** [`Definitions`] can now hold one — it keys by [`Name`]
+//!   alone and stores an [`OverloadKey`](crate::OverloadKey) per definition —
+//!   but the **loader** cannot rebuild one. Registration happens in pass 1 and
+//!   the type table only resolves in pass 2, so the `Ty`s a key is made of do
+//!   not exist yet at the moment the key is needed; a key that does not depend
+//!   on the type table is a separate decision. [`SerializedDefPath::overload`]
+//!   is therefore still always empty, and a colliding artifact is rejected with
 //!   [`LoadError::DuplicateDefinition`] rather than silently keeping one.
 //! - **Cross-package references.** A `DefId` from another package has no entry
 //!   in the producer's `Definitions` to read a name out of. Writing one panics;
@@ -106,7 +107,12 @@ impl Stamp {
     /// added, removed or reordered, an enum variant inserted anywhere but the
     /// end. postcard writes enum variants by index and struct fields by
     /// position, so any of those silently reinterprets old bytes.
-    pub const FORMAT: u32 = 1;
+    /// History: `1` → `2` on 2026-07-29, when `SerializedDefPath.namespace:
+    /// Namespace` became `kind: DefKind` for the single-namespace symbol table.
+    /// The two enums have the same four variants in the same order, so postcard
+    /// writes **identical bytes** and a stale artifact would have loaded
+    /// silently — which is exactly the case this constant exists for.
+    pub const FORMAT: u32 = 2;
 
     /// The producing compiler's version.
     ///
@@ -270,8 +276,9 @@ pub enum LoadError {
     },
     /// A path named a definition the artifact does not contain.
     UnresolvedDefPath(Box<SerializedDefPath>),
-    /// Two definitions claimed the same name in the same namespace. Legal only
-    /// as an overload set, which [`Definitions`] cannot yet represent.
+    /// Two definitions claimed the same name. Legal only as an overload set,
+    /// which the *loader* cannot yet rebuild — see
+    /// [`SerializedDefPath::overload`].
     DuplicateDefinition(Box<SerializedDefPath>),
     /// A path with nothing in it names no definition.
     PathWithoutSegments(Box<SerializedDefPath>),
@@ -307,11 +314,9 @@ impl fmt::Display for LoadError {
                 "artifact references {}, which it does not define",
                 DisplayPath(path),
             ),
-            Self::DuplicateDefinition(path) => write!(
-                f,
-                "artifact defines {} twice in one namespace",
-                DisplayPath(path),
-            ),
+            Self::DuplicateDefinition(path) => {
+                write!(f, "artifact defines {} twice", DisplayPath(path))
+            }
             Self::PathWithoutSegments(path) => {
                 write!(
                     f,

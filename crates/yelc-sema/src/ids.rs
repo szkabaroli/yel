@@ -43,6 +43,36 @@ impl PackageId {
     }
 }
 
+/// Identifies one module node in a [`Definitions`](crate::Definitions) tree.
+///
+/// # Why a module is not addressed by [`PackageId`]
+///
+/// A module is a namespace *within* a package and a package holds several, so a
+/// `PackageId` cannot tell two `include`s of the same package apart — and
+/// [`plans/modules.md` §4.1](../../../plans/modules.md) settled that an
+/// `include` names a module, one node per `include`. Nor is it a [`DefId`]: a
+/// module has no declared type, no export flag and no row in the definition
+/// table.
+///
+/// What resolution actually needs from `Sym::Module` is *a scope to look the
+/// next segment up in*. So this indexes the symbol table's own module arena, and
+/// the node it reaches carries the [`PackageId`] its definitions belong to —
+/// which is what lets a [`DefId`] resolved through the module be read out of
+/// that package's own `Definitions` (see
+/// [`LoadedPackage`](crate::artifact::LoadedPackage)).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ModuleId(pub u32);
+
+impl ModuleId {
+    pub fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// Identifies one definition, qualified by the package that owns it.
 ///
 /// # Why the package is here from day one (decision B2)

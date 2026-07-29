@@ -9,10 +9,16 @@ license.workspace = true
 postcard.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
+smallvec.workspace = true
 yelc-base.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+# Differential harness only (tests/single_namespace.rs): the frozen front-end is
+# the accept/reject oracle for the single-namespace narrowing, which `parity.rs`
+# cannot observe. Nothing in the library links it, and it goes away with the
+# frozen tree at cutover phase 4 — see plans/rewrite/anti-spec.md A4.
+yel-core.workspace = true
 
 # Determinism guard — see plans/rewrite/anti-spec.md A6.
 [lints.clippy]
