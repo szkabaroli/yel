@@ -117,15 +117,18 @@ Plus two things the frozen tree has no equivalent of, both from
 Written calls before anyone starts. Numbered `S` so they do not collide with
 2a's `D`.
 
-| # | decision | recommendation |
+Answers come from [`open-decisions.md`](open-decisions.md); this table is the
+record.
+
+| # | decision | status |
 |---|---|---|
-| S1 | Adopt [§1](directions.md#1--builtins-are-a-table-not-a-field-per-builtin)'s builtin table? | **Yes** — it lives entirely here |
-| S2 | How does `Ty` serialize? | **Structurally.** The existing derive is a trap |
-| S3 | Does `known.rs` survive? | Mostly not — S1 replaces it |
-| S4 | What stays on `CompilerContext`? | The four above; nothing downstream-owned |
-| S5 | `DefId` shape, given `DefPath` | Module-qualified from day one |
-| S6 | Who owns `OverloadKey` — here or 2b? | Here; 2b and §3 both consume it |
-| S7 | Does `Ty` gain a non-concrete variant? | **Open** — two different questions, and §3 answers only one |
+| S1 | Adopt [§1](directions.md#1--builtins-are-a-table-not-a-field-per-builtin)'s builtin table? | ✅ **yes** — one table, replacing `stdlib_lookup.rs` + `known.rs` (C1, 2026-07-29) |
+| S2 | How does `Ty` serialize? | ⬜ **open** (B1) |
+| S3 | Does `known.rs` survive? | ⬜ **open** (C2) |
+| S4 | What stays on `CompilerContext`? | ⬜ **open** (D0) |
+| S5 | `DefId` shape, given `DefPath` | ✅ **module-qualified from day one** — `DefId { module, index }` (B2, 2026-07-29) |
+| S6 | Who owns `OverloadKey` — here or 3b? | ✅ **here** — one key, consumed by `DefPath` and §3's mangling (B3, 2026-07-29) |
+| S7 | Does `Ty` gain a non-concrete variant? | ✅ **yes — both** `Param` *and* `Infer` (A3, A4, 2026-07-29). **Reverses this file's recommendation** — see below |
 
 ### S1 · Adopt the builtin table (§1)
 
@@ -201,46 +204,55 @@ here.**
 
 ### S7 · Does `Ty` gain a non-concrete variant?
 
-**Open.** An earlier draft of this file asserted the new interner would be
-*smaller* than the frozen one "since [F1](findings.md#f1) says there are no type
-variables to support". That was unsupported, and it conflated two separate
-things:
+**Decided 2026-07-29: yes, both.** `InternedTyKind` gains `Param` (A3) *and*
+`Infer` (A4). **This reverses the recommendation previously written here**, which
+was "no" on both. The reasoning that recommendation rested on is recorded below,
+along with why it did not survive — a recommendation that loses is more useful
+kept than deleted.
 
-| | what it is | who decides |
-|---|---|---|
-| **type parameter** — `Param(idx)` | a placeholder in a *declaration*: the `T` in `list<T>` | [§3](directions.md#3--generics-are-monomorphization-by-name) |
-| **inference variable** — `Infer(var)` | a placeholder during *checking*, solved before the expression is done | [2b](stage-2b-hir-check.md) |
+Two holes, two lifetimes, and they are **not interchangeable**:
 
-**§3 removes the need for the first, conditionally.** Monomorphization by name
-works if a template is carried as **syntax** (an AST `TypeRef` plus a
-substitution) and only ever interned once concrete. If templates are instead
-represented as `Ty`, a `Param` variant is required and §3 does not change that —
-so this is a representation decision, not a consequence of adopting §3.
+| variant | means | legal | must be gone by |
+|---|---|---|---|
+| `Param(idx)` | the `T` in a declaration | in a template's stored signature | substitution at instantiation |
+| `Infer(var)` | unknown, to be solved | during 3b checking | the end of 3b |
 
-**§3 says nothing about the second.** Bidirectional checking with
-`Mode::{Infer, Check}` avoids inference variables because `Infer` means
-*synthesize*, not *unknown-to-be-solved* ([F1](findings.md#f1)). But
-[2b's gap table](stage-2b-hir-check.md#gaps-inherited-as-decisions-not-copies)
-lists **function-type inference** as stubbed in the frozen tree, and implementing
-it plausibly needs a variable that is genuinely unsolved for a while. Closures
-are the same question wearing a different hat
-([§4](directions.md#4--closures-are-a-value-and-the-irs-are-shaped-for-one)).
+#### Why "no" lost
 
-**Why it matters here and not later.** A non-concrete variant changes what
-`InternedTyKind` *is*, and therefore changes structural equality, the interner's
-uniquing, and — via [S2](#s2--ty-must-not-serialize-as-its-handle) — what
-serialization has to write. Adding it after the fact touches every one of those.
-Adding a variant that nothing constructs is
-[A9](anti-spec.md#a9--a-ported-construct-is-load-bearing-or-it-is-deleted), so
-the answer cannot be "add it just in case" either.
+The recommendation assumed templates would be carried as **syntax** (an AST
+`TypeRef` plus a substitution), interned only once concrete. That works, and it
+keeps `Ty` entirely concrete — but it forces **checking at instantiation**: a
+template body cannot be typechecked until a concrete type is substituted, so an
+error inside `filter` reports at the *user's* call site. That is the C++ template
+error-message problem.
 
-**What to do:** answer it *with*
-[2b's T1](stage-2b-hir-check.md#t1--bidirectional-checking-not-unification)
-(bidirectional vs. unification — which decides the `Infer` half) and §3's
-representation choice (which decides the `Param` half), in one pass, before this
-crate lands. Do not infer the
-answer from the frozen tree — F1 is evidence about what the old compiler
-supports, not about what the new one needs.
+`Param` buys the opposite: the body is checked **once, generically**, against the
+parameter. Errors land in the stdlib, where they belong. Combined with
+[A1](open-decisions.md#a1--how-are-parameterized-types-represented)'s
+monomorphization, this is Rust's arrangement — generic bodies checked once, then
+specialized per instantiation — and it was dismissed here too quickly on the
+grounds that "there are no type variables today" ([F1](findings.md#f1)), which is
+evidence about the frozen compiler, not an argument about the new one.
+
+#### What both variants now oblige
+
+1. **Neither may ever be serialized.** A module artifact containing a `Param` or
+   an `Infer` is a bug, not a state. This tightens
+   [S2](#s2--ty-must-not-serialize-as-its-handle): the structural writer must
+   *refuse* them, not merely encode them faithfully.
+2. **`Infer` must not outlive 3b.** 3b's postcondition strengthens from "`types`
+   is total" to "`types` is total **and contains no unresolved variable**" —
+   rustc's `has_infer()` check, asserted rather than assumed.
+3. **`Param` must not outlive substitution.** A `Param` reaching 4a is the same
+   class of error: the instantiation did not happen.
+4. **Structural equality must distinguish them.** Two `Param(0)`s from different
+   templates are not the same type; two distinct `Infer` variables are never
+   equal. Decide whether variables live in the interner at all or in a side
+   unification table — interning a value that is *about to change* is the usual
+   mistake here.
+5. **The interner's uniquing invariant weakens.** Today equal types share a
+   handle. With `Infer`, two handles may become equal *later*, which every
+   `Ty == Ty` comparison in the checker must be written knowing.
 
 ## Contract
 

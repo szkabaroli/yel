@@ -808,11 +808,13 @@ Two follow-ups for the orchestrator, neither an agent decision:
   default and in a global function body. The prediction above — "the module-scope
   filter path is actually exercised for the first time" — was wrong in an
   informative way: the path is not merely untested, it is broken.
-- ~~the two silent `_ => {}` arms are a `known_bugs` entry~~ — **no fixture is
-  owed.** They are an under-rejection, and the `known_bugs` harness asserts
-  compilation *fails*; a fixture there would report itself fixed. The 18 entries
-  in `support::catch_all::DIVERGENCES`, each proved causally by
-  `explains_our_report`, are the record. See
+- ~~the two silent `_ => {}` arms are a `known_bugs` entry~~ — **done
+  2026-07-29**, as `known_bugs/silent_discard/global_member.yel` plus a new
+  `known_bugs_silently_discarded_members` harness. It is an under-rejection, so
+  the `.failure` harness (which asserts compilation *fails*) could not hold it;
+  the `known_bugs/runtime/` subdirectory pattern could. The 18 entries in
+  `support::catch_all::DIVERGENCES`, each proved causally by
+  `explains_our_report`, remain the stronger record. See
   [`stage-2a-hir-build.md` § Phase 0](stage-2a-hir-build.md#phase-0--oracle-hygiene---done-2026-07-29-1d12250).
 
 ### 2. `if` followed directly by `{` is an element named `if`

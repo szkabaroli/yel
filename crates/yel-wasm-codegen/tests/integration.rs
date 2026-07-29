@@ -392,3 +392,106 @@ fn export_boundary_contract_is_produced() {
     let mount = iface.functions.iter().find(|f| ctx.str(f.name).to_string() == "mount").unwrap();
     assert!(matches!(mount.receiver, LirReceiver::Borrow(_)));
 }
+
+/// Known bugs of the **opposite** shape: programs the compiler wrongly
+/// *accepts*, dropping part of the source on the floor with no diagnostic.
+///
+/// These cannot use the `.failure` harness — that one asserts compilation
+/// fails, and these compile cleanly, so a fixture there would report itself
+/// fixed. They live in `known_bugs/silent_discard/`, which
+/// `known_bugs_fixtures` does not see because `list_yel_fixtures` does not
+/// recurse. Same split, and same reason, as `known_bugs/runtime/`.
+///
+/// Each `<name>.yel` is paired with `<name>.dropped`: one identifier per line
+/// that the **source writes** and the **AST must not contain**. Passes while
+/// the bug exists; fails with graduate-me instructions once the parser starts
+/// reporting.
+#[test]
+fn known_bugs_silently_discarded_members() {
+    let mut failures: Vec<String> = Vec::new();
+
+    for yel_path in list_yel_fixtures("known_bugs/silent_discard") {
+        let name = yel_path.file_stem().unwrap().to_string_lossy().into_owned();
+        let source = std::fs::read_to_string(&yel_path)
+            .unwrap_or_else(|e| panic!("read {}: {}", yel_path.display(), e));
+
+        let spec_path = yel_path.with_extension("dropped");
+        let spec = std::fs::read_to_string(&spec_path).unwrap_or_else(|e| {
+            panic!("[{}] missing .dropped file {}: {}", name, spec_path.display(), e)
+        });
+        let dropped: Vec<&str> = spec.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        assert!(!dropped.is_empty(), "[{}] .dropped file is empty", name);
+
+        let mut compiler = Compiler::new();
+        let file = match compiler.parse(&source) {
+            Ok(file) => file,
+            Err(e) => {
+                failures.push(format!(
+                    "[{}] the parser now REJECTS this input ({}).\n\
+                     The silent-discard bug appears to be fixed — move this fixture out of \
+                     known_bugs/silent_discard/ and delete the .dropped file.",
+                    name, e
+                ));
+                continue;
+            }
+        };
+        let _ = compiler.lower_to_hir(&file);
+
+        if compiler.has_errors() {
+            failures.push(format!(
+                "[{}] the compiler now REPORTS a diagnostic:\n{}\n\
+                 The silent-discard bug appears to be fixed — move this fixture out of \
+                 known_bugs/silent_discard/ and delete the .dropped file.",
+                name,
+                compiler.render_diagnostics()
+            ));
+            continue;
+        }
+
+        // Every name the AST does hold, across both silently-discarding sites.
+        let mut present: Vec<&str> = Vec::new();
+        for global in &file.globals {
+            for property in &global.node.properties {
+                present.push(&property.node.name);
+            }
+            for callback in &global.node.callbacks {
+                present.push(&callback.node.name);
+            }
+        }
+        for record in &file.records {
+            for field in &record.node.fields {
+                present.push(&field.node.name);
+            }
+        }
+
+        for needle in &dropped {
+            // Guard the guard: a name that is not in the source would be
+            // "absent from the AST" for a reason that has nothing to do with
+            // the bug, and the fixture would pass while testing nothing.
+            if !source.contains(needle) {
+                failures.push(format!(
+                    "[{}] `.dropped` lists `{}`, which does not appear in the fixture source \
+                     at all. Fix the spec — as written this assertion is vacuous.",
+                    name, needle
+                ));
+                continue;
+            }
+            if present.iter().any(|n| n == needle) {
+                failures.push(format!(
+                    "[{}] `{}` IS present in the AST — it is no longer discarded.\n\
+                     The silent-discard bug appears to be fixed — move this fixture out of \
+                     known_bugs/silent_discard/ and delete the .dropped file.",
+                    name, needle
+                ));
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "\n{} silent-discard fixture(s) changed state:\n\n{}",
+            failures.len(),
+            failures.join("\n\n")
+        );
+    }
+}

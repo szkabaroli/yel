@@ -237,7 +237,7 @@ assertions in stage 1's suite. None was weakened or deleted.
 |---|---|---|
 | `support::POSITIVE_FIXTURE_COUNT` | 91 → **90** | The count guard exists so a sweep cannot silently shrink. It shrank on purpose; the constant carries the reason in a doc comment. |
 | `support::catch_all::DIVERGENCES` | the **only whole-file entry** removed | This was the sole checked-in fixture the frozen catch-all excused. Every remaining entry is a generated mutation, so the new parser now reports zero error nodes across every hand-written fixture **with no exceptions**. |
-| `support::catch_all::DIVERGENCE_COUNT` | 19 → **18** | Down by deleting an excuse — the only direction it may move without a per-entry justification ([A10](anti-spec.md#a10)). |
+| `support::catch_all::DIVERGENCE_COUNT` | 19 → **18** | Down by deleting an excuse — the only direction it may move without a per-entry justification ([A10](anti-spec.md#a10--an-allow-list-entry-is-characterized-by-evidence-about-the-other-implementation)). |
 | `identity.rs::INCOMPARABLE_SOURCES` | 2 names → **1** (`examples/counter/counter.yel`) | `global_filter_default.yel` was incomparable because the frozen parser had no accepted parse to compare against. |
 | `identity.rs` sweep size | 2095 → **2094**; `COMPARABLE_SOURCES` **unchanged at 2093** | One fewer file swept, one fewer excused. Removing a file that could not be compared costs no comparison — which is why the comparable count, not the sweep size, is the number to watch. |
 | `parity.rs::accept_reject_parity_over_the_fixtures` | 118 → **117** | Same fixture, one fewer row. |
@@ -246,3 +246,50 @@ assertions in stage 1's suite. None was weakened or deleted.
 
 480 workspace / 0 failed / 2 ignored · execution **85 / 85** · fuzz **200 / 200**
 · corpus untouched (no compiler source changed).
+
+---
+
+## 2026-07-29 — the silent-discard bug gets a fixture and a harness
+
+Follow-up to the entry above. The `_ => {}` under-rejection is now pinned in the
+frozen tree, not only in `yelc-syntax`'s divergence list.
+
+**Why it needed a new harness.** `known_bugs/*.failure` asserts compilation
+*fails*. This bug is the opposite shape — the compiler wrongly *accepts*,
+dropping a member with no diagnostic — so a fixture there would compile cleanly
+and the harness would announce *"the bug appears to be fixed, graduate this to
+positive/"*. The precedent for "compiles cleanly but is wrong" already existed:
+`known_bugs/runtime/` is a subdirectory the non-recursing lister cannot see,
+paired with its own test.
+
+| added | what |
+|---|---|
+| `known_bugs/silent_discard/global_member.yel` | `filter(\|x\| x > 2)` in a `global` body — accepted, no diagnostic, member gone |
+| `known_bugs/silent_discard/global_member.dropped` | `evens` — written by the source, absent from the AST |
+| `integration.rs::known_bugs_silently_discarded_members` | the harness |
+| `known_bugs/README.md` | an *Under-rejection bugs* section |
+
+**The assertion is on the AST, not on the output.** The test reads
+`file.globals[*].properties`, `…callbacks` and `file.records[*].fields` and
+requires the name to be absent. Asserting on the WIT instead would have been
+weak evidence — globals emit no WIT interface at all, so the name would be
+missing whether or not the bug existed ([A11](anti-spec.md#a11)).
+
+**It guards its own guard.** A `.dropped` entry that does not appear in the
+fixture source is a failure, not a pass — otherwise a typo would make the
+assertion vacuous while looking green.
+
+**Mutation-checked in both directions before landing**, because a passing test
+proves nothing until it is shown to fail:
+
+| mutation | result |
+|---|---|
+| member rewritten to valid `evens: s32 = 1;` | fails — *"`evens` IS present in the AST"* |
+| `.dropped` changed to a name not in the source | fails — *"as written this assertion is vacuous"* |
+| restored | passes |
+
+### Numbers after
+
+**481** workspace / 0 failed / 2 ignored — up one from 480, the new test.
+Execution **85 / 85**. Fuzz **200 / 200**. Corpus untouched: no frozen `src/` or
+`Cargo.*` changed, only `tests/`.

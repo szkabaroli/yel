@@ -14,9 +14,9 @@
 
 | § | Direction | Status | Decided by | Changes output? |
 |---|---|---|---|---|
-| [1](#1--builtins-are-a-table-not-a-field-per-builtin) | Builtins are a table, not a field per builtin | open | stage 2b, 3b | no |
+| [1](#1--builtins-are-a-table-not-a-field-per-builtin) | Builtins are a table, not a field per builtin | ✅ **adopted 2026-07-29** | `yelc-sema` (S1) | no |
 | [2](#2--the-stdlib-is-yel-source-embedded-in-the-binary) | The stdlib is yel source, embedded in the binary | wanted | stage 2b+ | yes, enumerated |
-| [3](#3--generics-are-monomorphization-by-name) | Generics are monomorphization by name | wanted | stage 2b | yes, enumerated |
+| [3](#3--generics-are-monomorphization-by-name) | Generics are monomorphization by name | ✅ **adopted 2026-07-29** — by *type*, with a `Param` variant | 3b (A1, A3) | yes, enumerated |
 | [4](#4--closures-are-a-value-and-the-irs-are-shaped-for-one) | Closures are a value; the IRs are shaped for one | **design obligation** | 2b + 3a | no (modelling only) |
 | [5](#5--handlers-and-closures-are-one-concept-split-by-trigger) | Handlers and closures are one concept, split by trigger | wanted | 2b + 3b | **no** |
 | [6](#6--modules-are-serializable-artifacts) | Modules are serializable artifacts | wanted | 2a/2b seam | no |
@@ -33,8 +33,8 @@
 
 | | |
 |---|---|
-| **Status** | open, not scheduled |
-| **Home** | `yelc-sema`; read by 2b and 3b |
+| **Status** | ✅ **adopted 2026-07-29** ([C1](open-decisions.md#c1--how-are-builtins-registered)) — recorded as [S1](infra-sema.md) |
+| **Home** | `yelc-sema`; read by 3b and 4b |
 | **Changes output** | no |
 
 **Decision.** One table keyed by a stable name, whose row carries everything
@@ -170,9 +170,18 @@ per-invocation check)?
 
 | | |
 |---|---|
-| **Status** | wanted; the cheapest of the six |
-| **Decided by** | stage 2b |
+| **Status** | ✅ **adopted 2026-07-29** — monomorphization **by type**, and with a `Param` variant ([A1](open-decisions.md#a1--how-are-parameterized-types-represented), [A3](open-decisions.md#a3--does-ty-get-a-param-variant)) |
+| **Decided by** | 3b |
 | **Changes output** | yes — unblocks tier C of §2 |
+
+> **One thing this entry argued that the decision reversed.** §3 was written
+> assuming *no* type variables — templates carried as syntax, interned only once
+> concrete. [A3](open-decisions.md#a3--does-ty-get-a-param-variant) chose a
+> `Param` variant instead, which means a generic body is **checked once,
+> generically** rather than at each instantiation. That is Rust's arrangement,
+> not C++'s, and it removes the error-message cost this entry accepted. The
+> monomorphization half is unchanged; see
+> [S7](infra-sema.md#s7--does-ty-gain-a-non-concrete-variant).
 
 **Decision.** No type variables, no unification, no generalization. A
 parameterized item is a template instantiated per concrete type it is used at:

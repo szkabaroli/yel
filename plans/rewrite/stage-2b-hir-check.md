@@ -45,53 +45,47 @@ already `Ty`** in the definition tables (2a phase 2 —
 
 Prefix `T` so they do not collide with 2a's `D` or `yelc-sema`'s `S`.
 
-| # | decision | recommendation |
+| # | decision | status |
 |---|---|---|
-| T1 | Bidirectional (`Infer`/`Check`), or unification with inference variables? | **Bidirectional** — [below](#t1--bidirectional-checking-not-unification) |
+| T1 | How much inference sits inside the bidirectional checker? | ✅ **bidirectional skeleton + unification variables**, no generalization (A2, 2026-07-29) — [below](#t1--bidirectional-checking-not-unification) |
 
 ### T1 · Bidirectional checking, not unification
 
-**This was inherited, not decided.** "Bidirectional" is asserted across six plan
-documents because the frozen tree does it (`Mode::{Infer, Check(Ty)}`,
-`typeck.rs`). That is evidence about the old compiler, not an argument about the
-new one — the same mistake [S7](infra-sema.md#s7--does-ty-gain-a-non-concrete-variant)
-was written to correct. The argument, made properly:
+**Decided 2026-07-29: bidirectional skeleton, *with* unification variables, no
+let-generalization.** Option 2 of three
+([A2](open-decisions.md#a2--how-much-inference-sits-inside-the-bidirectional-checker)).
 
-**Keep bidirectional.**
+**The question this replaced was badly posed.** It asked "bidirectional *or*
+unification", which is a false dichotomy: bidirectional says *where* type
+information flows (⇒ / ⇐), unification says *how* unknowns get resolved. Rust,
+Swift, Scala and TypeScript do both. What is genuinely in tension with a
+bidirectional skeleton is **let-generalization**, not unification — and GHC has
+spent years restricting exactly that. Generalization is declined here because
+[§3](directions.md#3--generics-are-monomorphization-by-name) leaves yel with no
+polymorphic functions, so it would have nothing to generalize.
 
-1. **The surface is heavily annotated, so inference power buys little.** Every
-   property declares its type (`count: s32 = 0`), every function parameter and
-   global is declared. There is very little a solver would recover that an
-   annotation has not already stated.
-2. **[§3](directions.md#3--generics-are-monomorphization-by-name) needs the
-   `Check` direction.** Type-directed instantiation at a call site *is* an
-   expected type pushed downward. Monomorphization by name composes with
-   bidirectional checking; with a constraint solver it becomes a second
-   mechanism.
-3. **[§5](directions.md#5--handlers-and-closures-are-one-concept-split-by-trigger)
-   option B requires it outright** — the trigger rides on the slot's function
-   type and is delivered by `Check`. Choosing unification would foreclose that
-   option before it is decided.
-4. **Diagnostic meaning is frozen on 23 fixtures.** Bidirectional produces
-   "expected `X`, found `Y`" *at the construct*. A solver reports "cannot unify"
-   wherever the constraint happened to fail, which is a different span and a
-   different sentence. Matching the frozen fixtures is materially harder, and
-   diagnostic meaning is not free to change.
-5. **There are no polymorphic functions** (§3), so the thing unification is
-   actually for does not arise.
+**What carries over from the earlier argument** (all still true, none of it
+argued against a solver): the surface is heavily annotated · §3 needs the `Check`
+direction for call-site instantiation · §5 option B is *delivered* by `Check`.
 
-**What would push the other way**, so the decision is revisitable: fixing
-**function-type inference** (stubbed below) in its general form — `{ x -> x + 1 }`
-with no expected type anywhere. But
-[§4](directions.md#4--closures-are-a-value-and-the-irs-are-shaped-for-one)
-establishes that closures only occur where an expected type *exists* (a `filter`
-argument, a `func()`-typed slot), so the gap is **propagation, not inference
-power**. Widening propagation is cheap; adding a solver is not.
+**What is now an obligation rather than an avoided cost.** The earlier draft's
+fourth argument was diagnostics, and adopting a solver takes that cost on
+deliberately:
 
-**This answers half of [S7](infra-sema.md#s7--does-ty-gain-a-non-concrete-variant).**
-Bidirectional checking needs no `Infer(var)` variant in `Ty`, because
-`Mode::Infer` means *synthesize now*, not *unknown, to be solved later*. T1 and
-S7 are the same decision seen from two crates and must be answered together.
+> Bidirectional-only yields "expected `X`, found `Y`" **at the construct**. A
+> solver reports a conflict wherever unification happened to fail — a different
+> span and a different sentence.
+
+Diagnostic *meaning* is frozen on the 23 diagnostic fixtures. So the solver must
+be built to **report at the construct, not at the point of failure**: keep the
+expected type on the obligation, and when unification fails, blame the site that
+introduced the expectation. This is a design requirement on the checker, not a
+wording exercise — and it is the single most likely way this phase fails its
+diagnostic gate.
+
+**`Infer` must not survive this phase.** See
+[S7](infra-sema.md#s7--does-ty-gain-a-non-concrete-variant) for the full
+obligation set; the part this phase owns is the postcondition below.
 
 ## Gaps inherited as decisions, not copies
 
@@ -103,7 +97,7 @@ a side effect.
 |---|---|---|
 | Closure capture | `captures` always `vec![]`; no LIR counterpart; capturing a local **panics** ([F6](findings.md#f6)) | model the value form regardless ([§4](directions.md#4--closures-are-a-value-and-the-irs-are-shaped-for-one)); implementing is a separate scope call — no corpus program, no output to match |
 | Function-type inference | stubbed | same |
-| Generics | none ([F1](findings.md#f1)) | adopt [§3](directions.md#3--generics-are-monomorphization-by-name), or keep the `Ty::ERROR` placeholder? |
+| Generics | none ([F1](findings.md#f1)) | ✅ **adopted** — [§3](directions.md#3--generics-are-monomorphization-by-name), monomorphization by type, with a `Param` variant so bodies check once generically (A1 + A3, 2026-07-29) |
 | `match` | does not exist; conditionals special-cased | model the general form now so lowering has one path — [B4](anti-spec.md#b4--no-special-cased-control-flow-where-a-general-form-exists) |
 | `color`/`brush` as property types | rejected — two storage shapes for one name | unify, or keep rejecting *with the same diagnostic*? — [C4](anti-spec.md#c4--no-type-whose-storage-shape-depends-on-where-it-appears) |
 | **Coercions are not materialized** | `types_compatible` returns `bool` and discards *which* conversion applies; no `Coerce` node exists. `list<s32>` → `list<s64>` typechecks and the encoder rejects it ([F17](findings.md#f17)) | materialize an explicit conversion node — see below |
@@ -167,9 +161,12 @@ This phase owns it: coercion is type-directed, so it cannot live in 3a.
 [H1–H5](stage-2a-hir-build.md#invariants-this-phase-establishes) — is owned and
 established by [2a](stage-2a-hir-build.md#contract) and assumed here.
 
-**Postcondition:** `types` has an entry for every expression node. A missing
-entry after 2b is a bug, not a "not inferred" state — if a type could not be
-determined, the entry is `Ty::ERROR` and a diagnostic was emitted
+**Postcondition, strengthened by [T1](#t1--bidirectional-checking-not-unification):**
+`types` has an entry for every expression node, **and no entry contains an
+unresolved `Infer` variable**. A missing entry is a bug, not a "not inferred"
+state; an *unresolved* entry is a worse bug, because it type-checks and then
+miscompiles downstream. If a type could not be determined, the entry is
+`Ty::ERROR` and a diagnostic was emitted
 ([A5](anti-spec.md#a5--no-silent-fallback)).
 
 ### What stage 3a may NOT assume
@@ -211,6 +208,12 @@ Plus, unchanged from 2a and re-run here:
 - [ ] `types` total after 2b; asserted by a walk over every corpus program that
       every expression node has an entry — and **visible in `--emit-hir`**, which
       renders an untyped expression as such rather than omitting it.
+- [ ] **No `Infer` variable survives the phase** — a `has_infer()`-style assert
+      over the whole map, not a spot check ([T1](#t1--bidirectional-checking-not-unification),
+      [S7](infra-sema.md#s7--does-ty-gain-a-non-concrete-variant)).
+- [ ] **Unification failures report at the construct that introduced the
+      expectation**, not where the solver noticed. Verified against the 23
+      diagnostic fixtures.
 - [ ] Diagnostic *meaning* identical on all 23 diagnostic fixtures; any wording
       diff read and recorded in [`goldens-changed.md`](goldens-changed.md).
 - [ ] Accumulate-and-continue verified: a program with three independent type

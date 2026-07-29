@@ -84,22 +84,46 @@ merges them. [§3](directions.md#3--generics-are-monomorphization-by-name).
 
 ---
 
-### A2 · What algorithm does 2b type-check with?
+### A2 · How much inference sits inside the bidirectional checker?
 
-- [x] **Bidirectional** — `Mode::{Infer, Check}`, no solver, types concrete at
-      every step.
-- [ ] **Unification** — generate constraints with fresh variables, solve.
-- [ ] **Bidirectional now, solver later** behind the same API.
+**Bidirectional is the skeleton either way.** An earlier draft posed this as
+"bidirectional *vs* unification", which is a false dichotomy — and the tick that
+landed on "Bidirectional" under that wording could have meant either row below.
+The two are orthogonal: bidirectional says *where* type information flows
+(synthesize ⇒ / check ⇐); unification says *how* unknowns get resolved. Rust,
+Swift, Scala and TypeScript all do both.
+
+- [ ] **1 · None.** Every type concrete at every step, no metavariables. Where
+      neither direction determines a type, emit a diagnostic — the frozen tree's
+      *"cannot infer the type of this closure without an expected type."*
+- [ ] **2 · Metavariables + unification, no generalization.** Mint an inference
+      variable where nothing determines a type, unify, resolve before the phase
+      ends. Rust-like. ← **CHOSEN**
+- [x] **3 · Full Hindley-Milner** — option 2 plus let-generalization.
 - [ ] Other: ______
 
-*Hangs on it:* A3's `Infer` half; F1's option B; whether "expected X, found Y"
-diagnostics survive on the 23 fixtures.
-*Note:* this was **inherited from the frozen tree, never argued**, until it was
-written up — so treat it as genuinely open.
-**Recommendation:** bidirectional —
-[T1](stage-2b-hir-check.md#t1--bidirectional-checking-not-unification).
+*Hangs on it:* [A4](#a4--does-ty-get-an-infer-variant) follows directly — option 1
+⇒ A4 no; options 2/3 ⇒ A4 yes. It does **not** constrain
+[A3](#a3--does-ty-get-a-param-variant): metavariables and type parameters are
+independent holes.
 
-**Answer:**
+*Why not 3:* generalization exists to infer *polymorphic* types, and
+[A1](#a1--how-are-parameterized-types-represented) establishes yel has none — it
+would have nothing to generalize. It is also the one part genuinely in tension
+with a bidirectional skeleton; GHC has been *restricting* let-generalization for
+years for that reason. Unification is not in tension; generalization is.
+
+**Answer: 2 — bidirectional skeleton with unification variables.** "Bidirectional
+with HM" in the colloquial sense: HM-*style* inference, minus the
+let-generalization yel has no use for. Recorded 2026-07-29.
+
+**What this accepts.** [T1](stage-2b-hir-check.md#t1--bidirectional-checking-not-unification)
+argued against a solver on four grounds; three are unaffected, one is a real cost
+now taken on deliberately: **diagnostics.** Bidirectional-only yields "expected
+`X`, found `Y`" *at the construct*; a solver reports a conflict wherever
+unification failed — different span, different sentence. Diagnostic meaning is
+frozen on 23 fixtures, so this becomes an **explicit obligation on 3b**, not an
+accident.
 
 ---
 
@@ -124,15 +148,25 @@ The `T` in `list<T>` — a placeholder in a *declaration*.
 A placeholder during *checking*, solved later. **Distinct from A3** — conflating
 the two is the error this pair exists to prevent.
 
-- [ ] **No** — bidirectional needs none; `Mode::Infer` means *synthesize now*.
-- [ ] **Yes** — inference variables, solved during checking.
+- [ ] **No** — no metavariables; `Mode::Infer` means *synthesize now*.
+- [x] **Yes** — inference variables, solved during checking. ← **follows from A2**
 - [ ] Other: ______
 
-*Hangs on it:* whether function-type inference can be fixed in its general form
-later without a `Ty` change.
-**Recommendation:** no, **if A2 is bidirectional** — the two answers must agree.
+**Answer: yes.** Not independent — [A2](#a2--how-much-inference-sits-inside-the-bidirectional-checker)
+option 2 requires it. Recorded 2026-07-29.
 
-**Answer:**
+**Three obligations this creates**, none of which exist under "No":
+
+1. **`Infer` must not survive the phase.** It is legal *during* 3b and illegal
+   after. 3b's postcondition strengthens from "`types` is total" to "`types` is
+   total **and contains no unresolved variable**" — rustc's `has_infer()` check.
+2. **It must never be serialized.** A module artifact containing a hole is a bug,
+   not a state ([B1](#b1--how-does-ty-cross-a-module-boundary),
+   [§6](directions.md#6--modules-are-serializable-artifacts)).
+3. **Structural equality and interner uniquing must account for it** — two
+   distinct variables are not the same type. Decide whether variables live in the
+   interner at all or in a side unification table
+   ([S7](infra-sema.md#s7--does-ty-gain-a-non-concrete-variant)).
 
 ---
 

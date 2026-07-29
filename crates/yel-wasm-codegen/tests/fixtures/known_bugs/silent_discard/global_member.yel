@@ -1,0 +1,33 @@
+package yel:silentdrop@0.1.0;
+
+// A malformed member inside a `global` body is accepted with NO diagnostic
+// and the member VANISHES from the AST.
+//
+// `|` is not an operator in this grammar, so `global_property` fails to match.
+// `BLOCK_LEVEL_CATCH_ALL` (grammar.pest:18) then swallows the whole line,
+// terminator included, so `global_decl` still matches. `parse_global` iterates
+// its members with a trailing `_ => {}` and reports nothing.
+//
+// Result: `yelc check` prints `OK: 1 component(s) checked`, and `evens` is not
+// in `file.globals[0].properties` — the compiler accepted a program it cannot
+// represent and told nobody.
+//
+// `parse_record` has the same defect spelled differently: it filters its pairs
+// with `if field_pair.as_rule() == Rule::record_field` (parser.rs:321).
+// `parse_component` (:823) and `parse_element_node` (:1186) DO report the
+// catch-all — so this is two silent arms out of four sites, not a uniform
+// policy.
+//
+// This is an UNDER-rejection, so it cannot use the `.failure` harness one
+// directory up: that harness asserts compilation *fails*, and this compiles
+// cleanly. See `known_bugs_silently_discarded_members` in tests/integration.rs.
+
+export global Store {
+    evens: list<s32> = [1, 2, 3, 4].filter(|x| x > 2);
+}
+
+export component App {
+    VStack {
+        Text { "filtered" }
+    }
+}

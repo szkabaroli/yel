@@ -497,21 +497,34 @@ Phases run in order. Phase 0 must complete before any number is taken.
    [`ratchet.md`](ratchet.md).
 
 2. ~~**The two silent `_ => {}` arms** filed as a `known_bugs` entry.~~
-   ✅ **Filed differently, on purpose.** They are an **under**-rejection — the
-   frozen parser *accepts* a `global` body containing garbage and drops the
-   member — and the `known_bugs` harness asserts that compilation **fails**. A
-   fixture there would compile cleanly and the harness would report
-   *"the bug appears to be fixed, graduate this to positive/"*, which is the
-   opposite of the truth. The frozen suite has no shape for "accepts what it
-   should reject".
+   ✅ **Filed, with a new harness.** They are an **under**-rejection — the frozen
+   parser *accepts* a `global` body containing garbage and drops the member — and
+   the existing `.failure` harness asserts compilation **fails**, so a fixture
+   there would compile cleanly and report *"the bug appears to be fixed,
+   graduate this to positive/"*.
 
-   It is already pinned, in `yelc-syntax`'s own suite and more strongly than a
-   fixture could manage: `support::catch_all::DIVERGENCES` lists 18 cases, and
-   `explains_our_report` proves each one **causally** rather than by
-   co-location — it excises exactly the bytes the frozen parser discarded,
-   re-parses, and requires our diagnostic to disappear. An over-rejection of ours
-   cannot be appended to that list and pass. That is the record; no fixture is
-   owed.
+   **I first concluded no fixture was owed. That was the wrong call**, and the
+   reasoning shows why: I checked whether the bug fit the harness, found it did
+   not, and stopped — instead of noticing that `known_bugs/runtime/` already
+   establishes the pattern for "compiles cleanly but is wrong" (a subdirectory
+   the non-recursing lister cannot see, plus its own test). The gap was fillable
+   in about sixty lines.
+
+   What landed: `known_bugs/silent_discard/global_member.yel` +
+   `.dropped`, and `known_bugs_silently_discarded_members` in
+   `tests/integration.rs`. Each `.dropped` line names an identifier the **source
+   writes** and the **AST must not contain**; the harness additionally rejects a
+   `.dropped` entry absent from the source, so a typo cannot make the assertion
+   vacuously pass. Mutation-checked in both directions before landing — making
+   the member valid trips *"IS present in the AST"*, and a bogus `.dropped` entry
+   trips *"as written this assertion is vacuous"*.
+
+   The `yelc-syntax` record stands alongside it and is still the stronger of the
+   two: `support::catch_all::DIVERGENCES` lists 18 cases and
+   `explains_our_report` proves each **causally** — it excises exactly the bytes
+   the frozen parser discarded, re-parses, and requires our diagnostic to
+   disappear. The fixture pins the bug in the frozen tree where a reader of that
+   tree will find it; the divergence list pins it against the new parser.
 
 **The ordering constraint that made this a prerequisite held, and cost nothing.**
 Both items were done before any 2a measurement. The corpus did not need
@@ -624,6 +637,12 @@ Stated because it is a real cost, not a free simplification:
       source. A module is built from the file set (H1), so a single-source field
       is a category error.
 - [x] D1–D6 recorded with reasoning. ✅ 2026-07-29
+- [ ] **D5's item-order divergence measured, not asserted.** The 815 corpus
+      programs containing both a global and a component are byte-identical, or
+      diverge *only* in item order with every divergence enumerated in
+      [`goldens-changed.md`](goldens-changed.md). "We expected only item order to
+      change" is a claim; an unmeasured claim is how a miscompile ships as an
+      expected reordering ([D5](#d5--globals-lower-before-components)).
 - [ ] Adversarial review panel, read-only, one lens each.
 - [ ] Surprises written — [D3](anti-spec.md#d3--a-stage-documents-what-surprised-it).
 
@@ -731,7 +750,7 @@ the ordinary scope path, and a test resolves it there.
 
 Note this is strictly more than D2. D2 deletes a field that should never have
 existed; D3 deletes a field that is currently **load-bearing**, so it is only
-free once the scope structure is right ([A9](anti-spec.md#a9--load-bearing-or-deleted)).
+free once the scope structure is right ([A9](anti-spec.md#a9--a-ported-construct-is-load-bearing-or-it-is-deleted)).
 
 ### D4 · `HirGlobal` has no body — only its functions
 

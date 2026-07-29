@@ -57,6 +57,25 @@ runtime test.
 |---|---|
 | `runtime/s32_to_string_aliasing.yel` | Two consecutive `s32_to_string` calls in one string interpolation both return `(ptr, len)` into a shared static buffer; the second call overwrites the first's contents while the first's `len` lingers, so `concat` reads a truncated prefix of the wrong value. The fixture interleaves two integer reads with `Alpha.x=7` / `Beta.y=11` and observes `"alpha=1 beta=11"` instead of `"alpha=7 beta=11"`. |
 
+## Under-rejection bugs
+
+The `silent_discard/` subdirectory holds the **opposite** shape: programs
+the compiler wrongly *accepts*, dropping part of the source on the floor
+with no diagnostic. These cannot use the `.failure` harness — it asserts
+compilation fails, and these compile cleanly, so a fixture there would
+immediately report itself fixed.
+
+`known_bugs_silently_discarded_members` in `tests/integration.rs` handles
+them. Each `<name>.yel` pairs with `<name>.dropped`: one identifier per
+line that the **source writes** and the **AST must not contain**. The
+harness also refuses a `.dropped` entry that does not appear in the
+fixture source at all, so a typo cannot make the assertion vacuously
+pass.
+
+| Fixture | Bug being documented |
+|---|---|
+| `silent_discard/global_member.yel` | A malformed member in a `global` body is accepted with no diagnostic and vanishes from the AST. `BLOCK_LEVEL_CATCH_ALL` (grammar.pest:18) swallows the line so `global_decl` still matches, and `parse_global` iterates members with a trailing `_ => {}`. `parse_record` has the same defect spelled differently (`if field_pair.as_rule() == Rule::record_field`, parser.rs:321), while `parse_component` (:823) and `parse_element_node` (:1186) **do** report it — two silent sites out of four, not a uniform policy. |
+
 ## Adding a new known bug
 
 1. Drop `<name>.yel` into this directory.
