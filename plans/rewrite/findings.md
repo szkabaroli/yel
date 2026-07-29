@@ -370,3 +370,63 @@ So `Ternary` waits on an open decision; `Range` waits only on sequencing.
 
 `yelc-syntax/src/ast.rs` (`ExprKind`), `{hir,thir,lir}/{expr,node}.rs` ·
 measured 2026-07-28 · cited by [3a](stage-2a-hir-build.md#what-lowerings-belong-here)
+
+## F19
+
+**`|` in expression position reports `expected \`||\`` — a suggestion that cannot
+help.** There is no lone `|` token in yel. `lexer.rs:410` sees `|`, peeks for a
+second one, and on failing to find it emits `E0060: expected \`||\``. So a user
+writing a Rust-style closure gets told to write a logical-or:
+
+```
+$ yelc2 known_bugs/silent_discard/global_member.yel
+error[E0060]: expected `||`
+  --> …:26:44
+  26 |     evens: list<s32> = [1, 2, 3, 4].filter(|x| x > 2);
+```
+
+The verdict is right and the span is right; only the advice is wrong. The fix the
+user needs is `{ x -> x > 2 }` ([`LANGUAGE.md:618`](../../LANGUAGE.md) — closures
+are `{ params -> body }`). The message also fires **twice**, once per `|`, which
+is a second reading of the same mistake.
+
+**Not a parity or ratchet concern.** Both compilers reject — the frozen one
+differently and worse, see [F20](#f20) — so no accept/reject bit and no golden
+moves. This is diagnostic quality only, and it is filed so the next person to see
+`expected \`||\`` does not have to re-derive why a lexer peek produced it.
+
+**Why it is worth fixing rather than tolerating.** `|` in expression position
+where a closure is grammatical is an unusually strong signal: there is no other
+construct it could be starting. That makes "did you mean `{ x -> … }`?" a
+one-arm suggestion with no ambiguity to resolve — the cheap end of diagnostic
+work, and the exact case a Rust-literate newcomer hits first.
+
+`yelc-syntax/src/lexer.rs:410` · measured 2026-07-29 with `yelc2` ·
+owed to [2b](stage-2b-hir-check.md), which owns diagnostics
+
+## F20
+
+**The frozen compiler *accepts* the same input and drops the member.** Same
+source as [F19](#f19): `yelc check` prints `OK: 1 component(s) checked` and
+`evens` is absent from `file.globals[0].properties`.
+
+`BLOCK_LEVEL_CATCH_ALL` (`grammar.pest:18`) swallows the whole line so
+`global_decl` still matches, and `parse_global` iterates members with a trailing
+`_ => {}`. Two of the four catch-all sites are silent this way — `parse_record`
+spells it differently (`if field_pair.as_rule() == Rule::record_field`,
+`parser.rs:321`) while `parse_component` (:823) and `parse_element_node` (:1186)
+**do** report. It is not a uniform policy; it is two omissions.
+
+The new parser reports *and* keeps the property — `Ident evens` with
+`Expr Error` for its value — which is invariant S5: a diagnostic **and** an Error
+node, never a dropped subtree. The frozen tree loses the name and the span
+together, so nothing downstream can even know something was there.
+
+Pinned two ways, deliberately: `known_bugs/silent_discard/global_member.yel`
+records it in the frozen tree where a reader of that tree will find it, and
+`support::catch_all::DIVERGENCES` (18 entries, each proved causally by
+`explains_our_report`) records it against the new parser.
+
+`hir`-visible via `yelc ast` · `syntax/parser.rs` `parse_global`/`parse_record` ·
+measured 2026-07-29 · cited by
+[2a phase 0](stage-2a-hir-build.md#phase-0--oracle-hygiene---done-2026-07-29-1d12250)
