@@ -125,7 +125,7 @@ impl KnownItems {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::ModuleId;
+    use crate::ids::PackageId;
     use yelc_base::{SourceId, Span};
 
     fn span() -> Span {
@@ -133,7 +133,7 @@ mod tests {
     }
 
     fn registered_all(interner: &Interner) -> Definitions {
-        let mut defs = Definitions::new(ModuleId::LOCAL);
+        let mut defs = Definitions::new(PackageId::LOCAL);
         for &item in Known::ALL {
             defs.register(
                 interner.intern(item.source_name()),
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn an_incomplete_registration_fails_at_resolve() {
         let interner = Interner::new();
-        let defs = Definitions::new(ModuleId::LOCAL); // nothing registered
+        let defs = Definitions::new(PackageId::LOCAL); // nothing registered
         let err = KnownItems::resolve(&defs, &interner).unwrap_err();
         assert_eq!(err.missing, Known::ALL.to_vec());
     }
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn every_missing_entry_is_reported_not_just_the_first() {
         let interner = Interner::new();
-        let defs = Definitions::new(ModuleId::LOCAL);
+        let defs = Definitions::new(PackageId::LOCAL);
         let err = KnownItems::resolve(&defs, &interner).unwrap_err();
         assert_eq!(err.missing.len(), Known::ALL.len());
         for &item in Known::ALL {
@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn namespace_is_part_of_the_lookup() {
         let interner = Interner::new();
-        let mut defs = Definitions::new(ModuleId::LOCAL);
+        let mut defs = Definitions::new(PackageId::LOCAL);
         defs.register(interner.intern("Color"), Namespace::Value, span(), false)
             .unwrap();
         assert!(KnownItems::resolve(&defs, &interner).is_err());

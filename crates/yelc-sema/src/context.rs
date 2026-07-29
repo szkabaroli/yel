@@ -9,7 +9,7 @@ use yelc_base::{Diagnostics, Interner, SourceMap};
 
 use crate::builtins::BuiltinTable;
 use crate::definitions::Definitions;
-use crate::ids::ModuleId;
+use crate::ids::PackageId;
 use crate::known::KnownItems;
 use crate::types::TypeInterner;
 
@@ -56,11 +56,11 @@ pub struct CompilerContext {
 }
 
 impl CompilerContext {
-    pub fn new(module: ModuleId) -> Self {
+    pub fn new(package: PackageId) -> Self {
         Self {
             names: Interner::new(),
             types: TypeInterner::new(),
-            defs: Definitions::new(module),
+            defs: Definitions::new(package),
             builtins: BuiltinTable::new(),
             sources: SourceMap::new(),
             diagnostics: Diagnostics::new(),
@@ -97,7 +97,7 @@ impl CompilerContext {
 
 impl Default for CompilerContext {
     fn default() -> Self {
-        Self::new(ModuleId::LOCAL)
+        Self::new(PackageId::LOCAL)
     }
 }
 

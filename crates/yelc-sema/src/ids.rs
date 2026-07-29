@@ -5,7 +5,7 @@
 //! | | used | shape |
 //! |---|---|---|
 //! | [`DefId`] | in-process, everywhere | dense index, O(1) |
-//! | [`DefPath`] | serialized, across modules | structural, resolvable on load |
+//! | [`DefPath`] | serialized, across packages | structural, resolvable on load |
 //!
 //! A `DefId` must never reach a serialized position — its meaning depends on
 //! how many definitions were registered before it, which is not stable across
@@ -14,14 +14,25 @@
 
 use yelc_base::Name;
 
-/// Identifies a module. Not derived from a file path — a module may span
-/// several files ([D8](../../../plans/rewrite/stage-3-hir-build.md)).
+/// Identifies a package — **the compilation unit**.
+///
+/// Not derived from a file path: a package is a *directory* of files that merge
+/// into one namespace, the way a WIT package and a Go package do
+/// ([D8](../../../plans/rewrite/stage-3-hir-build.md),
+/// [`plans/modules.md`](../../../plans/modules.md)).
+///
+/// # Not to be confused with a `module`
+///
+/// A *module* is a namespace **within** a package, mapping 1:1 onto a WIT
+/// `interface`. A package holds several. This type was called `ModuleId` until
+/// 2026-07-29, which named the wrong level — the thing that is compiled,
+/// versioned and serialized is the package.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct ModuleId(pub u32);
+pub struct PackageId(pub u32);
 
-impl ModuleId {
-    /// The module currently being compiled.
-    pub const LOCAL: ModuleId = ModuleId(0);
+impl PackageId {
+    /// The package currently being compiled.
+    pub const LOCAL: PackageId = PackageId(0);
 
     pub fn new(index: u32) -> Self {
         Self(index)
@@ -32,9 +43,9 @@ impl ModuleId {
     }
 }
 
-/// Identifies one definition, qualified by the module that owns it.
+/// Identifies one definition, qualified by the package that owns it.
 ///
-/// # Why the module is here from day one (decision B2)
+/// # Why the package is here from day one (decision B2)
 ///
 /// The alternative — a plain index now, qualified once serialization lands —
 /// requires retrofitting every holder of a `DefId`, which is the whole
@@ -42,28 +53,28 @@ impl ModuleId {
 ///
 /// # Why this is not in `yelc-base`
 ///
-/// Module identity is a semantic concept, and `yelc-base` is deliberately
-/// mechanism-only. A `DefId` that cannot name its module is precisely the shape
+/// Package identity is a semantic concept, and `yelc-base` is deliberately
+/// mechanism-only. A `DefId` that cannot name its package is precisely the shape
 /// B2 exists to avoid, so there is no version of this type that belongs one
 /// layer down.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct DefId {
-    pub module: ModuleId,
+    pub package: PackageId,
     pub index: u32,
 }
 
 impl DefId {
-    pub fn new(module: ModuleId, index: u32) -> Self {
-        Self { module, index }
+    pub fn new(package: PackageId, index: u32) -> Self {
+        Self { package, index }
     }
 
-    /// A definition in the module being compiled.
+    /// A definition in the package being compiled.
     pub fn local(index: u32) -> Self {
-        Self::new(ModuleId::LOCAL, index)
+        Self::new(PackageId::LOCAL, index)
     }
 
     pub fn is_local(self) -> bool {
-        self.module == ModuleId::LOCAL
+        self.package == PackageId::LOCAL
     }
 }
 
@@ -74,7 +85,7 @@ impl DefId {
 /// carries the type for exactly this reason.
 ///
 /// **One key, two consumers** (decision B3 / S6): [`DefPath`] needs it to name a
-/// definition across a module boundary, and monomorphization needs it to mangle
+/// definition across a package boundary, and monomorphization needs it to mangle
 /// an instantiation. Two mechanisms would be two things that must agree, checked
 /// by nothing — which is [F12](../../../plans/rewrite/findings.md)'s shape.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
@@ -101,9 +112,9 @@ impl OverloadKey {
 /// registration order — which is what makes it correct where a [`DefId`] is not.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct DefPath {
-    /// The owning module, by name rather than by index.
-    pub module: Name,
-    /// Path segments from module root, outermost first.
+    /// The owning package, by name rather than by index.
+    pub package: Name,
+    /// Path segments from the package root, outermost first.
     pub segments: Vec<Name>,
     /// Disambiguates overloads. Empty when the name is unique.
     pub overload: OverloadKey,

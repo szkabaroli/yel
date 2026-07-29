@@ -25,7 +25,7 @@
 //! | A3 | `Ty` gains [`TyKind::Param`] | [`types`] |
 //! | A4 | `Ty` gains [`TyKind::Infer`] | [`types`] |
 //! | B1 | `Ty` **must not** derive `Serialize` | [`types`] |
-//! | B2 | [`DefId`] is module-qualified from day one | [`ids`] |
+//! | B2 | [`DefId`] is package-qualified from day one | [`ids`] |
 //! | B3 | one [`OverloadKey`], two consumers | [`ids`] |
 //! | C1 | builtins are **one table**, two accessors | [`builtins`] |
 //! | C1c | arity has a **variadic** form | [`builtins`] |
@@ -55,6 +55,6 @@ pub mod types;
 pub use builtins::{Arity, Builtin, BuiltinId, BuiltinTable, LoweringTarget, Visibility};
 pub use context::CompilerContext;
 pub use definitions::{Definition, Definitions, Duplicate, Namespace};
-pub use ids::{DefId, DefPath, ModuleId, OverloadKey};
+pub use ids::{DefId, DefPath, OverloadKey, PackageId};
 pub use known::{Known, KnownItems, MissingKnownItems};
 pub use types::{Ty, TyKind, TypeInterner};

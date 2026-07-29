@@ -7,7 +7,7 @@
 use rustc_hash::FxHashMap;
 use yelc_base::{Name, Span};
 
-use crate::ids::{DefId, ModuleId};
+use crate::ids::{DefId, PackageId};
 use crate::types::Ty;
 
 /// Which index space a name lives in.
@@ -46,9 +46,9 @@ pub struct Definition {
     pub is_export: bool,
 }
 
-/// Every definition in the module being compiled.
+/// Every definition in the package being compiled.
 pub struct Definitions {
-    module: ModuleId,
+    package: PackageId,
     defs: Vec<Definition>,
     by_name: FxHashMap<(Name, Namespace), DefId>,
 }
@@ -63,16 +63,16 @@ pub struct Duplicate {
 }
 
 impl Definitions {
-    pub fn new(module: ModuleId) -> Self {
+    pub fn new(package: PackageId) -> Self {
         Self {
-            module,
+            package,
             defs: Vec::new(),
             by_name: FxHashMap::default(),
         }
     }
 
-    pub fn module(&self) -> ModuleId {
-        self.module
+    pub fn package(&self) -> PackageId {
+        self.package
     }
 
     /// Register a name. Returns `Err(Duplicate)` if it is taken, leaving the
@@ -91,7 +91,7 @@ impl Definitions {
         if let Some(&existing) = self.by_name.get(&(name, namespace)) {
             return Err(Duplicate { existing });
         }
-        let id = DefId::new(self.module, self.defs.len() as u32);
+        let id = DefId::new(self.package, self.defs.len() as u32);
         self.defs.push(Definition {
             id,
             name,
@@ -110,15 +110,15 @@ impl Definitions {
 
     pub fn get(&self, id: DefId) -> &Definition {
         debug_assert_eq!(
-            id.module, self.module,
-            "DefId from another module read out of this table",
+            id.package, self.package,
+            "DefId from another package read out of this table",
         );
         &self.defs[id.index as usize]
     }
 
     /// Record the declared type discovered during resolution.
     pub fn set_ty(&mut self, id: DefId, ty: Ty) {
-        debug_assert_eq!(id.module, self.module);
+        debug_assert_eq!(id.package, self.package);
         self.defs[id.index as usize].ty = Some(ty);
     }
 
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn namespaces_do_not_collide() {
         let interner = Interner::new();
-        let mut defs = Definitions::new(ModuleId::LOCAL);
+        let mut defs = Definitions::new(PackageId::LOCAL);
         let name = interner.intern("Panel");
         assert!(defs.register(name, Namespace::Type, span(), false).is_ok());
         assert!(
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn a_duplicate_reports_and_keeps_the_original() {
         let interner = Interner::new();
-        let mut defs = Definitions::new(ModuleId::LOCAL);
+        let mut defs = Definitions::new(PackageId::LOCAL);
         let name = interner.intern("R");
         let first = defs.register(name, Namespace::Type, span(), false).unwrap();
         let err = defs
@@ -177,25 +177,25 @@ mod tests {
         assert_eq!(defs.len(), 1, "the duplicate must not be registered");
     }
 
-    /// DefIds carry their module, so a table can catch a foreign one rather
+    /// DefIds carry their package, so a table can catch a foreign one rather
     /// than silently indexing with it (decision B2).
     #[test]
-    fn defids_are_module_qualified() {
+    fn defids_are_package_qualified() {
         let interner = Interner::new();
-        let mut defs = Definitions::new(ModuleId::LOCAL);
+        let mut defs = Definitions::new(PackageId::LOCAL);
         let id = defs
             .register(interner.intern("R"), Namespace::Type, span(), false)
             .unwrap();
-        assert_eq!(id.module, ModuleId::LOCAL);
+        assert_eq!(id.package, PackageId::LOCAL);
         assert!(id.is_local());
-        assert_ne!(id, DefId::new(ModuleId(1), id.index));
+        assert_ne!(id, DefId::new(PackageId(1), id.index));
     }
 
     /// A6: iteration order must not come from the hash map.
     #[test]
     fn iteration_is_registration_order() {
         let interner = Interner::new();
-        let mut defs = Definitions::new(ModuleId::LOCAL);
+        let mut defs = Definitions::new(PackageId::LOCAL);
         for name in ["zeta", "alpha", "mu"] {
             defs.register(interner.intern(name), Namespace::Type, span(), false)
                 .unwrap();
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn declared_types_start_absent_not_placeholder() {
         let interner = Interner::new();
-        let mut defs = Definitions::new(ModuleId::LOCAL);
+        let mut defs = Definitions::new(PackageId::LOCAL);
         let id = defs
             .register(interner.intern("x"), Namespace::Value, span(), false)
             .unwrap();

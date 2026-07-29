@@ -273,9 +273,7 @@ surface keyword meaning *WIT interface*, three things want the word: the surface
 construct, the serialization unit, and the WIT interface.
 
 The mapping is *surface module → WIT interface* (1:1) and *package →
-serialization unit* (holds several modules). So **rename `ModuleId` →
-`PackageId`** before the surface keyword lands. `yelc-sema` is small today; this
-is nearly free now and sprawling later.
+serialization unit* (holds several modules). So ~~rename `ModuleId` → `PackageId`~~ — **done 2026-07-29.**
 
 **The compiler's current name describes the wrong level.** §6's decisions — B1
 (`Ty` written structurally), B2 (module-qualified `DefId`), B3 (`OverloadKey` in
@@ -310,7 +308,7 @@ the noun is off by one level.
 Nothing here is implemented, and none of it is on the surface-break list in
 [`scope.md`](rewrite/scope.md) yet.
 
-1. **Rename `ModuleId` → `PackageId`** — independent, do it now, nearly free.
+1. ~~**Rename `ModuleId` → `PackageId`**~~ — ✅ done 2026-07-29.
 2. **`impl T { }`** — unblocks the stdlib; needed before stdlib source lands.
 3. **WIT import** (`from "…" include`, WIT locator only) — bounded, deletes
    `extern module` and the `dom_imports.rs` special case, uses `wit-parser`.

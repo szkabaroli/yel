@@ -157,7 +157,7 @@ fixtures before it lands.
 | D5 | Item and diagnostic ordering | ⚠️ **Globals then components** — reverses the frozen lowering order, and carries a measured obligation. [log](#d5--globals-lower-before-components) |
 | D6 | Trivia / doc-comment attachment | **Attach** — nearest preceding comment run, no blank line. [log](#d6--doc-comments-attach-to-the-nearest-preceding-comment-run) |
 | D7 | Flatten `else if` into nested `If`? | **Decided: yes** — [log](#d7--flatten-else-if-chains) |
-| D8 | What identifies a module — one `SourceId`, or the file set? | **Decided: `ModuleId` + `Vec<SourceId>`** — [log](#d8--a-module-is-identified-by-itself-not-by-a-file) |
+| D8 | What identifies a module — one `SourceId`, or the file set? | **Decided: `PackageId` + `Vec<SourceId>`** — [log](#d8--a-module-is-identified-by-itself-not-by-a-file) |
 
 ### D1
 
@@ -202,7 +202,7 @@ impl HirMap {
 }
 
 pub struct HirModule {
-    pub id:      ModuleId,        // identity of the module, not of a file
+    pub id:      PackageId,        // identity of the module, not of a file
     pub sources: Vec<SourceId>,   // the file *set* — see "Multiple files"
     pub items:   IndexVec<HirItemId, HirItem>,
     pub bodies:  IndexVec<BodyId, HirBody>,
@@ -252,7 +252,7 @@ Swift's mechanism is the reference — see §6 for the `XREF` citation.
 /// lookup on load. A `DefId` is NEVER serialized — it is an index into a table
 /// the reader does not own.
 pub struct DefPath {
-    pub module: ModuleId,
+    pub module: PackageId,
     pub pieces: Vec<PathPiece>,
 }
 
@@ -892,9 +892,9 @@ evidence about the frozen compiler, not an argument about the new one.
 
 ```rust
 // identity
-pub struct ModuleId(u32);
-pub struct DefId { module: ModuleId, index: u32 }   // dense, in-process, never serialized
-pub struct DefPath { module: ModuleId, pieces: Vec<PathPiece> }  // serialized, resolved by lookup
+pub struct PackageId(u32);
+pub struct DefId { module: PackageId, index: u32 }   // dense, in-process, never serialized
+pub struct DefPath { module: PackageId, pieces: Vec<PathPiece> }  // serialized, resolved by lookup
 
 // types
 pub struct Ty(u32);                      // handle; NOT Serialize — see S2
@@ -994,7 +994,7 @@ Stated because it is a real cost, not a free simplification:
       only identity that crosses a module boundary
       ([§6](directions.md#6--modules-are-serializable-artifacts)); a `DefId` in a
       would-be-serialized struct is the bug this split exists to prevent.
-- [ ] `HirModule` carries a `ModuleId` and a *set* of `SourceId`s — not one
+- [ ] `HirModule` carries a `PackageId` and a *set* of `SourceId`s — not one
       source. A module is built from the file set (H1), so a single-source field
       is a category error.
 - [ ] **Provenance recorded for every node the UI desugaring generates**, and no
@@ -1053,7 +1053,7 @@ output by construction and propagates the special case through the whole rewrite
 
 ### D8 · A module is identified by itself, not by a file
 
-**Decided 2026-07-28, before briefing.** `HirModule` carries `id: ModuleId` and
+**Decided 2026-07-28, before briefing.** `HirModule` carries `id: PackageId` and
 `sources: Vec<SourceId>`. It does **not** carry a single `SourceId`.
 
 **The error this corrects.** The first draft of the contract in this file had
@@ -1068,7 +1068,7 @@ the output.
 that touched it wanted a span, and any source in the set would have produced
 *a* span. Nothing asked the question that breaks it —
 **"what is this module's identity?"** — until
-[§6](directions.md#6--modules-are-serializable-artifacts) needed a `ModuleId` to
+[§6](directions.md#6--modules-are-serializable-artifacts) needed a `PackageId` to
 put at the head of a `DefPath`. A serialized cross-module reference cannot say
 "the module whose first file was `foo.yel`".
 
