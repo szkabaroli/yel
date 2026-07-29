@@ -29,8 +29,8 @@
 //! | B3 | one [`OverloadKey`], two consumers | [`ids`] |
 //! | C1 | builtins are **one table**, two accessors | [`builtins`] |
 //! | C1c | arity has a **variadic** form | [`builtins`] |
-//! | C2 | builtin elements/enums/variants get a separate home, holding `DefId` not `Option<DefId>` | pending |
-//! | D0 | the context holds **six** fields | pending |
+//! | C2 | builtin elements/enums/variants get a separate home, holding `DefId` not `Option<DefId>` | [`known`] |
+//! | D0 | the context holds **six** fields | [`context`] |
 //!
 //! # What is deliberately absent
 //!
@@ -45,11 +45,15 @@
 //! (decision D0a) because it is analysis about a program, not infrastructure.
 
 pub mod builtins;
+pub mod context;
 pub mod definitions;
 pub mod ids;
+pub mod known;
 pub mod types;
 
 pub use builtins::{Arity, Builtin, BuiltinId, BuiltinTable, LoweringTarget};
+pub use context::CompilerContext;
 pub use definitions::{Definition, Definitions, Duplicate, Namespace};
 pub use ids::{DefId, DefPath, ModuleId, OverloadKey};
+pub use known::{Known, KnownItems, MissingKnownItems};
 pub use types::{Ty, TyKind, TypeInterner};
