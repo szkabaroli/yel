@@ -61,12 +61,17 @@ impl Outcome {
                 return true;
             }
             let gap = if a.1 < b.0 { a.1..b.0 } else { b.1..a.0 };
-            gap.clone().all(|byte| trivia.get(byte).copied().unwrap_or(true))
+            gap.clone()
+                .all(|byte| trivia.get(byte).copied().unwrap_or(true))
         };
 
         let mut out = Vec::new();
         for diagnostic in &self.diagnostic_spans {
-            if !self.recovery_spans.iter().any(|mark| near(*diagnostic, *mark)) {
+            if !self
+                .recovery_spans
+                .iter()
+                .any(|mark| near(*diagnostic, *mark))
+            {
                 out.push(format!("diagnostic at {diagnostic:?} has no recovery node"));
             }
         }
@@ -116,7 +121,11 @@ fn parse_source(content: &str) -> Outcome {
             .filter_map(|diagnostic| diagnostic.span)
             .map(|span| (span.start, span.end))
             .collect(),
-        recovery_spans: counter.spans.iter().map(|span| (span.start, span.end)).collect(),
+        recovery_spans: counter
+            .spans
+            .iter()
+            .map(|span| (span.start, span.end))
+            .collect(),
     }
 }
 
@@ -257,7 +266,10 @@ fn mutations_satisfy_s5_and_never_lose_bytes() {
         }
     }
 
-    assert_eq!(cases, MUTATION_SWEEP_CASES, "the mutation sweep changed size");
+    assert_eq!(
+        cases, MUTATION_SWEEP_CASES,
+        "the mutation sweep changed size"
+    );
     assert!(
         violations.is_empty(),
         "S5 violated per-construct on {} of {cases} mutated inputs: {:#?}",
@@ -295,10 +307,7 @@ fn randomized_inputs_satisfy_s5_and_never_lose_bytes() {
 
     let mut check = |label: String, subject: &str| {
         let outcome = parse_source(subject);
-        assert!(
-            outcome.round_tripped,
-            "{label} lost bytes on {subject:?}"
-        );
+        assert!(outcome.round_tripped, "{label} lost bytes on {subject:?}");
         for violation in outcome.s5_violations(subject) {
             violations.push((label.clone(), subject.to_string(), violation));
         }
@@ -321,7 +330,10 @@ fn randomized_inputs_satisfy_s5_and_never_lose_bytes() {
         check(format!("soup#{index}"), &soup);
     }
 
-    assert_eq!(cases, RANDOM_SWEEP_CASES, "the randomized sweep changed size");
+    assert_eq!(
+        cases, RANDOM_SWEEP_CASES,
+        "the randomized sweep changed size"
+    );
     assert!(
         violations.is_empty(),
         "S5 violated per-construct on {} of {cases} randomized inputs \

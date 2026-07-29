@@ -550,7 +550,10 @@ mod tests {
     }
 
     fn kinds_no_trivia(source: &str) -> Vec<TokenKind> {
-        kinds(source).into_iter().filter(|k| !k.is_trivia()).collect()
+        kinds(source)
+            .into_iter()
+            .filter(|k| !k.is_trivia())
+            .collect()
     }
 
     /// Every lex must partition the input exactly. This is the lexer half of
@@ -559,7 +562,11 @@ mod tests {
         let mut diags = Diagnostics::new();
         let result = lex(SourceId(0), source, &mut diags);
         let total: u32 = result.widths.iter().sum();
-        assert_eq!(total as usize, source.len(), "lexer lost bytes in {source:?}");
+        assert_eq!(
+            total as usize,
+            source.len(),
+            "lexer lost bytes in {source:?}"
+        );
     }
 
     #[test]
@@ -606,10 +613,19 @@ mod tests {
     #[test]
     fn arrow_versus_hyphen_identifier() {
         assert_eq!(kinds_no_trivia("p->x"), vec![IDENTIFIER, ARROW, IDENTIFIER]);
-        assert_eq!(kinds_no_trivia("p -> x"), vec![IDENTIFIER, ARROW, IDENTIFIER]);
-        assert_eq!(kinds_no_trivia("s32->p"), vec![IDENTIFIER, ARROW, IDENTIFIER]);
+        assert_eq!(
+            kinds_no_trivia("p -> x"),
+            vec![IDENTIFIER, ARROW, IDENTIFIER]
+        );
+        assert_eq!(
+            kinds_no_trivia("s32->p"),
+            vec![IDENTIFIER, ARROW, IDENTIFIER]
+        );
         // …and a hyphen between two name characters still joins.
-        assert_eq!(kinds_no_trivia("a-b->c"), vec![IDENTIFIER, ARROW, IDENTIFIER]);
+        assert_eq!(
+            kinds_no_trivia("a-b->c"),
+            vec![IDENTIFIER, ARROW, IDENTIFIER]
+        );
     }
 
     #[test]
@@ -623,7 +639,10 @@ mod tests {
         assert_eq!(kinds_no_trivia("1.5rem"), vec![UNIT_LITERAL]);
         // Ordered-choice prefix match, matching pest.
         assert_eq!(kinds_no_trivia("10second"), vec![UNIT_LITERAL, IDENTIFIER]);
-        assert_eq!(kinds_no_trivia("50 % 3"), vec![INT_LITERAL, MODULO, INT_LITERAL]);
+        assert_eq!(
+            kinds_no_trivia("50 % 3"),
+            vec![INT_LITERAL, MODULO, INT_LITERAL]
+        );
     }
 
     #[test]
@@ -726,7 +745,10 @@ mod tests {
         assert_eq!(kinds_no_trivia("#ff0000"), vec![COLOR_LITERAL]);
         assert_eq!(kinds_no_trivia("#abc"), vec![COLOR_LITERAL]);
         // Nine hex digits: eight are consumed, the ninth lexes on its own.
-        assert_eq!(kinds_no_trivia("#123456789"), vec![COLOR_LITERAL, INT_LITERAL]);
+        assert_eq!(
+            kinds_no_trivia("#123456789"),
+            vec![COLOR_LITERAL, INT_LITERAL]
+        );
         assert_eq!(kinds_no_trivia("#a"), vec![UNKNOWN, IDENTIFIER]);
         assert_eq!(kinds_no_trivia("$"), vec![UNKNOWN]);
     }
@@ -736,9 +758,22 @@ mod tests {
         assert_eq!(
             kinds_no_trivia("a += 1; b -= 2; c *= 3; d /= 4;"),
             vec![
-                IDENTIFIER, ADD_EQ, INT_LITERAL, SEMICOLON, IDENTIFIER, SUB_EQ, INT_LITERAL,
-                SEMICOLON, IDENTIFIER, MUL_EQ, INT_LITERAL, SEMICOLON, IDENTIFIER, DIV_EQ,
-                INT_LITERAL, SEMICOLON
+                IDENTIFIER,
+                ADD_EQ,
+                INT_LITERAL,
+                SEMICOLON,
+                IDENTIFIER,
+                SUB_EQ,
+                INT_LITERAL,
+                SEMICOLON,
+                IDENTIFIER,
+                MUL_EQ,
+                INT_LITERAL,
+                SEMICOLON,
+                IDENTIFIER,
+                DIV_EQ,
+                INT_LITERAL,
+                SEMICOLON
             ]
         );
     }

@@ -100,10 +100,10 @@ mod stmts;
 mod types;
 
 use crate::green::{Checkpoint as GreenCheckpoint, GreenTreeBuilder, Marker};
-use rustc_hash::FxHashSet;
 use crate::lexer::lex;
 use crate::token::{TokenKind, TokenKind::*, TokenSet};
 use crate::{NodeId, ParsedFile, ast};
+use rustc_hash::FxHashSet;
 use yelc_base::{Diagnostics, ErrorCode, Interner, Name, SourceId, Span};
 
 /// Maximum nesting the parser descends before it stops and reports.
@@ -404,8 +404,6 @@ impl<'a> Parser<'a> {
     pub(super) fn shallow_marks_here(&self) -> ShallowMarks {
         self.shallow_marks(self.token_idx)
     }
-
-
 
     /// Source text of the `n`-th non-trivia token, or `""` past the end.
     fn nth_text(&self, n: usize) -> &'a str {
@@ -1567,7 +1565,11 @@ pub(crate) mod tests {
         });
 
         assert!(out.is_some());
-        assert_eq!(p.diags.len(), 1, "committed diagnostic did not reach the sink");
+        assert_eq!(
+            p.diags.len(),
+            1,
+            "committed diagnostic did not reach the sink"
+        );
         assert!(p.buffered_diagnostics.is_empty(), "buffer not drained");
     }
 

@@ -493,13 +493,37 @@ pub struct FunctionDecl {
 pub struct FuncSignature {
     pub id: NodeId,
     pub span: Span,
+    /// `<T, U>`, empty when the function is not generic.
+    ///
+    /// Empty and absent are the same thing here, unlike [`FuncSignature::params`]
+    /// — a missing `(` is a malformed signature, while a missing `<` is the
+    /// ordinary case.
+    pub type_params: Vec<Recovered<TypeParam>>,
     /// `Missing` when the `(` was absent: no parameter list was read at all,
     /// which is not the same as an empty one.
     pub params: Recovered<Vec<Recovered<FuncParam>>>,
     pub return_type: Option<TypeRef>,
 }
 
+/// One declared type parameter — the `T` in `func<T>(…)`.
+///
+/// The parser records the name only. Whether it *shadows* a type in scope, and
+/// what it may be instantiated with, are later phases' questions.
+#[derive(Debug)]
+pub struct TypeParam {
+    pub id: NodeId,
+    pub span: Span,
+    pub name: Recovered<Ident>,
+}
+
 impl FuncSignature {
+    /// One level of unwrapping, not two: unlike
+    /// [`FuncSignature::present_params`], an absent `<` is the ordinary case
+    /// rather than a recovery position, so there is no outer [`Recovered`].
+    pub fn present_type_params(&self) -> impl Iterator<Item = &TypeParam> {
+        self.type_params.iter().filter_map(Recovered::present)
+    }
+
     pub fn present_params(&self) -> impl Iterator<Item = &FuncParam> {
         self.params
             .present()

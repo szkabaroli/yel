@@ -86,6 +86,9 @@ pub trait Visitor: Sized {
     fn visit_func_param(&mut self, node: &FuncParam) {
         walk_func_param(self, node);
     }
+    fn visit_type_param(&mut self, node: &TypeParam) {
+        walk_type_param(self, node);
+    }
     fn visit_type_ref(&mut self, node: &TypeRef) {
         walk_type_ref(self, node);
     }
@@ -320,6 +323,10 @@ pub fn walk_function_decl<V: Visitor>(v: &mut V, node: &FunctionDecl) {
 }
 
 pub fn walk_func_signature<V: Visitor>(v: &mut V, node: &FuncSignature) {
+    // Type parameters first: they are in scope for everything below.
+    for param in &node.type_params {
+        walk_recovered(v, param, |v, param| v.visit_type_param(param));
+    }
     walk_recovered(v, &node.params, |v, params| {
         for param in params {
             walk_recovered(v, param, |v, param| v.visit_func_param(param));
@@ -328,6 +335,11 @@ pub fn walk_func_signature<V: Visitor>(v: &mut V, node: &FuncSignature) {
     if let Some(ret) = &node.return_type {
         v.visit_type_ref(ret);
     }
+}
+
+/// A type parameter's only child is its name, which may be a recovery hole.
+pub fn walk_type_param<V: Visitor>(v: &mut V, node: &TypeParam) {
+    walk_recovered(v, &node.name, |v, name| v.visit_ident(name));
 }
 
 pub fn walk_func_param<V: Visitor>(v: &mut V, node: &FuncParam) {

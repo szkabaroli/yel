@@ -279,8 +279,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-
-
     /// `for_node = "for" ~ identifier ~ "in" ~ expr ~ key_clause? ~ "{" ~ for_body ~ "}"`
     fn parse_for_node(&mut self) -> ast::ForNode {
         self.start_node();

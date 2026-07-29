@@ -822,8 +822,38 @@ impl<'a> Parser<'a> {
     /// `extern component C { func m; }`. A bare `f: func;` never gets here:
     /// `func_type` needs the `(`, so that is a property whose type is the
     /// *named* type `func`, which the frozen parser accepts.
+    fn parse_type_param(&mut self) -> Option<ast::TypeParam> {
+        if !self.is_name() {
+            return None;
+        }
+        self.start_node();
+        let name = self.expect_name();
+        let span = self.finish_node(TYPE_PARAM);
+        Some(ast::TypeParam {
+            id: self.new_node_id(),
+            span,
+            name,
+        })
+    }
+
     pub(super) fn parse_func_signature(&mut self) -> ast::FuncSignature {
         let mark = self.mark();
+
+        // `<T, U>` — optional, and its absence is not a recovery position.
+        let type_params = if self.is(LT) {
+            self.parse_list(
+                LT,
+                COMMA,
+                GT,
+                PARAM_RECOVERY,
+                TYPE_PARAM_LIST,
+                TrailingSep::Forbidden,
+                |p| p.parse_type_param().map(ast::Recovered::Present),
+            )
+        } else {
+            Vec::new()
+        };
+
         let params = if self.is(L_PAREN) {
             ast::Recovered::Present(self.parse_list(
                 L_PAREN,
@@ -857,6 +887,7 @@ impl<'a> Parser<'a> {
         ast::FuncSignature {
             id: self.new_node_id(),
             span,
+            type_params,
             params,
             return_type,
         }

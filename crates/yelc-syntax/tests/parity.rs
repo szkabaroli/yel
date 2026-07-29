@@ -1004,8 +1004,8 @@ fn every_known_divergence_still_diverges() {
     for entry in known_divergences() {
         let relative = entry.split('#').next().expect("a path");
         let path = support::workspace_root().join(relative);
-        let content = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("{relative} is gone: {e}"));
+        let content =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{relative} is gone: {e}"));
 
         let subject = support::catch_all::subject(entry, &content);
 

@@ -331,12 +331,86 @@ const SOUP_TOKENS: &[&str] = &[
     // `extern component`, not `import component` — the keyword was renamed and
     // a soup built from the old spelling exercises a production neither parser
     // has had since.
-    "component", "global", "record", "enum", "variant", "element", "extern", "package", "export",
-    "func", "callback", "let", "if", "else", "for", "in", "out", "in-out", "key", "set", "bind",
-    "children", "true", "false", "s32", "string", "list", "option", "tuple", "result", "A", "x",
-    "a-b", "{", "}", "(", ")", "[", "]", "<", ">", ",", ";", ":", ".", "..", "..=", "@", "->", "?",
-    "?.", "=", "==", "!=", "<=", ">=", "&&", "||", "!", "+", "-", "*", "/", "%", "+=", "-=", "1",
-    "1.5", "8px", "50%", "#fff", "'c'", "\"s\"", "\"v={", "}t\"", "//c\n", "/*c*/", "/*", " ", "\n",
+    "component",
+    "global",
+    "record",
+    "enum",
+    "variant",
+    "element",
+    "extern",
+    "package",
+    "export",
+    "func",
+    "callback",
+    "let",
+    "if",
+    "else",
+    "for",
+    "in",
+    "out",
+    "in-out",
+    "key",
+    "set",
+    "bind",
+    "children",
+    "true",
+    "false",
+    "s32",
+    "string",
+    "list",
+    "option",
+    "tuple",
+    "result",
+    "A",
+    "x",
+    "a-b",
+    "{",
+    "}",
+    "(",
+    ")",
+    "[",
+    "]",
+    "<",
+    ">",
+    ",",
+    ";",
+    ":",
+    ".",
+    "..",
+    "..=",
+    "@",
+    "->",
+    "?",
+    "?.",
+    "=",
+    "==",
+    "!=",
+    "<=",
+    ">=",
+    "&&",
+    "||",
+    "!",
+    "+",
+    "-",
+    "*",
+    "/",
+    "%",
+    "+=",
+    "-=",
+    "1",
+    "1.5",
+    "8px",
+    "50%",
+    "#fff",
+    "'c'",
+    "\"s\"",
+    "\"v={",
+    "}t\"",
+    "//c\n",
+    "/*c*/",
+    "/*",
+    " ",
+    "\n",
 ];
 
 /// `count` random token soups of up to `max_tokens` fragments each.
@@ -671,7 +745,10 @@ pub mod catch_all {
         members: &[yel_core::Span],
         out: &mut Vec<(usize, usize)>,
     ) {
-        let Some(open) = content[decl.start..decl.end].find('{').map(|at| decl.start + at) else {
+        let Some(open) = content[decl.start..decl.end]
+            .find('{')
+            .map(|at| decl.start + at)
+        else {
             return;
         };
         let Some(close) = content[open..decl.end].rfind('}').map(|at| open + at) else {
@@ -714,5 +791,4 @@ pub mod catch_all {
         }
         out.extend(run);
     }
-
 }

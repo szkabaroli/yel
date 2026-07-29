@@ -359,6 +359,8 @@ pub enum TokenKind {
 
     FUNC_TYPE,
     FUNC_PARAM_LIST,
+    TYPE_PARAM_LIST,
+    TYPE_PARAM,
     FUNC_PARAM,
     FUNC_RETURN,
 
@@ -557,9 +559,12 @@ mod tests {
     fn token_kind_counts() {
         // Reported in the stage file; a change here is a change to the budget.
         assert_eq!(TokenKind::EOF as u8, 73, "token kind count changed");
+        // 76 → 78 on 2026-07-29: TYPE_PARAM_LIST and TYPE_PARAM, for
+        // `func<T>(…)` (LANGUAGE.md § Type Parameters). Purely additive — no
+        // existing kind moved, which is what keeps the corpus comparable.
         assert_eq!(
             TokenKind::INDEX_EXPR as u8 - TokenKind::EOF as u8,
-            76,
+            78,
             "node kind count changed"
         );
     }

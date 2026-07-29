@@ -83,8 +83,16 @@ mod frozen {
         // `projection`, not by this traversal.
         push_all(&mut out, "item:record", file.records.iter().map(|i| i.span));
         push_all(&mut out, "item:enum", file.enums.iter().map(|i| i.span));
-        push_all(&mut out, "item:variant", file.variants.iter().map(|i| i.span));
-        push_all(&mut out, "item:element", file.elements.iter().map(|i| i.span));
+        push_all(
+            &mut out,
+            "item:variant",
+            file.variants.iter().map(|i| i.span),
+        );
+        push_all(
+            &mut out,
+            "item:element",
+            file.elements.iter().map(|i| i.span),
+        );
 
         for item in &file.extern_components {
             out.push(("item:extern-component", item.span.start, item.span.end));
@@ -530,7 +538,9 @@ fn compare(content: &str) -> Option<Mismatch> {
     fresh.sort();
 
     let shape = |list: &[Construct]| -> Vec<(&'static str, usize)> {
-        list.iter().map(|(kind, start, _)| (*kind, *start)).collect()
+        list.iter()
+            .map(|(kind, start, _)| (*kind, *start))
+            .collect()
     };
     if shape(&frozen) != shape(&fresh) {
         return Some(Mismatch::Shape(shape(&frozen), shape(&fresh)));
@@ -881,7 +891,9 @@ fn the_projection_catches_an_injected_misidentification() {
     assert_eq!(doctored[at].0, "node:if");
     doctored[at].0 = "node:element";
     let shape = |list: &[Construct]| -> Vec<(&'static str, usize)> {
-        list.iter().map(|(kind, start, _)| (*kind, *start)).collect()
+        list.iter()
+            .map(|(kind, start, _)| (*kind, *start))
+            .collect()
     };
     assert_ne!(
         shape(&one),
@@ -900,6 +912,10 @@ fn the_projections_are_not_empty() {
     let sample = read(&positive_fixtures()[0]);
     let parsed = yelc_syntax::parse(SourceId(0), &sample, &interner, &mut diags);
     assert!(!parsed.ast.items.is_empty());
-    assert!(!frozen::constructs(&sample).expect("frozen accepts").is_empty());
+    assert!(
+        !frozen::constructs(&sample)
+            .expect("frozen accepts")
+            .is_empty()
+    );
     assert!(!fresh::constructs(&sample).expect("new accepts").is_empty());
 }

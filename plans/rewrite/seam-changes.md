@@ -356,3 +356,41 @@ walker, a lint written once against both phases.
 **Recorded so it is not re-proposed.** Both the split and the MIR are reasonable
 readings of a real problem. The problem is real; the fix is the lowering point,
 not another IR.
+
+---
+
+## 2026-07-29 — `FuncSignature` gains `type_params`
+
+**Seam change, requested and applied.** `yelc-syntax`'s `FuncSignature` is frozen
+for stage 3, so this is filed rather than edited in.
+
+**What.** `pub type_params: Vec<Recovered<TypeParam>>`, plus a new `TypeParam`
+node, `TYPE_PARAM_LIST`/`TYPE_PARAM` kinds, and a `visit_type_param` arm.
+
+**Why.** `<T>` was added to the language
+([`scope.md`](scope.md), [`LANGUAGE.md` § Type Parameters](../../LANGUAGE.md#type-parameters))
+because §2's stdlib is unwritable without it. Stage 3 lowers signatures, so the
+AST has to carry them or stage 3 gets built without generics and retrofits.
+
+**Shape, and why it differs from `params`.** `params` is
+`Recovered<Vec<Recovered<_>>>` — the outer layer distinguishes "no `(` at all"
+from "`()`", because a missing `(` is malformed. A missing `<` is the ordinary
+case, so `type_params` is a plain `Vec` and absent means empty.
+
+**The bug this went through, worth keeping.** `parse_type`'s dispatch looked
+ahead for `(` only, so `func<T>(…)` fell through to the **named-type** branch and
+`func` parsed as an ordinary type name. The green tree held
+`NAMED_TYPE(FUNC_KW)` with `<T>` stranded as sibling `ERROR` nodes. It is a
+*silent misparse*: the file still round-trips, so S1 does not catch it, and the
+only signal is the node shape. `tests/generics.rs` asserts it.
+
+**A related gap, not fixed here.** `visit.rs`'s exhaustive matches make a new
+*variant* a compile error in one file — but a new **field** is not. `type_params`
+had to be added to `walk_func_signature` by hand, and nothing would have failed
+had it been forgotten: the walker would silently skip every type parameter. The
+guarantee is narrower than "adding to the AST is a compile error", and stages 3+
+should not assume otherwise.
+
+**Additive.** Stage 1's parity (7) and identity (12) suites pass unchanged, which
+is what shows no existing accept/reject verdict moved. Node kinds 76 → 78, with
+the budget assertion updated and the reason recorded in `token.rs`.

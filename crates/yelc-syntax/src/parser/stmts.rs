@@ -315,7 +315,10 @@ mod tests {
         };
         assert_eq!(stmt.then_branch.present().map(Vec::len), Some(1));
         assert_eq!(
-            stmt.else_branch.as_ref().and_then(|b| b.present()).map(Vec::len),
+            stmt.else_branch
+                .as_ref()
+                .and_then(|b| b.present())
+                .map(Vec::len),
             Some(1)
         );
     }

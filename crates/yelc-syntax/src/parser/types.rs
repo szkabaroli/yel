@@ -32,7 +32,11 @@ impl<'a> Parser<'a> {
         // word, and `f: func;`, `x: func = 0;`, `record R { a: func }` and
         // `list<func>` are all accepted by the frozen parser. Committing on the
         // keyword alone rejected every one of them.
-        if self.is(FUNC_KW) && self.nth_non_trivia(1) == L_PAREN {
+        // `func(` or `func<` — the second form is a generic signature
+        // (`LANGUAGE.md` § Type Parameters). Without the `LT` arm, `func<T>(…)`
+        // falls through to the named-type branch and `func` is read as an
+        // ordinary type name, which is a silent misparse rather than an error.
+        if self.is(FUNC_KW) && matches!(self.nth_non_trivia(1), L_PAREN | LT) {
             return self.parse_func_type();
         }
 
@@ -268,9 +272,32 @@ impl<'a> Parser<'a> {
 /// identifier falls through to `named_type`. `listx` is a legal named type
 /// today and stays one.
 const PREFIX_MATCHING_TYPE_KEYWORDS: &[&str] = &[
-    "bool", "s64", "s32", "s16", "s8", "u64", "u32", "u16", "u8", "f64", "f32", "char", "string",
-    "int", "float", "length", "physical-length", "angle", "duration", "percent",
-    "relative-font-size", "color", "brush", "image", "easing", "result",
+    "bool",
+    "s64",
+    "s32",
+    "s16",
+    "s8",
+    "u64",
+    "u32",
+    "u16",
+    "u8",
+    "f64",
+    "f32",
+    "char",
+    "string",
+    "int",
+    "float",
+    "length",
+    "physical-length",
+    "angle",
+    "duration",
+    "percent",
+    "relative-font-size",
+    "color",
+    "brush",
+    "image",
+    "easing",
+    "result",
 ];
 
 /// The keyword pest would have matched, when `text` is not one of them outright.

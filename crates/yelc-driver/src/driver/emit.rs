@@ -183,6 +183,7 @@ impl Visitor for Dumper<'_> {
         visit_function_decl(FunctionDecl) via walk_function_decl;
         visit_func_signature(FuncSignature) via walk_func_signature;
         visit_func_param(FuncParam) via walk_func_param;
+        visit_type_param(TypeParam) via walk_type_param;
         visit_type_ref(TypeRef) via walk_type_ref;
         visit_element_node(ElementNode) via walk_element_node;
         visit_named_prop(NamedProp) via walk_named_prop;
@@ -316,6 +317,7 @@ unlabelled!(
     FunctionDecl,
     FuncSignature,
     FuncParam,
+    TypeParam,
     ElementNode,
     NamedProp,
     TextNode,
