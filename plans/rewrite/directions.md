@@ -891,3 +891,86 @@ granularity is closer to right than the draft assumed.
   removable.
 - **This changes output**, so whichever strategy is chosen lands as its own
   enumerated divergence set. It is not a refactor.
+
+---
+
+## 9 · `match` is the general conditional; everything desugars into it
+
+**Decided 2026-07-29.** `match` is being added to the language
+([`LANGUAGE.md` § Match](../../LANGUAGE.md#match)), and it becomes the **only**
+conditional below the HIR→THIR seam. All three surface conditionals lower into
+it — including UI `if` nodes, which go **directly** to `match`, not to an
+if-statement first.
+
+| surface | THIR |
+|---|---|
+| `c ? a : b` | `match c { true -> a, false -> b }` |
+| `if c { s; }` | `match c { true -> { s; }, false -> {} }` |
+| `if c { …ui… } else { …ui… }` | `match c { true -> {…}, false -> {…} }` |
+| `match v { … }` | itself |
+
+**One node, not two.** An earlier draft here proposed a general `If` in THIR with
+`Match` joining later as a sibling, on the grounds that building `Match` before
+the feature existed would be machinery ahead of its use — the same sequencing
+mistake flagged against [`Ty::Param`](open-decisions.md#a3--does-ty-get-a-param-variant).
+That reasoning was correct and its premise is now gone: the feature is being
+added, so `Match` is the general form and `If` is sugar. There is no argument for
+carrying both.
+
+### Why UI `if` goes straight to `match`, not via `if`
+
+Routing UI conditionals through an if-statement first would be a desugaring into
+a form that is itself sugar — two lowerings where one suffices, and a second
+place for the reactive keying to be attached inconsistently. A UI conditional and
+a UI `match` are the *same construct* once the tree becomes builder functions:
+arms are blocks, the region re-runs when the scrutinee's dependencies change.
+Lowering them to different nodes would make that identity accidental rather than
+structural.
+
+### What has to be true for this to work
+
+1. **The HIR/THIR split** ([`seam-changes.md`](seam-changes.md)). THIR is where
+   the vocabulary changes; without a separate typed IR there is nowhere for the
+   three surface forms to become one, which is exactly why `Ternary` survives all
+   four IRs today ([F18](findings.md#f18)).
+2. **Signal deps computed on HIR**, before the UI tree is desugared —
+   `signalck.rs` is 426 lines and reads only `Def(def_id)` / `Local(local_id)`,
+   never a type, so it runs unchanged on a name-resolved untyped IR.
+3. **Pattern resolution is type-directed**, so it lands in THIR by necessity: a
+   bare lowercase name is a case pattern when it names a case of the scrutinee's
+   type and a binding otherwise, and only the typed layer knows which.
+4. **Exhaustiveness is checked in THIR** against `Definitions`, as an error.
+   Yel compiles closed-world, so "a later version might add a case" is not a
+   reason to soften it.
+
+### Sequencing — the design lands before the syntax
+
+Stage 1 is closed and in the ratchet. Adding `match` means new tokens, new AST
+nodes and new grammar, which is reopening a landed stage mid-rewrite — precisely
+what *one stage in flight* exists to prevent.
+
+But stages 3 and 4 are being designed now and need to know `Match` is the target
+form, so the THIR vocabulary is shaped for it rather than retrofitted.
+
+These separate cleanly: **stages 3/4 need the design, not a working parser.** The
+grammar work lands as a scoped stage-1 reopening once stage 4 closes, or at
+cutover — with its own ratchet row.
+
+### `match` has no oracle, and that is recorded rather than discovered
+
+The frozen compiler will never parse `match`, so match-using programs sit
+**outside the differential** — the rewrite's only real correctness gate. Two
+consequences, both load-bearing:
+
+- The 2000-program corpus stays valid, because `yel-smith` does not generate
+  `match`. Nothing already measured is invalidated.
+- Everything `match` touches is verified by *hand-written tests only*, at the
+  moment the rewrite's other guarantee — "diffed against a known-good
+  implementation on inputs neither was tuned for" — does not apply. Exhaustiveness
+  checking in particular has no oracle at all.
+
+The mitigation is to teach `yel-smith` to generate `match` **before** the feature
+lands, not after, so the new construct enters the fuzzer's grammar at the same
+time it enters the language. A generator that lags the language is how a
+construct ends up tested only by the examples someone thought of
+([A13](anti-spec.md#a13--the-generator-ships-not-its-instances)).

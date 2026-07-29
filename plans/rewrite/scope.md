@@ -18,7 +18,7 @@ simultaneously.
 
 | Frozen — changing it is a separate, approved decision | Free — expected to change |
 |---|---|
-| Surface syntax as specified in [`LANGUAGE.md`](../../LANGUAGE.md) | Parser implementation, grammar technology (pest → hand-written lexer + recursive descent), AST node shapes |
+| Surface syntax as specified in [`LANGUAGE.md`](../../LANGUAGE.md) — **one planned exception, see below** | Parser implementation, grammar technology (pest → hand-written lexer + recursive descent), AST node shapes |
 | Stage names and their order: **AST → HIR → LIR → WASM** — frozen *because differential attribution depends on it*, not because the frozen compiler drew it there. Moving a boundary is an integrator decision logged in [`seam-changes.md`](seam-changes.md) ([2026-07-28](seam-changes.md#log)), and must say which stages lose independent attribution and what replaces the differential for them. THIR was merged into HIR under that rule — one IR, phases 3/4. | Every type, pass, and helper *inside* a stage |
 | Exported WIT world and the `yel:ui/dom@0.1.0` host contract | How WIT is constructed and emitted (`wit_ast.rs` internals) |
 | Observable DOM-op behaviour asserted by the **85 execution tests** | The lowering and codegen that produce it |
@@ -100,3 +100,30 @@ new one is correct" is a reason; it still gets written down.
 - Language features that do not exist yet (`match`, closures/capture analysis,
   `color`/`brush` as property types). The rewrite must not *foreclose* them —
   anti-spec B4, C4 — but it does not implement them.
+
+
+## The surface freeze has one planned break: `match`
+
+**Recorded 2026-07-29.** `match` is being added to the language
+([`LANGUAGE.md` § Match](../../LANGUAGE.md#match),
+[directions §9](directions.md#9--match-is-the-general-conditional-everything-desugars-into-it)).
+That is a **surface language change**, which this table otherwise forbids, so it
+is written down rather than left as an inconsistency for a reviewer to find.
+
+Why it is allowed: variants are currently **write-only** — `LANGUAGE.md`
+documents how to construct `some(v)` and `none` and no way to take either apart.
+That is a hole in the language, not a wart in the implementation, and the three
+unrelated conditional constructs it sits beside ([F18](findings.md#f18)) are
+about to be lowered into a general form. Deciding that general form *after*
+stages 5–7 are built on the current arrangement is the expensive order.
+
+What the exception does **not** license:
+
+- **It is not a precedent.** Surface changes remain out of scope; this one is
+  named, dated and bounded to `match` and its patterns.
+- **It does not move now.** Stage 1 is closed and in the ratchet. The design lands
+  now because stages 3/4 need it; the grammar lands as a scoped stage-1 reopening
+  after stage 4 closes, or at cutover, with its own ratchet row.
+- **It does not get a differential.** The frozen compiler will never parse
+  `match`, so it has no oracle — see directions §9. `yel-smith` must learn to
+  generate it *before* it lands.

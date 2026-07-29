@@ -43,6 +43,7 @@ through the WebAssembly Component Model.
   - [Function and Method Calls](#function-and-method-calls)
   - [Closures](#closures)
   - [Ternary Expressions](#ternary-expressions)
+  - [Match](#match)
   - [Ranges](#ranges)
 - [Statements](#statements)
 - [Built-in Elements](#built-in-elements)
@@ -648,6 +649,73 @@ active ? "medium" : "regular"
 selected ? #2563eb : #00000000
 selected-index >= 0 ? some(filtered[selected-index]) : none
 ```
+
+### Match
+
+`match` branches on the *shape* of a value, binding any payload it carries. It is
+the only way to take a variant apart.
+
+```yel
+match filter {
+    all -> "everything"
+    none -> "nothing"
+    some(items) -> "{items.len()} selected"
+}
+```
+
+Arms use `->`, the same producer arrow as closures. A block-bodied arm needs no
+separator; an expression arm is followed by a comma when another arm follows on
+the same line.
+
+**Patterns**
+
+| Pattern | Example | Matches |
+|---------|---------|---------|
+| Case | `none`, `all` | a case of the value's variant or enum, carrying no payload |
+| Case with payload | `some(items)` | that case, binding the payload to `items` |
+| Nested | `some(some(x))` | patterns nest to any depth |
+| Boolean | `true`, `false` | a `bool` value |
+| Binding | `rest` | anything, binding it to `rest` |
+| Wildcard | `_` | anything, binding nothing |
+
+A bare lowercase name is a **case pattern** when it names a case of the value's
+type, and a **binding** otherwise. So in a `match` on an `option<s32>`, `none`
+matches the empty case, while `total` binds the whole option.
+
+**Matches must be exhaustive.** Every case of the value's type needs an arm, or a
+`_` arm must cover the rest. A `match` missing a case is a compile error naming
+the cases you left out — this is what makes variants safe to add cases to.
+
+```yel
+match status {
+    pending -> "waiting"
+    active -> "running"
+    // error: non-exhaustive match, missing `completed`
+}
+```
+
+**Match works anywhere a value or a branch does** — in an expression, as a
+statement, and in a template:
+
+```yel
+export component FilterView {
+    filter: Filter = all;
+
+    match filter {
+        all -> Text { "everything" }
+        none -> Text { "nothing" }
+        some(items) -> VStack {
+            for item in items { Text { "{item}" } }
+        }
+    }
+}
+```
+
+In a template, a `match` re-renders when the value it inspects changes, exactly
+as [conditional rendering](#conditional-rendering) does.
+
+In expression position every arm must produce the same type; as a statement the
+arms produce nothing.
 
 ### Ranges
 
