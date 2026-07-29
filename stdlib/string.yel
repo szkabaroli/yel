@@ -1,0 +1,12 @@
+// String operations.
+//
+// STATUS: specification artifact. Signatures parse today; nothing compiles
+// this yet. See stdlib/README.md.
+
+package yel:std@0.1.0;
+
+export global Str {
+    // Documented in LANGUAGE.md § Built-in Functions.
+    len: func(text: string) -> s32;
+    starts-with: func(text: string, prefix: string) -> bool;
+}

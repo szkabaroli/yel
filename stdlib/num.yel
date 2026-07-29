@@ -1,0 +1,13 @@
+// Numeric operations.
+//
+// STATUS: specification artifact. Signatures parse today; nothing compiles
+// this yet. See stdlib/README.md.
+
+package yel:std@0.1.0;
+
+export global Num {
+    // Documented in LANGUAGE.md § Built-in Functions. Monomorphic on s32
+    // today because there are no numeric constraints — see stdlib/README.md.
+    min: func(a: s32, b: s32) -> s32;
+    max: func(a: s32, b: s32) -> s32;
+}
