@@ -138,18 +138,53 @@ necessary.
 
 ---
 
-## 4 · Imports: the string is a **locator**, not a kind
+## 4 · Two levels: package and module
+
+| | is | maps to | precompilable |
+|---|---|---|---|
+| **package** | a directory of files; **the compilation unit** | WIT package `ns:name@ver` | **yes** — [§6](rewrite/directions.md) |
+| **module** | a namespace *within* a package | WIT `interface` | — |
+
+`module M { … }` at the top level of any file declares an interface. Several
+files, several modules, one package — and files in a package see each other with
+no import ([D8](rewrite/stage-3-hir-build.md)).
+
+**"Submodule" means a module within a package, not a module within a module.**
+Nesting stays refused (§3).
+
+This mirrors WIT and Go exactly. A WIT package is a **directory**: every `.wit`
+file in it repeats the same `package ns:name@version;`, they merge into one
+namespace, and dependencies live in `deps/`. Go's rule is the same — a package is
+a directory, files in it see each other, `import` reaches only *other* packages.
+Nested directories are **independent** packages in both: nesting is naming, not
+scoping.
+
+So yel did not merely pick a model compatible with WIT — [D8](rewrite/stage-3-hir-build.md)
+independently arrived at WIT's own file rule. A yel package directory can *be* a
+WIT package directory.
+
+## 4.1 · Imports: the string is a **locator**, not a kind
+
+**An `include` names a MODULE, not a package** — because that is what WIT's
+import path names (`ns:pkg/iface@version`). One `include` per module actually
+used, so the yel source and the world's import list correspond one-to-one.
 
 ```yel
-from "./dom.wit"  include Dom;      // → a WIT interface
-from "std:hash"   include Hash;     // → a yel package
-from "./ui.yel"   include MyUi;     // → a yel package
-from "yelmodule"  include Module;   // → a yel package, pre-compiled
+from "yel:ui/dom@0.1.0"    include Dom;      // package yel:ui, interface dom
+from "std:hash/sha256@1.0" include Sha256;   // package std:hash, module sha256
+from "./ui.yel"            include MyUi;     // a yel package, by path
+from "yelmodule"           include Module;   // a pre-compiled yel package
 
 use Dom.{ create-element, set-attribute };
 ```
 
-Four locators, **two kinds of result**:
+**Every specifier therefore carries the `/module` segment**, which removes an
+ambiguity an earlier draft had to legislate against: there is no bare `ns:name`
+form for a `ns:pkg/iface@ver` form to collide with. One uniform shape, and the
+only thing distinguishing a WIT interface from a yel package is what the resolver
+finds — which is the whole point of *locator, not kind*.
+
+Locators, **two kinds of result**:
 
 | result | effect | WIT |
 |---|---|---|
@@ -186,13 +221,16 @@ needs none, so a typical app has perhaps one — for the DOM. That is a better f
 than Grain's model, where every file split costs an import line, and it is why
 "one component per file" stays free.
 
-### Make the specifier shapes disjoint
+### The specifier shapes are disjoint by construction
 
-WIT ids are `ns:pkg/iface@ver`; a bare package is `ns:name`. Distinguishing them
-by *presence of `/`* is a lookahead rule of exactly the kind that has misparsed
-this grammar twice ([`func<T>`](rewrite/seam-changes.md), `@children`). **Require
-the interface segment for WIT**, so the shapes are disjoint by construction
-rather than usually different.
+An earlier draft required the interface segment on WIT ids so `ns:name` and
+`ns:pkg/iface@ver` could not be confused — distinguishing them by *presence of
+`/`* would have been a lookahead rule of exactly the kind that has misparsed this
+grammar twice ([`func<T>`](rewrite/seam-changes.md), `@children`).
+
+**That rule is no longer needed.** Since an `include` names a module, every
+specifier has the segment; there is no bare form. The ambiguity is designed out
+rather than legislated against.
 
 ### What this retires
 
@@ -235,9 +273,16 @@ surface keyword meaning *WIT interface*, three things want the word: the surface
 construct, the serialization unit, and the WIT interface.
 
 The mapping is *surface module → WIT interface* (1:1) and *package →
-serialization unit* (may hold several modules). So **rename `ModuleId` →
+serialization unit* (holds several modules). So **rename `ModuleId` →
 `PackageId`** before the surface keyword lands. `yelc-sema` is small today; this
 is nearly free now and sprawling later.
+
+**The compiler's current name describes the wrong level.** §6's decisions — B1
+(`Ty` written structurally), B2 (module-qualified `DefId`), B3 (`OverloadKey` in
+the `DefPath`) — were all made for *"a module is serializable"*. Under this
+hierarchy the thing being serialized is a **package**: the compilation unit, and
+the only level with a version to be compatible against. The decisions are right;
+the noun is off by one level.
 
 ---
 
