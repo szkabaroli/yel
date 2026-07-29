@@ -881,6 +881,29 @@ UI nodes in a template, statements in a block.
 There is no `while`. A loop that is not over a list or a range has no way to be
 written; if one is needed, that is a separate decision.
 
+### Return
+
+`return` exits a function early:
+
+```yel
+starts-with: func(text: string, prefix: string) -> bool {
+    if bytes-len(prefix) > bytes-len(text) { return false; }
+
+    for i in 0..bytes-len(prefix) {
+        if byte-at(text, i) != byte-at(prefix, i) { return false; }
+    }
+
+    true
+}
+```
+
+`return expr;` produces a value; `return;` exits a function that returns nothing.
+The value must match the function's declared return type.
+
+A function's last expression is still its value — `return` is for leaving
+*before* the end, not for producing the result. `return` inside a closure exits
+the closure, not the enclosing function.
+
 ### Match Statements
 
 [`match`](#match) as a statement runs the arm that matches and produces no value:

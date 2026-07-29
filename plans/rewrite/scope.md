@@ -471,3 +471,41 @@ lookahead that went stale when `<` became legal before it. The fix was applied t
 declared in a `global`, so it blocks the file even after `primitive`, `ref` and
 `@unsafe` land. Not fixed here: it belongs to the `<T>` landing, not to this one,
 and it needs its own parity pass.
+
+### 2026-07-29 — `return`, reversing the decision two entries above
+
+**Decided: add `return`.** The entry above says *"no `return`, and deliberately
+none planned"*, on the reasoning that *"with `match` coming, most early exits
+become arms, so adding `return` before seeing whether that suffices would be a
+mechanism ahead of its need."*
+
+**That reasoning was wrong, and the flaw is specific.** It considered early exit
+from a **branch** — which `match` genuinely subsumes — and not early exit from a
+**loop**, which nothing subsumes. `starts-with` is the counterexample:
+
+```yel
+for i in 0..bytes-len(prefix) {
+    if byte-at(text, i) != byte-at(prefix, i) { return false; }
+}
+```
+
+There is no arm that means "stop iterating and answer now". Written without
+`return` it becomes a flag threaded through the whole scan, and the loop cannot
+stop early — a correctness-neutral change that makes every mismatch cost a full
+pass.
+
+**The evidence arrived exactly where the entry said to look for it.** *"Add on
+evidence, not in anticipation"* was the right rule; the decision was made without
+first trying to write the functions, and one file later `starts-with` had to be
+commented out. Writing the stdlib has now overturned or corrected a recorded
+decision **five** times.
+
+**Not the same as `if`-as-an-expression, which is still open.** `return` plus the
+existing statement-`if` covers early exit. It does **not** cover a value-position
+conditional — `array.yel`'s `get` still cannot be written, because
+`if c { none } else { some(…) }` is a statement and cannot be a tail. That is a
+separate gap, separately evidenced, and not decided here.
+
+**Revised surface list — nine items, seven mechanisms, three landed:**
+`match` · `<T>` ✅ · function bodies ✅ · `for` statement ✅ · attributes +
+`@unsafe` ✅ · `ref` · `primitive` · **`return`** · *(`if`-as-expression, open)*
