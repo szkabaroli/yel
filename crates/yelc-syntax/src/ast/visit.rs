@@ -32,6 +32,15 @@ pub trait Visitor: Sized {
         walk_item(self, node);
     }
     fn visit_ident(&mut self, node: &Ident) {}
+    fn visit_attribute_list(&mut self, node: &AttributeList) {
+        walk_attribute_list(self, node);
+    }
+    fn visit_attribute(&mut self, node: &Attribute) {
+        walk_attribute(self, node);
+    }
+    fn visit_attribute_arg(&mut self, node: &AttributeArg) {
+        walk_attribute_arg(self, node);
+    }
     fn visit_package_decl(&mut self, node: &PackageDecl) {
         walk_package_decl(self, node);
     }
@@ -169,6 +178,23 @@ fn walk_maybe_ident<V: Visitor>(visitor: &mut V, node: &MaybeIdent) {
     walk_recovered(visitor, node, |visitor, ident| visitor.visit_ident(ident));
 }
 
+/// Walk the `attributes` field of a declaration.
+///
+/// # This is the field the compiler cannot check for you
+///
+/// `walk_*` is exhaustive with no `_` arm, so a new AST **variant** is a compile
+/// error here (anti-spec A3). A new **field** is not: `attributes` had to be
+/// wired into all ten owning `walk_*` functions by hand, and forgetting one
+/// would silently skip every attribute on that declaration with nothing failing.
+/// The gap is the same one `type_params` hit and is recorded in
+/// `plans/rewrite/seam-changes.md`. This helper exists so the ten call sites are
+/// one greppable line each.
+fn walk_attributes<V: Visitor>(visitor: &mut V, node: &Option<AttributeList>) {
+    if let Some(attributes) = node {
+        visitor.visit_attribute_list(attributes);
+    }
+}
+
 fn walk_block<V: Visitor, T>(
     visitor: &mut V,
     node: &Block<T>,
@@ -207,12 +233,31 @@ pub fn walk_item<V: Visitor>(v: &mut V, node: &ItemKind) {
     }
 }
 
+pub fn walk_attribute_list<V: Visitor>(v: &mut V, node: &AttributeList) {
+    for attribute in &node.attributes {
+        walk_recovered(v, attribute, |v, attribute| v.visit_attribute(attribute));
+    }
+}
+
+pub fn walk_attribute<V: Visitor>(v: &mut V, node: &Attribute) {
+    walk_maybe_ident(v, &node.name);
+    for arg in &node.args {
+        walk_recovered(v, arg, |v, arg| v.visit_attribute_arg(arg));
+    }
+}
+
+pub fn walk_attribute_arg<V: Visitor>(v: &mut V, node: &AttributeArg) {
+    walk_maybe_ident(v, &node.name);
+    v.visit_expr(&node.value);
+}
+
 pub fn walk_package_decl<V: Visitor>(v: &mut V, node: &PackageDecl) {
     walk_maybe_ident(v, &node.namespace);
     walk_maybe_ident(v, &node.name);
 }
 
 pub fn walk_record_decl<V: Visitor>(v: &mut V, node: &RecordDecl) {
+    walk_attributes(v, &node.attributes);
     walk_maybe_ident(v, &node.name);
     for field in &node.fields {
         walk_recovered(v, field, |v, field| v.visit_record_field(field));
@@ -225,6 +270,7 @@ pub fn walk_record_field<V: Visitor>(v: &mut V, node: &RecordField) {
 }
 
 pub fn walk_enum_decl<V: Visitor>(v: &mut V, node: &EnumDecl) {
+    walk_attributes(v, &node.attributes);
     walk_maybe_ident(v, &node.name);
     for case in &node.cases {
         walk_maybe_ident(v, case);
@@ -232,6 +278,7 @@ pub fn walk_enum_decl<V: Visitor>(v: &mut V, node: &EnumDecl) {
 }
 
 pub fn walk_variant_decl<V: Visitor>(v: &mut V, node: &VariantDecl) {
+    walk_attributes(v, &node.attributes);
     walk_maybe_ident(v, &node.name);
     for case in &node.cases {
         walk_recovered(v, case, |v, case| v.visit_variant_case(case));
@@ -246,6 +293,7 @@ pub fn walk_variant_case<V: Visitor>(v: &mut V, node: &VariantCase) {
 }
 
 pub fn walk_element_decl<V: Visitor>(v: &mut V, node: &ElementDecl) {
+    walk_attributes(v, &node.attributes);
     walk_maybe_ident(v, &node.name);
     for member in &node.members {
         walk_recovered(v, member, |v, property| v.visit_property_decl(property));
@@ -253,6 +301,7 @@ pub fn walk_element_decl<V: Visitor>(v: &mut V, node: &ElementDecl) {
 }
 
 pub fn walk_extern_component_decl<V: Visitor>(v: &mut V, node: &ExternComponentDecl) {
+    walk_attributes(v, &node.attributes);
     walk_maybe_ident(v, &node.name);
     for member in &node.members {
         v.visit_extern_member(member);
@@ -269,6 +318,7 @@ pub fn walk_extern_member<V: Visitor>(v: &mut V, node: &ExternMember) {
 }
 
 pub fn walk_global_decl<V: Visitor>(v: &mut V, node: &GlobalDecl) {
+    walk_attributes(v, &node.attributes);
     walk_maybe_ident(v, &node.name);
     for member in &node.members {
         v.visit_global_member(member);
@@ -284,6 +334,7 @@ pub fn walk_global_member<V: Visitor>(v: &mut V, node: &GlobalMember) {
 }
 
 pub fn walk_global_property<V: Visitor>(v: &mut V, node: &GlobalProperty) {
+    walk_attributes(v, &node.attributes);
     walk_maybe_ident(v, &node.name);
     v.visit_type_ref(&node.ty);
     if let Some(default) = &node.default {
@@ -292,6 +343,7 @@ pub fn walk_global_property<V: Visitor>(v: &mut V, node: &GlobalProperty) {
 }
 
 pub fn walk_component_decl<V: Visitor>(v: &mut V, node: &ComponentDecl) {
+    walk_attributes(v, &node.attributes);
     walk_maybe_ident(v, &node.name);
     for member in &node.members {
         v.visit_component_member(member);
@@ -308,6 +360,7 @@ pub fn walk_component_member<V: Visitor>(v: &mut V, node: &ComponentMember) {
 }
 
 pub fn walk_property_decl<V: Visitor>(v: &mut V, node: &PropertyDecl) {
+    walk_attributes(v, &node.attributes);
     walk_maybe_ident(v, &node.name);
     v.visit_type_ref(&node.ty);
     if let Some(default) = &node.default {
@@ -316,6 +369,7 @@ pub fn walk_property_decl<V: Visitor>(v: &mut V, node: &PropertyDecl) {
 }
 
 pub fn walk_function_decl<V: Visitor>(v: &mut V, node: &FunctionDecl) {
+    walk_attributes(v, &node.attributes);
     walk_maybe_ident(v, &node.name);
     walk_recovered(v, &node.signature, |v, signature| {
         v.visit_func_signature(signature)

@@ -357,6 +357,11 @@ pub enum TokenKind {
     MODIFIER,
     NAME,
 
+    ATTRIBUTE_LIST,
+    ATTRIBUTE,
+    ATTRIBUTE_ARG_LIST,
+    ATTRIBUTE_ARG,
+
     FUNC_TYPE,
     FUNC_PARAM_LIST,
     TYPE_PARAM_LIST,
@@ -562,9 +567,18 @@ mod tests {
         // 76 → 78 on 2026-07-29: TYPE_PARAM_LIST and TYPE_PARAM, for
         // `func<T>(…)` (LANGUAGE.md § Type Parameters). Purely additive — no
         // existing kind moved, which is what keeps the corpus comparable.
+        //
+        // 78 → 82 on 2026-07-29: ATTRIBUTE_LIST, ATTRIBUTE, ATTRIBUTE_ARG_LIST
+        // and ATTRIBUTE_ARG, for `@name(key = value)` before a declaration
+        // (`plans/rewrite/scope.md` § attributes on items, and `@unsafe`).
+        // Four rather than three because the argument list is a `parse_list`
+        // production and `parse_list` closes a green node of its own — the same
+        // reason `FUNC_PARAM_LIST` sits beside `FUNC_PARAM`. Additive: no token
+        // kind moved and no `TokenSet` changed, so every FIRST and recovery set
+        // is bit-for-bit what it was.
         assert_eq!(
             TokenKind::INDEX_EXPR as u8 - TokenKind::EOF as u8,
-            78,
+            82,
             "node kind count changed"
         );
     }

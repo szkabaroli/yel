@@ -205,6 +205,78 @@ pub struct Ident {
 pub type MaybeIdent = Recovered<Ident>;
 
 // ---------------------------------------------------------------------------
+// Attributes
+// ---------------------------------------------------------------------------
+
+/// One or more `@name` / `@name(key = value, …)` written before a declaration.
+///
+/// A node with `id`/`span` rather than side data: an attribute is source text
+/// and has to round-trip (invariant S1), so it belongs in the tree.
+///
+/// # `@children` is never an attribute
+///
+/// `@` was already taken — `@children` is a **UI node**, and in a component body
+/// the two occupy the same position. The rule is stated once, in
+/// [`crate::parser::Parser::at_children_marker`]'s single caller inside
+/// `parse_attribute_list`: an `AT` whose *next raw token* is `CHILDREN_KW` is
+/// the children marker and nothing else; every other `AT` in a declaration
+/// position opens an attribute list.
+///
+/// That is one token-kind test against a spelling the lexer already classified,
+/// **not** a lookahead list over attribute names — the shape that silently
+/// misparsed `func<T>` (`plans/rewrite/seam-changes.md`, 2026-07-29). An unknown
+/// attribute still parses as an attribute and is *reported*; it does not fall
+/// through to some other production.
+#[derive(Debug)]
+pub struct AttributeList {
+    pub id: NodeId,
+    pub span: Span,
+    pub attributes: Vec<Recovered<Attribute>>,
+}
+
+impl AttributeList {
+    pub fn present(&self) -> impl Iterator<Item = &Attribute> {
+        self.attributes.iter().filter_map(Recovered::present)
+    }
+}
+
+/// `@name` or `@name(key = value, …)`.
+#[derive(Debug)]
+pub struct Attribute {
+    pub id: NodeId,
+    pub span: Span,
+    pub name: MaybeIdent,
+    /// `(key = value, …)`, empty when the attribute was written bare.
+    ///
+    /// Empty and absent are the same thing here, as they are for
+    /// [`FuncSignature::type_params`] and unlike [`FuncSignature::params`]: a
+    /// missing `(` on a callable is malformed, a missing `(` on an attribute is
+    /// the ordinary case. So there is no outer [`Recovered`] to unwrap.
+    pub args: Vec<Recovered<AttributeArg>>,
+}
+
+impl Attribute {
+    pub fn present_args(&self) -> impl Iterator<Item = &AttributeArg> {
+        self.args.iter().filter_map(Recovered::present)
+    }
+}
+
+/// `key = value` — attribute arguments are **named pairs, never positional**.
+///
+/// The first real consumer is WIT passthrough, and WIT's own feature gates are
+/// already spelled with named arguments — `@since(version = 0.2.0)`,
+/// `@unstable(feature = my-feature)`, `@deprecated(version = 0.2.0)` — so a yel
+/// attribute on an exported item can emit near-literally instead of being
+/// translated. See `plans/rewrite/scope.md`, 2026-07-29.
+#[derive(Debug)]
+pub struct AttributeArg {
+    pub id: NodeId,
+    pub span: Span,
+    pub name: MaybeIdent,
+    pub value: Expr,
+}
+
+// ---------------------------------------------------------------------------
 // Declarations
 // ---------------------------------------------------------------------------
 
@@ -225,6 +297,9 @@ pub struct PackageDecl {
 pub struct RecordDecl {
     pub id: NodeId,
     pub span: Span,
+    /// `@name` attributes written before the declaration. `None` when none
+    /// were. See [`AttributeList`].
+    pub attributes: Option<AttributeList>,
     pub name: MaybeIdent,
     pub fields: Vec<Recovered<RecordField>>,
 }
@@ -248,6 +323,7 @@ pub struct RecordField {
 pub struct EnumDecl {
     pub id: NodeId,
     pub span: Span,
+    pub attributes: Option<AttributeList>,
     pub name: MaybeIdent,
     pub cases: Vec<MaybeIdent>,
 }
@@ -257,6 +333,7 @@ pub struct EnumDecl {
 pub struct VariantDecl {
     pub id: NodeId,
     pub span: Span,
+    pub attributes: Option<AttributeList>,
     pub name: MaybeIdent,
     pub cases: Vec<Recovered<VariantCase>>,
 }
@@ -274,6 +351,7 @@ pub struct VariantCase {
 pub struct ElementDecl {
     pub id: NodeId,
     pub span: Span,
+    pub attributes: Option<AttributeList>,
     pub name: MaybeIdent,
     pub members: Vec<Recovered<PropertyDecl>>,
 }
@@ -289,6 +367,7 @@ impl ElementDecl {
 pub struct ExternComponentDecl {
     pub id: NodeId,
     pub span: Span,
+    pub attributes: Option<AttributeList>,
     pub name: MaybeIdent,
     pub members: Vec<ExternMember>,
 }
@@ -349,6 +428,7 @@ impl ExternComponentDecl {
 pub struct GlobalDecl {
     pub id: NodeId,
     pub span: Span,
+    pub attributes: Option<AttributeList>,
     pub name: MaybeIdent,
     pub is_export: bool,
     pub members: Vec<GlobalMember>,
@@ -395,6 +475,7 @@ pub enum PropertyDirection {
 pub struct GlobalProperty {
     pub id: NodeId,
     pub span: Span,
+    pub attributes: Option<AttributeList>,
     /// `None` when no direction was written. The frozen compiler defaults this
     /// to `In` at lowering time; the parser records what was written.
     pub direction: Option<PropertyDirection>,
@@ -408,6 +489,7 @@ pub struct GlobalProperty {
 pub struct ComponentDecl {
     pub id: NodeId,
     pub span: Span,
+    pub attributes: Option<AttributeList>,
     pub name: MaybeIdent,
     pub is_export: bool,
     /// Members in **source order**, properties and nodes interleaved as
@@ -468,6 +550,10 @@ impl ComponentDecl {
 pub struct PropertyDecl {
     pub id: NodeId,
     pub span: Span,
+    /// Always `None` for an `element` property or an `extern component`
+    /// property: attributes attach to top-level items and to component/global
+    /// members, and those two member lists are not in that set.
+    pub attributes: Option<AttributeList>,
     pub name: MaybeIdent,
     pub ty: TypeRef,
     pub default: Option<Expr>,
@@ -479,6 +565,9 @@ pub struct PropertyDecl {
 pub struct FunctionDecl {
     pub id: NodeId,
     pub span: Span,
+    /// Always `None` for an `extern component` method — see
+    /// [`PropertyDecl::attributes`].
+    pub attributes: Option<AttributeList>,
     pub name: MaybeIdent,
     pub is_export: bool,
     /// `Missing` when the `func` keyword itself was absent — which is different

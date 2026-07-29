@@ -97,29 +97,54 @@ impl<'a> Parser<'a> {
     /// sync with the `match` must fall through to the reporting `_` arm, because
     /// `unreachable!()` here would break invariant S6.
     fn parse_item(&mut self) -> ast::ItemKind {
+        // Attributes are consumed **before** the gate rather than through it.
+        // Putting `AT` into `ITEM_FIRST` would also put it into `ITEM_RECOVERY`
+        // — and into `MEMBER_RECOVERY`, `PARAM_RECOVERY`, `EXPR_LIST_RECOVERY`
+        // and `TYPE_LIST_RECOVERY`, all of which union it — silently moving
+        // where five unrelated list productions stop recovering. Nothing about
+        // attributes needs that, so no `TokenSet` changes at all.
+        let attributes = self.parse_attribute_list();
+
         if !self.is_set(ITEM_FIRST) {
-            return self.parse_error_item("expected a top-level declaration");
+            return self.error_item(attributes, "expected a top-level declaration");
         }
 
         match self.current() {
-            RECORD_KW => self.parse_record_decl(),
-            ENUM_KW => self.parse_enum_decl(),
-            VARIANT_KW => self.parse_variant_decl(),
-            ELEMENT_KW => self.parse_element_decl(),
-            EXTERN_KW => self.parse_extern_component(),
-            GLOBAL_KW => self.parse_global_decl(),
-            COMPONENT_KW => self.parse_component_decl(),
+            RECORD_KW => self.parse_record_decl(attributes),
+            ENUM_KW => self.parse_enum_decl(attributes),
+            VARIANT_KW => self.parse_variant_decl(attributes),
+            ELEMENT_KW => self.parse_element_decl(attributes),
+            EXTERN_KW => self.parse_extern_component(attributes),
+            GLOBAL_KW => self.parse_global_decl(attributes),
+            COMPONENT_KW => self.parse_component_decl(attributes),
             // `package` is in ITEM_FIRST but only legal in first position, which
             // `parse_file` has already consumed by the time control reaches here.
-            PACKAGE_KW => {
-                self.parse_error_item("`package` must be the first declaration in a file")
-            }
+            PACKAGE_KW => self.error_item(
+                attributes,
+                "`package` must be the first declaration in a file",
+            ),
             EXPORT_KW => match self.after_export() {
-                GLOBAL_KW => self.parse_global_decl(),
-                COMPONENT_KW => self.parse_component_decl(),
-                _ => self.parse_error_item("expected `component` or `global` after `export`"),
+                GLOBAL_KW => self.parse_global_decl(attributes),
+                COMPONENT_KW => self.parse_component_decl(attributes),
+                _ => self.error_item(
+                    attributes,
+                    "expected `component` or `global` after `export`",
+                ),
             },
-            _ => self.parse_error_item("expected a top-level declaration"),
+            _ => self.error_item(attributes, "expected a top-level declaration"),
+        }
+    }
+
+    /// [`Parser::parse_error_item`], widened to cover any attributes already
+    /// consumed so their text is still attributable.
+    fn error_item(
+        &mut self,
+        attributes: Option<ast::AttributeList>,
+        message: &str,
+    ) -> ast::ItemKind {
+        match attributes {
+            Some(list) => self.orphaned_attributes(&list, message),
+            None => self.parse_error_item(message),
         }
     }
 
@@ -166,6 +191,19 @@ impl<'a> Parser<'a> {
         }
         let span = self.finish_node(ERROR);
         R::recovery(self.new_node_id(), span)
+    }
+
+    /// [`Parser::member_hole`], widened to cover any attributes already
+    /// consumed. Same reason as [`Parser::error_item`].
+    fn member_hole_after<R: ast::Recovery>(
+        &mut self,
+        attributes: Option<&ast::AttributeList>,
+        message: &str,
+    ) -> R {
+        match attributes {
+            Some(list) => self.orphaned_attributes(list, message),
+            None => self.member_hole(message),
+        }
     }
 
     // -- package -----------------------------------------------------------
@@ -247,7 +285,7 @@ impl<'a> Parser<'a> {
 
     // -- record / enum / variant -------------------------------------------
 
-    fn parse_record_decl(&mut self) -> ast::ItemKind {
+    fn parse_record_decl(&mut self, attributes: Option<ast::AttributeList>) -> ast::ItemKind {
         self.start_node();
         self.assert(RECORD_KW);
         let name = self.expect_name();
@@ -270,6 +308,7 @@ impl<'a> Parser<'a> {
         ast::ItemKind::Record(ast::RecordDecl {
             id: self.new_node_id(),
             span,
+            attributes,
             name,
             fields,
         })
@@ -292,7 +331,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_enum_decl(&mut self) -> ast::ItemKind {
+    fn parse_enum_decl(&mut self, attributes: Option<ast::AttributeList>) -> ast::ItemKind {
         self.start_node();
         self.assert(ENUM_KW);
         let name = self.expect_name();
@@ -315,6 +354,7 @@ impl<'a> Parser<'a> {
         ast::ItemKind::Enum(ast::EnumDecl {
             id: self.new_node_id(),
             span,
+            attributes,
             name,
             cases,
         })
@@ -348,7 +388,7 @@ impl<'a> Parser<'a> {
         false
     }
 
-    fn parse_variant_decl(&mut self) -> ast::ItemKind {
+    fn parse_variant_decl(&mut self, attributes: Option<ast::AttributeList>) -> ast::ItemKind {
         self.start_node();
         self.assert(VARIANT_KW);
         let name = self.expect_name();
@@ -371,6 +411,7 @@ impl<'a> Parser<'a> {
         ast::ItemKind::Variant(ast::VariantDecl {
             id: self.new_node_id(),
             span,
+            attributes,
             name,
             cases,
         })
@@ -401,7 +442,7 @@ impl<'a> Parser<'a> {
 
     // -- element -----------------------------------------------------------
 
-    fn parse_element_decl(&mut self) -> ast::ItemKind {
+    fn parse_element_decl(&mut self, attributes: Option<ast::AttributeList>) -> ast::ItemKind {
         self.start_node();
         self.assert(ELEMENT_KW);
         let name = self.expect_name();
@@ -416,7 +457,9 @@ impl<'a> Parser<'a> {
             if self.is_name() && self.nth_non_trivia(1) == COLON {
                 // `element_property = identifier ~ ":" ~ type_annotation ~ ";"`
                 // — no default value, unlike a component property.
-                members.push(ast::Recovered::Present(self.parse_property_decl(false)));
+                members.push(ast::Recovered::Present(
+                    self.parse_property_decl(false, None),
+                ));
             } else {
                 members.push(self.member_hole("expected a property declaration"));
             }
@@ -429,6 +472,7 @@ impl<'a> Parser<'a> {
         ast::ItemKind::Element(ast::ElementDecl {
             id: self.new_node_id(),
             span,
+            attributes,
             name,
             members,
         })
@@ -436,7 +480,7 @@ impl<'a> Parser<'a> {
 
     // -- extern component --------------------------------------------------
 
-    fn parse_extern_component(&mut self) -> ast::ItemKind {
+    fn parse_extern_component(&mut self, attributes: Option<ast::AttributeList>) -> ast::ItemKind {
         self.start_node();
         self.assert(EXTERN_KW);
         if !self.expect(COMPONENT_KW) {
@@ -461,7 +505,9 @@ impl<'a> Parser<'a> {
                     span,
                 });
             } else if self.is_name() && self.nth_non_trivia(1) == COLON {
-                members.push(ast::ExternMember::Property(self.parse_property_decl(false)));
+                members.push(ast::ExternMember::Property(
+                    self.parse_property_decl(false, None),
+                ));
             } else {
                 members.push(self.member_hole("expected a property, `func`, or `@children`"));
             }
@@ -474,6 +520,7 @@ impl<'a> Parser<'a> {
         ast::ItemKind::ExternComponent(ast::ExternComponentDecl {
             id: self.new_node_id(),
             span,
+            attributes,
             name,
             members,
         })
@@ -490,6 +537,7 @@ impl<'a> Parser<'a> {
         ast::FunctionDecl {
             id: self.new_node_id(),
             span,
+            attributes: None,
             name,
             is_export: false,
             signature: ast::Recovered::Present(signature),
@@ -498,7 +546,7 @@ impl<'a> Parser<'a> {
 
     // -- global ------------------------------------------------------------
 
-    fn parse_global_decl(&mut self) -> ast::ItemKind {
+    fn parse_global_decl(&mut self, attributes: Option<ast::AttributeList>) -> ast::ItemKind {
         self.start_node();
         let is_export = self.parse_export_modifier();
         self.assert(GLOBAL_KW);
@@ -522,6 +570,7 @@ impl<'a> Parser<'a> {
         ast::ItemKind::Global(ast::GlobalDecl {
             id: self.new_node_id(),
             span,
+            attributes,
             name,
             is_export,
             members,
@@ -533,6 +582,11 @@ impl<'a> Parser<'a> {
     /// `function_decl` comes first, so `name: func(..);` is a callback here
     /// even though the identical text is a *property* inside a component.
     fn parse_global_member(&mut self) -> ast::GlobalMember {
+        // Attributes bind to the declaration that follows, whichever
+        // alternative below matches it. `@children` is not legal in a `global`
+        // at all, so there is nothing to disambiguate here.
+        let attributes = self.parse_attribute_list();
+
         // `export? identifier ":" func_type ";"` — the **first** alternative, so
         // it is tried first. `callback` is not a reserved word, so
         // `callback: func();` is a function declaration *named* `callback`;
@@ -547,7 +601,7 @@ impl<'a> Parser<'a> {
             // named type `func`, which the frozen parser accepts.
             && self.nth_non_trivia(func_offset + 3) == L_PAREN
         {
-            return ast::GlobalMember::Callback(self.parse_function_decl());
+            return ast::GlobalMember::Callback(self.parse_function_decl(attributes));
         }
 
         // `global_callback = "callback" ~ identifier ~ "(" ~ …`. `callback` is a
@@ -555,26 +609,30 @@ impl<'a> Parser<'a> {
         // property, and `callback: func();` was already taken by the
         // `function_decl` alternative above.
         if self.is(CALLBACK_KW) && (self.nth_non_trivia(1) == L_PAREN || self.nth_is_name(1)) {
-            return ast::GlobalMember::Callback(self.parse_global_callback());
+            return ast::GlobalMember::Callback(self.parse_global_callback(attributes));
         }
 
         // `property_direction? identifier ":" type_annotation ("=" expr)? ";"`
         match self.global_property_direction() {
             DirectionMatch::Dead => {
-                return self.member_hole(
+                return self.member_hole_after(
+                    attributes.as_ref(),
                     "expected a name after `in`, `out` or `in-out` in this global property",
                 );
             }
             DirectionMatch::Present => {
-                return ast::GlobalMember::Property(self.parse_global_property(true));
+                return ast::GlobalMember::Property(self.parse_global_property(true, attributes));
             }
             DirectionMatch::Absent => {}
         }
         if self.nth_is_name(0) && self.nth_non_trivia(1) == COLON {
-            return ast::GlobalMember::Property(self.parse_global_property(false));
+            return ast::GlobalMember::Property(self.parse_global_property(false, attributes));
         }
 
-        self.member_hole("expected a global property or callback declaration")
+        self.member_hole_after(
+            attributes.as_ref(),
+            "expected a global property or callback declaration",
+        )
     }
 
     /// What `property_direction?` does to the `global_property` starting here.
@@ -606,7 +664,11 @@ impl<'a> Parser<'a> {
         DirectionMatch::Absent
     }
 
-    fn parse_global_property(&mut self, has_direction: bool) -> ast::GlobalProperty {
+    fn parse_global_property(
+        &mut self,
+        has_direction: bool,
+        attributes: Option<ast::AttributeList>,
+    ) -> ast::GlobalProperty {
         self.start_node();
         // `has_direction` is the caller's prediction; the `match` is the only
         // thing that can confirm it. A `todo!()` here used to make the two
@@ -648,6 +710,7 @@ impl<'a> Parser<'a> {
         ast::GlobalProperty {
             id: self.new_node_id(),
             span,
+            attributes,
             direction,
             name,
             ty,
@@ -656,7 +719,10 @@ impl<'a> Parser<'a> {
     }
 
     /// `global_callback = "callback" ~ identifier ~ "(" ~ params? ~ ")" ~ ret? ~ ";"`
-    fn parse_global_callback(&mut self) -> ast::FunctionDecl {
+    fn parse_global_callback(
+        &mut self,
+        attributes: Option<ast::AttributeList>,
+    ) -> ast::FunctionDecl {
         self.start_node();
         self.assert(CALLBACK_KW);
         let name = self.expect_name();
@@ -666,6 +732,7 @@ impl<'a> Parser<'a> {
         ast::FunctionDecl {
             id: self.new_node_id(),
             span,
+            attributes,
             name,
             is_export: false,
             signature: ast::Recovered::Present(signature),
@@ -674,7 +741,7 @@ impl<'a> Parser<'a> {
 
     // -- component ---------------------------------------------------------
 
-    fn parse_component_decl(&mut self) -> ast::ItemKind {
+    fn parse_component_decl(&mut self, attributes: Option<ast::AttributeList>) -> ast::ItemKind {
         self.start_node();
         let is_export = self.parse_export_modifier();
         self.assert(COMPONENT_KW);
@@ -701,6 +768,7 @@ impl<'a> Parser<'a> {
         ast::ItemKind::Component(ast::ComponentDecl {
             id: self.new_node_id(),
             span,
+            attributes,
             name,
             is_export,
             members,
@@ -716,16 +784,33 @@ impl<'a> Parser<'a> {
             return self.member_hole("expected a property, function, or node");
         }
 
+        // The one position where an attribute and `@children` are both legal.
+        // `parse_attribute_list` returns `None` for the marker, so `@children`
+        // falls through to `parse_ui_node` below exactly as it always has — see
+        // `parser/attributes.rs` for why that tiebreak is a token-kind test and
+        // not a lookahead over attribute names.
+        let attributes = self.parse_attribute_list();
+
         // `export identifier ":" func_type ";"` — the only `function_decl` form
         // reachable here, because `property_decl` shadows the unexported one.
         // `export` is not reserved, so `export: s32 = 0;` is a property *called*
         // `export`, which `property_decl` matches one alternative earlier.
         if self.is(EXPORT_KW) && self.nth_is_name(1) && self.nth_non_trivia(2) == COLON {
-            return ast::ComponentMember::Function(self.parse_function_decl());
+            return ast::ComponentMember::Function(self.parse_function_decl(attributes));
         }
 
         if self.is_name() && self.nth_non_trivia(1) == COLON {
-            return ast::ComponentMember::Property(self.parse_property_decl(true));
+            return ast::ComponentMember::Property(self.parse_property_decl(true, attributes));
+        }
+
+        // An attribute precedes a **declaration**. A UI node is not one, so
+        // `@unsafe div { }` is reported here rather than silently attaching an
+        // attribute to a node that has nowhere to hold it.
+        if let Some(attributes) = attributes {
+            return self.orphaned_attributes(
+                &attributes,
+                "expected a property or function declaration after this attribute",
+            );
         }
 
         if self.is_set(NODE_FIRST) {
@@ -739,7 +824,11 @@ impl<'a> Parser<'a> {
     ///
     /// `allow_default` is false for `element_property` / `import_property`,
     /// which the grammar writes without the `= expr` tail.
-    fn parse_property_decl(&mut self, allow_default: bool) -> ast::PropertyDecl {
+    fn parse_property_decl(
+        &mut self,
+        allow_default: bool,
+        attributes: Option<ast::AttributeList>,
+    ) -> ast::PropertyDecl {
         self.start_node();
         let name = self.expect_name();
         self.expect(COLON);
@@ -767,6 +856,7 @@ impl<'a> Parser<'a> {
         ast::PropertyDecl {
             id: self.new_node_id(),
             span,
+            attributes,
             name,
             ty,
             default,
@@ -779,7 +869,7 @@ impl<'a> Parser<'a> {
     /// empty parameter list: `component A { export x: s32; }` used to yield a
     /// `FunctionDecl` named `x` with zero parameters, with the `s32` the user
     /// actually wrote silently orphaned.
-    fn parse_function_decl(&mut self) -> ast::FunctionDecl {
+    fn parse_function_decl(&mut self, attributes: Option<ast::AttributeList>) -> ast::FunctionDecl {
         self.start_node();
         let is_export = self.parse_export_modifier();
         let name = self.expect_name();
@@ -806,6 +896,7 @@ impl<'a> Parser<'a> {
         ast::FunctionDecl {
             id: self.new_node_id(),
             span,
+            attributes,
             name,
             is_export,
             signature,

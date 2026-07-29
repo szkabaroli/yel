@@ -88,11 +88,13 @@
 //! | Module | Productions |
 //! |---|---|
 //! | [`items`] | file, package, record/enum/variant/element, extern component, global, component, members |
+//! | [`attributes`] | `@name(key = value)` before a declaration, and the `@children` tiebreak |
 //! | [`types`] | `type_annotation` and everything under it |
 //! | [`nodes`] | the UI tree: elements, text, `if`, `for`, `@children` |
 //! | [`stmts`] | statement blocks: `let`, `if`, assignment, expression statements |
 //! | [`exprs`] | closures, literals, and the expression grammar |
 
+mod attributes;
 mod exprs;
 mod items;
 mod nodes;

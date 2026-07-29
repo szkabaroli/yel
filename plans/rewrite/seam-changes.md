@@ -394,3 +394,152 @@ should not assume otherwise.
 **Additive.** Stage 1's parity (7) and identity (12) suites pass unchanged, which
 is what shows no existing accept/reject verdict moved. Node kinds 76 → 78, with
 the budget assertion updated and the reason recorded in `token.rs`.
+
+---
+
+## 2026-07-29 — ten AST declarations gain `attributes`; `AttributeList` / `Attribute` / `AttributeArg` are new
+
+**Seam change, requested and applied.** `yelc-syntax`'s public AST is frozen for
+stage 3, so this is filed rather than edited in.
+
+**What.** Three new nodes —
+
+```rust
+pub struct AttributeList { id, span, attributes: Vec<Recovered<Attribute>> }
+pub struct Attribute     { id, span, name: MaybeIdent, args: Vec<Recovered<AttributeArg>> }
+pub struct AttributeArg  { id, span, name: MaybeIdent, value: Expr }
+```
+
+— plus `attributes: Option<AttributeList>` on the ten declaration structs that
+can carry one (`RecordDecl`, `EnumDecl`, `VariantDecl`, `ElementDecl`,
+`ExternComponentDecl`, `GlobalDecl`, `ComponentDecl`, `PropertyDecl`,
+`FunctionDecl`, `GlobalProperty`), four node kinds (`ATTRIBUTE_LIST`,
+`ATTRIBUTE`, `ATTRIBUTE_ARG_LIST`, `ATTRIBUTE_ARG`), and
+`visit_attribute_list` / `visit_attribute` / `visit_attribute_arg` with their
+`walk_*` functions.
+
+**Why.** Attributes were added to the language
+([`scope.md`](scope.md) § *2026-07-29 — attributes on items, and `unsafe`*).
+`@unsafe` gates the primitive/cast machinery the uniform-ref stdlib needs, and
+the same mechanism subsumes the `primitive` keyword — one surface break instead
+of two. Stage 3 lowers declarations, so the AST has to carry them or stage 3 gets
+built without attributes and retrofits.
+
+### The `@children` collision — where the recorded design was underspecified
+
+`scope.md` says the two are *"separable by position: an attribute precedes a
+**declaration**, and `@children` appears in a **UI tree body**"*, and instructs
+the parser to decide by context rather than by lookahead over the name.
+
+**Position does not separate them, and the brief was written believing it did.**
+`@children` is legal as a *direct component member* — `parse_component_member`
+routes `AT` through `NODE_FIRST` into `parse_ui_node`, and
+`export component App { @children }` is a row in `tests/identity.rs`'s
+hand-written table. So an attributed member and a `@children` node occupy the
+**same position in the same parse function**, and "which parse function am I in"
+returns the same answer for both.
+
+What was implemented instead is one **total** rule, stated once in
+`parser/attributes.rs`:
+
+> An `AT` whose next *raw* token is `CHILDREN_KW` is the children marker. Every
+> other `AT` in a declaration position opens an attribute list.
+
+That is not the shape the brief warns about, and the difference is worth being
+precise about, because it is one token of lookahead either way:
+
+- It reads **one token kind the lexer already assigned**, not a table of
+  attribute spellings. Adding an attribute never touches it, so it cannot drift
+  out of sync with the attribute set the way `parse_type`'s `(`-only lookahead
+  drifted out of sync with `func<T>` (entry above).
+- It is **total**: there is no third outcome and nothing falls through to a
+  different production. An unknown attribute still parses *as an attribute* and
+  is reported; it does not silently become something else.
+- The predicate is `Parser::at_children_marker`, the crate's existing and only
+  definition of the marker, including its no-trivia rule.
+
+**Consequence, stated so it is a decision:** `@children` cannot be spelled as an
+attribute. It is a node wherever it is legal, in every position, unchanged.
+`@ children` (with a gap) was never the marker — `children_node` is one atomic
+string literal in the frozen grammar — so it is now an *unknown attribute*: still
+rejected, which is why the `parity.rs` rows for it do not move.
+
+### Two deviations from the recorded shape
+
+1. **`args` is `Vec<Recovered<AttributeArg>>`, not `Vec<AttributeArg>`.**
+   `parse_list` — the generic recovery helper whose `R: Recovery` bound is what
+   makes it *impossible* to write a list production that drops its failures —
+   requires the element type to implement `Recovery`, and `Recovery::recovery`
+   hands out exactly **one** `NodeId`. `AttributeArg` owns two further node
+   positions (`name`, `value`), so implementing it would mean either three nodes
+   sharing one id (breaking invariant S3) or a bespoke loop outside `parse_list`.
+   `Recovered<_>` is also what every other element list in this crate uses
+   (`fields`, `params`, `type_params`, and `AttributeList::attributes` itself).
+
+2. **`args` has no outer `Recovered`.** `@unsafe` and `@unsafe()` are the same
+   thing; a missing `(` on an attribute is the ordinary case, not a malformed
+   signature. Same call as `FuncSignature::type_params`, opposite of
+   `FuncSignature::params`.
+
+### `@primitive`'s argument form, as recorded, does not typecheck against its own decision
+
+`scope.md`'s motivating example is
+
+```yel
+@primitive("@wasm.ref_array_any_get")
+```
+
+— a **positional** string — while the same entry decides three paragraphs later
+that arguments are named pairs. Both cannot hold. Named pairs won, because that
+is the decision with a reason attached (WIT passthrough), so the spelling is
+`@primitive(op = "@wasm.ref_array_any_get")`. The key `op` is this entry's
+invention and is the smallest thing here that a later decision may overrule; it
+is only ever read by stage 3.
+
+**The `⚠️` in `scope.md` is now discharged.** The WIT gate grammar was checked
+against the specification
+([`WebAssembly/component-model` `design/mvp/WIT.md` § Feature Gates](https://github.com/WebAssembly/component-model/blob/main/design/mvp/WIT.md)):
+
+```ebnf
+unstable-gate ::= '@unstable' '(' feature-field ')'
+since-gate    ::= '@since' '(' version-field ')'
+feature-field ::= 'feature' '=' id
+version-field ::= 'version' '=' <valid semver>
+```
+
+It is `key = value`, not `key: value`. The recollection was right and
+passthrough stays passthrough.
+
+`@since` / `@unstable` / `@deprecated` are deliberately **not** in the parser's
+known-attribute registry: they motivated the argument *form*, but no decision has
+landed that yel has them, and a registry entry with no decision behind it is a
+shape-only port ([A9](anti-spec.md#a9--a-ported-construct-is-load-bearing-or-it-is-deleted)).
+The registry holds `unsafe` and `primitive`.
+
+### The same walker gap as `type_params`, and what was done about it this time
+
+The entry above records it: `visit.rs`'s exhaustive matches make a new *variant*
+a compile error, but a new **field** is not. `attributes` had to be wired into
+ten `walk_*` functions by hand, and forgetting one would silently skip every
+attribute on that declaration with everything still compiling.
+
+The gap is still real and still unclosed by the compiler. What is new is that it
+is now **asserted**:
+`tests/attributes.rs::the_walker_reaches_the_attributes_on_every_declaration_that_can_carry_them`
+parses one program carrying an attribute on all ten owners and counts what the
+visitor sees. Deleting any one `walk_attributes` line fails it — verified by
+deleting the one in `walk_property_decl`.
+
+**No `TokenSet` changed.** `AT` was deliberately *not* added to `ITEM_FIRST`:
+`ITEM_RECOVERY` aliases it, and `MEMBER_RECOVERY`, `PARAM_RECOVERY`,
+`EXPR_LIST_RECOVERY` and `TYPE_LIST_RECOVERY` all union it, so a one-line
+addition would have moved where five unrelated list productions stop recovering
+— and the mutation sweeps insert `@` characters. Attributes are consumed *before*
+the gate instead, so every FIRST and recovery set is bit-for-bit what it was.
+
+**Additive, measured.** Workspace **513 → 531 / 0 failed / 2 ignored**
+(`cargo test --workspace`); execution **85 / 85**
+(`cargo test -p yel-wasm-codegen --test execution`); stage 1's parity (12) and
+identity (7) suites pass **unchanged**, which is what shows no existing
+accept/reject verdict and no construct identity moved. Node kinds 78 → 82, with
+the budget assertion updated and the reason recorded in `token.rs`.

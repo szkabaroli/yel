@@ -168,6 +168,9 @@ impl Visitor for Dumper<'_> {
     }
 
     dump_nodes! {
+        visit_attribute_list(AttributeList) via walk_attribute_list;
+        visit_attribute(Attribute) via walk_attribute;
+        visit_attribute_arg(AttributeArg) via walk_attribute_arg;
         visit_package_decl(PackageDecl) via walk_package_decl;
         visit_record_decl(RecordDecl) via walk_record_decl;
         visit_record_field(RecordField) via walk_record_field;
@@ -302,6 +305,9 @@ macro_rules! unlabelled {
 }
 
 unlabelled!(
+    AttributeList,
+    Attribute,
+    AttributeArg,
     PackageDecl,
     RecordDecl,
     RecordField,
