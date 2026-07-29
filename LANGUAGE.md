@@ -28,6 +28,7 @@ through the WebAssembly Component Model.
   - [Event Handlers](#event-handlers)
   - [Two-Way Bindings](#two-way-bindings)
   - [Conditional Rendering](#conditional-rendering)
+  - [Match Rendering](#match-rendering)
   - [List Rendering](#list-rendering)
 - [Globals](#globals)
   - [In-Tree Shared State](#in-tree-shared-state)
@@ -408,6 +409,25 @@ if MailStore.has-selection {
 Branches mount and unmount their children. The condition is any boolean
 expression.
 
+### Match Rendering
+
+Use [`match`](#match) to pick a UI subtree by the *shape* of a value, rather than
+by a boolean. Each arm's body is a subtree:
+
+```yel
+match filter {
+    all -> Text { "everything" }
+    none -> Text { "nothing" }
+    some(items) -> VStack {
+        for item in items { Text { "{item}" } }
+    }
+}
+```
+
+Arms mount and unmount their children exactly as `if` branches do, and the
+subtree re-renders when the matched value changes. The same exhaustiveness rule
+applies: every case needs an arm, or a `_` arm to cover the rest.
+
 ### List Rendering
 
 Use `for item in collection` to render a list. An optional `key(expr)` clause
@@ -694,28 +714,25 @@ match status {
 }
 ```
 
-**Match works anywhere a value or a branch does** — in an expression, as a
-statement, and in a template:
+**Where a `match` can appear.** Like `if`, the same keyword means three things
+depending on *where you write it*, and the position is what decides — there is no
+different syntax to remember:
+
+| Written in | It is | Arms produce |
+|-------------|-------|--------------|
+| a value position | a match **expression** (below) | a value; every arm the same type |
+| a component body | a [match in a template](#match-rendering) | UI subtrees |
+| a handler, closure or `set` block | a [match **statement**](#match-statements) | nothing |
+
+As an expression, every arm must produce the same type:
 
 ```yel
-export component FilterView {
-    filter: Filter = all;
-
-    match filter {
-        all -> Text { "everything" }
-        none -> Text { "nothing" }
-        some(items) -> VStack {
-            for item in items { Text { "{item}" } }
-        }
-    }
-}
+label: string = match status {
+    pending -> "waiting"
+    active -> "running"
+    completed -> "done"
+};
 ```
-
-In a template, a `match` re-renders when the value it inspects changes, exactly
-as [conditional rendering](#conditional-rendering) does.
-
-In expression position every arm must produce the same type; as a statement the
-arms produce nothing.
 
 ### Ranges
 
@@ -765,6 +782,21 @@ if count > 10 {
     label = "normal";
 }
 ```
+
+### Match Statements
+
+[`match`](#match) as a statement runs the arm that matches and produces no value:
+
+```yel
+match status {
+    pending -> { label = "waiting"; }
+    active -> { label = "running"; }
+    completed -> { label = "done"; done-at = now(); }
+}
+```
+
+Arms are blocks here, so they may contain several statements. Exhaustiveness is
+required, the same as everywhere else.
 
 ### Expression Statements
 
