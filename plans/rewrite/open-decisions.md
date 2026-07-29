@@ -15,7 +15,9 @@
 > [`stage-2b-hir-check.md`](stage-2b-hir-check.md)). This file is a worksheet, not
 > the record.
 
-**16 open.** Two already decided and not repeated:
+**10 open.** Cluster E (2a's HIR shape) was answered in full on 2026-07-29 and
+is recorded in [`stage-2a-hir-build.md`](stage-2a-hir-build.md#decision-log) as
+D1–D6 — that file is the record, this one is the worksheet. Also decided:
 [D7](stage-2a-hir-build.md#d7--flatten-else-if-chains) (flatten `else if`),
 [D8](stage-2a-hir-build.md#d8--a-module-is-identified-by-itself-not-by-a-file)
 (module identity).
@@ -26,7 +28,7 @@
 | [B · Identity & serialization](#cluster-b--identity--serialization) | 3 | sema's contract | after A |
 | [C · Builtins](#cluster-c--builtins) | 2 | sema's bulk | after A |
 | [D · Context shape](#cluster-d--context-shape) | 1 | sema's API | after B, C |
-| [E · HIR shape](#cluster-e--hir-shape-2a) | 6 | 2a's seam types | **parallel with A–D** |
+| [E · HIR shape](#cluster-e--hir-shape-2a) | ~~6~~ **0** | 2a's seam types | ✅ answered 2026-07-29 |
 | [F · Trigger](#cluster-f--trigger-2b) | 1 | 2b | with E1 |
 
 Not asked here, deliberately: whether to **implement** closure capture
@@ -42,9 +44,15 @@ Answer all four in one sitting — each constrains the others.
 
 ### A1 · How are parameterized types represented?
 
-- [ ] **Monomorphization by name.** `list<T>` instantiates to concrete
+- [ ] **Monomorphization by type.** `list<T>` instantiates to concrete
       `$list_s32`, `$list_Person`. No type variables, no unification. Internal
-      only — `list<s32>` stays the surface.
+      only — `list<s32>` stays the surface. Key: `(template, concrete args)`.
+- [ ] **Monomorphization by GC shape** (Go 1.18's stenciling). Same machinery,
+      **coarser key**: `(template, shapes(args))`. On WASM-GC the partition is
+      roughly `{i32, i64, f32, f64, ref}`, so `list<Person>` and `list<Address>`
+      share one copy and every generic is bounded at ~5 instantiations regardless
+      of user-type count. Costs a second concept (shape ≠ type) and interacts
+      with [B3](#b3--where-does-the-overload-discriminator-live).
 - [ ] **Real generics.** Add `TyVar` + substitution + unification +
       generalization, and a polymorphic-representation decision at the LIR seam.
 - [ ] **Neither yet.** Keep the frozen `Ty::ERROR` placeholder; parameterized
@@ -53,10 +61,24 @@ Answer all four in one sitting — each constrains the others.
 
 *Hangs on it:* A3, B3, C1, and whether §2 tier C (`len`, `some`, `list.get`,
 `append`) is reachable at all.
-*Evidence:* [F1](findings.md#f1) — the type system has no type variables today;
-`option` is registered with `payload: Ty::ERROR`.
-**Recommendation:** monomorphization —
-[§3](directions.md#3--generics-are-monomorphization-by-name).
+
+*Evidence:* [F1](findings.md#f1) — no type variables exist today; `option` is
+registered with `payload: Ty::ERROR`. [F15](findings.md#f15) — `filter` is
+**already** monomorphized per *call site*, so per-type is a **reduction** against
+the real baseline, not an increase.
+
+*On code size*, which matters for a web target: erasure ships one general copy
+that fights dead-code elimination, while a specialized instantiation feeds the
+`--gufa --closed-world -Oz` pipeline already in the release path. The two
+remaining alternatives are closed — erasure reintroduces a second value
+representation ([C2](anti-spec.md#c2--one-representation-chosen-at-the-seam)),
+witness tables need funcrefs ([§4](directions.md#4--closures-are-a-value-and-the-irs-are-shaped-for-one)).
+
+**Recommendation:** monomorphization, **by type first** — options 1 and 2 share a
+memo table and differ only in the key function, so coarsening to shapes later is
+a local change, not a redesign. Measure before coarsening: build one generic at
+two same-shape instantiations and see whether `--gufa --type-merging` already
+merges them. [§3](directions.md#3--generics-are-monomorphization-by-name).
 
 **Answer:**
 
@@ -139,7 +161,7 @@ them at load time."*
 
 ### B2 · Is `DefId` module-qualified from day one?
 
-- [ ] **Yes** — `DefId { module, index }`; `DefPath` is derivable from it.
+- [x] **Yes** — `DefId { module, index }`; `DefPath` is derivable from it.
 - [ ] **No** — plain index now, qualify when serialization actually lands.
 - [ ] **No module concept yet** at all.
 - [ ] Other: ______
@@ -158,7 +180,7 @@ A name does not identify a definition under overloading: `len` is both
 `list<T> -> s32` and `string -> s32`. Swift's `XREF_VALUE_PATH_PIECE` carries the
 *type* for exactly this.
 
-- [ ] **`yelc-sema`** — one `OverloadKey`, consumed by both `DefPath` and A1's
+- [x] **`yelc-sema`** — one `OverloadKey`, consumed by both `DefPath` and A1's
       mangling.
 - [ ] **`yelc-hir` (2b)** — it is a resolution concern, sema just stores it.
 - [ ] **Two mechanisms**, one per consumer.
@@ -174,7 +196,7 @@ A name does not identify a definition under overloading: `len` is both
 
 ### C1 · How are builtins registered?
 
-- [ ] **One table** — `name → { arity, type scheme, lowering target }`, replacing
+- [x] **One table** — `name → { arity, type scheme, lowering target }`, replacing
       `stdlib_lookup.rs` (1,029 lines) and `known.rs` (413).
 - [ ] **Field per builtin**, rewritten but structurally as today.
 - [ ] **Table for functions, fields for elements/enums/variants.**
@@ -256,7 +278,7 @@ Runs in parallel with A–D. Only E1 couples outward.
 
 ### E1 · Does HIR keep bindings and handlers as separate lists?
 
-- [ ] **No — one uniform prop list.** 2b classifies, using the declared type.
+- [x] **No — one uniform prop list.** 2b classifies, using the declared type.
 - [ ] **Yes** — classify syntactically in 2a (value is a closure literal ⇒
       handler).
 - [ ] **One list plus a classification side table** filled by 2b.
@@ -276,7 +298,7 @@ the split to decide scoping, and `LocalId` ordinals reach the type checker.
 
 ### E2 · Does the `For` node carry the item type?
 
-- [ ] **No** — remove `item_ty: Ty`; a side table if 2b needs it keyed by node.
+- [x] **No** — remove `item_ty: Ty`; a side table if 2b needs it keyed by node.
 - [ ] **Yes** — keep it on the node.
 - [ ] Other: ______
 
@@ -292,7 +314,7 @@ the split to decide scoping, and `LocalId` ordinals reach the type checker.
 
 Frozen comment: *"stored directly to avoid LocalScope lookup issues."*
 
-- [ ] **No** — fix the scope structure so the lookup works.
+- [x] **No** — fix the scope structure so the lookup works.
 - [ ] **Yes, as a side table** (`NodeMap`).
 - [ ] **Yes, on the node** — keep frozen behaviour.
 - [ ] Other: ______
@@ -309,7 +331,8 @@ Today it does not; property defaults live in `GlobalDef`, which is asymmetric
 with `HirComponent`.
 
 - [ ] **Yes** — symmetric with components, one uniform spine.
-- [ ] **No** — defaults stay in the definition table.
+- [x] **No** — defaults stay in the definition table. `HirGlobal` carries only
+      the functions declared on that global.
 - [ ] Other: ______
 
 *Note:* the frozen doc comment claims the asymmetry is deliberate. Either answer
@@ -324,7 +347,9 @@ is defensible; the requirement is that it is **chosen**, not inherited.
 
 - [ ] **All components, then all globals** — frozen behaviour, which preserves
       type-check and therefore diagnostic order.
-- [ ] **Source order** — the uniform-spine ideal.
+- [x] **Globals then components** — reverses the frozen *lowering* order so it
+      agrees with the *registration* order, which is already globals-first.
+      ⚠️ Carries an obligation; see the log entry.
 - [ ] **Source order, with diagnostics sorted before rendering.**
 - [ ] Other: ______
 
@@ -340,7 +365,7 @@ the one place "uniform item spine" and "match frozen output" pull apart.
 
 Stage 1 explicitly did **not** decide this; 2a owns it.
 
-- [ ] **Nearest preceding comment run, no blank line between.**
+- [x] **Nearest preceding comment run, no blank line between.**
 - [ ] **Not attached yet** — 2a records trivia positions only.
 - [ ] Other: ______
 

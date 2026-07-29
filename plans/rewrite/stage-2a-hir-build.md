@@ -106,6 +106,35 @@ part's type; `MethodCall` survives into HIR by design) · **UI tree flattening**
 (`if`/`for`/`Element` stay structured; flattening is LIR's job) · name errors
 (HIR never errors on an unknown name — resolution is *partial* on purpose).
 
+### Candidates, and what blocks each
+
+Not proposals — a list so nobody re-derives it. The rustc rule that generates it:
+**desugar to a general form early, then lower the general form once.** Six Rust
+constructs (`for`, `while`, `while let`, `if let`, `?`, `let else`) collapse to
+`loop` + `match` before HIR exists, so MIR building handles two, not six.
+
+| candidate | today | blocked on |
+|---|---|---|
+| `Ternary` → a general conditional | carried by **all four IRs**; `ExprKind` has `Ternary` and no `If`, so yel has *three* unrelated conditional constructs — expression, statement, UI node ([F18](findings.md#f18)) | the `match` / general-conditional decision in [3b's gap table](stage-2b-hir-check.md#gaps-inherited-as-decisions-not-copies). **The target form does not exist yet.** |
+| `Range` → a struct literal | carried by all four IRs | **not blocked — scheduled.** There is no `Range` type to desugar into *yet*, and [§2 § What the stdlib must provide](directions.md#what-the-stdlib-must-provide-not-just-what-can-move-into-it) now carries it as a requirement. Not generic, so it does **not** wait on §3. |
+| `MethodCall` → `Call` | already desugars — gone by the typed layer | — |
+| `Interpolation` → `concat` | already desugars — gone by LIR | — |
+
+**Neither is a "someday" item.** `Ternary` waits on a real open decision (the
+general conditional form). `Range` waits on nothing but sequencing — the stdlib
+is planned, and the desugaring is now a **requirement on its contents** rather
+than a request blocked by it. Revisit this table when either lands, rather than
+rediscovering it.
+
+The general rule, worth applying to every future candidate: **a desugaring
+desugars *into* something, and that something is a design requirement on whatever
+provides it.** Record the requirement when the desugaring is decided.
+
+Note the scale: F18's three conditional forms across four IRs is
+[B4](anti-spec.md#b4--no-special-cased-control-flow-where-a-general-form-exists)
+at four times [D7](#d7--flatten-else-if-chains)'s, and D7 was judged worth an
+enumerated divergence.
+
 **Every desugaring moves diagnostic spans.** `x += 1` → `x = x + 1` means a later
 error reports against a *synthesized* `Binary`. The five carried over are safe by
 construction (the 23 fixtures pin them); a **new** one is checked against those
@@ -113,14 +142,16 @@ fixtures before it lands.
 
 ## Decisions
 
-| # | decision | recommendation |
+**All decided 2026-07-29.** Reasoning in the [Decision log](#decision-log).
+
+| # | decision | answer |
 |---|---|---|
-| D1 | Do bindings and handlers stay split? | **No — one uniform prop list.** [below](#d1) |
-| D2 | `For.item_ty: Ty` on the node | Remove — [B3](anti-spec.md#b3--no-analysis-result-stored-on-the-node-it-describes) verbatim. If 2b needs it keyed by node, that is a side table. |
-| D3 | `For.item_name` *"stored directly to avoid LocalScope lookup issues"* | Fix the scope structure rather than porting the duplicate. If genuinely needed it is a `NodeMap`, not a field. |
-| D4 | Do globals get a body? | `HirGlobal` has none; defaults live in `GlobalDef`. Asymmetric with `HirComponent`. D1's uniform-spine goal argues for symmetry. Decide explicitly. |
-| D5 | Item and diagnostic ordering | **Preserve exactly.** The frozen tree lowers all components then all globals *"so the type-check order (and therefore diagnostic order) matches"*. Asserted by the 23 fixtures, and the one place "uniform spine" and "match output" pull apart. |
-| D6 | Trivia / doc-comment attachment | Decide the rule, or decide explicitly not to attach yet. Not implicit. |
+| D1 | Do bindings and handlers stay split? | **No — one uniform prop list.** 2b classifies. [log](#d1--bindings-and-handlers-are-one-uniform-prop-list) |
+| D2 | `For.item_ty: Ty` on the node | **Remove.** [log](#d2--for-does-not-carry-the-item-type) |
+| D3 | `For.item_name` *"stored directly to avoid LocalScope lookup issues"* | **Remove; fix the scope structure.** [log](#d3--for-does-not-carry-the-loop-variable-name) |
+| D4 | Do globals get a body? | **No.** `HirGlobal` carries only its functions; defaults stay in `GlobalDef`. [log](#d4--hirglobal-has-no-body--only-its-functions) |
+| D5 | Item and diagnostic ordering | ⚠️ **Globals then components** — reverses the frozen lowering order, and carries a measured obligation. [log](#d5--globals-lower-before-components) |
+| D6 | Trivia / doc-comment attachment | **Attach** — nearest preceding comment run, no blank line. [log](#d6--doc-comments-attach-to-the-nearest-preceding-comment-run) |
 | D7 | Flatten `else if` into nested `If`? | **Decided: yes** — [log](#d7--flatten-else-if-chains) |
 | D8 | What identifies a module — one `SourceId`, or the file set? | **Decided: `ModuleId` + `Vec<SourceId>`** — [log](#d8--a-module-is-identified-by-itself-not-by-a-file) |
 
@@ -382,10 +413,47 @@ strongest first:
    corpus, 91 positive and 23 diagnostic fixtures, via frozen `yelc check`.
 3. **No panic, total lowering** over the corpus.
 
-A **text dump** of 2a's output (same serde impls as the binary artifact, a second
-encoder — [§6](directions.md#the-format-serde--postcard-in-a-hand-written-envelope))
-makes 1 and 2 reviewable rather than a hexdump. Cheap, and it is also what early
-lints and the LSP read.
+### `yelc2 --emit-hir` — the dump is a deliverable, not a convenience
+
+The driver already emits `--emit-ast`, `--emit-green`, `--emit-green-text`; the
+established pattern is one `--emit-<ir>` per stage, added as a line in the
+straight-line `run()`. **`--emit-hir` lands with this phase.**
+
+**Render it yel-flavoured, like rustc's MIR dump — and do not make it
+round-trippable.** MIR dumps look like Rust and are not Rust; the same applies
+here, for a concrete reason: HIR is *post-desugaring*. `x += 1` is already
+`x = x + 1`, `#ff0000` is already `Color.rgba(…)`, an `else if` chain is already
+nested ([D7](#d7--flatten-else-if-chains)). A renderer emitting valid `.yel`
+would have to either lie about the input or refuse.
+
+**The round-trip need is already met one layer up** — stage 1's S1 guarantees
+`green.text() == content`, and `--emit-green-text` exposes it. That frees this
+dump to be *readable* instead of *faithful*, which is the more useful of the two.
+
+**What it must show is everything source cannot** — the analysis, not the syntax:
+
+| | |
+|---|---|
+| resolved names | `count#12` — the `DefId` the name bound to |
+| declared types | from H1 phase 2; expressions stay untyped until 2b |
+| desugarings, made visible | the five in [What lowerings belong here](#what-lowerings-belong-here) |
+| dependency sets | `thir/signalck.rs` is the model |
+| trigger kind | [§5](directions.md#5--handlers-and-closures-are-one-concept-split-by-trigger) |
+| capture sets | [§4](directions.md#4--closures-are-a-value-and-the-irs-are-shaped-for-one) |
+
+Every analysis this brief argues for becomes **observable and testable** the
+moment it is in the dump. That is most of the reason to build it early.
+
+> **It is a change-detector, not an oracle.** A golden HIR dump is a snapshot of
+> the *new* compiler, so it can tell you something moved — it can never tell you
+> the output is *correct*.
+> [`oracle-never-rebless`](../../.agents/skills/compiler-rewrite/rules/oracle-never-rebless.md)
+> applies to the frozen artifacts and the 85 execution tests; it does not make a
+> HIR snapshot into an oracle. Keep the two straight or the suite goes green while
+> the compiler is wrong.
+
+The dump is output, so [A6](anti-spec.md#a6--no-random-seeded-iteration-reaching-output)
+applies: stable ordering, byte-identical across runs.
 
 The artifact-level differential arrives after
 [2b](stage-2b-hir-check.md#verification).
@@ -436,7 +504,9 @@ The artifact-level differential arrives after
 5. **2a's own seam types landed on `main`** as compiling Rust — `HirId`,
    `BodyId`, `HirMap`, `HirModule`, `NodeMap`, `TypeId`, `type_of`,
    `lower_files`.
-6. **D1–D6 answered in writing** in the Decision log. D7 and D8 are decided.
+6. ~~**D1–D6 answered in writing** in the Decision log~~ ✅ 2026-07-29. D7 and D8
+   were already decided. **D5 carries an obligation into the stage** — the
+   corpus item-order differential; see its log entry.
 
 ## Reference
 
@@ -466,6 +536,9 @@ The artifact-level differential arrives after
       tables and the `types` side table carry `Ty` by design.
 - [ ] `type_of` structurally unreachable from H1 phase 1 (the collector does not
       exist yet), not merely commented.
+- [ ] **`yelc2 --emit-hir` renders this phase's output**, yel-flavoured, showing
+      resolved `DefId`s, declared types, and the desugarings. Byte-stable across
+      runs. Explicitly **not** round-trippable — see above.
 - [ ] **No `DefId` is reachable from a serializable position.** `DefPath` is the
       only identity that crosses a module boundary
       ([§6](directions.md#6--modules-are-serializable-artifacts)); a `DefId` in a
@@ -473,7 +546,7 @@ The artifact-level differential arrives after
 - [ ] `HirModule` carries a `ModuleId` and a *set* of `SourceId`s — not one
       source. A module is built from the file set (H1), so a single-source field
       is a category error.
-- [ ] D1–D6 recorded with reasoning.
+- [x] D1–D6 recorded with reasoning. ✅ 2026-07-29
 - [ ] Adversarial review panel, read-only, one lens each.
 - [ ] Surprises written — [D3](anti-spec.md#d3--a-stage-documents-what-surprised-it).
 
@@ -543,7 +616,123 @@ for diagnostics); `id` is the first. Conflating them is invisible until somethin
 needs to *refer* to the whole, which is exactly what serialization does and what
 in-process compilation never did.
 
-*D1–D6: to be answered before briefing.*
+### D1 · Bindings and handlers are one uniform prop list
+
+**Decided 2026-07-29: one uniform prop list.** No `HirBinding`/`HirHandler`
+split; HIR carries what stage 1's AST already carries — `NamedProp { modifier,
+name, value }` — and [2b](stage-2b-hir-check.md) classifies using the declared
+type.
+
+The rationale is above under [D1](#d1) and does not repeat here. The **caveat is
+binding and is 2a's to discharge, not to note**: the frozen lowering uses the
+split to decide scoping, `LocalId` ordinals reach the type checker, and
+`HirHandler`'s doc says typeck re-defines the param "to produce the THIR
+`LocalId` with matching arena parity." A uniform lowering must produce the same
+locals in the same order. That is a test — locals of a closure-valued prop
+enumerated in allocation order, against the frozen tree's — not a review remark
+([A8](anti-spec.md#a8--an-invariant-is-asserted-not-observed)).
+
+Couples to [F1](open-decisions.md#f1--how-is-a-bodys-trigger-determined), which
+is 2b's and still open.
+
+### D2 · `For` does not carry the item type
+
+**Decided 2026-07-29: remove `item_ty: Ty`.**
+[B3](anti-spec.md#b3--no-analysis-result-stored-on-the-node-it-describes)
+verbatim — a typeck result stored on an untyped IR node. If 2b needs it keyed by
+node, that is a `NodeMap` side table it owns.
+
+### D3 · `For` does not carry the loop-variable name
+
+**Decided 2026-07-29: remove `item_name`; fix the scope structure.**
+
+The frozen field exists with the comment *"stored directly to avoid LocalScope
+lookup issues."* A duplicate of information the scope already holds, kept because
+the lookup did not work, is the shape this rewrite exists to stop porting. The
+obligation that comes with the decision: the `for` loop variable resolves through
+the ordinary scope path, and a test resolves it there.
+
+Note this is strictly more than D2. D2 deletes a field that should never have
+existed; D3 deletes a field that is currently **load-bearing**, so it is only
+free once the scope structure is right ([A9](anti-spec.md#a9--load-bearing-or-deleted)).
+
+### D4 · `HirGlobal` has no body — only its functions
+
+**Decided 2026-07-29: no body.** Property defaults stay in `GlobalDef`, and
+`HirGlobal` carries the **functions declared on that global** and nothing else.
+
+This is the asymmetry with `HirComponent` made deliberate rather than inherited.
+The distinction it encodes: a component's body is a *tree* — it has UI structure
+to lower — and a global's is a *bag of declarations*. Giving globals a body for
+symmetry's sake would create a node that is always the same degenerate shape,
+which is uniformity in the type and not in the thing.
+
+The functions do need a home, because they have real bodies that lower like any
+other. They hang off `HirGlobal`; they do not go in `GlobalDef`, which is a
+definition-table entry and not an IR node.
+
+### D5 · Globals lower before components
+
+**Decided 2026-07-29: globals, then components — reversing the frozen lowering
+order.**
+
+⚠️ **This is the one answer that diverges from the recommendation, and it has a
+measured cost. Read before proceeding.**
+
+What the frozen tree actually does — worth stating, because the two loops
+disagree on purpose (`yel-core/src/hir/lower.rs:128–160`):
+
+| phase | order |
+|---|---|
+| registration (1b, 2) | elements → extern components → **globals** → **components** |
+| lowering (3) | **components** → **globals** |
+
+So *registration* is already globals-first; this decision makes **lowering** agree
+with it. One order in the file instead of two, which is the argument for it. The
+frozen comment concedes components-first is inherited rather than required —
+*"so the type-check order (and therefore diagnostic order) matches the previous
+components-then-globals pipeline"* — and shedding compatibility with a pipeline
+that no longer exists is what the rewrite is for.
+
+**The cost, measured rather than guessed:**
+
+| | |
+|---|---|
+| diagnostic fixtures with both a global and a component | **0 / 23** |
+| corpus programs with both a global and a component | **815 / 2000** |
+
+The 23 diagnostic fixtures are therefore **unaffected** — none of them can
+observe the order. The 815 is the number that matters, and it is not a diagnostic
+concern: corpus programs are valid Yel and emit no diagnostics. It is an
+**item-order** concern. Lowering order determines the order of `HirItem`s, which
+flows to THIR → LIR → codegen and can reorder WIT exports and DOT nodes.
+
+**The obligation this creates, and it is 2a's:** run the corpus differential and
+show the 815 either byte-identical or diverging *only* in item order, with the
+divergence enumerated in [`goldens-changed.md`](goldens-changed.md). If WIT bytes
+move, this decision is not free and comes back for a second look — a reordered
+WIT export list is a real interface change, not a cosmetic one.
+
+`Definitions` order is **not** at risk: registration order is unchanged.
+
+### D6 · Doc comments attach to the nearest preceding comment run
+
+**Decided 2026-07-29: attach, using the nearest preceding comment run with no
+blank line between it and the item.**
+
+Stage 1 deliberately left this open — the green tree holds trivia and decides
+nothing about ownership ([`stage-1-syntax.md`](stage-1-syntax.md)), so 2a owns
+the rule. The rule is stated positively so it can be tested rather than inferred:
+
+- The run ends at the item's first token, with only whitespace between.
+- A blank line breaks attachment — the run belongs to nothing.
+- Multiple consecutive comment lines are one run, joined in source order.
+- A comment run with no item after it attaches to nothing and is not an error.
+
+The attachment lives in a `NodeMap` side table, not on the node
+([B3](anti-spec.md#b3--no-analysis-result-stored-on-the-node-it-describes)) —
+this is analysis *about* an item, read off the green tree, and the LSP is its
+consumer.
 
 ## Numbers · Surprises
 
