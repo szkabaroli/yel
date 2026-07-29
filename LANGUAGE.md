@@ -856,6 +856,31 @@ if count > 10 {
 }
 ```
 
+### For Statements
+
+`for` iterates in statement position, with the same syntax it uses in a
+[template](#list-rendering):
+
+```yel
+for item in items {
+    total = total + item.price;
+}
+
+for i in 0..count {
+    array-set(out, i, none);
+}
+```
+
+Over a list, the loop variable is each element. Over a [range](#ranges), it is
+each value in turn.
+
+Like [`if`](#if-statements) and [`match`](#match-statements), `for` is the same
+construct in both positions — the difference is only what the body contains:
+UI nodes in a template, statements in a block.
+
+There is no `while`. A loop that is not over a list or a range has no way to be
+written; if one is needed, that is a separate decision.
+
 ### Match Statements
 
 [`match`](#match) as a statement runs the arm that matches and produces no value:

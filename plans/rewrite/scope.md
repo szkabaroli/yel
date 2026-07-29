@@ -380,3 +380,44 @@ fails at registration rather than lowering to nothing.
 **Revised surface list:** `match` · `<T>` ✅ · function bodies · attributes +
 `@unsafe` ✅ (`a68e127`) · `ref` type · `primitive` item form. Six items, five
 mechanisms.
+
+### 2026-07-29 — `for` as a statement (GAP 2), and no `return` (GAP 1)
+
+**Decided.** `for` becomes a statement, reusing the template syntax exactly
+([`LANGUAGE.md` § For Statements](../../LANGUAGE.md#for-statements)). `while` is
+**not** added.
+
+**Why this is the largest of the surface changes, despite being the smallest.**
+Found by writing [`stdlib/array.yel`](../../stdlib/array.yel): yel has **no loop
+statement at all**. `for` is a UI node; `LANGUAGE.md` § Statements lists
+assignment, compound assignment, `let`, `if` and expression statements. A `for`
+in a handler body is rejected today with `expected '}', found 'identifier'`.
+
+So `filter`, `map`, and every list operation have **no expressible body** — which
+outranks `primitive`, `ref` and function bodies as a blocker, and was on no list
+until a file was written that needed it.
+
+**Reusing `for` rather than adding `while`.** Ranges already exist (`0..n`,
+`0..=n`), so a counted loop is expressible the moment `for` is a statement. That
+covers every stdlib function drafted so far. `while` buys unbounded iteration and
+nothing currently needs it — add it on evidence, not in anticipation.
+
+**It shares a construct, like the other two.** `ForNode` becomes position-shared
+the way [`Block`](#2026-07-29--function-bodies-sharing-block-with-closures) is
+shared between function bodies and closures, and the way `match` is shared across
+all three positions. That is now the pattern for every one of these changes: the
+construct exists, the position is new.
+
+**GAP 1 — no `return`, and no plan to add one.** Confirmed: the only `RETURN` in
+`token.rs` is `FUNC_RETURN`, a node kind. Bodies are tail-expression style, which
+works — `stdlib/array.yel`'s `get` shows the cost, an early exit becoming a
+nested if/else chain. Left alone deliberately: with `match` coming, most early
+exits become arms, and adding `return` before seeing whether that suffices would
+be building a mechanism ahead of its need.
+
+This also **caught an error in `LANGUAGE.md`**: the `clamp` example committed
+earlier that day used `return low;`, which does not exist. Corrected in `b2d47cd`.
+
+**Revised surface list — eight items, six mechanisms, two landed:**
+`match` · `<T>` ✅ · function bodies (`Block`) · **`for` statement (`ForNode`)** ·
+attributes + `@unsafe` ✅ · `ref` type · `primitive` item form.
