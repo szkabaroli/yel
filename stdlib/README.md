@@ -79,3 +79,44 @@ intermediate state, not as an oversight.
    one
 
 They parse, and that is the whole of what is true today.
+
+## `@impl(type)` — a global is a type's method set
+
+```yel
+@impl(string)
+export global String {
+    len: func(text: string) -> s32 { bytes-len(text) }
+    starts-with: func(text: string, prefix: string) -> bool { … }
+}
+```
+
+`"hello".len()` resolves `len` **in the global registered for the receiver's
+type**. Rust's `impl`, Go's method set, and the same shape the stdlib was already
+being written in.
+
+**Why not the pure desugar alone.** `x.f(a)` → `f(x, a)` is syntactic and the
+frozen tree already performs it (`MethodCall → Call`, listed as a keeper in
+[stage 3](../plans/rewrite/stage-3-hir-build.md)). But it resolves `f` in a
+**flat** namespace, and the stdlib is not flat — `len` lives inside
+`global String`. Something would have to lift every stdlib function into global
+scope, and that something is a per-function registry that must agree with the
+source with nothing checking it. That is
+[F12](../plans/rewrite/findings.md)'s shape, which the builtin table exists to
+retire, so reintroducing it here would be circular.
+
+Scoped lookup also disposes of the `len` overload: `String.len` and `List.len`
+stop being one overload set disambiguated by argument type, and adding `Map.len`
+later costs nothing.
+
+**The two compose; it is not either/or.** The desugar decides the *call shape*
+(`x.f(a)` is a call with `x` first); `@impl` decides *where the name is found*.
+Keep both.
+
+**Cost, stated:** the lookup needs the receiver's type, so it is stage 4, not
+stage 3. The desugar alone would have been stage 3. That is the price of scoped
+resolution and it is worth paying — the alternative is a registry nobody checks.
+
+**Open:** whether a type may have more than one `@impl` global (Rust allows many
+`impl` blocks; one-per-type is simpler and can be relaxed later), and whether
+`@impl` on a global that also has state is legal. Neither blocks writing the
+stdlib.
