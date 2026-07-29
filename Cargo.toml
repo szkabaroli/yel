@@ -36,6 +36,12 @@ clap = { version = "4", features = ["derive"] }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Binary codec for package artifacts. postcard, not bincode: postcard's wire
+# format is a separately published, versioned specification frozen for all of
+# 1.x, so an artifact is invalidated only when *our* schema moves — which is
+# exactly what the artifact stamp's `format` field is for. bincode is
+# unmaintained (RUSTSEC-2025-0141). See plans/modules.md §6.6.
+postcard = { version = "1.1", default-features = false, features = ["use-std"] }
 
 # Parsing
 pest = "2.7"

@@ -28,6 +28,164 @@ granted one, and stops the same request arriving three times.
 
 ## Log
 
+## 2026-07-29 — `yelc-sema` gains `artifact`; `Namespace` derives `Serialize`
+
+**Requested by:** the package-artifact agent (`plans/modules.md` §6.6).
+
+**Request.** Build the artifact format. `yelc-sema`'s public surface is contract,
+and this adds a module to it: `artifact::{Artifact, Stamp, PackageName,
+LoadedPackage, LoadError, ToArtifact, FromArtifact, ArtifactWriter, wire::*}`.
+One existing type changed: `Namespace` derives `Serialize`/`Deserialize`.
+
+**Decision: granted, additive.** Nothing existing changed shape. `Namespace`
+carries no index — it means the same thing in every compilation — so deriving
+`Serialize` on it is not the B1 hazard that the same derive on `Ty` is, and the
+doc comment now says so at the derive site rather than here.
+
+**Blast radius.** `yelc-sema` only. Stage 3 gains an obligation
+(`ToArtifact`/`FromArtifact` for HIR nodes) in place of the paragraph it had.
+Workspace 569 → 594 / 0 failed / 2 ignored; execution 85/85.
+
+### The encoding is postcard, and the criteria decided it 3–0
+
+`modules.md` §6.6 left this open and asked for ten minutes on the stability
+guarantees. It took longer and the answer is not close.
+
+| criterion | postcard | bincode |
+|---|---|---|
+| schema stability across crate versions | a **separate published wire-format specification**, stable since 1.0.0; changing it requires a 2.0 *with an updated spec* | no specification document; the format is whatever the implementation does, and it moved across 1.x → 2.0 |
+| compactness | every integer > 8 bits is a varint; this format is almost entirely small indices, so one byte each | 1.x writes fixed 8-byte lengths by default; 2.x varint |
+| no self-describing overhead | *"As `struct`s have a known number of elements with known names, their length and field names are not encoded on the wire"* | also non-self-describing — a tie |
+
+Criterion 1 is the one the `format` field exists to protect, and it is the one
+with a real separation: postcard's bytes move when **our** schema moves and at no
+other time, so `format` tracks one thing. It is asserted, not assumed —
+`the_encoding_carries_no_field_names` greps the bytes for six schema names, and
+swapping the codec for `serde_json` fails it.
+
+**Two statements in the plans are wrong, and one is worse than wrong.**
+
+1. **§6.6: "the frozen tree and `arkc` both use `bincode`".** The frozen tree
+   does not use bincode. It has never had it as a dependency — `serde` +
+   `serde_json`, and `grep -rn bincode` over the repo returns only the two plan
+   sentences. `arkc` does, pinned at `2.0.0-rc.3`: a release candidate, which is
+   evidence *against* criterion 1 rather than for familiarity.
+2. **bincode is unmaintained.** RUSTSEC-2025-0141, 2025-12-16. Development ceased
+   permanently after a harassment incident; 3.0.0 is a tombstone release
+   containing a README and a compiler error, and the advisory's own recommended
+   alternatives list begins with postcard. §6.6 was written on 2026-07-29 — seven
+   months later — and still frames it as a live option. **A "both are defensible"
+   framing survives in a plan long after one of them stops being defensible**,
+   because nothing re-checks a resolved-looking sentence. Worth generalising: a
+   recorded comparison of two dependencies has a shelf life.
+
+### §6.6 and `directions.md` §6 both specify this, and they disagree
+
+`directions.md` §6 says **"Decided: postcard"** and specifies a hand-written
+envelope — `magic "YELM" · format_version: u32 · input_hash: [u8; 32] ·
+section_count: u32` plus a section table. §6.6, written later, says the encoding
+is "not decided here" and specifies `Stamp { compiler, format }` with no magic,
+no hash and no sections.
+
+§6.6 was implemented, as briefed. The divergences are live and unreconciled:
+
+- **`input_hash` vs `compiler`.** A content hash catches a stale artifact whose
+  *inputs* moved; the stamp only catches one whose *compiler* moved. They are not
+  substitutes and §6.6 has no replacement for the hash.
+- **Magic bytes.** §6.6 has none, so a non-artifact file reaches the decoder and
+  is rejected as a decode error rather than as "not an artifact".
+- **The section table.** §6.6's flat struct forecloses the lazy-load door §6
+  explicitly left open. It reopens with a `format` bump, so this is a cost
+  deferred rather than paid.
+
+### `DefPath` is documented as the serialized form and is not serializable
+
+`ids.rs` says a `DefPath` is *"the serialized form of a definition's identity"*.
+It cannot be written:
+
+- `package: Name` and `segments: Vec<Name>` are **interner indices** — the same
+  class of value as a `Ty` handle, with the same failure mode, and `Name` *does*
+  derive `Serialize` in `yelc-base`. A naive derive compiles and writes indices.
+- `overload: OverloadKey` holds `Vec<Ty>`, and `OverloadKey`'s own doc says a
+  `DefPath` carrying it must write them structurally — which `DefPath` has no
+  way to do, having no type table.
+
+So `DefPath` is the *resolution-independent in-process* form, one step short of
+the wire, and the artifact needs a third representation (`wire::SerializedDefPath`,
+with `String` segments and `Vec<TypeIndex>` overloads). **Not requested as a seam
+change**: `Name` is right in-process and `DefPath` is used nowhere yet. But its
+doc comment claims a property it does not have, which is how a future author
+derives `Serialize` on it and ships the B1 bug through the one type named after
+avoiding it.
+
+### `DefPath` cannot name a definition — the namespace is missing
+
+`Definitions` keys names by `(Name, Namespace)`, and `definitions.rs`'s own test
+`namespaces_do_not_collide` asserts that a record and a component may share a
+name. `DefPath` has no namespace field, so it cannot distinguish them; the
+`OverloadKey` does not help, because that disambiguates *within* a namespace.
+
+`SerializedDefPath` carries `namespace`, and
+`a_path_distinguishes_two_namespaces_sharing_a_name` pins it: dropping the field
+from the loader's key makes the record and the component resolve to each other.
+**If `DefPath` is ever used, it needs the same field.**
+
+### B1's enforcement is real for `Ty` and absent for `Name`
+
+`Ty` not deriving `Serialize` works exactly as designed. Simulating the bug —
+writing the type table as raw interner indices — needed **four** edits including
+a new `Ty::from_raw_index` constructor. It is not a slip; it is a campaign.
+
+`Name` and `SourceId` have no such protection: both derive `Serialize` in
+`yelc-base`, so a wire struct with a `Name` field compiles and writes an index.
+The artifact module contains neither, and `wire.rs` is the only place wire types
+are declared, but that is a convention. **Not requested**, because removing
+`Name: Serialize` is a `yelc-base` seam change with no current beneficiary — but
+when stage 3 adds HIR to the artifact the surface grows a great deal, and this is
+the moment to decide whether the derive should survive it.
+
+### `Definitions` cannot represent an overload set, so B3 is unreachable
+
+B3 puts one `OverloadKey` in `yelc-sema`, and `stdlib.rs` already registers `len`
+twice. But `Definitions::by_name` is keyed `(Name, Namespace)` with no
+discriminator, so the second `len` is a `Duplicate`. `SerializedDefPath.overload`
+exists, is always empty, and fills in without a format change the day
+`Definitions` learns the key. Until then a colliding artifact is **rejected**
+(`LoadError::DuplicateDefinition`) rather than silently keeping one.
+
+### The `compiler` half of the stamp currently discriminates nothing
+
+`Stamp::COMPILER` is `env!("CARGO_PKG_VERSION")` — `0.1.0`, workspace-pinned, and
+it does not move when the compiler does. Every artifact the rewrite writes
+carries the same string, so the field that exists to catch *"a node's meaning
+changed without its encoding changing"* catches nothing. §6.6 says `compiler` is
+"the build's own version" and does not notice that the build has no version. The
+fix is a build identity (`shadow-rs` is already a workspace dependency) and it is
+a change to that one constant; it is documented at the constant so it is not
+found by an artifact that loads when it should not.
+
+### A4 obligation 2 and the brief's `Infer` test contradict each other
+
+open-decisions A4 says an `Infer` **must never be serialized**. The brief asks
+that `TyKind::Infer` survive a round trip and stay distinct from `Param`. Both
+are right about different layers, and collapsing them loses one:
+
+- the **encoding** represents `Infer` distinctly, so an `Infer` can never be
+  quietly written *as* a `Param` — the confusion A3 and A4 were split to prevent;
+- the **producer policy** is `Artifact::inference_holes()`, which reports every
+  hole so publishing one is a loud failure.
+
+An encoding that could not represent `Infer` would satisfy A4 by turning a
+detectable bug into an undetectable one.
+
+### `stage-2-driver.md`'s CLI signature is already contradicted, in §6.5
+
+Not this change's scope, but it is recorded in `modules.md` §6.5 as *"a
+consequence for stage 2 that nobody recorded"* and it is still unrecorded here:
+`yelc2 [OPTIONS] <FILE>` cannot name a package, and a package is a directory.
+Flagged so it is not discovered during stage 6.
+
+
 ## 2026-07-28 — stage numbering — renumbered to close the gap left by the merge
 
 **Requested by:** the integrator. Supersedes the "stage numbering downstream is

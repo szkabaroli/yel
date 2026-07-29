@@ -287,11 +287,47 @@ pub enum PathPiece {
    no discriminator needed, and an attempt is a lookup that fails rather than a
    name that collides.
 
-**Deferred, deliberately:** the serializer itself, the lazy-load offset table
-(Swift's index block — worth allowing in the format, not worth building for
-modules this small), and the format version constant. The format recommendation
-(serde + postcard in a hand-written section envelope, and the two traps it walks
-into) is in [§6](directions.md#the-format-serde--postcard-in-a-hand-written-envelope).
+**No longer deferred, and no longer stage 3's to design.** The serializer was
+built on 2026-07-29 — `crates/yelc-sema/src/artifact/`, postcard, with the
+version stamp. So this section's obligation changes shape:
+
+> **Stage 3 implements two traits; it does not design a format.**
+>
+> ```rust
+> impl ToArtifact   for HirNode { type Wire = …; fn to_artifact(&self, w: &mut ArtifactWriter) -> Self::Wire }
+> impl FromArtifact for HirNode { type Wire = …; fn from_artifact(w: &Self::Wire, p: &LoadedPackage) -> Result<Self, LoadError> }
+> ```
+>
+> The `Wire` type must contain no `Ty` and no `DefId`. The only way to obtain a
+> wire value for either is the `ArtifactWriter` / `LoadedPackage` handed to those
+> methods — a `Ty` becomes a `TypeIndex`, a `DefId` becomes a
+> `SerializedDefPath` — so **implementing the trait is simultaneously the
+> mechanism and the constraint**. Blanket impls cover `Option<T>` and `Vec<T>`.
+>
+> A `HirId` needs neither: the whole HIR travels together, so its ids only have
+> to agree with themselves. The `types` `NodeMap` is a `Vec<(HirId, TypeIndex)>`
+> written in `HirId` order — a map derived from a hash map must be sorted before
+> it reaches bytes ([A6](anti-spec.md)), and serialized bytes are output.
+>
+> Then bump `Stamp::FORMAT`. postcard writes struct fields by position and enum
+> variants by index, so *any* shape change in `artifact::wire` is invisible in
+> the bytes and must move the stamp by hand.
+
+Still deferred: the lazy-load offset table (Swift's index block — the flat
+`Artifact` struct forecloses it, and reopening costs a `format` bump), and an
+input hash, which `directions.md` §6's envelope has and §6.6's stamp does not.
+
+**Two statements above are wrong, found by building it** — see
+[`seam-changes.md`](seam-changes.md), 2026-07-29:
+
+1. **"There is no `Ty` remap table, so there is none to forget."** There is one.
+   Re-interning a recursive structure needs each already-converted entry to be
+   addressable by its children, so the load side builds artifact-index → `Ty`
+   and resolves every reference through it. The claim describes the *format*
+   (no handles on the wire) and denies the *loader*, which are different things.
+2. **The `DefPath` sketched above is not writable.** `Name` and `Ty` are both
+   interner indices; a `DefPath` holding them has the exact problem it exists to
+   solve. The wire form uses `String` segments and type-table indices.
 
 **One trap is already armed in this crate's dependencies.** `Ty` is
 `pub struct Ty(pub u32)` and **already derives `Serialize`/`Deserialize`**, so a

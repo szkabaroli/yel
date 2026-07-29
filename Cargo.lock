@@ -4051,7 +4051,10 @@ dependencies = [
 name = "yelc-sema"
 version = "0.1.0"
 dependencies = [
+ "postcard",
+ "pretty_assertions",
  "rustc-hash",
+ "serde",
  "yelc-base",
 ]
 

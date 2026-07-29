@@ -233,7 +233,18 @@ them at load time."*
 **Recommendation:** structurally, delete the derive —
 [S2](stage-3-hir-build.md#s2--ty-must-not-serialize-as-its-handle).
 
-**Answer:**
+**Answer: structurally, no derive.** Confirmed by implementation 2026-07-29
+(`crates/yelc-sema/src/artifact/`) rather than by argument. Types are written
+into an artifact-local table and re-interned on load; the enforcement holds —
+simulating the bug needed four edits including a new `Ty::from_raw_index`. The
+test loads into a **differently populated** interner, because a same-interner
+round trip passes with raw handles on the wire and proves nothing; that control
+is kept in the suite under that name.
+
+**The derive is still live one crate down.** `Name` and `SourceId` derive
+`Serialize` in `yelc-base`, and a `Name` is an interner index with exactly this
+failure mode. The artifact writes strings instead, but by convention, not by
+type error. Decide before stage 3 grows the wire surface.
 
 ---
 
@@ -248,7 +259,16 @@ them at load time."*
 is the whole compiler.
 **Recommendation:** yes — [S5](stage-3-hir-build.md#s5--defid-shape).
 
-**Answer:**
+**Answer: yes.** Confirmed 2026-07-29. A `DefId` crossing a package boundary
+becomes a path and resolves to the consumer's own index, which is not the
+producer's.
+
+**`DefPath` as recorded does not do the job**, on two counts found by building
+it: it holds `Name`s and `Ty` handles, so it is not serializable at all (it is
+the resolution-independent *in-process* form, one step short of the wire); and it
+has **no namespace**, so it cannot distinguish a record from a component of the
+same name, which `Definitions` explicitly permits. See
+[`seam-changes.md`](seam-changes.md), 2026-07-29.
 
 ---
 
@@ -266,7 +286,12 @@ A name does not identify a definition under overloading: `len` is both
 
 **Recommendation:** `yelc-sema` — [S6](stage-3-hir-build.md#s6--overloadkey).
 
-**Answer:**
+**Answer: `yelc-sema`** — one `OverloadKey`, as recorded. **Untested, and
+currently unreachable:** `Definitions` keys names by `(Name, Namespace)` with no
+discriminator, so `stdlib.rs`'s two `len`s cannot both be registered. The
+artifact carries the field (`SerializedDefPath.overload`), always empty, and it
+fills in without a format change the day `Definitions` learns the key. Until
+then an artifact holding an overload set is **rejected**, not half-loaded.
 
 ---
 

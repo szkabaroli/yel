@@ -5,6 +5,7 @@
 //! directions — see stage 3's register-then-lower invariant.
 
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 use yelc_base::{Name, Span};
 
 use crate::ids::{DefId, PackageId};
@@ -14,7 +15,14 @@ use crate::types::Ty;
 ///
 /// Separate namespaces are why a record and a component may share a name
 /// without either shadowing the other.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+///
+/// # Why this one derives `Serialize` when [`Ty`] does not
+///
+/// It carries no index. A `Namespace` means the same thing in every
+/// compilation, so writing it is writing a fact rather than a handle — the
+/// distinction decision B1 turns on. A path that omitted it could not name one
+/// of two same-named definitions; see [`crate::artifact::wire`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub enum Namespace {
     /// Records, enums, variants.
     Type,

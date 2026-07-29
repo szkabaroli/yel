@@ -32,6 +32,13 @@
 //! | C2 | builtin elements/enums/variants get a separate home, holding `DefId` not `Option<DefId>` | [`known`] |
 //! | D0 | the context holds **six** fields | [`context`] |
 //!
+//! B1 is the one that was argued rather than tested until [`artifact`] landed:
+//! with nothing round-tripping, a `Ty` written as its interner index is
+//! invisible. It is now a type error, and the test that would catch it anyway
+//! loads into a *differently populated* interner
+//! (`tests/artifact.rs`) — a same-interner round trip passes either way and
+//! proves nothing.
+//!
 //! # What is deliberately absent
 //!
 //! `block_id_counter`, `block_names`, `component_lifecycle_blocks` and the
@@ -44,6 +51,7 @@
 //! `effect` below the frontend seam, and `signal_deps` belongs to `yelc-hir`
 //! (decision D0a) because it is analysis about a program, not infrastructure.
 
+pub mod artifact;
 pub mod builtins;
 pub mod context;
 pub mod definitions;
@@ -52,6 +60,7 @@ pub mod known;
 pub mod stdlib;
 pub mod types;
 
+pub use artifact::{Artifact, LoadError, LoadedPackage, PackageName, Stamp};
 pub use builtins::{Arity, Builtin, BuiltinId, BuiltinTable, LoweringTarget, Visibility};
 pub use context::CompilerContext;
 pub use definitions::{Definition, Definitions, Duplicate, Namespace};

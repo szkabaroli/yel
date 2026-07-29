@@ -441,17 +441,50 @@ should not be invalidated by a dependency bump), **compactness**, and **no
 self-describing overhead** — the schema is known to both sides, so field names on
 the wire are waste.
 
-`postcard` and `bincode` both fit; the frozen tree and `arkc` both use `bincode`.
-Not decided here, and worth ten minutes on their stability guarantees, because
-this choice is what the `format` field is protecting against and getting it wrong
-means bumping the stamp on every dependency update.
+~~`postcard` and `bincode` both fit; the frozen tree and `arkc` both use
+`bincode`. Not decided here…~~ — **decided: postcard**, 2026-07-29. Two
+statements above were wrong and are struck rather than edited, because the way
+they were wrong is the lesson:
+
+- **The frozen tree does not use `bincode`** and never has (`serde` +
+  `serde_json`; `grep -rn bincode` over the repo hits only this paragraph and
+  `directions.md`). `arkc` does, pinned at `2.0.0-rc.3` — a release candidate,
+  which is evidence *against* stability rather than for familiarity.
+- **`bincode` is unmaintained** — RUSTSEC-2025-0141, 2025-12-16, seven months
+  before this paragraph was written. 3.0.0 is a tombstone release and its own
+  advisory recommends postcard first. A "both are defensible" line survives in a
+  plan long after one of them stops being defensible, because nothing re-checks a
+  sentence that looks settled.
+
+postcard wins criterion 1 outright — a **separately published wire-format
+specification**, stable across all of 1.x — which is the criterion the `format`
+field exists to protect. Full reasoning and the corrections:
+[`seam-changes.md`](rewrite/seam-changes.md), 2026-07-29.
+
+`directions.md` §6 had already decided postcard, and also specifies a
+**different artifact envelope** (magic bytes, an input hash, a section table)
+than this section does. §6.6 is what was built; the divergence is unreconciled
+and itemised in the same seam-changes entry.
 
 ### Do this before stage 3
 
-The round-trip over `Definitions` + `Ty` + `DefPath` **validates B1
-empirically**. Today nothing round-trips, so a `Ty` written as its interner index
-would be invisible — the decision is currently argued rather than tested, which
-is the standard everything else in this rewrite is held to.
+~~The round-trip over `Definitions` + `Ty` + `DefPath` **validates B1
+empirically**.~~ — **done**, `crates/yelc-sema/src/artifact/`. B1 holds: writing
+a `Ty` as its handle does not compile, and simulating it took four edits
+including a new constructor on `Ty`. The load side uses a **differently
+populated** interner, because a same-interner round trip passes either way —
+that control is kept in the suite under its own name.
+
+Two things in this section did not survive contact:
+
+- **`DefPath` is not the serialized form** it is documented as. Its `package`
+  and `segments` are `Name`s (interner indices, the same hazard as a `Ty`
+  handle, and `Name` *does* derive `Serialize`) and its `OverloadKey` holds `Ty`
+  handles. It is the resolution-independent *in-process* form; the wire needs a
+  third representation.
+- **`DefPath` cannot name a definition.** `Definitions` keys on
+  `(Name, Namespace)` and a record may share a name with a component;
+  `DefPath` has no namespace field, so it cannot tell them apart.
 
 ---
 
@@ -462,8 +495,15 @@ is the standard everything else in this rewrite is held to.
   right for a browser target — composition would break the closed-world
   assumption `--gufa --closed-world` depends on. Decide it before the syntax,
   because the syntax is trivial beside it.
-- **The serialized-module format** — §6. The decisions exist (B1 structural `Ty`,
-  B2 module-qualified `DefId`, B3 `OverloadKey`); the artifact does not.
+- ~~**The serialized-module format** — §6.~~ Built 2026-07-29
+  (`crates/yelc-sema/src/artifact/`). B1 and B2 are now tested rather than
+  argued. **B3 is not**, and cannot be: `Definitions` keys names by
+  `(Name, Namespace)` with no overload discriminator, so the second `len` is a
+  duplicate and an overload set cannot be registered at all.
+  `SerializedDefPath.overload` is carried, always empty, and fills in without a
+  format change the day `Definitions` learns the key. Still open above it: what
+  the artifact does about an **input hash** and about **cross-package**
+  `DefId`s — writing one panics today rather than guessing.
 - **Whether `impl` may appear outside the stdlib.** Closed-world makes coherence
   decidable — error on a duplicate method — so user `impl` on *user* types is
   nearly free. Retroactive `impl` on stdlib types is the line worth drawing
