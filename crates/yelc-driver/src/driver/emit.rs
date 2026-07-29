@@ -194,6 +194,7 @@ impl Visitor for Dumper<'_> {
         visit_if_node(IfNode) via walk_if_node;
         visit_else_if_branch(ElseIfBranch) via walk_else_if_branch;
         visit_for_node(ForNode) via walk_for_node;
+        visit_block(Block) via walk_block;
         visit_let_stmt(LetStmt) via walk_let_stmt;
         visit_if_stmt(IfStmt) via walk_if_stmt;
         visit_assign_stmt(AssignStmt) via walk_assign_stmt;
@@ -330,6 +331,7 @@ unlabelled!(
     IfNode,
     ElseIfBranch,
     ForNode,
+    Block,
     LetStmt,
     IfStmt,
     AssignStmt,

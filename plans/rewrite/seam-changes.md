@@ -543,3 +543,140 @@ the gate instead, so every FIRST and recovery set is bit-for-bit what it was.
 identity (7) suites pass **unchanged**, which is what shows no existing
 accept/reject verdict and no construct identity moved. Node kinds 78 → 82, with
 the budget assertion updated and the reason recorded in `token.rs`.
+
+---
+
+## 2026-07-29 — `Block` is extracted and shared; `ClosureExpr::body` changes type; `ForNode` becomes position-shared
+
+**Seam change, requested and applied.** `yelc-syntax`'s public AST is frozen for
+stage 3, and this moves three existing fields, so it is filed rather than edited
+in.
+
+**What.** One new node, one new enum, one renamed alias, one deleted field:
+
+```rust
+pub struct Block { id, span, stmts: Vec<Stmt>, tail: Option<Expr> }
+pub enum ForBody { Nodes(Braced<UiNode>), Statements(Recovered<Block>) }
+pub type Braced<T> = Recovered<Vec<T>>;   // was `Block<T>`
+```
+
+| field | was | is |
+|---|---|---|
+| `ClosureExpr::body` | `Vec<Stmt>` | `Block` |
+| `FunctionDecl::body` | — | `Option<Block>` |
+| `IfStmt::{then_branch, else_branch}` | `Block<Stmt>` | `Recovered<Block>` |
+| `ForNode::body` | `Block<UiNode>` | `ForBody` |
+| `ExprStmt::has_semicolon` | `bool` | **deleted** |
+| `Stmt` | — | new variant `For(Box<ForNode>)` |
+
+Plus node kinds `FUNC_BODY` and `FOR_STMT` (82 → 84), `Visitor::visit_block` /
+`walk_block`, and `Block` in the driver's AST dump.
+
+**Why.** Function bodies and `for`-as-a-statement were added to the language
+([`scope.md`](scope.md), 2026-07-29). Both were found by writing
+[`stdlib/`](../../stdlib/README.md): a named function had nowhere to put an
+implementation, and yel had no loop statement at all, so `filter` and `map` had
+no expressible body.
+
+### The name `Block` was already taken, and the recorded design does not say so
+
+`scope.md` specifies `pub struct Block { id, span, stmts, tail }` outright. There
+was already a `pub type Block<T> = Recovered<Vec<T>>` — the braced-body alias
+behind `IfNode`, `ElseIfBranch`, `ForNode` and `IfStmt`. One name cannot be both
+a bare `Vec` of UI nodes and a statement list with a tail.
+
+The alias was renamed to `Braced<T>`, which is what it always meant: *"the
+`{ … }` after a template construct"*. It is now only ever instantiated at
+`Braced<UiNode>` and stays generic because the call sites read better that way,
+not because a second instantiation exists.
+
+### Statement blocks were unified rather than left at two representations
+
+`scope.md` names only `ClosureExpr` and `FunctionDecl` as `Block`'s owners.
+Taken literally that leaves `IfStmt` on `Recovered<Vec<Stmt>>` while a
+`for`-statement body — added the same day, in the same position, with the same
+rule — would be a `Recovered<Block>`. Two statement-block representations in one
+crate is the second `Block`
+[directions §9](directions.md#9--match-is-the-general-conditional-everything-desugars-into-it)
+is trying not to have, so `IfStmt` moved too. No behaviour changed with it: an
+`if` branch is still `statement*`, `allow_trailing` is still false there, and
+`tail` is `None` for every well-formed one.
+
+### `tail` replaces `ExprStmt::has_semicolon`, and that is the point
+
+The trailing expression used to be the last `Stmt`, flagged with
+`has_semicolon: false`. It is now `Block::tail`, and the flag is deleted because
+it became unrepresentable-false.
+
+This is the shape §9 needs: `match` arms, `if` branches and ternary arms are all
+blocks whose tail *is* their value, so "statement position" versus "expression
+position" stops being a node distinction and becomes whether the block has a
+tail. A boolean on the last element cannot carry that — a consumer has to know
+to look at the last element and know what the flag means.
+
+`tail` is filled in wherever a semicolon-less final expression is *read*,
+including the two positions where writing one is an **error** (an `if`-statement
+branch, a `for`-statement body). The diagnostic is reported and the expression is
+kept: dropping the subtree the user wrote is what invariant S5 forbids.
+
+**Construct identity did not move**, and that was the risk. `identity.rs`
+projects the tail as `stmt:expr` at the tail expression's own span, which is what
+the frozen parser reads it as — pest's `expr_statement` is `expr ~ ";"?`, so its
+semicolon-less form is a `Statement::Expr` starting at the same offset. Verified
+over 2093 comparable programs and 5264 mutations, and verified *non-vacuous* by
+deleting that projection line, which produces four failures.
+
+### One `for` parser, one `for` node, one walker
+
+`ForNode` is shared between the template and statement positions, and so is
+`Parser::parse_for`: the head (`for x in e key(k)?`) is read once and the body
+comes in as a closure. Which position is being parsed is decided by **the
+caller** — `parse_ui_node` versus `parse_stmt_inner` — never by lookahead inside
+the shared function.
+
+Two consequences, both deliberate:
+
+1. **`key(…)` is grammatical in statement position.** One parser accepts the
+   whole `for_node` shape wherever a `for` is legal. It is only *meaningful* for
+   template reconciliation; rejecting it is a later phase's call, and that phase
+   has the node to reject. The alternative — a flag threaded into the shared
+   parser — is the position leaking back into the thing that was shared to be
+   position-free.
+2. **`ForBody` is an enum, not a type parameter on `ForNode`.** A generic
+   `ForNode<B>` would make the two positions' types exact, at the cost of a
+   generic `visit_for_node` and a hand-written arm in the driver's dump macro,
+   which takes a concrete type. One enum keeps *one* `walk_for_node`, which is
+   what [A3](anti-spec.md#a3) is actually about.
+
+### The statement guard is tighter than the template guard, and has to be
+
+`parse_ui_node` opens a `for_node` on `FOR_KW` followed by anything that is not
+`{`. In statement position that would be wrong, because `for` is not reserved and
+**is** a legal expression there: `{ for = 1; }` and `{ for + 1 }` are about a
+variable called `for`. `at_for_statement` asks for the whole head —
+`FOR_KW ~ name ~ IN_KW` — which is the production, not a maintained list of
+spellings, so it cannot drift the way `parse_type`'s `(`-only lookahead drifted
+out of sync with `func<T>` (entry above). Every text it claims was a syntax error
+on both parsers before.
+
+### No `TokenSet` changed, again
+
+`FOR_KW` was already in `STATEMENT_FIRST`, through
+`KEYWORD_FIRST ⊆ NAME_FIRST ⊆ EXPRESSION_FIRST ⊆ STATEMENT_FIRST` — every
+keyword is a legal identifier in this grammar. So every FIRST and recovery set is
+bit-for-bit what it was, for the third change running.
+
+### What the accept/reject and identity suites cannot see here
+
+Measured, not assumed. Two deliberate dispatch breakages — the statement `for`
+guard loosened to the template one, and function bodies switched off entirely —
+leave **both `parity.rs` and `identity.rs` completely green**. The frozen parser
+rejects every program containing either construct, so there is nothing for either
+suite to compare. `tests/blocks.rs` is the cover, and every assertion in it was
+confirmed to fail under a deliberate break.
+
+**Additive, measured.** Workspace **531 → 554 / 0 failed / 2 ignored**
+(`cargo test --workspace`); execution **85 / 85**
+(`cargo test -p yel-wasm-codegen --test execution`); stage 1's parity (12) and
+identity (7) suites pass **unchanged**. Node kinds 82 → 84, with the budget
+assertion updated and the reason recorded in `token.rs`.

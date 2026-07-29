@@ -122,6 +122,9 @@ pub trait Visitor: Sized {
     fn visit_for_node(&mut self, node: &ForNode) {
         walk_for_node(self, node);
     }
+    fn visit_block(&mut self, node: &Block) {
+        walk_block(self, node);
+    }
     fn visit_stmt(&mut self, node: &Stmt) {
         walk_stmt(self, node);
     }
@@ -195,9 +198,12 @@ fn walk_attributes<V: Visitor>(visitor: &mut V, node: &Option<AttributeList>) {
     }
 }
 
-fn walk_block<V: Visitor, T>(
+/// Walk a braced run of UI nodes. Renamed from `walk_block` when `Block`
+/// became the statement-block struct; this one has no AST node of its own,
+/// which is why it stays a private helper rather than a `visit_*` hook.
+fn walk_braced<V: Visitor, T>(
     visitor: &mut V,
-    node: &Block<T>,
+    node: &Braced<T>,
     mut walk_item: impl FnMut(&mut V, &T),
 ) {
     walk_recovered(visitor, node, |visitor, items| {
@@ -374,6 +380,11 @@ pub fn walk_function_decl<V: Visitor>(v: &mut V, node: &FunctionDecl) {
     walk_recovered(v, &node.signature, |v, signature| {
         v.visit_func_signature(signature)
     });
+    // A hand-wired field, like `attributes` above: nothing fails if it is
+    // dropped. `tests/blocks.rs` asserts the walker reaches it.
+    if let Some(body) = &node.body {
+        v.visit_block(body);
+    }
 }
 
 pub fn walk_func_signature<V: Visitor>(v: &mut V, node: &FuncSignature) {
@@ -454,33 +465,60 @@ pub fn walk_text_node<V: Visitor>(v: &mut V, node: &TextNode) {
 
 pub fn walk_if_node<V: Visitor>(v: &mut V, node: &IfNode) {
     v.visit_expr(&node.condition);
-    walk_block(v, &node.then_branch, |v, child| v.visit_ui_node(child));
+    walk_braced(v, &node.then_branch, |v, child| v.visit_ui_node(child));
     for branch in &node.else_if_branches {
         v.visit_else_if_branch(branch);
     }
     if let Some(else_branch) = &node.else_branch {
-        walk_block(v, else_branch, |v, child| v.visit_ui_node(child));
+        walk_braced(v, else_branch, |v, child| v.visit_ui_node(child));
     }
 }
 
 pub fn walk_else_if_branch<V: Visitor>(v: &mut V, node: &ElseIfBranch) {
     v.visit_expr(&node.condition);
-    walk_block(v, &node.body, |v, child| v.visit_ui_node(child));
+    walk_braced(v, &node.body, |v, child| v.visit_ui_node(child));
 }
 
+/// One walk for both `for` positions — the node is shared, so the walker is
+/// too, and the body is the only branch.
 pub fn walk_for_node<V: Visitor>(v: &mut V, node: &ForNode) {
     walk_maybe_ident(v, &node.item);
     v.visit_expr(&node.iterable);
     if let Some(key) = &node.key {
         v.visit_expr(key);
     }
-    walk_block(v, &node.body, |v, child| v.visit_ui_node(child));
+    match &node.body {
+        ForBody::Nodes(body) => walk_braced(v, body, |v, child| v.visit_ui_node(child)),
+        ForBody::Statements(body) => {
+            walk_recovered(v, body, |v, block| v.visit_block(block));
+        }
+    }
+}
+
+/// The statement block, in every position that owns one.
+///
+/// # `tail` is the field the compiler cannot check for you
+///
+/// The same gap `walk_attributes` documents: a new AST **variant** is a compile
+/// error in this file, a new **field** is not. `Block` has two, and a walk that
+/// visited `stmts` and forgot `tail` would silently skip the block's *value* —
+/// the one expression `directions.md` §9 is built on — with everything still
+/// compiling. `tests/blocks.rs::the_walker_reaches_the_tail_of_every_block`
+/// is the assertion that it does not.
+pub fn walk_block<V: Visitor>(v: &mut V, node: &Block) {
+    for stmt in &node.stmts {
+        v.visit_stmt(stmt);
+    }
+    if let Some(tail) = &node.tail {
+        v.visit_expr(tail);
+    }
 }
 
 pub fn walk_stmt<V: Visitor>(v: &mut V, node: &Stmt) {
     match node {
         Stmt::Let(s) => v.visit_let_stmt(s),
         Stmt::If(s) => v.visit_if_stmt(s),
+        Stmt::For(s) => v.visit_for_node(s),
         Stmt::Assign(s) => v.visit_assign_stmt(s),
         Stmt::Expr(s) => v.visit_expr_stmt(s),
         Stmt::Error { id, span } => v.visit_error(*id, *span),
@@ -497,9 +535,9 @@ pub fn walk_let_stmt<V: Visitor>(v: &mut V, node: &LetStmt) {
 
 pub fn walk_if_stmt<V: Visitor>(v: &mut V, node: &IfStmt) {
     v.visit_expr(&node.condition);
-    walk_block(v, &node.then_branch, |v, stmt| v.visit_stmt(stmt));
+    walk_recovered(v, &node.then_branch, |v, block| v.visit_block(block));
     if let Some(else_branch) = &node.else_branch {
-        walk_block(v, else_branch, |v, stmt| v.visit_stmt(stmt));
+        walk_recovered(v, else_branch, |v, block| v.visit_block(block));
     }
 }
 
@@ -635,9 +673,7 @@ pub fn walk_closure_expr<V: Visitor>(v: &mut V, node: &ClosureExpr) {
     for param in &node.params {
         walk_recovered(v, param, |v, param| v.visit_closure_param(param));
     }
-    for stmt in &node.body {
-        v.visit_stmt(stmt);
-    }
+    v.visit_block(&node.body);
 }
 
 pub fn walk_closure_param<V: Visitor>(v: &mut V, node: &ClosureParam) {

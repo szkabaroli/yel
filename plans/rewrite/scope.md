@@ -421,3 +421,53 @@ earlier that day used `return low;`, which does not exist. Corrected in `b2d47cd
 **Revised surface list — eight items, six mechanisms, two landed:**
 `match` · `<T>` ✅ · function bodies (`Block`) · **`for` statement (`ForNode`)** ·
 attributes + `@unsafe` ✅ · `ref` type · `primitive` item form.
+
+#### Corrections — two more statements above are wrong
+
+Found by implementing them, the same way the attribute corrections were. Left in
+place with corrections rather than edited away.
+
+**4. `Block` is a name the crate already used.** The function-bodies entry
+specifies `pub struct Block { id, span, stmts, tail }` as if the name were free.
+It was not: `pub type Block<T> = Recovered<Vec<T>>` was the braced-body alias
+behind `IfNode`, `ElseIfBranch`, `ForNode` and `IfStmt`. The alias was renamed to
+`Braced<T>` — which is what it always meant — and the new struct took the name.
+Full reasoning in [`seam-changes.md`](seam-changes.md).
+
+**5. "`ClosureExpr` and `FunctionDecl`" is one owner short.** Taken literally it
+leaves `IfStmt` on the old `Recovered<Vec<Stmt>>` while a `for`-statement body,
+added the same day in the same position under the same rule, is a
+`Recovered<Block>` — two statement-block representations in one crate, which is
+the second `Block` [§9](directions.md#9--match-is-the-general-conditional-everything-desugars-into-it)
+is trying not to have. All four statement-block positions share `Block`. No
+behaviour moved with it.
+
+**Both landed**, with the seam change recorded in
+[`seam-changes.md`](seam-changes.md) (2026-07-29): function bodies ✅, `for`
+statement ✅. `match`, `ref` and the `primitive` item form remain unspent.
+
+#### An unrelated gap this surfaced: `func<T>` is not recognised in a `global`
+
+Not a correction to this entry — a defect in the **`<T>` landing** (`8daa4b9`),
+found while checking [`stdlib/array.yel`](../../stdlib/array.yel). It is written
+here because this is where anyone reading about the stdlib blockers will look.
+
+`parse_global_member` decides `function_decl` versus `global_property` with a
+four-token lookahead ending in `nth(3) == L_PAREN`. A generic signature puts `<`
+there, so
+
+```yel
+global G { len: func<T>(items: list<T>) -> s32 { 1 } }
+```
+
+is read as a **global property** whose type is a `func`, and the body is then
+rejected with *expected `;`, found `{`*. The non-generic spelling and the
+component-side `export len: func<T>(…) { … }` both work, so it is that one
+predicate.
+
+This is the **same shape** the `<T>` entry's own warning names — a `(`-only
+lookahead that went stale when `<` became legal before it. The fix was applied to
+`parse_type` and missed here. Every function in `stdlib/array.yel` is generic and
+declared in a `global`, so it blocks the file even after `primitive`, `ref` and
+`@unsafe` land. Not fixed here: it belongs to the `<T>` landing, not to this one,
+and it needs its own parity pass.

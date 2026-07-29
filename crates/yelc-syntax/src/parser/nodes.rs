@@ -10,13 +10,13 @@
 //!   `attr_name` shape check is what keeps `fontSize: 24px` and `Foo: 1`
 //!   rejected: pest's `attr_name` is lowercase kebab and would have stopped
 //!   before the `S`, failing the whole alternative.
-//! * **A body with no `{` is `Block::Missing`, not an empty `Vec`.** An `if`
+//! * **A body with no `{` is `Recovered::Missing`, not an empty `Vec`.** An `if`
 //!   whose block was never opened is not an `if` with an empty block, and
 //!   `component A { if x "a" }` used to be indistinguishable from `if x { }`.
 
 use super::{Parser, Speculation, is_kebab_lower};
 use crate::ast;
-use crate::token::{ELEMENT_ITEM_FIRST, NODE_FIRST, RESYNC_MEMBER, TokenKind::*};
+use crate::token::{ELEMENT_ITEM_FIRST, NODE_FIRST, RESYNC_MEMBER, TokenKind, TokenKind::*};
 use yelc_base::Span;
 
 impl<'a> Parser<'a> {
@@ -280,7 +280,26 @@ impl<'a> Parser<'a> {
     }
 
     /// `for_node = "for" ~ identifier ~ "in" ~ expr ~ key_clause? ~ "{" ~ for_body ~ "}"`
-    fn parse_for_node(&mut self) -> ast::ForNode {
+    ///
+    /// # The only `for` parser in the crate
+    ///
+    /// `for` is legal in a **template** and, since 2026-07-29, in a **statement
+    /// block**. The head is identical in both — the positions differ only in
+    /// what the body holds, which is exactly what [`ast::ForBody`] is — so the
+    /// head is read here once and the body comes in as a closure. A second
+    /// `parse_for_stmt` that re-read `for x in e key(k)?` would be the
+    /// duplicated walker anti-spec A3 forbids, and the two copies would drift on
+    /// the first change to the head.
+    ///
+    /// `node` is the green kind to close: `FOR_NODE` in a template, `FOR_STMT`
+    /// in a block. Which position is being parsed is decided by *the caller* —
+    /// `parse_ui_node` versus `parse_stmt_inner` — never by lookahead inside
+    /// here.
+    pub(super) fn parse_for(
+        &mut self,
+        node: TokenKind,
+        parse_body: impl FnOnce(&mut Self) -> ast::ForBody,
+    ) -> ast::ForNode {
         self.start_node();
         self.assert(FOR_KW);
         let item = self.expect_name();
@@ -299,8 +318,8 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let body = self.parse_node_body();
-        let span = self.finish_node(FOR_NODE);
+        let body = parse_body(self);
+        let span = self.finish_node(node);
 
         ast::ForNode {
             id: self.new_node_id(),
@@ -312,11 +331,15 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_for_node(&mut self) -> ast::ForNode {
+        self.parse_for(FOR_NODE, |p| ast::ForBody::Nodes(p.parse_node_body()))
+    }
+
     /// `if_body` / `for_body = (node ~ ","?)*`, delimited by braces.
     ///
-    /// Returns [`ast::Block::Missing`] when the opening `{` is absent — the
-    /// block was never opened, which is a different fact from its being empty.
-    fn parse_node_body(&mut self) -> ast::Block<ast::UiNode> {
+    /// Returns `Recovered::Missing` when the opening `{` is absent — the block
+    /// was never opened, which is a different fact from its being empty.
+    fn parse_node_body(&mut self) -> ast::Braced<ast::UiNode> {
         if !self.is(L_BRACE) {
             let at = self.current_span();
             self.error_here(format!(

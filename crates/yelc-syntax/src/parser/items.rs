@@ -541,6 +541,9 @@ impl<'a> Parser<'a> {
             name,
             is_export: false,
             signature: ast::Recovered::Present(signature),
+            // An `extern component` method is implemented by the host component
+            // on the other side of the boundary, so it never has a body here.
+            body: None,
         }
     }
 
@@ -736,6 +739,12 @@ impl<'a> Parser<'a> {
             name,
             is_export: false,
             signature: ast::Recovered::Present(signature),
+            // `global_callback` is the `callback name(...)` spelling and is
+            // bodyless by definition — the caller supplies the implementation.
+            // Bodies attach to the `name: func(...)` form, which is
+            // `parse_function_decl`. `LANGUAGE.md` gives a body to that form
+            // only, so widening this is a language decision, not a parser one.
+            body: None,
         }
     }
 
@@ -863,12 +872,30 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `function_decl = export_modifier? ~ identifier ~ ":" ~ func_type ~ ";"`
+    /// `function_decl = export_modifier? ~ identifier ~ ":" ~ func_type ~ (block | ";")`
     ///
     /// A missing `func` keyword makes the whole signature a hole. It is not an
     /// empty parameter list: `component A { export x: s32; }` used to yield a
     /// `FunctionDecl` named `x` with zero parameters, with the `s32` the user
     /// actually wrote silently orphaned.
+    ///
+    /// # Body or `;`, decided on the `{`
+    ///
+    /// `double: func(n: s32) -> s32 { n * 2 }` carries a body;
+    /// `now: func() -> s64;` does not, and means someone else implements it
+    /// (`LANGUAGE.md` § Function Bodies). The two are told apart by the one
+    /// token that can follow a signature and is not a `;`, which is the whole
+    /// decision — no lookahead over anything inside the braces, and no third
+    /// outcome. A `{` here was a syntax error on both parsers before
+    /// 2026-07-29, so nothing that parsed changes meaning.
+    ///
+    /// The `{` is honoured even when the *signature* is a hole
+    /// (`export f: { … }`): the body is source the user wrote and belongs in the
+    /// tree next to the diagnostic about the missing `func`, not resynchronised
+    /// over as if it were the next member.
+    ///
+    /// There is no trailing `;` after a body, and none is consumed — one is a
+    /// stray member, reported where it is written.
     fn parse_function_decl(&mut self, attributes: Option<ast::AttributeList>) -> ast::FunctionDecl {
         self.start_node();
         let is_export = self.parse_export_modifier();
@@ -890,7 +917,23 @@ impl<'a> Parser<'a> {
         };
         self.finish_node(FUNC_TYPE);
 
-        self.expect(SEMICOLON);
+        let body = if self.is(L_BRACE) {
+            self.assert(L_BRACE);
+            // `allow_trailing`: a function body's final expression *is* its
+            // return value, exactly as a closure's is. That is the whole of
+            // what the two constructs share, and it is why they share `Block`.
+            //
+            // The braces themselves are direct children of `FUNCTION_DECL` and
+            // `FUNC_BODY` covers the statements — the same arrangement
+            // `CLOSURE_EXPR`/`CLOSURE_BODY` uses.
+            let block = self.parse_stmt_block(FUNC_BODY, true);
+            self.expect(R_BRACE);
+            Some(block)
+        } else {
+            self.expect(SEMICOLON);
+            None
+        };
+
         let span = self.finish_node(FUNCTION_DECL);
 
         ast::FunctionDecl {
@@ -900,6 +943,7 @@ impl<'a> Parser<'a> {
             name,
             is_export,
             signature,
+            body,
         }
     }
 

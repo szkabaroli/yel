@@ -1,23 +1,40 @@
-//! Statement blocks: `let`, `if`, assignment, and expression statements.
+//! Statement blocks: `let`, `if`, `for`, assignment, and expression statements.
 //!
 //! Split out of `exprs.rs`, which had grown past anti-spec A2's ~800-line
 //! threshold for one unit.
 //!
-//! # Two block shapes
+//! # One block shape, with a switch on the tail
 //!
-//! A **closure body** is `statement* ~ trailing_expr?`: the last expression may
-//! drop its semicolon, and that is what makes it the closure's value. An
-//! **`if`-statement branch** is `statement*` with no trailing form, so a missing
-//! semicolon there is an error. `allow_trailing` is that distinction and nothing
-//! else.
+//! Every statement block is an [`ast::Block`] — `statement* ~ trailing_expr?`
+//! with the trailing expression in [`ast::Block::tail`]. Four positions build
+//! one: a closure body, a function body, an `if`-statement branch and a
+//! `for`-statement body.
 //!
-//! A branch with no `{` is [`ast::Block::Missing`], not an empty `Vec` — the
-//! same rule the UI-tree bodies follow in `nodes.rs`.
+//! `allow_trailing` says whether writing that trailing expression is *legal*
+//! here, not whether it is representable. A closure or function body's tail is
+//! its value; an `if` branch and a `for` body produce nothing, so a
+//! semicolon-less final expression there is reported — and still recorded in
+//! `tail`, because dropping the subtree the user wrote is what invariant S5
+//! forbids.
+//!
+//! A branch with no `{` is `Recovered::Missing`, not an empty block — the same
+//! rule the UI-tree bodies follow in `nodes.rs`.
 
 use super::Parser;
 use crate::ast;
 use crate::token::{EXPRESSION_FIRST, STATEMENT_FIRST, TokenKind, TokenKind::*};
 use yelc_base::Span;
+
+/// What [`Parser::parse_stmt`] read: a statement, or the block's trailing
+/// expression, which may only appear last.
+///
+/// Was `(ast::Stmt, bool)`, where the `bool` meant "that `Stmt` was actually the
+/// trailing expression". The two are different things now — one goes in
+/// `Block::stmts`, the other in `Block::tail` — so the return type says so.
+enum StmtOrTail {
+    Stmt(ast::Stmt),
+    Tail(ast::Expr),
+}
 
 fn assign_op(kind: TokenKind) -> Option<ast::AssignOp> {
     Some(match kind {
@@ -31,16 +48,17 @@ fn assign_op(kind: TokenKind) -> Option<ast::AssignOp> {
 }
 
 impl<'a> Parser<'a> {
-    /// `closure_body = statement* ~ trailing_expr?`
+    /// `block_body = statement* ~ trailing_expr?`
     ///
     /// The caller has already consumed the `{` and closes the `}` itself.
-    pub(super) fn parse_stmt_block(
-        &mut self,
-        node: TokenKind,
-        allow_trailing: bool,
-    ) -> Vec<ast::Stmt> {
-        let mut body = Vec::new();
-        self.builder.start_node();
+    ///
+    /// The green node `node` spans exactly what it did before this returned an
+    /// [`ast::Block`] — `mark`/`finish_marked` is `builder.start_node`/
+    /// `builder.finish_node` with the span the AST node now needs.
+    pub(super) fn parse_stmt_block(&mut self, node: TokenKind, allow_trailing: bool) -> ast::Block {
+        let mark = self.mark();
+        let mut stmts = Vec::new();
+        let mut tail = None;
 
         while !self.is(R_BRACE) && !self.is_eof() {
             let before = self.position();
@@ -53,7 +71,7 @@ impl<'a> Parser<'a> {
                 ));
                 self.advance();
                 let span = self.finish_node(ERROR);
-                body.push(ast::Stmt::Error {
+                stmts.push(ast::Stmt::Error {
                     id: self.new_node_id(),
                     span,
                 });
@@ -61,16 +79,26 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            let (stmt, is_trailing) = self.parse_stmt(allow_trailing);
-            body.push(stmt);
+            let parsed = self.parse_stmt(allow_trailing);
             assert!(self.position() > before, "statement consumed nothing");
-            if is_trailing {
-                break;
+            match parsed {
+                StmtOrTail::Stmt(stmt) => stmts.push(stmt),
+                StmtOrTail::Tail(expr) => {
+                    // A semicolon-less expression can only be last: the caller
+                    // now expects the `}`.
+                    tail = Some(expr);
+                    break;
+                }
             }
         }
 
-        self.builder.finish_node(node);
-        body
+        let span = self.finish_marked(node, &mark);
+        ast::Block {
+            id: self.new_node_id(),
+            span,
+            stmts,
+            tail,
+        }
     }
 
     /// One of the five guarded recursive entry points: `if a { if a { …` is
@@ -80,25 +108,28 @@ impl<'a> Parser<'a> {
     /// the block's loop is where the no-progress check lives — the recovery node
     /// this returns has consumed a token, so the loop still advances.
     ///
-    /// Returns the statement and whether it was the semicolon-less
-    /// `trailing_expr`, which may only appear last.
-    fn parse_stmt(&mut self, allow_trailing: bool) -> (ast::Stmt, bool) {
+    /// Returns the statement, or the semicolon-less `trailing_expr` — which may
+    /// only appear last, and becomes [`ast::Block::tail`].
+    fn parse_stmt(&mut self, allow_trailing: bool) -> StmtOrTail {
         if !self.enter_nesting() {
             let span = self.nesting_limit_node();
             let id = self.new_node_id();
-            return (<ast::Stmt as ast::Recovery>::recovery(id, span), false);
+            return StmtOrTail::Stmt(<ast::Stmt as ast::Recovery>::recovery(id, span));
         }
         let result = self.parse_stmt_inner(allow_trailing);
         self.leave_nesting();
         result
     }
 
-    fn parse_stmt_inner(&mut self, allow_trailing: bool) -> (ast::Stmt, bool) {
+    fn parse_stmt_inner(&mut self, allow_trailing: bool) -> StmtOrTail {
         if self.at_let_statement() {
-            return (self.parse_let_stmt(), false);
+            return StmtOrTail::Stmt(self.parse_let_stmt());
         }
         if self.at_if_statement() {
-            return (self.parse_if_stmt(), false);
+            return StmtOrTail::Stmt(self.parse_if_stmt());
+        }
+        if self.at_for_statement() {
+            return StmtOrTail::Stmt(self.parse_for_stmt());
         }
 
         let mark = self.mark();
@@ -109,33 +140,36 @@ impl<'a> Parser<'a> {
             let value = self.parse_expr();
             self.expect(SEMICOLON);
             let span = self.finish_marked(ASSIGN_STMT, &mark);
-            return (
-                ast::Stmt::Assign(ast::AssignStmt {
-                    id: self.new_node_id(),
-                    span,
-                    op,
-                    target,
-                    value,
-                }),
-                false,
-            );
+            return StmtOrTail::Stmt(ast::Stmt::Assign(ast::AssignStmt {
+                id: self.new_node_id(),
+                span,
+                op,
+                target,
+                value,
+            }));
         }
 
         let has_semicolon = self.eat(SEMICOLON);
         if !has_semicolon && !allow_trailing {
-            // `if_statement` bodies are `statement*` — no trailing expression.
+            // `if_statement` and `for_statement` bodies are `statement*` — no
+            // trailing expression. Reported here; the expression is still kept,
+            // as the block's `tail`.
             self.expect(SEMICOLON);
         }
+        // The green node stays `EXPR_STMT` in both cases. The trailing
+        // expression *is* `expr_statement` in the concrete grammar — the `;` is
+        // what is optional — and inventing a second green kind for it would
+        // rewrite the green tree of every closure in the corpus to record
+        // something the token stream already says.
         let span = self.finish_marked(EXPR_STMT, &mark);
-        (
-            ast::Stmt::Expr(ast::ExprStmt {
-                id: self.new_node_id(),
-                span,
-                expr: target,
-                has_semicolon,
-            }),
-            !has_semicolon,
-        )
+        if !has_semicolon {
+            return StmtOrTail::Tail(target);
+        }
+        StmtOrTail::Stmt(ast::Stmt::Expr(ast::ExprStmt {
+            id: self.new_node_id(),
+            span,
+            expr: target,
+        }))
     }
 
     /// Whether `let` here starts a `let_statement`, or is an ordinary name.
@@ -184,6 +218,39 @@ impl<'a> Parser<'a> {
             Some((index, _)) => self.expression_is_followed_by_a_block(index),
             None => false,
         }
+    }
+
+    /// Whether `for` here starts a `for_statement`, or is an ordinary name.
+    ///
+    /// Same mechanism as [`Parser::at_let_statement`], and the tightest of the
+    /// three: `for_statement` is `"for" ~ identifier ~ "in" ~ expr ~ …`, so all
+    /// three head tokens are fixed by the grammar and the predicate asks for
+    /// exactly them. It is **not** a maintained list of spellings — the shape it
+    /// matches is the production, and it cannot drift the way `parse_type`'s
+    /// `(`-only lookahead drifted out of sync with `func<T>`.
+    ///
+    /// It has to be tighter than the *template* `for`'s guard
+    /// (`nth_non_trivia(1) != L_BRACE`, in `nodes.rs`), because `for` is a legal
+    /// **expression** in statement position and is not one in node position:
+    /// `{ for + 1 }` and `{ for = 1; }` are about a variable called `for`, and a
+    /// looser guard would steal them. Every text this does claim —
+    /// `for <name> in …` inside a block — was a syntax error before, on both
+    /// parsers, which is what makes the addition purely additive.
+    ///
+    /// `for` is a word, so `forx in xs { }` never reaches here at all.
+    fn at_for_statement(&self) -> bool {
+        self.is(FOR_KW) && self.nth_is_name(1) && self.nth_non_trivia(2) == IN_KW
+    }
+
+    /// `for_statement = "for" ~ identifier ~ "in" ~ expr ~ key_clause? ~ "{" ~ statement* ~ "}"`
+    ///
+    /// The **same** parser the template `for` uses — see `Parser::parse_for`.
+    /// Only the body differs.
+    fn parse_for_stmt(&mut self) -> ast::Stmt {
+        let node = self.parse_for(FOR_STMT, |p| {
+            ast::ForBody::Statements(p.parse_braced_stmt_block())
+        });
+        ast::Stmt::For(Box::new(node))
     }
 
     /// `let_statement = "let" ~ identifier ~ (":" ~ type_annotation)? ~ "=" ~ expr ~ ";"`
@@ -242,7 +309,11 @@ impl<'a> Parser<'a> {
 
     /// `"{" ~ statement* ~ "}"` — `Missing` when the `{` is absent, so a branch
     /// that was never opened stays distinguishable from an empty one.
-    fn parse_braced_stmt_block(&mut self) -> ast::Block<ast::Stmt> {
+    ///
+    /// Shared by `if`-statement branches and `for`-statement bodies. Both are
+    /// `statement*`: neither produces a value, so `allow_trailing` is false and
+    /// a semicolon-less final expression is reported.
+    pub(super) fn parse_braced_stmt_block(&mut self) -> ast::Recovered<ast::Block> {
         if !self.is(L_BRACE) {
             let at = self.current_span();
             self.error_here(format!(
@@ -279,6 +350,12 @@ mod tests {
         closure
     }
 
+    /// How many statements an `if`-statement branch holds, or `None` when its
+    /// `{` was missing.
+    fn branch_len(branch: &ast::Recovered<ast::Block>) -> Option<usize> {
+        branch.present().map(|block| block.stmts.len())
+    }
+
     #[test]
     fn parse_every_statement_form() {
         let p = parse_ok(
@@ -286,21 +363,22 @@ mod tests {
              if x > 0 { count -= 1; } else { count *= 2; } f(x); x } } }",
         );
         let closure = closure_body(&p);
-        assert_eq!(closure.body.len(), 6);
-        assert!(matches!(closure.body[0], ast::Stmt::Let(_)));
-        assert!(matches!(closure.body[1], ast::Stmt::Assign(_)));
-        assert!(matches!(closure.body[3], ast::Stmt::If(_)));
-        let ast::Stmt::Expr(trailing) = &closure.body[5] else {
-            panic!("expected a trailing expression")
-        };
-        assert!(!trailing.has_semicolon);
+        // Five statements and a tail, where this used to read six statements
+        // with a `has_semicolon: false` flag on the last: the trailing `x` is
+        // the block's *value* and now lives in `Block::tail`.
+        assert_eq!(closure.body.stmts.len(), 5);
+        assert!(matches!(closure.body.stmts[0], ast::Stmt::Let(_)));
+        assert!(matches!(closure.body.stmts[1], ast::Stmt::Assign(_)));
+        assert!(matches!(closure.body.stmts[3], ast::Stmt::If(_)));
+        let tail = closure.body.tail.as_ref().expect("a trailing expression");
+        assert!(matches!(tail.kind, ast::ExprKind::Ident(_)));
     }
 
     #[test]
     fn parse_let_with_an_inferred_type() {
         let p = parse_ok("component A { div { f: { let x = 1; x } } }");
         let closure = closure_body(&p);
-        let ast::Stmt::Let(stmt) = &closure.body[0] else {
+        let ast::Stmt::Let(stmt) = &closure.body.stmts[0] else {
             panic!("expected a let")
         };
         assert!(stmt.ty.is_none(), "no type was written, none is invented");
@@ -310,17 +388,11 @@ mod tests {
     fn parse_if_statement_branches() {
         let p = parse_ok("component A { div { f: { if a { b(); } else { c(); } } } }");
         let closure = closure_body(&p);
-        let ast::Stmt::If(stmt) = &closure.body[0] else {
+        let ast::Stmt::If(stmt) = &closure.body.stmts[0] else {
             panic!("expected an if statement")
         };
-        assert_eq!(stmt.then_branch.present().map(Vec::len), Some(1));
-        assert_eq!(
-            stmt.else_branch
-                .as_ref()
-                .and_then(|b| b.present())
-                .map(Vec::len),
-            Some(1)
-        );
+        assert_eq!(branch_len(&stmt.then_branch), Some(1));
+        assert_eq!(stmt.else_branch.as_ref().and_then(branch_len), Some(1));
     }
 
     #[test]
@@ -345,7 +417,7 @@ mod tests {
         // `plans/rewrite/goldens-changed.md`.
         let p = parse_ok("component A { div { f: { letx = 1; x } } }");
         let closure = closure_body(&p);
-        let ast::Stmt::Assign(stmt) = &closure.body[0] else {
+        let ast::Stmt::Assign(stmt) = &closure.body.stmts[0] else {
             panic!("expected an assignment to a variable called `letx`")
         };
         let ast::ExprKind::Ident(name) = stmt.target.kind else {
@@ -360,7 +432,7 @@ mod tests {
         // **unsplit** reading survives: an expression statement about `letx`.
         let p = parse_ok("component A { div { f: { letx; } } }");
         let closure = closure_body(&p);
-        let ast::Stmt::Expr(stmt) = &closure.body[0] else {
+        let ast::Stmt::Expr(stmt) = &closure.body.stmts[0] else {
             panic!("expected an expression statement")
         };
         assert!(matches!(stmt.expr.kind, ast::ExprKind::Ident(_)));
@@ -377,7 +449,7 @@ mod tests {
             let p = parse_ok(source);
             let closure = closure_body(&p);
             assert!(
-                matches!(closure.body[0], ast::Stmt::Assign(_)),
+                matches!(closure.body.stmts[0], ast::Stmt::Assign(_)),
                 "{source:?} is an assignment to a variable of that name"
             );
         }
@@ -391,10 +463,10 @@ mod tests {
         // wants a `;` — so the case moved to a spelled-out `if`.
         let p = parse_ok("component A { div { f: { if a > 0 { g(); } } } }");
         let closure = closure_body(&p);
-        let ast::Stmt::If(stmt) = &closure.body[0] else {
+        let ast::Stmt::If(stmt) = &closure.body.stmts[0] else {
             panic!("expected an if statement")
         };
-        assert_eq!(stmt.then_branch.present().map(Vec::len), Some(1));
+        assert_eq!(branch_len(&stmt.then_branch), Some(1));
     }
 
     #[test]
@@ -403,14 +475,16 @@ mod tests {
         // so an `else` with no block is not a malformed branch.
         let p = parse_ok("component A { div { f: { if a { } else } } }");
         let closure = closure_body(&p);
-        let ast::Stmt::If(stmt) = &closure.body[0] else {
+        let ast::Stmt::If(stmt) = &closure.body.stmts[0] else {
             panic!("expected an if statement")
         };
         assert!(stmt.else_branch.is_none());
-        let ast::Stmt::Expr(trailing) = &closure.body[1] else {
-            panic!("expected the `else` to become a trailing expression")
-        };
-        assert!(!trailing.has_semicolon);
+        let tail = closure
+            .body
+            .tail
+            .as_ref()
+            .expect("the `else` becomes the trailing expression");
+        assert!(matches!(tail.kind, ast::ExprKind::Ident(_)));
     }
 
     #[test]

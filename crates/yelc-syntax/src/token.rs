@@ -22,7 +22,9 @@
 //! - **total tokens: 74** (`EOF` has discriminant 73)
 //!
 //! 74 < 128, so `u128` is sufficient and the seam does **not** need
-//! `TokenSet([u64; N])`. Node kinds (76) live above `EOF` and are never members
+//! `TokenSet([u64; N])`. Node kinds (84 as of 2026-07-29; the count and every
+//! change to it are recorded in `tests::token_kind_counts`) live above `EOF`
+//! and are never members
 //! of a `TokenSet`, so they do not consume set capacity — but they do consume
 //! the `u8` discriminant space, and 150 total is comfortably under 256.
 //!
@@ -363,6 +365,7 @@ pub enum TokenKind {
     ATTRIBUTE_ARG,
 
     FUNC_TYPE,
+    FUNC_BODY,
     FUNC_PARAM_LIST,
     TYPE_PARAM_LIST,
     TYPE_PARAM,
@@ -393,6 +396,7 @@ pub enum TokenKind {
 
     LET_STMT,
     IF_STMT,
+    FOR_STMT,
     ASSIGN_STMT,
     EXPR_STMT,
     STMT_BLOCK,
@@ -576,9 +580,34 @@ mod tests {
         // reason `FUNC_PARAM_LIST` sits beside `FUNC_PARAM`. Additive: no token
         // kind moved and no `TokenSet` changed, so every FIRST and recovery set
         // is bit-for-bit what it was.
+        //
+        // 82 → 84 on 2026-07-29: FUNC_BODY and FOR_STMT, for function bodies
+        // and `for` in statement position (`plans/rewrite/scope.md`
+        // § *function bodies, sharing `Block` with closures* and § *`for` as a
+        // statement*). Two rather than four: the *block* inside both reuses the
+        // existing STMT_BLOCK / CLOSURE_BODY kinds, because `ast::Block` is one
+        // construct and giving each of its four owners a green kind of its own
+        // would be a distinction the AST no longer draws.
+        //
+        // Still no token kind and no `TokenSet`: `for` was already reachable in
+        // statement position through `NAME_FIRST` ⊆ `EXPRESSION_FIRST` ⊆
+        // `STATEMENT_FIRST` — every keyword is a legal identifier here — so
+        // STATEMENT_FIRST is bit-for-bit what it was.
+        //
+        // ⚠️ **This assertion measures `INDEX_EXPR`'s position, not the length
+        // of the list.** It catches every kind *inserted* before `INDEX_EXPR` —
+        // which is every change so far, and the change that matters, since an
+        // insertion shifts existing discriminants. A kind **appended after
+        // `INDEX_EXPR`** is invisible to it: verified by mutation on
+        // 2026-07-29, a `SPURIOUS_KIND` added at the end of the enum left this
+        // test green. So `INDEX_EXPR` must stay the last variant, and moving it
+        // is a change to this test as well as to the enum. Named here rather
+        // than fixed, because the mechanical fix needs a variant count Rust
+        // does not give on stable, and a sentinel variant would be a fake kind
+        // in an enum whose members are all real.
         assert_eq!(
             TokenKind::INDEX_EXPR as u8 - TokenKind::EOF as u8,
-            82,
+            84,
             "node kind count changed"
         );
     }

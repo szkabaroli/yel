@@ -1009,7 +1009,7 @@ mod tests {
         let ast::ExprKind::Closure(closure) = &first_prop_value(&p).kind else {
             panic!("expected a closure, not a record literal")
         };
-        assert!(matches!(closure.body[0], ast::Stmt::Let(_)));
+        assert!(matches!(closure.body.stmts[0], ast::Stmt::Let(_)));
     }
 
     #[test]
@@ -1032,7 +1032,8 @@ mod tests {
         let ast::ExprKind::Closure(closure) = &first_prop_value(&p).kind else {
             panic!("expected a closure")
         };
-        assert!(closure.params.is_empty() && closure.body.is_empty());
+        assert!(closure.params.is_empty());
+        assert!(closure.body.stmts.is_empty() && closure.body.tail.is_none());
     }
 
     #[test]

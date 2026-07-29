@@ -305,8 +305,11 @@ fn children_still_parses_as_a_ui_node_everywhere_it_did_before() {
     let Some(ast::UiNode::For(for_node)) = body.next() else {
         panic!("expected a for node")
     };
+    let ast::ForBody::Nodes(for_body) = &for_node.body else {
+        panic!("a `for` in a template holds UI nodes")
+    };
     assert!(matches!(
-        for_node.body.present().unwrap()[0],
+        for_body.present().unwrap()[0],
         ast::UiNode::Children { .. }
     ));
     assert!(body.next().is_none());

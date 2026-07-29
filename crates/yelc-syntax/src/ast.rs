@@ -575,6 +575,18 @@ pub struct FunctionDecl {
     /// from it. `component A { export x: s32; }` produced a `FunctionDecl`
     /// named `x` with zero parameters and the written `s32` silently orphaned.
     pub signature: Recovered<FuncSignature>,
+    /// `name: func(a: s32) -> s32 { a * 2 }` — the block written directly after
+    /// the signature, with no `=` and no trailing `;`.
+    ///
+    /// `None` means the declaration has no body and **someone else implements
+    /// it**: a host callback (`export global Clock { now: func() -> s64; }`), a
+    /// component-supplied function, an `extern component` method, a `callback`.
+    /// That is the only form that existed before 2026-07-29 and it is unchanged.
+    ///
+    /// Not `Recovered`: an absent body is the ordinary case, not a hole. A body
+    /// that was *opened* and then went wrong is a `Some(Block)` full of `Error`
+    /// statements, which is where the recovery nodes live.
+    pub body: Option<Block>,
 }
 
 /// `( params? ) ( -> type )?`
@@ -805,21 +817,58 @@ pub struct TextNode {
     pub content: Expr,
 }
 
-/// A braced body.
+/// A braced run of *UI nodes*.
 ///
 /// `Missing` means the `{` itself was absent. An `if` with no block is not an
 /// `if` with an empty block, and `component A { if x "a" }` used to be
 /// indistinguishable from `if x { }`.
-pub type Block<T> = Recovered<Vec<T>>;
+///
+/// Named `Block<T>` until 2026-07-29, when the statement half of it became the
+/// [`Block`] struct below — one name could not mean both a bare `Vec` of UI
+/// nodes and a statement list with a tail expression. Statement bodies are
+/// `Recovered<Block>`; this alias is now only ever `Braced<UiNode>`, and it
+/// stays generic so it reads as "the `{ … }` after a template construct" rather
+/// than as a UI-only type.
+pub type Braced<T> = Recovered<Vec<T>>;
+
+/// `{ statement* trailing_expr? }` — the one statement-block construct.
+///
+/// Shared, in this order of appearance, by closure bodies, function bodies,
+/// `if`-statement branches and `for`-statement bodies. A function body and a
+/// closure body differ **only** in where their parameters come from
+/// (`plans/rewrite/scope.md`, 2026-07-29).
+///
+/// # `tail` is the block's value
+///
+/// A final expression *not* followed by `;`. `{ a * 2 }` has a tail; `{ f(); }`
+/// does not. This is deliberately a field and not "the last `Stmt` happens to be
+/// an `ExprStmt` with `has_semicolon: false`", which is what it was before:
+/// `directions.md` §9 collapses `match` arms, `if` branches and ternary arms
+/// into blocks whose tail *is* their value, so "statement position" versus
+/// "expression position" stops being a node distinction and becomes whether the
+/// block has a tail. A boolean on the last element cannot carry that.
+///
+/// `tail` is set wherever the parser reads a semicolon-less final expression,
+/// including in the positions where writing one is an **error** (an
+/// `if`-statement branch, a `for`-statement body). The diagnostic is reported
+/// and the expression is still recorded — dropping it would be the
+/// silently-discarded subtree invariant S5 forbids.
+#[derive(Debug)]
+pub struct Block {
+    pub id: NodeId,
+    pub span: Span,
+    pub stmts: Vec<Stmt>,
+    pub tail: Option<Expr>,
+}
 
 #[derive(Debug)]
 pub struct IfNode {
     pub id: NodeId,
     pub span: Span,
     pub condition: Expr,
-    pub then_branch: Block<UiNode>,
+    pub then_branch: Braced<UiNode>,
     pub else_if_branches: Vec<ElseIfBranch>,
-    pub else_branch: Option<Block<UiNode>>,
+    pub else_branch: Option<Braced<UiNode>>,
 }
 
 #[derive(Debug)]
@@ -827,17 +876,36 @@ pub struct ElseIfBranch {
     pub id: NodeId,
     pub span: Span,
     pub condition: Expr,
-    pub body: Block<UiNode>,
+    pub body: Braced<UiNode>,
 }
 
+/// `for item in iterable key(k)? { … }`, in **either** position.
+///
+/// One node and one parser for both, because the only thing that differs is
+/// what the body holds — [`ForBody`]. Two `for` parsers would be the duplicated
+/// walker anti-spec A3 forbids wearing a different hat.
 #[derive(Debug)]
 pub struct ForNode {
     pub id: NodeId,
     pub span: Span,
     pub item: MaybeIdent,
     pub iterable: Expr,
+    /// `key(expr)`. Grammatical in both positions — the parser is one function
+    /// and accepts the whole `for_node` shape wherever a `for` is legal. It is
+    /// only *meaningful* for list reconciliation in a template; rejecting it in
+    /// statement position is a later phase's call, and the parser accepts the
+    /// grammar rather than the language (see `lib.rs`, out-of-contract notes).
     pub key: Option<Expr>,
-    pub body: Block<UiNode>,
+    pub body: ForBody,
+}
+
+/// What a `for` body holds — the whole difference between the two positions.
+#[derive(Debug)]
+pub enum ForBody {
+    /// Template position: UI nodes.
+    Nodes(Braced<UiNode>),
+    /// Statement position: a statement block.
+    Statements(Recovered<Block>),
 }
 
 // ---------------------------------------------------------------------------
@@ -848,9 +916,15 @@ pub struct ForNode {
 pub enum Stmt {
     Let(LetStmt),
     If(Box<IfStmt>),
+    /// `for item in items { … }` in statement position. The same [`ForNode`]
+    /// [`UiNode::For`] carries, holding a [`ForBody::Statements`] body.
+    For(Box<ForNode>),
     Assign(AssignStmt),
     Expr(ExprStmt),
-    Error { id: NodeId, span: Span },
+    Error {
+        id: NodeId,
+        span: Span,
+    },
 }
 
 impl Recovery for Stmt {
@@ -864,6 +938,7 @@ impl Stmt {
         match self {
             Stmt::Let(stmt) => stmt.span,
             Stmt::If(stmt) => stmt.span,
+            Stmt::For(stmt) => stmt.span,
             Stmt::Assign(stmt) => stmt.span,
             Stmt::Expr(stmt) => stmt.span,
             Stmt::Error { span, .. } => *span,
@@ -885,8 +960,8 @@ pub struct IfStmt {
     pub id: NodeId,
     pub span: Span,
     pub condition: Expr,
-    pub then_branch: Block<Stmt>,
-    pub else_branch: Option<Block<Stmt>>,
+    pub then_branch: Recovered<Block>,
+    pub else_branch: Option<Recovered<Block>>,
 }
 
 /// `target = value;` and `target += value;`
@@ -908,14 +983,18 @@ pub struct AssignStmt {
     pub value: Expr,
 }
 
-/// An expression used as a statement. `has_semicolon` is false for the
-/// `trailing_expr` position at the end of a closure body.
+/// An expression used as a statement: `f(x);`
+///
+/// Always semicolon-terminated. A semicolon-*less* final expression is the
+/// block's [`Block::tail`] and is not a statement at all — which is why the
+/// `has_semicolon: bool` this used to carry is gone. It was the same fact,
+/// stored where nothing could read it without knowing it had to look at the
+/// last element.
 #[derive(Debug)]
 pub struct ExprStmt {
     pub id: NodeId,
     pub span: Span,
     pub expr: Expr,
-    pub has_semicolon: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,7 +1246,10 @@ pub struct ClosureExpr {
     pub id: NodeId,
     pub span: Span,
     pub params: Vec<Recovered<ClosureParam>>,
-    pub body: Vec<Stmt>,
+    /// The `{` is what made this a closure, so the block is always present —
+    /// unlike a function body, which may be absent, or an `if` branch, whose
+    /// `{` may be missing.
+    pub body: Block,
 }
 
 #[derive(Debug)]

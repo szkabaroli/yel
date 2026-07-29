@@ -357,9 +357,29 @@ mod fresh {
         }
     }
 
-    fn push_block(out: &mut Vec<Construct>, block: &na::Block<na::UiNode>) {
+    fn push_braced(out: &mut Vec<Construct>, block: &na::Braced<na::UiNode>) {
         for node in block.present().into_iter().flatten() {
             push_node(out, node);
+        }
+    }
+
+    /// A statement block, in every position that owns one. The tail projects as
+    /// a `stmt:expr`, which is what the frozen parser reads it as: pest's
+    /// `expr_statement` is `expr ~ ";"?`, so the semicolon-less final
+    /// expression is a `Statement::Expr` there and starts at the same offset.
+    fn push_stmt_block(out: &mut Vec<Construct>, block: &na::Block) {
+        for stmt in &block.stmts {
+            push_stmt(out, stmt);
+        }
+        if let Some(tail) = &block.tail {
+            out.push(("stmt:expr", tail.span.start, tail.span.end));
+            push_expr(out, tail);
+        }
+    }
+
+    fn push_stmt_block_recovered(out: &mut Vec<Construct>, block: &na::Recovered<na::Block>) {
+        if let Some(block) = block.present() {
+            push_stmt_block(out, block);
         }
     }
 
@@ -382,13 +402,13 @@ mod fresh {
             na::UiNode::If(node) => {
                 out.push(("node:if", span.start, span.end));
                 push_expr(out, &node.condition);
-                push_block(out, &node.then_branch);
+                push_braced(out, &node.then_branch);
                 for branch in &node.else_if_branches {
                     push_expr(out, &branch.condition);
-                    push_block(out, &branch.body);
+                    push_braced(out, &branch.body);
                 }
                 if let Some(body) = &node.else_branch {
-                    push_block(out, body);
+                    push_braced(out, body);
                 }
             }
             na::UiNode::For(node) => {
@@ -397,10 +417,22 @@ mod fresh {
                 if let Some(key) = &node.key {
                     push_expr(out, key);
                 }
-                push_block(out, &node.body);
+                push_for_body(out, &node.body);
             }
             na::UiNode::Children { .. } => out.push(("node:children", span.start, span.end)),
             na::UiNode::Error { .. } => out.push(("node:error", span.start, span.end)),
+        }
+    }
+
+    /// A `for` body, in whichever position the node was written. In a template
+    /// it is UI nodes; in a block it is statements — and the statement form has
+    /// no frozen counterpart at all, so a program containing one is never
+    /// comparable and this arm is only ever reached through an input `compare`
+    /// has already discarded.
+    fn push_for_body(out: &mut Vec<Construct>, body: &na::ForBody) {
+        match body {
+            na::ForBody::Nodes(nodes) => push_braced(out, nodes),
+            na::ForBody::Statements(block) => push_stmt_block_recovered(out, block),
         }
     }
 
@@ -414,18 +446,23 @@ mod fresh {
             na::Stmt::If(node) => {
                 out.push(("stmt:if", span.start, span.end));
                 push_expr(out, &node.condition);
-                for stmt in node.then_branch.present().into_iter().flatten() {
-                    push_stmt(out, stmt);
+                push_stmt_block_recovered(out, &node.then_branch);
+                if let Some(branch) = &node.else_branch {
+                    push_stmt_block_recovered(out, branch);
                 }
-                for stmt in node
-                    .else_branch
-                    .as_ref()
-                    .and_then(|branch| branch.present())
-                    .into_iter()
-                    .flatten()
-                {
-                    push_stmt(out, stmt);
+            }
+            // `for` in statement position, which the frozen grammar has no
+            // production for — like `stmt:error`, this kind can only appear in
+            // an input the frozen parser rejects, so it is never compared. It
+            // is projected anyway: the match is exhaustive, and a silently
+            // skipped subtree is what that buys.
+            na::Stmt::For(node) => {
+                out.push(("stmt:for", span.start, span.end));
+                push_expr(out, &node.iterable);
+                if let Some(key) = &node.key {
+                    push_expr(out, key);
                 }
+                push_for_body(out, &node.body);
             }
             na::Stmt::Assign(node) => {
                 out.push(("stmt:assign", span.start, span.end));
@@ -444,11 +481,7 @@ mod fresh {
         let mut stack = vec![expr];
         while let Some(expr) = stack.pop() {
             match &expr.kind {
-                na::ExprKind::Closure(closure) => {
-                    for stmt in &closure.body {
-                        push_stmt(out, stmt);
-                    }
-                }
+                na::ExprKind::Closure(closure) => push_stmt_block(out, &closure.body),
                 na::ExprKind::Interpolation(parts) => {
                     stack.extend(parts.iter().filter_map(|part| match part {
                         na::InterpolationPart::Expr(expr) => Some(expr),
