@@ -120,3 +120,51 @@ resolution and it is worth paying — the alternative is a registry nobody check
 `impl` blocks; one-per-type is simpler and can be relaxed later), and whether
 `@impl` on a global that also has state is legal. Neither blocks writing the
 stdlib.
+
+## `Color` is a stdlib variant, not a builtin
+
+**Decided.** `Color` moves out of the compiler and into `stdlib/color.yel` as an
+ordinary `variant`. `#ff0000` keeps desugaring to `Color.rgba(…)`.
+
+### This justifies `Known` rather than removing it
+
+The compiler still has to *find* `Color` to emit that desugaring. What changes is
+the direction:
+
+| | today | after |
+|---|---|---|
+| who declares `Color` | the compiler, in `stdlib.rs` | `stdlib/color.yel` |
+| what `Known::Color` means | a builtin the compiler **provides** | a definition the compiler **requires** |
+
+That second row is the whole point. A *provides* entry with one item looks like
+machinery ahead of its need — which is how the panel found `Known` with zero live
+registration sites (A9). A *requires* entry is rustc's `#[lang = "…"]`: the
+stdlib declares it, the compiler names it, and resolution fails loudly if the
+stdlib does not supply it.
+
+So `KnownItems::resolve` keeps its shape — resolve once, report **every** missing
+entry, `DefId` not `Option<DefId>` — and finally has a real reason to exist.
+
+### It also shrinks the Group B problem
+
+The review panel measured ~240 narrowed program shapes if all ~60 frozen builtins
+were registered into `Definitions`. Every builtin that becomes ordinary stdlib
+source **stops being a compiler-registered name** and stops contributing to that
+count — it collides the way any other stdlib declaration would, under whatever
+rule packages already follow.
+
+`Color` is one of the 9 Type-namespace builtins. The same move is available for
+the other 8 and for most of the 51 Component ones, which is a far better answer
+to Group B than choosing how much narrowing to accept.
+
+### Sequencing
+
+**It cannot move yet.** `stdlib/*.yel` does not compile — `impl`, `primitive`,
+`ref` and `module` are designed and unparsed. So the current one-entry
+registration in `stdlib.rs` is a **placeholder with a scheduled removal**, not a
+design, and should say so at the registration site.
+
+The order: stdlib source compiles → `Color` moves to `stdlib/color.yel` →
+`stdlib.rs`'s registration deletes → `Known::Color` resolves against the loaded
+stdlib. Nothing about `Known`'s API changes on that path, which is the sign the
+shape was right even though its only entry was not.
