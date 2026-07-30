@@ -1,0 +1,337 @@
+package yel:desugar-demo@0.1.0;
+
+@interface(name = "yel:ui/dom@0.1.0")
+module Dom {
+    variant color {
+        red,
+        green,
+        blue,
+        white,
+        black,
+        transparent,
+        rgba(tuple<u8, u8, u8, u8>),
+    }
+
+    variant attribute-value {
+        str(string),
+        bool(bool),
+        s8(s8),
+        s16(s16),
+        s32(s32),
+        s64(s64),
+        u8(u8),
+        u16(u16),
+        u32(u32),
+        u64(u64),
+        f32(f32),
+        f64(f64),
+        char(char),
+        color(color),
+    }
+
+    @import(name = "create-element")
+    create-element: extern func(tag: string) -> node;
+
+    @import(name = "create-text")
+    create-text: externfunc(content: string) -> node;
+
+    @import(name = "create-comment")
+    create-comment: extern func(content: string) -> node;
+
+    @import(name = "set-attribute")
+    set-attribute: extern func(node: node, name: string, value: attribute-value);
+
+    @import(name = "remove-attribute")
+    remove-attribute: extern func(node: node, name: string);
+
+    @import(name = "set-text-content")
+    set-text-content: extern func(node: node, content: string);
+
+    @import(name = "set-style")
+    set-style: extern func(node: node, property: string, value: string);
+
+    @import(name = "set-class")
+    set-class: extern func(node: node, class-name: string);
+
+    @import(name = "append-child")
+    append-child: extern func(parent: node, child: node);
+
+    @import(name = "insert-before")
+    insert-before: extern func(parent: node, node: node, reference: node);
+
+    @import(name = "remove-child")
+    remove-child: extern func(parent: node, child: node);
+
+    @import(name = "remove")
+    remove: extern func(node: node);
+
+    @import(name = "get-parent")
+    get-parent: extern func(node: node) -> node;
+
+    @import(name = "get-next-sibling")
+    get-next-sibling: extern func(node: node) -> node;
+
+    @import(name = "add-event-listener")
+    add-event-listener: extern func(node: node, event: string, handler-id: u32);
+
+    @import(name = "remove-event-listener")
+    remove-event-listener: extern func(node: node, event: string, handler-id: u32);
+
+    @import(name = "insert-after")
+    insert-after: extern func(parent: node, node: node, anchor: node);
+
+    @import(name = "create-fragment")
+    create-fragment: extern func() -> node;
+}
+
+@interface(name = "yel:ui/dispatch@0.1.0")
+module Dispatch {
+    use CounterComponent.{ handle-clicked, registry-get };
+
+    variant event-value {
+        none,
+        input-text(string),
+        input-f64(f64),
+        input-f32(f32),
+        input-s32(s32),
+        input-bool(bool),
+        drop(string),
+        drag-enter(string),
+        drag-leave,
+    }
+
+    @export(name = "dispatch")
+    dispatch: func(handler-id: u32, event: event-value) {
+        let rep = handler-id >> 16;
+        match handler-id & 0xFFFF {
+            0 -> handle-clicked(registry-get(rep))
+        }
+    }
+}
+
+@interface(name = "yel:desugar-demo/counter-component@0.1.0")
+module CounterComponent {
+    use Dom.{
+        create-text,
+        create-comment,
+        append-child,
+        insert-after,
+        set-text-content,
+        remove,
+        add-event-listener,
+        remove-event-listener,
+    };
+
+    record Component {
+        count: s32,
+        tree: TreeRoot,
+        self-handle: u32,
+    }
+
+    record TreeRoot {
+        text-0: node,
+        if-1: If0,
+    }
+
+    record If0 {
+        anchor: node,
+        parent: node,
+        active: bool,
+        branch-then: If0Then,
+    }
+
+    record If0Then {
+        wrapper: node,
+    }
+
+    registry: list<Handle>;
+    registry-len: u32;
+    registry-free-head: s32;
+    current-handle: u32;
+
+    @import(interface = "[export]yel:desugar-demo/counter-component@0.1.0", name = "[resource-new]counter")
+    resource-new: extern func(rep: u32) -> u32;
+
+    registry-get: extern func(rep: u32) -> Component;
+    registry-insert: extern func(self: Component) -> u32;
+    registry-free: extern func(rep: u32);
+
+    @export(name = "#[constructor]counter")
+    export-new: func() -> u32 {
+        let self = new();
+        let rep = registry-insert(self);
+        let h = resource-new(rep);
+        self.self-handle = h;
+        h
+    }
+
+    @export(name = "#[method]counter.mount")
+    export-mount: func(rep: u32, parent: u32) {
+        current-handle = rep;
+        mount(registry-get(rep), parent);
+    }
+
+    @export(name = "#[method]counter.unmount")
+    export-unmount: func(rep: u32) {
+        unmount(registry-get(rep));
+        registry-free(rep);
+    }
+
+    @export(name = "#[method]counter.get-count")
+    export-get-count: func(rep: u32) -> s32 {
+        let self = registry-get(rep);
+        self.count
+    }
+
+    @export(name = "#[method]counter.set-count")
+    export-set-count: func(rep: u32, v: s32) {
+        let self = registry-get(rep);
+        self.count = v;
+        update(self, self.tree);
+    }
+
+    new: func() -> Component {
+        let self = Component {
+            count: 0,
+            tree: TreeRoot { text-0: 0, if-1: none },
+            self-handle: 0,
+        };
+        constructor(self, 0);
+        self
+    }
+
+    constructor: func(self: Component, parent: node) {}
+
+    mount: func(self: Component, parent: node) {
+        let root = create-element-into(parent, "VStack");
+
+        let text-box = create-element-into(root, "Text");
+        self.tree.text-0 = create-text(concat("Count: ",
+                                              s32-to-string(self.count)));
+        append-child(text-box, self.tree.text-0);
+
+        let btn = create-element-into(root, "Button");
+        set-attribute-str(btn, "label", "increment");
+        add-event-listener(btn, "clicked", current-handle << 16 | 0);
+
+        self.tree.if-1 = If0 {
+            anchor: create-comment("if"),
+            parent: root,
+            active: false,
+            branch-then: none,
+        };
+        append-child(root, self.tree.if-1.anchor);
+
+        match self.count > 10 {
+            true -> {
+                self.tree.if-1.branch-then = If0Then { wrapper: 0 };
+                if-branch-mount(self, root, self.tree.if-1,
+                                self.tree.if-1.branch-then);
+                self.tree.if-1.active = true;
+            }
+            false -> self.tree.if-1.active = false
+        }
+    }
+
+    unmount: func(self: Component) {
+        remove(self.tree.text-0);
+        remove(self.tree.if-1.parent);
+        remove(self.tree.if-1.anchor);
+        remove(self.tree.if-1.branch-then.wrapper);
+    }
+
+    update: func(self: Component, tree: TreeRoot) {
+        if-update(self, tree);
+        set-text-content(tree.text-0,
+                         concat("Count: ", s32-to-string(self.count)));
+    }
+
+    if-update: func(self: Component, tree: TreeRoot) {
+        match self.count > 10 {
+            true -> match tree.if-1.active {
+                false -> {
+                    tree.if-1.branch-then = If0Then { wrapper: 0 };
+                    if-branch-mount(self, tree.if-1.parent, tree.if-1,
+                                    tree.if-1.branch-then);
+                    tree.if-1.active = true;
+                }
+                true -> unit
+            }
+            false -> match tree.if-1.active {
+                true -> {
+                    if-branch-unmount(self, tree.if-1.parent,
+                                      tree.if-1.branch-then);
+                    tree.if-1.active = false;
+                }
+                false -> unit
+            }
+        }
+    }
+
+    if-branch-mount: func(self: Component, parent: node, if-0: If0,
+                          branch: If0Then) {
+        branch.wrapper = create-element-into(parent, "Text");
+        set-text-content(branch.wrapper, "high!");
+        insert-after(parent, branch.wrapper, if-0.anchor);
+    }
+
+    if-branch-unmount: func(self: Component, parent: node, branch: If0Then) {
+        remove(branch.wrapper);
+    }
+
+    handle-clicked: func(self: Component) {
+        self.count = self.count + 1;
+        update(self, self.tree);
+    }
+}
+
+from "yel:std/num@0.1.0" include Num;
+
+use Num.{ min };
+use String.{ s32-to-string, concat };
+use Dom.{ create-element, append-child, set-attribute };
+
+record Handle {
+    inst: any,
+    next: s32,
+}
+
+create-element-into: func(parent: node, tag: string) -> node {
+    let n = create-element(tag);
+    append-child(parent, n);
+    n
+}
+
+set-attribute-str: func(node: node, name: string, value: string) {
+    set-attribute(node, name, str(value));
+}
+
+@unsafe
+@primitive(op = "@wasm.memory_copy")
+copy: extern func(dest: u32, src: u32, len: u32);
+
+@unsafe
+@primitive(op = "@yel.malloc")
+alloc: extern func(size: u32, align: u32) -> u32;
+
+@unsafe
+@primitive(op = "@yel.free")
+free: extern func(ptr: u32, size: u32);
+
+@export(name = "cabi_realloc")
+cabi-realloc: func(old: u32, old-size: u32, align: u32, new-size: u32) -> u32 {
+    match new-size == 0 {
+        true -> { free(old, old-size); 0 }
+        false -> {
+            let p = alloc(new-size, align);
+            match old == 0 {
+                true -> p
+                false -> {
+                    copy(p, old, min(old-size, new-size));
+                    free(old, old-size);
+                    p
+                }
+            }
+        }
+    }
+}

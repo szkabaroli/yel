@@ -1,0 +1,24 @@
+// The source side of the desugaring illustration.
+//
+// Deliberately NOT under examples/ or tests/fixtures/ — those directories are
+// swept by `yelc-syntax`'s identity and parity suites against pinned counts, and
+// this file is documentation, not test input. See counter.yelir.
+
+package yel:desugar-demo@0.1.0;
+
+export component Counter {
+    count: s32 = 0;
+
+    VStack {
+        Text { "Count: {count}" }
+
+        Button {
+            label: "increment"
+            clicked: { count = count + 1; }
+        }
+
+        if count > 10 {
+            Text { "high!" }
+        }
+    }
+}

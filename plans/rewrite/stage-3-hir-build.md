@@ -289,6 +289,110 @@ error reports against a *synthesized* `Binary`. The five carried over are safe b
 construction (the 23 fixtures pin them); a **new** one is checked against those
 fixtures before it lands.
 
+### The artifact — and the stage boundary through it
+
+**Added 2026-07-30.** [`plans/desugar/counter.yel`](../desugar/counter.yel) is a
+one-property component; [`counter.yelir`](../desugar/counter.yelir) is what
+lowering makes of it, written out concretely, with
+[its README](../desugar/README.md) carrying the evidence, the fifteen corrections
+that checking it produced, and the compiler bugs it turned up. Read those for
+detail; what belongs *here* is only the boundary — because **the artifact is not
+this stage's output.** It spans four stages, and reading it as one would put that
+conflation into the brief.
+
+**The stage-3 slice** — the only part writable today, since it needs no types:
+
+| in the artifact | why 3 |
+|---|---|
+| the component as a `record`; every UI node gone | definition tables only ([D1](#d1--bindings-and-handlers-are-one-uniform-prop-list)) |
+| `mount` / `unmount` / the per-region update functions, as ordinary functions with the record as first parameter | UFCS; no method concept needed |
+| the UI `if` as `match`, **directly** | [§9](directions.md#9--match-is-the-general-conditional-everything-desugars-into-it) |
+| resolved names; dependency sets | `signalck` reads only `Def`/`Local`, never a type |
+| the five desugarings above | as tabled |
+
+At stage 3 the interpolation is **still an interpolation node** — the artifact
+writes `concat("Count: ", s32-to-string(count))`, which is ahead of this stage on
+that one line and says so.
+
+**What is in the artifact and is not this stage's:**
+
+| | whose | why |
+|---|---|---|
+| types on every node; interpolation → `concat`; **which `*-to-string`** | [4](stage-4-hir-check.md) | type-directed |
+| `for` / `match` binder types; pattern resolution | 4 | [the binder exception](#the-one-exception-binders) |
+| `Component`→`TreeRoot`→`If0`→`If0Then`; the handle registry; effects collapsed to one `update` per signal | [6](stage-6-lower.md) | tree-shape flattening + reactive lowering, exactly the row above |
+| `concat` → `$concat2`; the mangled `@export` names; `cabi_realloc`; the return area; `cabi_post`; the packed handler id | codegen | canonical ABI and arity monomorphization are the back-end's |
+
+Two corrections to the obvious reading of that table, both from the artifact's
+README:
+
+- **`concat` → `$concat2` is codegen's, not LIR's.** The arity scan feeds
+  `RuntimeFunctions::new`, and the monomorphized function is emitted in the wasm
+  builder. The candidates table above says interpolation is *"gone by LIR"*; the
+  `concat` **call** is, the arity family is not.
+- **There is no `concat` overload to pick.** `yelc-sema` declares one variadic
+  `concat` and **eight** `*-to-string` rows, one per source type. So the
+  type-directed choice inside an interpolation is *which `to-string`*, and
+  `concat` needs no type at all. `len` is the name with overloads; `concat` is
+  not.
+
+**What the artifact shows this brief does not say.** It predates the
+UI-lowers-before-typecheck move, and three obligations fall out of writing the
+output down:
+
+1. **`mount` and `unmount` are a pair, and the pairing is this stage's.** Every
+   handle, region and registration the desugaring *creates* is one the teardown
+   must undo. Writing `mount` alone is what hid the obligation — and in the
+   frozen back-end it stayed hidden: there is no effect deregistration and
+   `remove-event-listener` is imported into every module and never called.
+2. **Teardown order is a correctness property, not a style choice.** Effects come
+   off before nodes go away; an effect firing between a node's removal and its
+   own deregistration writes to a node that is gone. Invisible in source, visible
+   the moment the IR is explicit.
+3. **A region lowers to a function *pair* per branch**, not one builder —
+   `if-branch-mount` and `if-branch-unmount`. The [binder exception](#the-one-exception-binders)
+   names the `for`/`match` signature problem; it does not name the pairing.
+
+**Provenance, now demonstrable.** [The obligation](#the-desugarings-diagnostic-obligation)
+argues from a hypothetical `Button { label: 42 }`. The artifact supplies the real
+count: **nine generated functions** in one one-property component — `new`,
+`constructor`, `mount`, `unmount`, two region updates, the `if-branch` pair, and
+the click handler — none of which the user wrote, and every one of which is a
+name a type error can be reported against. Cite it rather than the hypothetical.
+
+**A risk for phase 4, found by writing phase 3's output.** The artifact's
+allocator calls `min(old-size, new-size)`. `min` is registered
+`vec![Ty::S32, Ty::S32] -> S32` (`yelc-sema/src/stdlib.rs:102–108`) and
+`stdlib/num.yel:10` records why — *"Monomorphic on s32 today because there are no
+numeric constraints"* — while the canonical ABI's sizes are **`u32`**. There is
+no `u32` `min`, no constraint to write one generically
+([§3](directions.md#3--generics-are-monomorphization-by-name) is what unblocks
+that), and no coercion. **The first stdlib call in the first concrete lowering is
+one the checker will reject.** Expect it; it is not a lowering bug.
+
+#### ⚠️ Two things in this brief the artifact contradicts
+
+Recorded rather than reconciled, per this directory's rule.
+
+- **[`--emit-hir` says the dump must not round-trip](#yelc2---emit-hir--the-dump-is-a-deliverable-not-a-convenience);
+  the artifact asserts the opposite** (*"the HIR dump must parse as yel"*). The
+  brief's three supporting examples do not support it: `x = x + 1`,
+  `Color.rgba((r,g,b,a))` and a flattened `else if` chain are **all valid yel**,
+  so "a renderer emitting valid `.yel` would have to lie or refuse" does not
+  follow from them. The real obstacles are five *parser* gaps, each measured
+  against `yelc2 --emit-ast` in the artifact's README §1 — top-level `func`,
+  `module M { }`, module-level mutable state, `@export`/`@import` absent from
+  `KNOWN_ATTRIBUTES`, and no variadic syntax. That is a different argument with a
+  different answer, and the decision should be re-taken on it.
+- **[Provenance deliverable 4](#what-is-owed) cannot be written as specified.**
+  It says to grep rendered diagnostics for "the generated-name prefix" and assert
+  zero hits. There is no prefix: `__mount_*` and `__ui_*` appear **nowhere** in
+  the frozen tree — they are invented in this brief's own example — and the
+  back-end's actual scheme is `{comp}-{kind}` (`counter-mount`,
+  `counter-if-update-b0`), which is shape-indistinguishable from a user-written
+  name. Either this stage mandates a prefix for generated functions, or
+  deliverable 4 needs a mechanism that does not depend on one.
+
 ## Decisions
 
 **All decided 2026-07-29.** Reasoning in the [Decision log](#decision-log).
@@ -453,6 +557,33 @@ What it needs before it can be: a decision on **what owns it**. The DoD line
 already assumes an owner — a type constructed between phase 1 and phase 2 — and
 that owner is what has never been named. Pick it and both other defects close:
 the receiver is that type, and the memo is a field on it keyed by `TypeId`.
+
+##### Decided 2026-07-30 — the owner is stage 3's lowering context, in `yelc-hir`
+
+A struct in `yelc-hir` holding `&mut CompilerContext` plus the memo. `type_of` is
+a method on it; the memo is keyed by **`TypeId`**, not a `NodeMap<Ty>` — a
+`NodeMap` keys `HirId`, a different index space, and that mismatch was the
+contradiction.
+
+**`CompilerContext` was not an option**, which is worth stating because it is the
+obvious home and the reason it fails is structural rather than a preference:
+`type_of` looks up by `TypeId`, `TypeId` is `yelc-hir`'s, and `yelc-sema` sits
+**below** `yelc-hir` in the crate graph. It cannot see the type it would have to
+key on. Not a style call — a build error.
+
+The third option, moving `TypeId` down into `yelc-sema` so the context could own
+it, was rejected: it buys one convenience by giving `yelc-sema` knowledge of
+syntax-tree numbering, which is the layer above it. That is the leak this crate
+graph exists to make impossible, and today has been spent tidying instances of it.
+
+**What it costs**, stated so it is not a surprise: only stage 3 can call it
+directly. Stage 4 must be handed the context — one parameter — and the memo dies
+with the lowering, so nothing carries stale entries between compilations. Both
+are acceptable; the second is arguably a feature.
+
+**This closes the gate on phase 3.** Phase 2 stopped here deliberately rather
+than landing `type_of` under a guess, which was the right call — the guess would
+have been `CompilerContext`, and it would not have compiled.
 
 #### 3 · `HirModule` is the noun `ModuleId` → `PackageId` was renamed away from
 
