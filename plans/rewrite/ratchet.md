@@ -26,6 +26,7 @@ started measuring.
 | **2 — driver** | 2026-07-28 | `2505f8d` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | **0** | **2** |
 | **baseline (re-freeze 3)** | 2026-07-29 | `1d12250` | **480 pass / 0 fail** | **85 / 85** | **200 / 200** | — (corpus untouched; no frozen `src/` changed) | **2** |
 | **baseline (re-freeze 4)** | 2026-07-29 | `f2bd1bc` | **481 pass / 0 fail** | **85 / 85** | **200 / 200** | — (corpus untouched; `tests/` only) | **2** |
+| **corrective — 4 unrecorded landings** | 2026-07-30 | `8d4d8e8` | **625 pass / 0 fail** | **85 / 85** | **200 / 200** | **0** | **2** |
 | 3 — HIR build+resolve (incl. `yelc-sema`) | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 4 — HIR check | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
 | 5 — LIR data model | | | ≥ prev | 85 / 85 | ≥ prev | 0 | ≤ prev |
@@ -220,3 +221,61 @@ frozen half is unchanged between the two.
   never; the ceremony is the point.
 - **Execution stays 85/85 exactly.** Not "≥ 85" in spirit — the same 85 tests,
   unmodified. Adding tests is fine; the 85 must all still pass as written.
+
+
+## Corrective row, 2026-07-30 — four landings went unmeasured
+
+**The rule was not followed.** *"A row is per landing, not per crate"* — and between
+`f2bd1bc` (481 tests) and `8d4d8e8` (625) **four landings** went in with no row:
+
+| landing | commits |
+|---|---|
+| `yelc-sema` phase 1 — types, ids, symbol table, builtins, known, context | `9fd68f5`, `a901326`, `0ac41db`, `dc963f6` |
+| the package artifact format | `9a54ad1` |
+| `ModuleId` → `PackageId` | `fbaa95e` |
+| the single-namespace narrowing | `ca905d0` |
+| stage 3 phase 2 — seam types | `8d4d8e8` |
+
+Plus five reopenings of the *closed* stage 1 — `8daa4b9` (`<T>`), `a68e127`
+(attributes), `7899c12` (function bodies + `for`), `da8cbfa` (`return`), and
+`94fc9ef`.
+
+**One corrective row, not five.** Reconstructing per-landing numbers would mean
+checking out each SHA and re-measuring, and a number produced that way is a
+number measured *today* wearing yesterday's label — worse than an honest gap.
+This file's own rule is *"if a past number was measured wrong, add a corrective
+row; do not rewrite the history you are now measuring against."* The same applies
+to a number never taken.
+
+### What the row does and does not say
+
+The measured numbers are real: `625 / 0 / 2`, execution `85 / 85`, fuzz
+`200 / 200`, taken from a clean release build on 2026-07-30.
+
+**But the workspace count is the wrong instrument for what landed.** It went
+481 → 625 while `ca905d0` **reduced what the language accepts** — cross-kind name
+reuse the frozen compiler accepts is now rejected. A suite that grew says nothing
+about that, and no column in this table does either:
+
+- **fuzz** cannot see it — `yel-smith` generates no cross-kind reuse
+- **corpus divergences** cannot see it — zero of 2000 programs contain the
+  construct
+- **execution** cannot see it — those are codegen tests
+
+So `0` in the divergence column is **not** evidence of conformance here. The only
+cover is `yelc-sema/tests/single_namespace.rs`, which drives the frozen compiler
+directly and enumerates the boundary in both directions. Invariant 3 — *"the
+conformance number never goes down"* — was **not verified by this table** for that
+change, and the table cannot verify it. Recorded so nobody reads the row as
+though it had.
+
+### The rule that was applied inconsistently, and its fix
+
+Non-additive changes were deferred to cutover on the strength of `@children`
+(1020 / 2000 programs). Then `ca905d0` — also non-additive — landed. The
+distinction worth having is **measured corpus impact**, not additivity as such:
+`@children` breaks half the corpus, this breaks none of it. That is a defensible
+line and it was not the line written down, so it read as inconsistency.
+
+**Gate non-additive changes on measured impact**, and require the measurement in
+the ratchet row. `scope.md` should say so.
