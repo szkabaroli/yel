@@ -264,7 +264,10 @@ about that, and no column in this table does either:
 
 So `0` in the divergence column is **not** evidence of conformance here. The only
 cover is `yelc-sema/tests/single_namespace.rs`, which drives the frozen compiler
-directly and enumerates the boundary in both directions. Invariant 3 — *"the
+directly. **That test does not enumerate the whole boundary** — a review panel
+found ~240 further narrowed programs on the builtin axis it never touches, and a
+checked-in file (`stdlib/list.yel`) that already breaks. Corrected 2026-07-30;
+see [`scope.md`](scope.md). Invariant 3 — *"the
 conformance number never goes down"* — was **not verified by this table** for that
 change, and the table cannot verify it. Recorded so nobody reads the row as
 though it had.
@@ -274,7 +277,10 @@ though it had.
 Non-additive changes were deferred to cutover on the strength of `@children`
 (1020 / 2000 programs). Then `ca905d0` — also non-additive — landed. The
 distinction worth having is **measured corpus impact**, not additivity as such:
-`@children` breaks half the corpus, this breaks none of it. That is a defensible
+`@children` breaks half the corpus, and this was believed to break none of it.
+**That belief was wrong** — measured 2026-07-30, it breaks `stdlib/list.yel` and
+~240 program shapes once builtins register. The line is still the right line;
+the measurement behind this instance of it was not taken. That is a defensible
 line and it was not the line written down, so it read as inconsistency.
 
 **Gate non-additive changes on measured impact**, and require the measurement in

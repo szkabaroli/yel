@@ -643,7 +643,35 @@ own `check`** — parse → lower → type-check, the same three calls
   `Definitions`, so a pair cannot silently be two forms the frozen tree puts in
   the *same* namespace.
 
-#### The conformance number did not move
+#### ⚠️ CORRECTED 2026-07-30 — the conformance number DID move
+
+**The heading below was false and is kept for the diff.** A review panel measured
+the blast radius independently and found it is **9× larger** than this section
+claims, and that a checked-in file already breaks.
+
+- **30 narrowed pairs enumerated; ~240 more exist on an axis nobody measured.**
+  Builtin names live in the *same* by-name map — 9 in the Type namespace, 51 in
+  Component. Every user declaration whose name matches a builtin's, in a
+  different kind, flips accepted → rejected. Verified against the frozen binary:
+  `global Color`, `component Color`, `record Text`, `global Button` all compile
+  today.
+- **`stdlib/list.yel:8` declares `export global List`, and `List` is a builtin
+  element.** The rewrite's own stdlib is the first casualty. `element List`
+  gives `duplicate definition of \`List\`` on the frozen compiler, which is the
+  proof the builtins are in that map.
+- **The sweep is not exhaustive.** It walks four hard-coded directories (2117
+  files); the repo tracks **2130**. `stdlib/` is among the 13 unswept — and the
+  sweep compares user declarations only against *each other*, never against
+  builtins, so it could not have caught this even with the directory added.
+
+Not live *today* only because `resolve_known` has no non-test caller — which is
+itself a separate finding (the lang-item mechanism has never run). Two review
+lenses reached the same defect from opposite directions.
+
+**A test count is not a conformance measurement.** The suite grew while the
+language shrank; see [`ratchet.md`](ratchet.md)'s corrective row.
+
+#### The conformance number did not move *(superseded — see above)*
 
 Measured, not assumed. Workspace **594 → 612 / 0 failed / 2 ignored** (+18, all
 new tests, none removed — two inverted in place with the reason in a comment);

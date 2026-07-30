@@ -1,5 +1,12 @@
 # res-namespaced-defs
 
+> ⚠️ **SUPERSEDED 2026-07-30 for the rewrite.** `ca905d0` deleted `Namespace`
+> from `yelc-sema` in favour of a single-namespace symbol table, a deliberate
+> user-approved narrowing. This rule still describes the **frozen** tree
+> accurately and is correct history — but it is a *prescription*, and root
+> `CLAUDE.md` points every subagent here. Do not build `(Name, Namespace)`
+> keying in new crates. See `plans/rewrite/scope.md` and `plans/modules.md`.
+>
 > Key the definition table by `(name, namespace)` so types, values, and components can share a name
 
 ## Why It Matters
