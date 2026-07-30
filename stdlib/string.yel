@@ -1,12 +1,115 @@
 // String operations.
 //
-// STATUS: specification artifact. Signatures parse today; nothing compiles
-// this yet. See stdlib/README.md.
+// STATUS: the floor parses and `len` is implemented. `starts-with` does not
+// parse yet — it needs a loop over bytes and hits array.yel's GAP 2 (`if` is
+// not an expression). See the bottom of this file.
 
 package yel:std@0.1.0;
 
+// ── What a string *is* ──────────────────────────────────────────────────────
+//
+// `string` is a bare **`(array (mut i8))` of UTF-8 bytes** — one WASM-GC array
+// type, `$str_bytes`, shared by every string in the module
+// (`yel-wasm-codegen/src/wasm/gc_types.rs`, "a `String` is a GC byte array").
+// The migration off linear memory already happened; see plans/strings-to-gc.md.
+//
+// Grain's WasmGC branch (`oscar/gc-rebased`, "Switch from linear memory to Wasm
+// GC") arrived at the same representation from the same starting point — UTF-8
+// bytes in a GC array rather than the `stringref` proposal. Two differences
+// worth knowing before borrowing their code:
+//
+//   1. **Grain wraps; yel does not.** A Grain `String` is a struct whose field
+//      is the byte array, reached through `getStringArrayRef`. A yel `string`
+//      *is* the array. So yel needs no unwrap step, and no header field is
+//      available to cache a length or a codepoint count in.
+//
+//   2. **Their array ops are per-element-type, not uniform.** `WasmArrayRef`
+//      declares `getI8U`/`setI8`/`copyI8`/`fillI8`/`compareI8` alongside `…I64`
+//      and `…Any` variants, because a WASM-GC `(array i8)` and an
+//      `(array (ref any))` are different types and no single accessor covers
+//      both. array.yel's floor speaks `ref` only and therefore **cannot reach a
+//      string** — strings need their own i8 ops, below.
+//
+//      That partition — {i8, i64, ref} — is exactly the GC-shape stencil that
+//      directions.md §3 raises as the middle path between per-type
+//      monomorphization and erasure. Grain hit it by construction.
+
+// None of these carry `@unsafe`: none mentions `ref`. See num.yel for the rule
+// and array.yel for the declarations that do earn it. Every operation here is
+// bounds-checked by the engine — a bad index traps rather than corrupting.
+export global StrPrimitive {
+    @primitive(op = "@wasm.array_len_i8")
+    bytes-len: func(bytes: string) -> s32;
+
+    // Unsigned byte read. `getI8U` in Grain — the `U` matters: an i8 array
+    // element is *packed*, so reading it needs an explicit sign choice, and
+    // UTF-8 bytes are unsigned. A signed read silently mangles every byte
+    // above 0x7F, which is every non-ASCII character.
+    @primitive(op = "@wasm.array_get_u_i8")
+    byte-at: func(bytes: string, index: s32) -> u8;
+
+    @primitive(op = "@wasm.array_new_i8")
+    bytes-new: func(size: s32) -> string;
+
+    @primitive(op = "@wasm.array_set_i8")
+    byte-set: func(bytes: string, index: s32, value: u8);
+
+    // Bulk compare, the reason `starts-with` is not a hand-rolled loop in
+    // Grain either. Worth having as a primitive rather than building it from
+    // `byte-at`: it is one instruction sequence the engine can vectorise, and
+    // it is the hot path for every prefix/equality check.
+    @primitive(op = "@wasm.array_copy_i8")
+    bytes-copy: func(dest: string, dest-at: s32, src: string, src-at: s32, count: s32);
+}
+
 export global Str {
     // Documented in LANGUAGE.md § Built-in Functions.
-    len: func(text: string) -> s32;
-    starts-with: func(text: string, prefix: string) -> bool;
+    //
+    // **Bytes, not codepoints** — and this is a decision, not an omission.
+    // `LANGUAGE.md` says only "Length of list or string". With UTF-8 in an i8
+    // array, byte length is O(1) (`array.len`) and codepoint length is O(n)
+    // (decode every byte). Grain's GC branch shipped a commit titled "Correct
+    // behaviour of `String.indexOf`" — byte-vs-codepoint indexing is where that
+    // class of bug lives.
+    //
+    // Whatever the frozen compiler already does is the answer this must match;
+    // that is a `known_bugs`-adjacent check, not a free choice. Recorded as a
+    // gap below.
+    len: func(text: string) -> s32 { bytes-len(text) }
+
+    // Does not parse yet — see GAP below. Kept in comment form so the shape and
+    // its blocker stay attached to each other.
+    //
+    // starts-with: func(text: string, prefix: string) -> bool {
+    //     let n = bytes-len(prefix);
+    //     let same = n <= bytes-len(text);
+    //     for i in 0..n {
+    //         if byte-at(text, i) != byte-at(prefix, i) { same = false; }
+    //     }
+    //     same
+    // }
 }
+
+// ── What writing this surfaced ──────────────────────────────────────────────
+//
+// GAP — **`starts-with` needs an early exit and there is none.** `return` was
+//   decided against (`560cde5`), `if` is a statement not an expression
+//   (array.yel GAP 2), and there is no `break`. So the loop above scans the
+//   whole prefix even after a mismatch, using a `same` flag — correct, and
+//   O(n) where O(1)-on-mismatch was available.
+//
+//   Checked: `for i in 0..n { … i … }` parses and binds a usable index, so no
+//   separate counter is needed. Only the early exit is missing.
+//
+// GAP — **`len` is byte length, and nothing says that is right.**
+//   `LANGUAGE.md` § Built-in Functions gives `len | string -> s32 | Length of
+//   list or string` and stops. Byte length and codepoint length differ for every
+//   non-ASCII string, both are defensible, and the frozen compiler has already
+//   picked one. Matching it is a compatibility requirement; documenting it is a
+//   language decision that has never been made.
+//
+// NOT A GAP — a uniform `ref` floor does not cover strings. array.yel's
+//   primitives take `ref` and cannot be applied to `$str_bytes`, because
+//   `(array (mut i8))` and `(array (mut (ref any)))` are distinct WASM-GC types.
+//   This is why `StrPrimitive` exists separately rather than being folded into
+//   `ArrayPrimitive`, and it is the same {i8, i64, ref} partition Grain has.
