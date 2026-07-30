@@ -28,6 +28,102 @@ granted one, and stops the same request arriving three times.
 
 ## Log
 
+## 2026-07-30 — stage 3's seam — `HirMap` is keyed by `(SourceId, NodeId)`, and `type_of` is refused
+
+**Requested by:** stage 3, phase 2 (the seam-types landing).
+
+**Request.** Two changes to the contract in
+[`stage-3-hir-build.md` § Contract](stage-3-hir-build.md#contract), both found by
+writing it as Rust with no body to serve.
+
+**1 · `HirMap`'s key.** The contract specifies
+
+```rust
+pub struct HirMap { map: FxHashMap<HirId, NodeId>, rev_map: FxHashMap<NodeId, HirId> }
+```
+
+copied from ark's `hir_map.rs`, which the brief names as the model. A
+`yelc_syntax::NodeId` is unique **within one `ParsedFile`** and allocated from
+zero per file; `lower_files` is handed the whole file set. So `rev_map` merges
+file 1's node 7 with file 2's, silently, on every multi-file input. The forward
+map is no better: a bare `NodeId` handed back by `node_of` is a number the caller
+cannot interpret.
+
+**Why the citation misleads rather than being wrong.** ark's `NodeId` comes from
+one process-global `AtomicUsize` (`arkc-parser/src/parser.rs:28`), so it *is*
+unique across the compilation and ark's map is correct. Stage 1 rejected that
+design deliberately — a process-global counter makes a node's id depend on how
+many files were parsed earlier, which is
+[A6](anti-spec.md#a6--no-random-seeded-iteration-reaching-output) and would make
+any golden containing node ids unstable. Both calls were right; the composition
+is not. **A reference is a source of shape, and a shape carries assumptions** —
+worth adding to how the ark citations are read, because this is the one construct
+in stage 3's brief that names ark as the model and it is the one that had to
+change.
+
+**Options considered.**
+
+| | cost |
+|---|---|
+| **(a) qualify the key** — `SourceNodeId { source, node }`, both directions | one 8-byte key instead of 4; a new public type in the seam |
+| (b) make `NodeId` globally unique | reopens a closed stage, reintroduces the A6 hazard stage 1 rejected |
+| (c) one `HirMap` per file | `HirModule` spans the set by [D8](stage-3-hir-build.md); N maps is the category error D8 exists to correct |
+| (d) key by `Span` | a `Span` is `(SourceId, start, end)` and two nodes can share one — `Recovered::Missing` has a zero-width span at the same offset as its parent |
+
+**Decision: granted, (a).** It is not a design choice so much as the only shape
+that types: (b) and (c) each contradict a landed decision, and (d) is not
+injective. Landed as `yelc_hir::SourceNodeId`, and `TypeId` wraps it for the same
+reason.
+
+**H2 was restated with it, and that is the more important half.** As written —
+*"total and bidirectional … `hir_of(node_of(h)) == h`"* — H2 **passes under the
+collision it should catch**: the reverse map keeps the last writer, the forward
+map still answers, and the round trip holds for the survivor. A real invariant, a
+real test, and neither can see a real bug
+([A8](anti-spec.md#a8--an-invariant-is-asserted-not-observed)). H2 now also
+requires **injectivity**, asserted in `next_hir_id` where the invariant is
+established, and its test is a two-file input — the round-trip assertion alone is
+kept in the suite and is explicitly *not* the one that covers this.
+
+**2 · `type_of` — refused, pending a decision that is not this agent's.**
+
+```rust
+pub fn type_of(&mut self, ty: TypeId) -> Ty;   // "Memoized in a NodeMap<Ty>"
+```
+
+Three defects, and all three are contract rather than implementation:
+
+1. `&mut self` names no receiver. No type in the brief owns it.
+2. The memo cannot be a `NodeMap<Ty>`: `NodeMap::insert` takes a `HirId` and a
+   `TypeId` is not one. The two declarations are twenty lines apart in the same
+   code block and contradict each other.
+3. The definition of done requires it *"structurally unreachable from H1 phase 1
+   (the collector does not exist yet)"* — a statement about a type the contract
+   never declares.
+
+**Decision: not landed.** Naming the owner closes all three at once (the receiver
+is that type; the memo is a field on it keyed by `TypeId`), and naming it is a
+contract decision. Landing a guess would have made the guess the contract, which
+is the one thing types-before-body exists to prevent. Recorded as the remaining
+gate on phase 3.
+
+**3 · `HirModule` — flagged, not renamed.** `fbaa95e` renamed `ModuleId` →
+`PackageId` because *"the noun was one level off"*. The identical argument applies
+to `HirModule`: it holds a `PackageId`, spans a `Vec<SourceId>`, and D8 says it
+*is* the package — while `module` is becoming a surface keyword for a WIT
+interface and `ModuleId` now means a symbol-table node. `HirPackage` is what the
+reasoning produces. **Refused for this landing**, on the same grounds as
+`type_of`: the seam list said `HirModule`. Filed for decision before phase 3's
+lowering.
+
+**Blast radius.** Stage 4 assumes stage 3's contract and adds only the `types`
+map; it inherits `SourceNodeId` unchanged. Stages 5/6 are unaffected — neither
+`HirMap` nor `SourceNodeId` may cross the frontend seam, and the crate graph
+already forbids it. One artifact consequence, recorded in the brief: `SourceId`
+**does** derive `Serialize` in `yelc-base`, so a `SourceNodeId` in a `Wire` type
+compiles and writes a producer-local index. `Ty`'s type-level guard does not cover
+it; whether `HirMap` crosses at all is stage 3's to decide.
+
 ## 2026-07-29 — `yelc-sema` gains `artifact`; `Namespace` derives `Serialize`
 
 **Requested by:** the package-artifact agent (`plans/modules.md` §6.6).

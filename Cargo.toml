@@ -7,6 +7,7 @@ members = [
   "crates/yelc-syntax",
   "crates/yelc-driver",
   "crates/yelc-sema",
+  "crates/yelc-hir",
   "crates/yel-host",
   "crates/yel-lsp",
   "crates/yel-smith",
@@ -27,6 +28,7 @@ yelc-base = { path = "crates/yelc-base" }
 yelc-syntax = { path = "crates/yelc-syntax" }
 yelc-driver = { path = "crates/yelc-driver" }
 yelc-sema = { path = "crates/yelc-sema" }
+yelc-hir = { path = "crates/yelc-hir" }
 
 # CLI & Error handling
 anyhow = "1"

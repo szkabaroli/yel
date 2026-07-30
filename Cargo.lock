@@ -4048,6 +4048,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "yelc-hir"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+ "rustc-hash",
+ "yelc-base",
+ "yelc-sema",
+ "yelc-syntax",
+]
+
+[[package]]
 name = "yelc-sema"
 version = "0.1.0"
 dependencies = [
