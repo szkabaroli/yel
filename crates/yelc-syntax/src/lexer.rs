@@ -1,4 +1,4 @@
-//! Hand-written lexer.
+//! The lexer.
 //!
 //! # Contract
 //!
