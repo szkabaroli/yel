@@ -1,0 +1,18 @@
+freeze_sha=33e5c7147a84f634eafb3303de495300f27ef585
+compiler_sources_clean=yes
+seeds=2000
+generated_by=scripts/freeze-corpus.sh
+yelc_version=yelc 0.1.0 (33e5c71 2026-07-28 10:35:53 +00:00)
+built: 2026-07-28 12:36:50 +02:00
+rustc: rustc 1.96.0 (ac68faa20 2026-05-25)
+wasm_tools_version=wasm-tools 1.227.1
+src_count=2000
+wit_count=2000
+dot_count=2000
+wasm_count=2000
+known_failures=0
+fail_generate=0
+fail_wit=0
+fail_dot=0
+fail_wasm=0
+fail_validate=0

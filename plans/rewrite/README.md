@@ -221,5 +221,10 @@ frozen path as fatal.
 
 ## Clone setup
 
-The corpus is tracked via git-lfs. `git lfs install` before cloning, or
-`git lfs pull` after.
+Nothing special — **the corpus is no longer tracked** (2026-07-30). A clone gets
+`corpus/`'s metadata (`SHA256SUMS`, `MANIFEST`, `known-failures.txt`) and none of
+the 8000 artifact bodies.
+
+You need the bodies to run the differential. They exist on exactly one machine
+and are **not** regenerable after cutover phase 4 — see
+[`corpus.md`](corpus.md) § *The bodies are local-only*.

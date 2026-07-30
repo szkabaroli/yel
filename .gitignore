@@ -32,10 +32,27 @@ yel-flow-editor/
 # LLVM coverage instrumentation artifacts
 *.profraw
 
-# Rewrite oracle corpus (scripts/freeze-corpus.sh) is tracked in full via
-# git-lfs — see .gitattributes and plans/rewrite/corpus.md. The blanket
-# **/*.wasm rule above would otherwise swallow the frozen components.
-!corpus/wasm/*.wasm
+# Rewrite oracle corpus — the 8000 ARTIFACT BODIES are local-only (2026-07-30).
+#
+# 209 MB, previously tracked via git-lfs. Removed from history: the LFS batch
+# API rate-limits a first-time 8000-object upload, and 8000 entries make every
+# PR diff unreviewable.
+#
+# The four artifact directories are ignored; `corpus/`'s plain-text metadata is
+# NOT — SHA256SUMS, MANIFEST and known-failures.txt total 617 KB (0.3% of the
+# corpus) and are the whole point of keeping anything: `shasum -c` still answers
+# "did anything move?" over all 8000 files, and MANIFEST still pins the freeze
+# SHA. Losing the bodies costs you the ability to *diff* a divergence; losing
+# these would cost you the ability to *detect* one.
+#
+# Regenerate bodies with scripts/freeze-corpus.sh at the freeze SHA. Read
+# plans/rewrite/corpus.md first — seed N does NOT reproduce the same program
+# across yel-smith versions, so a regenerated corpus is a DIFFERENT corpus
+# unless the freeze SHA matches.
+corpus/src/
+corpus/wit/
+corpus/dot/
+corpus/wasm/
 
 # macOS Finder metadata
 .DS_Store

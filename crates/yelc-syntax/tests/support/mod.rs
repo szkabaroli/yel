@@ -9,9 +9,11 @@
 //! silently re-point every allow-list entry at a different program while both
 //! test binaries stayed green. One generator, one set of constants, one place.
 //!
-//! The corpus is tracked through git-lfs, and an unpulled checkout is **not**
-//! empty — it is 2000 pointer stubs with the right names, which satisfies every
-//! count. So the counts below are asserted *and* so is the content; see
+//! The corpus bodies are **not tracked** (2026-07-30): a fresh clone has
+//! `corpus/src` absent or partial, and a stale one can be the wrong corpus
+//! entirely. Historically the same hazard came from git-lfs pointer stubs —
+//! 2000 files with the right names and 130 bytes each, satisfying every count.
+//! Either way the counts below are asserted *and* so is the content; see
 //! [`CORPUS_MIN_BYTES`]. A sweep that silently shrinks to the fixtures, or to
 //! 2000 stubs, proves nothing.
 
@@ -76,7 +78,8 @@ pub fn corpus_sources() -> Vec<PathBuf> {
     assert_eq!(
         files.len(),
         CORPUS_COUNT,
-        "corpus/src holds {} programs, expected {CORPUS_COUNT} — run `git lfs pull`",
+        "corpus/src holds {} programs, expected {CORPUS_COUNT} — regenerate with \
+         `scripts/freeze-corpus.sh` at the freeze SHA in corpus/MANIFEST",
         files.len()
     );
     assert_corpus_content(&files);
@@ -101,7 +104,7 @@ fn assert_corpus_content(files: &[PathBuf]) {
         total >= CORPUS_MIN_BYTES,
         "corpus/src is {total} bytes, expected at least {CORPUS_MIN_BYTES} — \
          this looks like unpulled git-lfs pointer stubs, not Yel source. \
-         Run `git lfs pull`."
+         Regenerate with `scripts/freeze-corpus.sh`."
     );
     for path in files.iter().step_by(499) {
         let content = read(path);

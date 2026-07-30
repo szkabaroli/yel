@@ -53,31 +53,53 @@ identical between them** — stage 1 only added `yelc-syntax` and `yelc-base`, a
 ## Layout
 
 ```
-corpus/                                                     209 MB total, all tracked
-  src/N.yel      × 2000   generated programs — the frozen INPUTS   [git-lfs]
-  wit/N.wit      × 2000   old compiler's WIT                       [git-lfs]
-  dot/N.dot      × 2000   old compiler's DOT                       [git-lfs]
-  wasm/N.wasm    × 2000   old compiler's component                 [git-lfs]
+corpus/                                                209 MB on disk, mostly untracked
+  src/N.yel      × 2000   generated programs — the frozen INPUTS   [LOCAL ONLY]
+  wit/N.wit      × 2000   old compiler's WIT                       [LOCAL ONLY]
+  dot/N.dot      × 2000   old compiler's DOT                       [LOCAL ONLY]
+  wasm/N.wasm    × 2000   old compiler's component                 [LOCAL ONLY]
   SHA256SUMS              sha256 of all 8000 files above           [git, plain]
   known-failures.txt      seed|stage|first error line — EMPTY      [git, plain]
   MANIFEST                provenance + counts                      [git, plain]
 ```
 
-### Everything is tracked, via git-lfs
+### The bodies are local-only — changed 2026-07-30
 
-`.gitattributes` routes `corpus/{src,wit,dot,wasm}/**` through LFS. **Every clone
-needs `git lfs install`.** The blanket `**/*.wasm` ignore rule is negated for
-`corpus/wasm/*.wasm` — without that, the frozen components would be silently
-absent.
+They were tracked in full via git-lfs. That was removed from history, for two
+reasons that turned out to be the same reason:
 
-The reason for tracking all of it rather than digests alone: once the frozen
-tree is deleted (cutover phase 4) the artifact bodies can no longer be
-regenerated, and a digest tells you *that* something moved without telling you
-*what*. A divergence you cannot diff is a divergence you cannot triage.
+- **The first push never completed.** 8000 LFS objects, none previously on the
+  remote, hit GitHub's LFS batch API rate limit partway through and failed.
+- **8000 entries make a PR unreviewable** regardless of content — the diff is
+  rendering 8000 rows, and no reviewer reads past that.
 
-`SHA256SUMS` is still committed as plain text alongside them. It is the cheap
-check — one `shasum -c` answers "did anything move?" over all 8000 files without
-materializing any LFS content — and it stays diffable and reviewable in a PR.
+**What this costs, stated plainly, because the argument for tracking has not
+stopped being true:**
+
+Once the frozen tree is deleted (cutover phase 4) the artifact bodies **cannot
+be regenerated at all**. Before then they can only be regenerated at the freeze
+SHA — and *"seed N does not reliably reproduce the same program, because
+`yel-smith` is part of the workspace and its generator will change."* A
+regenerated corpus is a **different corpus** unless the freeze SHA matches
+exactly. There is now no backup of these 8000 files anywhere but this working
+tree.
+
+**What survives, and why it is the part that mattered most:**
+
+`SHA256SUMS`, `MANIFEST` and `known-failures.txt` stay tracked — 617 KB, 0.3% of
+the corpus. One `shasum -c` still answers *"did anything move?"* across all 8000
+files, and `MANIFEST` still pins the freeze SHA, the toolchain and the counts.
+Losing the bodies costs the ability to **diff** a divergence; losing these would
+have cost the ability to **detect** one, which is strictly worse and was avoided
+for a rounding error of the size.
+
+**Unresolved: where the bodies live.** A release artifact, a second repository,
+and an object store are all viable and none is chosen. Until one is, the corpus
+exists on exactly one machine and the differential dies with that disk. That is
+a real gap, recorded here rather than discovered later.
+
+`SHA256SUMS` is the cheap check — one `shasum -c` answers "did anything move?"
+over all 8000 files, and it stays diffable and reviewable in a PR.
 
 Note `src/` in particular is not optional: seed N does **not** reliably reproduce
 the same program, because `yel-smith` is part of the workspace and its generator

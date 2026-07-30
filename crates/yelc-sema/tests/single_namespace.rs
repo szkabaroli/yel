@@ -467,8 +467,9 @@ const TRACKED_YEL_FILES: usize =
 /// would still have reported a clean census.
 const UNPARSEABLE: &[&str] = &["invalid_call_base.yel"];
 
-/// The corpus is git-lfs tracked, and an unpulled checkout is 2000 pointer
-/// stubs that satisfy every count. Bytes are the content check (anti-spec A14).
+/// The corpus bodies are untracked (2026-07-30), so a checkout can lack them.
+/// The same hole previously came from git-lfs pointer stubs, which satisfied
+/// every count. Bytes are the content check (anti-spec A14).
 const CORPUS_MIN_BYTES: usize = 4_000_000;
 
 fn workspace_root() -> PathBuf {
@@ -496,7 +497,7 @@ fn all_sources() -> Vec<PathBuf> {
     assert_eq!(
         corpus.len(),
         CORPUS_COUNT,
-        "corpus/src holds {} programs — run `git lfs pull`",
+        "corpus/src holds {} programs — regenerate with `scripts/freeze-corpus.sh` at the freeze SHA in corpus/MANIFEST",
         corpus.len(),
     );
     let bytes: usize = corpus
