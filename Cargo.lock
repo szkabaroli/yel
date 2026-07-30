@@ -4044,6 +4044,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "yelc-base",
+ "yelc-sema",
  "yelc-syntax",
 ]
 

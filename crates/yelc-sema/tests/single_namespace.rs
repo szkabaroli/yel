@@ -442,6 +442,31 @@ const CORPUS_COUNT: usize = 2000;
 const POSITIVE_FIXTURE_COUNT: usize = 90;
 const DIAGNOSTIC_FIXTURE_COUNT: usize = 23;
 const EXAMPLE_COUNT: usize = 4;
+const KNOWN_BUG_FIXTURE_COUNT: usize = 3;
+const STDLIB_COUNT: usize = 4;
+const CORE_EXAMPLE_COUNT: usize = 3;
+const EDITOR_SAMPLE_COUNT: usize = 3;
+
+/// Every `.yel` file the repository tracks.
+///
+/// **The sweep covers all of them.** It used to walk four hard-coded
+/// directories — 2117 files — and the 13 it missed included `stdlib/`, which is
+/// the one place a name is declared against the *builtin* inventory rather than
+/// against another user declaration. A sweep that reports "no program does X"
+/// while not reading every program is a sample presented as a census.
+const TRACKED_YEL_FILES: usize =
+    CORPUS_COUNT + POSITIVE_FIXTURE_COUNT + DIAGNOSTIC_FIXTURE_COUNT + EXAMPLE_COUNT
+        + KNOWN_BUG_FIXTURE_COUNT + STDLIB_COUNT + CORE_EXAMPLE_COUNT + EDITOR_SAMPLE_COUNT;
+
+/// The **only** tracked `.yel` file the frozen parser rejects, named rather
+/// than skipped.
+///
+/// It is a diagnostics fixture whose whole job is to be unparseable. Every other
+/// file parses, which is what lets the sweep assert `parsed == total` instead of
+/// `parsed >= 2000` — the old bound let 117 files fail silently and the sweep
+/// would still have reported a clean census.
+const UNPARSEABLE: &[&str] = &["invalid_call_base.yel"];
+
 /// The corpus is git-lfs tracked, and an unpulled checkout is 2000 pointer
 /// stubs that satisfy every count. Bytes are the content check (anti-spec A14).
 const CORPUS_MIN_BYTES: usize = 4_000_000;
@@ -492,11 +517,156 @@ fn all_sources() -> Vec<PathBuf> {
     walk(&root.join("examples"), &mut examples);
     assert_eq!(examples.len(), EXAMPLE_COUNT);
 
+    // The four that used to be missed. `stdlib/` is the one that matters —
+    // it is where a declaration meets the *builtin* inventory rather than
+    // another user declaration, and it is the only place in the tree where a
+    // name is chosen against the language rather than against a program.
+    let mut known_bugs = Vec::new();
+    walk(
+        &root.join("crates/yel-wasm-codegen/tests/fixtures/known_bugs"),
+        &mut known_bugs,
+    );
+    assert_eq!(known_bugs.len(), KNOWN_BUG_FIXTURE_COUNT);
+    let stdlib = yel_files(&root.join("stdlib"));
+    assert_eq!(stdlib.len(), STDLIB_COUNT);
+    let core_examples = yel_files(&root.join("crates/yel-core/examples"));
+    assert_eq!(core_examples.len(), CORE_EXAMPLE_COUNT);
+    let mut editor_samples = Vec::new();
+    walk(&root.join("editors/vscode"), &mut editor_samples);
+    assert_eq!(editor_samples.len(), EDITOR_SAMPLE_COUNT);
+
     let mut all = corpus;
     all.extend(positive);
     all.extend(diagnostics);
     all.extend(examples);
+    all.extend(known_bugs);
+    all.extend(stdlib);
+    all.extend(core_examples);
+    all.extend(editor_samples);
+    assert_eq!(
+        all.len(),
+        TRACKED_YEL_FILES,
+        "the sweep no longer covers every tracked `.yel` file",
+    );
     all
+}
+
+/// The declarations one parsed file makes, as `(name, kind)` pairs.
+///
+/// Extracted so that [`the_extraction_finds_declarations`] can drive it with a
+/// program whose answer is known. Without that, the sweep's "nothing reuses a
+/// name" conclusion is satisfied just as well by an extraction that returns
+/// nothing at all — which is exactly what the mutation `let declared = Vec::new()`
+/// demonstrated, passing silently.
+fn declarations_of(file: &yel_core::syntax::ast::File) -> Vec<(String, DefKind)> {
+    let named = |names: Vec<&str>, kind: DefKind| {
+        names
+            .into_iter()
+            .map(move |name| (name.to_string(), kind))
+            .collect::<Vec<_>>()
+    };
+
+    let mut declared = Vec::new();
+    declared.extend(named(
+        file.records.iter().map(|d| d.node.name.as_str()).collect(),
+        DefKind::Type,
+    ));
+    declared.extend(named(
+        file.enums.iter().map(|d| d.node.name.as_str()).collect(),
+        DefKind::Type,
+    ));
+    declared.extend(named(
+        file.variants.iter().map(|d| d.node.name.as_str()).collect(),
+        DefKind::Type,
+    ));
+    declared.extend(named(
+        file.elements.iter().map(|d| d.node.name.as_str()).collect(),
+        DefKind::Component,
+    ));
+    declared.extend(named(
+        file.extern_components
+            .iter()
+            .map(|d| d.node.name.as_str())
+            .collect(),
+        DefKind::Component,
+    ));
+    declared.extend(named(
+        file.components
+            .iter()
+            .map(|d| d.node.name.as_str())
+            .collect(),
+        DefKind::Component,
+    ));
+    declared.extend(named(
+        file.globals.iter().map(|d| d.node.name.as_str()).collect(),
+        DefKind::Global,
+    ));
+    declared
+}
+
+fn parse_frozen(source: &str) -> Option<yel_core::syntax::ast::File> {
+    yel_core::syntax::parser::parse_file_with_source_id(source, yel_core::SourceId(0))
+        .ok()
+        .map(|parsed| parsed.file)
+}
+
+/// The sweep's instrument, checked against a program whose declarations are
+/// known — **including one that reuses a name across kinds**, so the detector is
+/// shown to fire as well as to find.
+///
+/// This is the control the sweep lacked. `no_checked_in_program_reuses_a_name_across_kinds`
+/// asserts an empty result over 2130 files; an extraction returning `Vec::new()`
+/// satisfies it perfectly, and did.
+#[test]
+fn the_extraction_finds_declarations() {
+    let source = FORMS
+        .iter()
+        .map(|form| (form.declare)(&form.keyword.replace(' ', "")))
+        .collect::<String>();
+    let file = parse_frozen(&source).expect("the generated program parses");
+    let declared = declarations_of(&file);
+
+    assert_eq!(
+        declared.len(),
+        FORMS.len(),
+        "every form must be extracted; the sweep is blind to whatever is missing",
+    );
+    for form in FORMS {
+        let name = form.keyword.replace(' ', "");
+        assert!(
+            declared.contains(&(name.clone(), form.kind)),
+            "`{}` declares `{name}` as {:?} and the extraction did not find it",
+            form.keyword,
+            form.kind,
+        );
+    }
+
+    // And the reuse detector itself: a program that *does* reuse a name must be
+    // reported, or "no program reuses a name" is a statement about the detector.
+    let reusing = format!(
+        "{}{}",
+        (FORMS[0].declare)(CLAIMED),
+        (FORMS[6].declare)(CLAIMED),
+    );
+    let file = parse_frozen(&reusing).expect("the reusing program parses");
+    assert_eq!(
+        cross_kind_reuses(&declarations_of(&file)),
+        vec![CLAIMED.to_string()],
+        "a program that reuses a name across kinds was not detected",
+    );
+}
+
+/// The names a file declares in more than one kind.
+fn cross_kind_reuses(declared: &[(String, DefKind)]) -> Vec<String> {
+    let mut found = Vec::new();
+    for (index, (name, kind)) in declared.iter().enumerate() {
+        for (other_name, other_kind) in &declared[index + 1..] {
+            if name == other_name && kind != other_kind {
+                found.push(name.clone());
+            }
+        }
+    }
+    found
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {

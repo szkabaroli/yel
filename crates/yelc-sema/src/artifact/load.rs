@@ -184,11 +184,14 @@ impl Artifact {
                     serialized.is_export,
                 )
                 .map_err(|_| LoadError::DuplicateDefinition(Box::new(serialized.path.clone())))?;
-            if def_remap.insert(serialized.path.clone(), id).is_some() {
-                return Err(LoadError::DuplicateDefinition(Box::new(
-                    serialized.path.clone(),
-                )));
-            }
+            // `insert`'s return is deliberately dropped. A second entry for a
+            // path would mean two definitions with the same leaf name, and
+            // `defs.register` above is single-namespace — it rejects that first,
+            // for every artifact, always. The guard that used to stand here
+            // returned the same error from a branch nothing could reach, which
+            // advertised a check that could not be tested; the duplicate rule
+            // has exactly one enforcement site and it is the symbol table's.
+            def_remap.insert(serialized.path.clone(), id);
             registered.push(id);
         }
 

@@ -256,10 +256,34 @@ mod tests {
     }
 
     /// Iteration must not inherit the hash map's order — A6.
+    ///
+    /// **Asserted on the rows, not on the ids.** The version of this test that
+    /// stood until 2026-07-30 collected only `(id, _)`, and `iter()` synthesizes
+    /// those ids from `enumerate()` — so reversing the underlying rows still
+    /// yielded `[BuiltinId(0), BuiltinId(1)]` and the test passed while every
+    /// row was paired with the wrong id. Reversing now fails on both the names
+    /// and the id→row agreement.
     #[test]
     fn iteration_is_registration_order() {
-        let (_interner, table) = table();
-        let names: Vec<_> = table.iter().map(|(id, _)| id).collect();
-        assert_eq!(names, vec![BuiltinId(0), BuiltinId(1)]);
+        let (interner, table) = table();
+        let seen: Vec<(BuiltinId, String)> = table
+            .iter()
+            .map(|(id, builtin)| (id, interner.str(builtin.name).to_string()))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (BuiltinId(0), "concat".to_string()),
+                (BuiltinId(1), "len".to_string()),
+            ],
+            "iteration must yield the rows in the order they were registered",
+        );
+
+        // And the id a row is yielded with must address that same row — the
+        // property C1a exists to make unrepresentable.
+        for (id, builtin) in table.iter() {
+            assert_eq!(table.get(id).name, builtin.name);
+            assert_eq!(table.get(id).lowering, builtin.lowering);
+        }
     }
 }

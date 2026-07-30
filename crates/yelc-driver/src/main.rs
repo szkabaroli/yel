@@ -38,6 +38,14 @@ pub struct Args {
     #[arg(long)]
     pub emit_green: bool,
 
+    /// Emit the builtin table and the resolved lang-items.
+    ///
+    /// Depends on no source input, which is what makes it comparable against
+    /// the frozen compiler's tables *before* a file is parsed — the standalone
+    /// checkpoint `yelc-sema::stdlib` owes.
+    #[arg(long)]
+    pub emit_builtins: bool,
+
     /// Emit `green.text()`: the source reconstructed from the tree.
     ///
     /// Invariant S1 says this equals the input byte for byte, for every input,

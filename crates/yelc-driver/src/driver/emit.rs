@@ -7,10 +7,61 @@
 use std::fmt::Write as _;
 
 use yelc_base::{Interner, Span};
+use yelc_sema::{Arity, CompilerContext, Known, LoweringTarget};
 use yelc_syntax::NodeId;
 use yelc_syntax::ast::visit::{self, Visitor};
 use yelc_syntax::ast::*;
 use yelc_syntax::green::GreenNode;
+
+// ---------------------------------------------------------------------------
+// Builtins
+// ---------------------------------------------------------------------------
+
+/// The builtin table and the lang-items, in registration order.
+///
+/// Both halves, because a builtin is one of two shapes and the bug this dump
+/// was added for was exactly half of it being empty: the callable rows lived in
+/// `BuiltinTable` and the named definitions were registered nowhere, so
+/// `resolve_known` had never once succeeded outside a test.
+pub fn builtins(context: &CompilerContext) -> String {
+    let mut out = String::new();
+
+    let _ = writeln!(out, "builtins ({})", context.builtins.len());
+    for (id, builtin) in context.builtins.iter() {
+        let lowering = match &builtin.lowering {
+            LoweringTarget::Op(op) => format!("op {op}"),
+            LoweringTarget::HostImport { interface, func } => {
+                format!("import {interface}#{func}")
+            }
+        };
+        let arity = match &builtin.arity {
+            Arity::Fixed(n) => format!("{n}"),
+            Arity::Variadic { min, .. } => format!("{min}.."),
+        };
+        let _ = writeln!(
+            out,
+            "  {:?} {} arity={arity} params={} {lowering} {:?}",
+            id,
+            context.names.str(builtin.name),
+            builtin.params.len(),
+            builtin.visibility,
+        );
+    }
+
+    let _ = writeln!(out, "lang-items ({})", Known::ALL.len());
+    for &item in Known::ALL {
+        let id = context.known().get(item);
+        let _ = writeln!(
+            out,
+            "  {} = {:?} ({:?})",
+            item.source_name(),
+            id,
+            context.defs.get(id).kind,
+        );
+    }
+
+    out
+}
 
 // ---------------------------------------------------------------------------
 // Green tree

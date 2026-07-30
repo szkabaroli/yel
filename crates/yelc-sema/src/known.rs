@@ -165,6 +165,12 @@ mod tests {
 
     /// C2's point: the invariant fails at the place it is established, not at
     /// each of the places that assume it.
+    ///
+    /// Also the standing assertion that resolution **accumulates**: the
+    /// expectation is `Known::ALL`, not a literal, so an early return from the
+    /// loop fails it as soon as the inventory has a second entry. See
+    /// [`the_message_names_every_entry_it_carries`] for why that is the best
+    /// available statement of the property today.
     #[test]
     fn an_incomplete_registration_fails_at_resolve() {
         let interner = Interner::new();
@@ -173,16 +179,66 @@ mod tests {
         assert_eq!(err.missing, Known::ALL.to_vec());
     }
 
-    /// Reporting one name per run makes finding a half-registered builtin set
-    /// take as many runs as there are missing names.
+    /// The **message** names every entry it carries, not just the first.
+    ///
+    /// # What this replaces, and why the replacement is smaller
+    ///
+    /// Until 2026-07-30 this test was `every_missing_entry_is_reported_not_just_the_first`
+    /// and drove [`KnownItems::resolve`] with an empty table. It was **vacuous
+    /// and could not be made otherwise**: `Known::ALL` has one element, so a
+    /// `break` after the first miss passed it. There is no witness for
+    /// "accumulates rather than stops" in a one-element loop, and manufacturing
+    /// one — a second `Known` variant with no consumer, or a `resolve` that
+    /// takes the item list only so a test can pass a different one — is the
+    /// shape-only port [A9](../../../plans/rewrite/anti-spec.md) forbids.
+    ///
+    /// So the claim is split. The half that *is* falsifiable today is the
+    /// rendering, tested here against a value carrying two entries. The
+    /// accumulation half is asserted structurally by
+    /// [`an_incomplete_registration_fails_at_resolve`] — `err.missing ==
+    /// Known::ALL`, written against the inventory rather than a literal, so it
+    /// becomes a real multi-entry assertion the moment a second lang-item
+    /// lands, with no test to remember to update.
     #[test]
-    fn every_missing_entry_is_reported_not_just_the_first() {
+    fn the_message_names_every_entry_it_carries() {
+        let one = MissingKnownItems {
+            missing: vec![Known::Color],
+        };
+        assert_eq!(
+            one.to_string(),
+            "builtin registration is incomplete; missing: Color",
+        );
+
+        let two = MissingKnownItems {
+            missing: vec![Known::Color, Known::Color],
+        };
+        assert_eq!(
+            two.to_string(),
+            "builtin registration is incomplete; missing: Color, Color",
+            "the message stopped after the first entry",
+        );
+    }
+
+    /// The registration and the resolution loop the **same** inventory, so an
+    /// entry cannot be one without the other.
+    ///
+    /// This is the half of A1 that lives here: `stdlib::register_builtins` is
+    /// where the registration happens and
+    /// `stdlib::tests::register_builtins_registers_the_lang_items_into_definitions`
+    /// is where it is checked, but the property is about this file's
+    /// `Known::ALL` and belongs beside it.
+    #[test]
+    fn resolution_covers_the_whole_inventory() {
         let interner = Interner::new();
-        let defs = Definitions::new(PackageId::LOCAL);
-        let err = KnownItems::resolve(&defs, &interner).unwrap_err();
-        assert_eq!(err.missing.len(), Known::ALL.len());
+        let defs = registered_all(&interner);
+        let known = KnownItems::resolve(&defs, &interner).unwrap();
         for &item in Known::ALL {
-            assert!(err.to_string().contains(item.source_name()));
+            assert_eq!(
+                defs.get(known.get(item)).name,
+                interner.intern(item.source_name()),
+                "`{}` resolved to a definition with another name",
+                item.source_name(),
+            );
         }
     }
 

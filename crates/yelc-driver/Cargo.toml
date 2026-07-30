@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 yelc-base.workspace = true
+yelc-sema.workspace = true
 yelc-syntax.workspace = true
 
 # Determinism guard — see plans/rewrite/anti-spec.md A6.

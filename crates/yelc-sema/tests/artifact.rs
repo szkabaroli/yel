@@ -518,10 +518,19 @@ fn a_format_mismatch_rejects_the_artifact() {
 /// left it green, because registration touches the name interner and the
 /// definition table and not the type interner. Found by mutation, not by
 /// reading. Every table the loader can reach is now asserted.
+///
+/// # The declared type is composite, and that is load-bearing
+///
+/// It used to be `Ty::S32`, which is **pre-interned**: the consumer's
+/// `TypeInterner::new()` already holds it, so re-interning it on a stale
+/// artifact does not move `len()` and the type half of this test passed under a
+/// stamp check moved below pass 2. `list<string>` is interned by nobody until
+/// the loader does it, so the count moves the moment the loader runs.
 #[test]
 fn a_rejected_artifact_touches_no_table() {
     let mut producer = Producer::new();
-    producer.declare("Widget", DefKind::Type, Some(Ty::S32));
+    let list_string = producer.types.intern(TyKind::List(Ty::STRING));
+    producer.declare("Widget", DefKind::Type, Some(list_string));
     let mut artifact = producer.build();
     artifact.stamp.format = 999;
 
@@ -532,6 +541,26 @@ fn a_rejected_artifact_touches_no_table() {
         .unwrap();
 
     let types_before = types.len();
+    // The premise: loading this artifact into this interner *would* intern a
+    // type. Without it, "the count did not move" is also satisfied by an
+    // artifact whose every type the consumer already holds — which is how the
+    // `Ty::S32` version of this test was vacuous.
+    let interned_by_a_good_load = {
+        let probe_names = Interner::new();
+        let probe_types = TypeInterner::new();
+        let before = probe_types.len();
+        producer
+            .build()
+            .load(PackageId(1), &probe_names, &probe_types)
+            .expect("the same artifact with an unmodified stamp loads");
+        probe_types.len() - before
+    };
+    assert!(
+        interned_by_a_good_load > 0,
+        "loading this artifact interns no type at all; the assertion below \
+         cannot distinguish a rejected load from an accepted one",
+    );
+
     assert!(artifact.load_into(defs, &names, &types).is_err());
 
     assert_eq!(types.len(), types_before, "no type was interned");

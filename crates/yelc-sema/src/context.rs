@@ -68,6 +68,32 @@ impl CompilerContext {
         }
     }
 
+    /// **The constructor a compilation uses**: builtins registered, lang-items
+    /// resolved.
+    ///
+    /// [`CompilerContext::new`] gives an *empty* context — no builtin resolves
+    /// in it and [`CompilerContext::known`] panics. Both exist because the
+    /// difference is the thing worth being able to state: the sequence
+    /// `new → register_builtins → resolve_known` is what
+    /// [`crate::known`] documents, and this is the one place it is written down
+    /// as code instead of as prose that every caller re-derives.
+    ///
+    /// # Panics
+    ///
+    /// If a [`Known`](crate::known::Known) entry has no definition afterwards.
+    /// [`register_builtins`](crate::stdlib::register_builtins) loops the same
+    /// inventory `resolve` reads, so this cannot fire from a language change —
+    /// only from the registration being removed, which is exactly what it is
+    /// here to catch.
+    pub fn with_builtins(package: PackageId) -> Self {
+        let mut ctx = Self::new(package);
+        crate::stdlib::register_builtins(&mut ctx);
+        ctx.resolve_known().unwrap_or_else(|missing| {
+            panic!("register_builtins left the lang-item table incomplete: {missing}")
+        });
+        ctx
+    }
+
     /// Resolve the lang-items. Call once, after builtin registration and before
     /// any lowering.
     pub fn resolve_known(&mut self) -> Result<(), crate::known::MissingKnownItems> {
@@ -107,20 +133,16 @@ mod tests {
     use crate::known::Known;
     use yelc_base::{SourceId, Span};
 
-    fn register_known(ctx: &mut CompilerContext) {
-        for &item in Known::ALL {
-            let name = ctx.names.intern(item.source_name());
-            ctx.defs
-                .register(name, item.kind(), Span::new(SourceId::new(0), 0, 1), false)
-                .unwrap();
-        }
-    }
-
+    /// **Through the real registration, not a fixture.**
+    ///
+    /// The version of this test that stood until 2026-07-30 registered the
+    /// lang-items itself, from a helper in this module — so it passed while
+    /// `register_builtins` touched no definition table at all, and every
+    /// non-test caller of [`CompilerContext::known`] would have panicked. A
+    /// fixture that reimplements the step under test measures the fixture.
     #[test]
     fn known_items_resolve_after_registration() {
-        let mut ctx = CompilerContext::default();
-        register_known(&mut ctx);
-        ctx.resolve_known().unwrap();
+        let ctx = CompilerContext::with_builtins(PackageId::LOCAL);
         let _ = ctx.known().get(Known::Color);
     }
 

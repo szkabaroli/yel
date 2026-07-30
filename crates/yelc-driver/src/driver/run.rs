@@ -4,6 +4,7 @@
 //! land, this function grows lines in the middle — it does not grow branches.
 
 use yelc_base::{Diagnostics, Interner, SourceMap};
+use yelc_sema::{CompilerContext, PackageId};
 
 use super::emit;
 use crate::Args;
@@ -22,6 +23,15 @@ pub fn run(args: Args) -> i32 {
     let source = source_map.add_file(&args.file, content.clone());
     let interner = Interner::new();
     let mut diagnostics = Diagnostics::new();
+
+    // Stage 3, phase 1 — the language's own definitions, before a byte of the
+    // file is read. Built unconditionally rather than behind `--emit-builtins`:
+    // it is the sequence `new → register_builtins → resolve_known`, and a
+    // sequence that only runs under a flag is a sequence nobody runs.
+    let context = CompilerContext::with_builtins(PackageId::LOCAL);
+    if args.emit_builtins {
+        print!("{}", emit::builtins(&context));
+    }
 
     // Stage 1 — source → AST. Never fails; see yelc-syntax invariant S6.
     let parsed = yelc_syntax::parse(source, &content, &interner, &mut diagnostics);

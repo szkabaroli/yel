@@ -516,17 +516,44 @@ impl Definitions {
             .map(|id| self.get(id))
     }
 
+    /// The definition `id` names.
+    ///
+    /// # Panics
+    ///
+    /// If `id` belongs to another package. **A hard assert, not a
+    /// `debug_assert`** — the workspace's `[profile.release]` does not enable
+    /// debug assertions, so as a `debug_assert` this check did nothing in the
+    /// shipping build and a foreign [`DefId`] silently read *this* package's
+    /// row at the same index: a wrong name, a wrong kind and a wrong declared
+    /// type, with no diagnostic anywhere. That is reachable as soon as two
+    /// packages are loaded, because [`TyKind::Adt`](crate::types::TyKind::Adt)
+    /// carries a package-qualified id and a consumer holds both tables.
+    ///
+    /// The same invariant is already a hard assert at the artifact writer
+    /// ([`ArtifactWriter::write_def_path`](crate::artifact::ArtifactWriter::write_def_path));
+    /// two spellings of one invariant is how one of them rots. The cost is a
+    /// `u32` compare beside a bounds-checked index.
     pub fn get(&self, id: DefId) -> &Definition {
-        debug_assert_eq!(
+        assert_eq!(
             id.package, self.package,
-            "DefId from another package read out of this table",
+            "a DefId from another package was read out of this table; \
+             it names a definition in that package's Definitions, not this one",
         );
         &self.defs[id.index as usize]
     }
 
     /// Record the declared type discovered during resolution.
+    ///
+    /// # Panics
+    ///
+    /// If `id` belongs to another package — see [`Definitions::get`]. Writing
+    /// through a foreign id is the worse half: it silently overwrites an
+    /// unrelated local definition's type.
     pub fn set_ty(&mut self, id: DefId, ty: Ty) {
-        debug_assert_eq!(id.package, self.package);
+        assert_eq!(
+            id.package, self.package,
+            "a DefId from another package was written through this table",
+        );
         self.defs[id.index as usize].ty = Some(ty);
     }
 
@@ -763,6 +790,40 @@ mod tests {
         assert_eq!(id.package, PackageId::LOCAL);
         assert!(id.is_local());
         assert_ne!(id, DefId::new(PackageId(1), id.index));
+    }
+
+    /// **A hard assert, not a `debug_assert`.** The workspace's
+    /// `[profile.release]` does not enable debug assertions, so the guard this
+    /// replaces did nothing in the shipping build: a foreign `DefId` read this
+    /// table's row at the same index and returned another package's definition
+    /// as if it were local.
+    ///
+    /// `#[should_panic]` is the only way to state that in a test, and it is the
+    /// reason the two below exist at all — a `debug_assert` passes this test
+    /// under `cargo test` and fails the user in release, which is the worst
+    /// possible split.
+    #[test]
+    #[should_panic(expected = "from another package")]
+    fn reading_a_foreign_def_id_panics_rather_than_returning_a_local_row() {
+        let interner = Interner::new();
+        let mut defs = Definitions::new(PackageId::LOCAL);
+        let local = defs
+            .register(interner.intern("Local"), DefKind::Type, span(), false)
+            .unwrap();
+        // Same index, different package — exactly what a `TyKind::Adt` from a
+        // loaded artifact carries, and what silently aliased `Local`.
+        let _ = defs.get(DefId::new(PackageId::new(4), local.index));
+    }
+
+    #[test]
+    #[should_panic(expected = "from another package")]
+    fn writing_through_a_foreign_def_id_panics_rather_than_overwriting_a_local_row() {
+        let interner = Interner::new();
+        let mut defs = Definitions::new(PackageId::LOCAL);
+        let local = defs
+            .register(interner.intern("Local"), DefKind::Value, span(), false)
+            .unwrap();
+        defs.set_ty(DefId::new(PackageId::new(4), local.index), Ty::S32);
     }
 
     /// A6: iteration order must not come from the hash map.
