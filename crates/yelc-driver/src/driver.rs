@@ -10,6 +10,7 @@
 //! reference for what not to build, not a module to port.
 
 pub mod emit;
+pub mod package;
 pub mod run;
 
 pub use self::run::run;

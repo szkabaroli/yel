@@ -298,6 +298,63 @@ needs none, so a typical app has perhaps one — for the DOM. That is a better f
 than Grain's model, where every file split costs an import line, and it is why
 "one component per file" stays free.
 
+### Decided 2026-07-30 — every file declares, and disagreement is an error
+
+Go's rule, adopted: **every file in a package directory carries the `package`
+clause, and all of them must be identical.** Two files that disagree is a hard
+error at directory load, before any typechecking — Go reports it as `found
+packages a (x.go) and b (y.go) in <dir>`, naming both files, and yel's should
+too. Naming both is the whole value of the diagnostic: the error is a
+disagreement, so a message that names one side asks the reader to go find the
+other.
+
+**WIT's rule is weaker, and this is deliberately stricter.** Verified against
+`wit-parser-0.252.0` (`src/ast/resolve.rs:109`), whose own comment reads: *"Only
+one file needs to mention it, but if multiple mention it then they must all
+match."* So a five-file WIT package may name itself once and leave four files
+with no clause at all.
+
+Strictness in this direction is free: every Go-legal package directory is also
+WIT-legal, so nothing at the boundary has to reconcile the two. And the weaker
+rule buys a thing worth refusing — a file whose package you determine by reading
+its siblings. That is precisely the "which unit am I in" confusion [D8](rewrite/stage-3-hir-build.md)
+and the section above it spend their length designing out; re-admitting it to
+save four lines of boilerplate is a bad trade.
+
+**A missing clause is an error in its own right**, and a different one from a
+mismatch. Absence has no defensible default: inferring the package from a
+sibling is the WIT behaviour just rejected, and inferring it from the directory
+name reintroduces path-identifies-package, which the section above exists to
+deny. So a file with no `package` clause is rejected on its own, named on its
+own, without reference to any other file — a one-file package with no clause is
+just as wrong as a five-file one.
+
+**The version is part of the identifier — provisionally.** Unlike Go's bare
+`package counter`, yel's clause carries `@0.1.0`, and wit-parser compares the
+*whole* name, version included. So `@0.1.0` in one file and `@0.2.0` in another
+is a disagreement, not a merge — correctly, since a directory holding two
+versions is a directory that is two packages.
+
+**The version is slated for removal** (decided 2026-07-30, unscheduled). Keeping
+it for now costs nothing and removing it later costs little: WIT's own grammar
+makes the version optional (`package ns:name;` is legal), so dropping it stays
+WIT-legal and the comparison rule above degrades to comparing bare names. What
+it does mean is that **no code may treat the version as load-bearing** — not for
+resolution, not for artifact keying, not for `deps/` layout. Anything that grows
+a dependency on it is work that will have to be undone. Write the comparison
+against the whole identifier and let the version be one optional component of
+it.
+
+**Not adopted: Go's `_test` exception.** Go permits `package foo_test` beside
+`package foo` in one directory, for tests that consume the package as an outside
+caller would. Yel has no test-package concept, so there is nothing to except.
+Recorded because it is the *only* hole in Go's rule — if a test story ever wants
+one, this is the precedent, and it should be re-derived rather than assumed.
+
+**Where the check lands:** package discovery, before parse-to-HIR. It needs the
+`package` clause of every file and nothing else, so it runs before the collector
+and reports without a symbol table. It is not a stage-3 phase 2 concern.
+
 ### The specifier shapes are disjoint by construction
 
 An earlier draft required the interface segment on WIT ids so `ns:name` and

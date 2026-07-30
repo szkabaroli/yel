@@ -66,6 +66,90 @@ enumerated divergence — toward one anchor and one effect subscription instead 
 two — and every diverging program gets a line in
 [`goldens-changed.md`](goldens-changed.md).
 
+## Where many packages become one wasm
+
+**This phase is the join point.** Above it everything is per-package; below it
+nothing is. A compilation reads a local package plus every package it imports —
+`yel:std` at minimum — and emits **one** wasm module, and this is the only step
+at which that reduction can happen.
+
+Why here and nowhere else, from the types rather than from taste:
+
+- Everything above LIR is **named**. `DefId` carries a `PackageId`,
+  `Definitions` discriminates by it, and each package is a WIT package at the
+  boundary. `HirModule.id` *is* a `PackageId`, and `HirItemId`/`BodyId` are
+  `IndexVec` indices **local to one module** — so a cross-package reference
+  structurally cannot be a `HirItemId`; it must be a `DefId{package, index}`.
+  Separate HIR per package is not a preference, the id spaces already assume it.
+- LIR is flat and frontend-agnostic — functions, blocks, ops. So is a wasm
+  module. Neither has a package concept and nothing below could reconstruct one.
+
+So the package dimension must be **gone** by the time LIR exists, which puts the
+seam at this phase exactly.
+
+### Lower from roots — not merge, then lower
+
+Start at the local package's exports (the world's exports, plus
+`cabi_realloc`), walk reachable `DefId`s, and when one lands in another package
+read that package's `HirModule`. **Nothing is merged.** The lowerer reads from a
+`PackageId → HirModule` map, and the other package is simply another place it
+looks. Three reasons this is the shape, not one of two options:
+
+1. **Dead code.** stdlib is ~360 lines across four files today and will grow.
+   Merge-then-lower emits all of it and asks the wasm optimizer to prove the rest
+   unreachable. Root-walking does the elimination at the one place that knows the
+   roots.
+2. **Monomorphization already forces demand-driven lowering.** The recommendation
+   in [`open-decisions.md`](open-decisions.md) is monomorphize-by-type, and
+   [F15](findings.md#f15) records that the frozen compiler *already*
+   monomorphizes `filter` per call site. A monomorphizing lowerer is
+   demand-driven by construction — a generic body cannot be lowered until its
+   instantiation is known, and that is known only at the call site. **The
+   machinery that turns N packages into one wasm is the same machinery generics
+   need.** Building merge-then-lower means building it twice and deleting one.
+3. It is rustc's monomorphization collector, walking from roots across crates,
+   for these reasons.
+
+### Determinism is not free here
+
+A demand-driven walk emits functions in **discovery order**, so the emitted order
+is a function of how roots and memo entries are iterated. A `HashMap` anywhere in
+that path makes the output vary between builds and the goldens flap for no source
+change ([A6](anti-spec.md#a6--no-random-seeded-iteration-reaching-output)).
+The roots must be walked in a stable order and the instantiation memo must
+iterate deterministically. This is the phase's most easily-missed A6 obligation,
+because unlike a sorted output list the hazard is in the *control flow*, not in a
+data structure someone will notice.
+
+### What must exist before this phase can be written
+
+Something has to hold `PackageId → HirModule`. `CompilerContext` owns
+`Definitions` and is the natural owner. **Today nothing holds it** —
+`lower_files` returns one module to its caller and `yelc-driver` drops it.
+Stage 3 does not owe this; it is named here so the phase that needs it does not
+discover it mid-write.
+
+### The precompiled-package cap, which is [B1](open-decisions.md) wearing a different hat
+
+The artifact carries `SerializedDef { path, ty, is_export }` — **signatures, no
+bodies**. So a precompiled `yel:std` lets a call to `min` typecheck but not
+be emitted, and `min` is not a WIT import: it is compiled into the output
+([`plans/desugar/counter.yelir`](../desugar/counter.yelir) calls it inside
+`cabi-realloc`). Cross-package bodies must therefore come from source, lowered
+in-process.
+
+That reads as a build-time cost and is not. **Under monomorphization a generic
+function cannot be precompiled at all** — there is nothing to compile until the
+instantiation is known. rustc ships MIR in rlibs for exactly this reason. So
+while bodies stay out of the artifact, the precompiled-package story is capped at
+non-generic, non-inlined functions *permanently*, not until someone optimizes it.
+
+B1 kept `Serialize` off `Ty` on other grounds and settled this one in passing.
+The alternative that does **not** reopen it: cache stdlib below HIR, as a lowered
+LIR or wasm object, which sidesteps type serialization entirely. That is a
+separate decision and is not made here — it is recorded so that "precompiled
+stdlib" is never planned as though the artifact already supports it.
+
 ## Directions in play
 
 [§1 — builtins are a table](directions.md#1--builtins-are-a-table-not-a-field-per-builtin),

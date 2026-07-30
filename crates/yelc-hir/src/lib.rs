@@ -53,10 +53,12 @@
 
 pub mod ids;
 pub mod map;
+pub mod package;
 pub mod module;
 
 pub use ids::{BodyId, HirId, HirItemId, SourceNodeId, TypeId};
 pub use map::HirMap;
+pub use package::{PackageIdentity, check_package_identity};
 pub use module::{HirBody, HirItem, HirModule};
 pub use node_map::NodeMap;
 

@@ -82,6 +82,13 @@ pub enum ErrorCode {
     SyntaxError,
     /// A package identifier is not a valid WIT kebab-case name.
     InvalidPackageName,
+    /// A file in a package directory carries no `package` declaration.
+    ///
+    /// Distinct from [`ErrorCode::PackageNameMismatch`] on purpose: absence has
+    /// no other file to point at, so it is reported against the one file alone.
+    MissingPackageDecl,
+    /// Two files in one package directory declare different packages.
+    PackageNameMismatch,
 
     // — Warnings —
     /// A setter writes a signal that its companion getter also reads.
@@ -114,6 +121,8 @@ impl ErrorCode {
             ErrorCode::InvalidValueBinding => "E0050",
             ErrorCode::SyntaxError => "E0060",
             ErrorCode::InvalidPackageName => "E0070",
+            ErrorCode::MissingPackageDecl => "E0071",
+            ErrorCode::PackageNameMismatch => "E0072",
             ErrorCode::SetterOverwritesGetter => "W0001",
         }
     }

@@ -27,11 +27,21 @@ use clap::Parser;
 #[command(name = "yelc2")]
 #[command(about = "Yel compiler (rewrite) — parse a file and emit its IRs", long_about = None)]
 pub struct Args {
-    /// The `.yel` file to read.
-    pub file: PathBuf,
+    /// The package to compile: a **directory** of `.yel` files.
+    ///
+    /// A single file is also accepted and read as a one-file package, which
+    /// keeps `--emit-green-text` — a per-file instrument — usable.
+    pub path: PathBuf,
 
-    /// Emit the typed AST. Optionally filter to one top-level item by name.
-    #[arg(long, value_name = "ITEM", num_args = 0..=1, default_missing_value = "")]
+    /// Emit the typed AST. Optionally filter to one top-level item by name,
+    /// written `--emit-ast=Counter`.
+    ///
+    /// `require_equals` is load-bearing, not style. With an optional value and
+    /// no `=`, clap reads the **next token** as the filter — so
+    /// `--emit-ast counter/` filtered for an item named `counter/` and then
+    /// reported the package argument missing. The separator makes the value
+    /// unambiguous and gives the positional back.
+    #[arg(long, value_name = "ITEM", num_args = 0..=1, require_equals = true, default_missing_value = "")]
     pub emit_ast: Option<String>,
 
     /// Emit the green tree — kinds and widths, trivia included.

@@ -1147,3 +1147,58 @@ That is a separate decision and is not made here.
 **85 / 85**; parity **12** and identity **7**, unchanged — and *unchanged is not
 evidence here*, see [`scope.md`](scope.md). freeze-check clean. 17 deliberate
 breakages, 17 caught; one no-op control, correctly not caught.
+
+---
+
+## `yelc-hir` gains `check_package_identity` — 2026-07-30
+
+**Requested by** the driver going directory-oriented. **Granted**, because the
+alternative homes are all worse for stated reasons rather than taste.
+
+`plans/modules.md` decided that a package is a directory, every file declares
+`package ns:name@version;`, and disagreement is an error. Enforcing that needs a
+`&[ParsedFile]` and a `Diagnostics` in one place, and until now nothing had both:
+
+- **`yelc-syntax` cannot**, and this is the interesting one — the rule is about a
+  *set* of files, so a parser that enforced it would be a parser holding state
+  across parses. That is a different kind of object than the one stage 1 built.
+- **`yelc-sema` cannot** — it sits below `yelc-syntax` and cannot name
+  `ast::PackageDecl`. The same wall that stopped `type_of` from living on
+  `CompilerContext`, hit from the other side.
+- **The driver must not** — its module doc forbids growing language behaviour,
+  and "which files disagree" is a language rule.
+
+So `yelc-hir` is not a convenient home, it is the **first** one, and that is the
+argument for it. It runs before `lower_files` rather than inside: it reads each
+file's `package` clause and nothing else, needs no symbol table, and reports
+without one.
+
+Two error codes added in `yelc-base`: `MissingPackageDecl` (E0071) and
+`PackageNameMismatch` (E0072). **Deliberately two.** Absence has no other file to
+point at, so it is reported against the one file alone; a mismatch names both
+sides, because an error that reports a disagreement while naming one side asks
+the reader to go find the other. Go names both files and is right to.
+
+### A pre-existing driver bug this surfaced
+
+`--emit-ast` was declared `num_args = 0..=1` without `require_equals`, so clap
+read the **next token** as the optional filter. `yelc2 --emit-ast foo.yel`
+filtered for an item named `foo.yel` and then reported the positional missing —
+the flag only worked when the path came first. It predates this change and was
+invisible because every recorded invocation happened to put the path first.
+
+The driver also kept its own `SourceMap` and `Diagnostics` beside the ones on
+`CompilerContext`: two id spaces, nothing checking they agreed, spans minted
+against one and rendered against the other (`anti-spec.md` F12). Now one of each,
+on the context.
+
+**Measured.** Workspace **612 → 642 / 0 failed / 2 ignored**. freeze-check clean.
+The ten new tests were mutation-tested against three breakages — version dropped
+from the comparison, mismatch arm silenced, absence arm silenced — and all three
+were caught by 4, 4, and 3 tests respectively. The implementation was restored
+and the restoration verified by content comparison, not by assumption.
+
+**Not covered by parity or identity, and this is expected**: the corpus has no
+multi-file program and no `package` clause, so both suites stay green through the
+whole change. That is the oracle's vocabulary blindness (`scope.md`), which is
+why the tests above are hand-written rather than inferred from a sweep.
