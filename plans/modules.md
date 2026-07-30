@@ -631,3 +631,118 @@ Nothing here is implemented, and none of it is on the surface-break list in
 Steps 2–4 are surface changes and belong in `scope.md`'s ledger with the other
 nine, landing in the same scoped reopening after stage 4 — additive, and outside
 the differential, so **`yel-smith` must learn each before it lands**.
+
+---
+
+## 8 · Method calls: pure UFCS, and no `impl`
+
+**Decided 2026-07-30. This supersedes §2 — `impl T { … }` is withdrawn.**
+
+Any function is callable in method position. `x.f(a)` desugars to `f(x, a)`; the
+callee is then resolved by ordinary overload resolution against the argument
+types. A function whose first parameter is `string` *is* a method on `string`,
+by virtue of its signature and nothing else.
+
+```yel
+// stdlib — top-level free functions
+len: func(text: string) -> s32 { #array.len.i8(text) }
+starts-with: func(text: string, prefix: string) -> bool { … }
+```
+```yel
+// user code — both spellings are the same call
+text.len()          starts-with(text, "ye")
+len(text)           text.starts-with("ye")
+```
+
+### Why `impl` is withdrawn
+
+§2 argued for `impl` because *"the desugar resolves in a flat namespace, and the
+stdlib is not flat — `len` lives inside `impl string`."* **That was circular.**
+`len` lived inside `impl string` because §2 chose `impl`. With top-level free
+functions — real, once [the root is the world](#the-root-is-the-world) — the
+namespace *is* flat and the desugar works unchanged.
+
+The overload objection dissolved too: `len(string)` and `len(list<T>)` are two
+overloads picked by argument type, and `by_name` became multi-valued in
+`ca905d0`.
+
+What `impl` would have cost, measured after the fact:
+
+- a new item form
+- **a third scope kind** — and the review panel's F3 found `impl` is already
+  *pre-broken*: the symbol table has root plus one child per `include`, and the
+  depth cap is a **compile error** by design (`bind_in_module` takes a `DefKind`,
+  which has no `Module` variant). `impl` requires undoing the flatness
+  enforcement built deliberately to match WIT.
+- and it needed stage 4 anyway, so it bought no earlier resolution
+
+| | needs stage 4 | new item form | new scope kind |
+|---|---|---|---|
+| `impl T { }` | yes | **yes** | **yes** |
+| pure UFCS | yes | no | no |
+
+### There is no type → methods mapping, and there must not be one
+
+*"Which functions belong to `string`"* is already stated by each function's first
+parameter. A stored mapping would restate it, and then the two could disagree
+with nothing checking — [F12](rewrite/findings.md)'s shape, which the builtin
+table exists to retire.
+
+An **index** (`Ty → methods`) is fine as a *derived cache* for completion, built
+from the same signatures and invalidated with them. It must never be the source
+of truth.
+
+### What it needs, and what it does not
+
+| | |
+|---|---|
+| top-level free functions | established with root-as-world |
+| `x.f(a)` → `f(x, a)` | the frozen tree's `MethodCall → Call`, a recorded keeper |
+| picking the overload | multi-valued `by_name` — landed |
+| generic instantiation (`list<s32>` vs `list<T>`) | **owed by stage 4 regardless** |
+| a type→methods table | **no** |
+| `impl` / `@method` / `self` | **no** |
+
+### `MethodCall` should not survive into HIR
+
+rustc's `MethodCall` node carries **adjustments** — autoref, autoderef, trait
+selection, receiver coercion. **Yel has none of those.** Stripped of them the node
+is `Call { callee, args: [receiver, …] }` with the first argument labelled, and
+the label is provenance — which
+[stage 3 already owes a mechanism for](rewrite/stage-3-hir-build.md#the-desugarings-diagnostic-obligation),
+because the UI desugaring reports errors against generated code.
+
+So stage 3 emits a plain `Call` plus provenance, and method resolution stops
+being a special operation. Porting `MethodCall` would be importing a solution to
+a problem yel does not have — the *read the frozen tree, do not port it* case
+exactly.
+
+### The rejected alternative, and why it stays rejected
+
+A first parameter named `self` would mark methods explicitly, so that a helper
+`format: func(x: string, …)` does not silently become `.format()` on every
+string.
+
+**Not taken.** That leak is not a correctness problem — semantics are unchanged,
+resolution is by type either way, nothing breaks. It is IDE noise and a fuzzy
+conceptual line, both of which scale with codebase size that yel does not have.
+Against that, pure UFCS has **nothing to teach**: *any function is callable with
+dot syntax*, no second category, no rule about which functions qualify. The
+stdlib never has to decide which helpers deserve method status.
+
+**The one argument that survives is reversibility** — marked→pure is additive,
+pure→marked is a break. It is held loosely on purpose: that same reasoning
+declined `while` correctly and `return` incorrectly on the same day, and it only
+works once the code that would settle it has been *written*. Here that code is a
+stdlib that does not yet compile.
+
+**If the noise becomes real**, add a marker as an **opt-out** (`@no-method`)
+rather than an opt-in. Existing code keeps working and the break inverts, which
+preserves reversibility without paying annotation cost now.
+
+### Not demonstrable until stage 4
+
+`"hello".len()` parses today (verified: `Expr PathCall`) and will lower, but
+nothing about it can be *checked* until the checker exists. The machinery savings
+are immediate; the ergonomics are not. Do not read "no `impl` needed" as "method
+calls work now."
