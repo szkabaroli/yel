@@ -112,7 +112,10 @@ impl Stamp {
     /// The two enums have the same four variants in the same order, so postcard
     /// writes **identical bytes** and a stale artifact would have loaded
     /// silently — which is exactly the case this constant exists for.
-    pub const FORMAT: u32 = 2;
+    /// 3: `SerializedDef` gained `members` (2026-07-31) — postcard writes
+    /// fields by position, so the change is invisible in the bytes and only
+    /// this number says it happened.
+    pub const FORMAT: u32 = 3;
 
     /// The producing compiler's version.
     ///

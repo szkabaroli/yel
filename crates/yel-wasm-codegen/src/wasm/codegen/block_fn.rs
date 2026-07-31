@@ -7,9 +7,9 @@
 use rustc_hash::FxHashMap as HashMap;
 
 use wasm_encoder::{Function, Instruction, ValType};
+use yel_core::ids::BlockId;
 use yel_core::lir::arena::LirResourceArena;
 use yel_core::lir::{LirBlock, LirResource, LirSlotKind};
-use yel_core::ids::BlockId;
 
 use super::super::CodegenError;
 use super::super::WasmPackageBuilder;
@@ -144,7 +144,9 @@ impl<'a> WasmPackageBuilder<'a> {
         let (max_i32_scratch, max_i64_scratch, max_f32_scratch, max_f64_scratch) =
             block.max_flat_scratch_counts;
 
-        let comp_layout = comp_idx.map(|ci| self.gc_layouts[ci].clone()).unwrap_or_default();
+        let comp_layout = comp_idx
+            .map(|ci| self.gc_layouts[ci].clone())
+            .unwrap_or_default();
         // `skip_params: 0` — UI's convention is that every Temp slot
         // (including the ones that back wasm-level params) gets its
         // own wasm local; the prologue copies wasm params into the
@@ -156,10 +158,8 @@ impl<'a> WasmPackageBuilder<'a> {
         // (sorted by per-block local_idx). slot_local's offset math
         // mirrors this order: Block Temps add `num_resource_slots` to
         // their local_idx.
-        let mut locals =
-            self.declare_function_locals(component.slots(), 0, &comp_layout)?;
-        let block_locals =
-            self.declare_function_locals(&block.slots, 0, &comp_layout)?;
+        let mut locals = self.declare_function_locals(component.slots(), 0, &comp_layout)?;
+        let block_locals = self.declare_function_locals(&block.slots, 0, &comp_layout)?;
         locals.extend(block_locals);
 
         // Append per-valtype scratch locals for flat-slot signal stores.
@@ -296,7 +296,9 @@ impl<'a> WasmPackageBuilder<'a> {
         // (ctor + mount each consume retention slots from index 0).
         // Field-driven via the component's identity fields.
         if is_lifecycle {
-            if let Some(ci) = comp_idx { self.parent_retention_cursor.insert(ci, 0); }
+            if let Some(ci) = comp_idx {
+                self.parent_retention_cursor.insert(ci, 0);
+            }
         }
         // Phase 0.3o: user params land at wasm index
         // `self_ref_param_count + i`.
@@ -352,9 +354,12 @@ impl<'a> WasmPackageBuilder<'a> {
             for (i, param_slot) in block.params.iter().enumerate() {
                 // WASM param `user_param_base + i` → slot.
                 func.instruction(&Instruction::LocalGet(user_param_base + (i as u32)));
-                func.instruction(&Instruction::LocalSet(
-                    slot_local(component, block, *param_slot, local_offset),
-                ));
+                func.instruction(&Instruction::LocalSet(slot_local(
+                    component,
+                    block,
+                    *param_slot,
+                    local_offset,
+                )));
             }
         }
 
@@ -366,8 +371,9 @@ impl<'a> WasmPackageBuilder<'a> {
         // order).
         // Stage 5c: derive boundary-id list from `boundary_param_slots`
         // (slot val_ty carries the id) instead of reading `boundary_params`.
-        let bp_ids: Vec<_> =
-            block.boundary_param_ids_from_slots(component.slots()).collect();
+        let bp_ids: Vec<_> = block
+            .boundary_param_ids_from_slots(component.slots())
+            .collect();
         for (i, b_id) in bp_ids.iter().enumerate() {
             // Phase 0.3n: base is `self_ref_param_count` (0 for
             // no-self blocks, 1 for legacy self-bearing blocks).
@@ -399,7 +405,8 @@ impl<'a> WasmPackageBuilder<'a> {
             // emit_expr treats the map as raw absolute indices so it can be
             // shared with the filter-closure path (which reserves raw locals
             // directly instead of going through SlotId).
-            let mut resolved = HashMap::with_capacity_and_hasher(block.captured_locals.len(), Default::default());
+            let mut resolved =
+                HashMap::with_capacity_and_hasher(block.captured_locals.len(), Default::default());
             for (local_id, slot) in &block.captured_locals {
                 resolved.insert(*local_id, slot_local(component, block, *slot, local_offset));
             }
@@ -479,9 +486,12 @@ impl<'a> WasmPackageBuilder<'a> {
         // holds the root DOM handle the caller records in its tracking
         // array for later diff / unmount.
         if let Some(slot) = block.return_slot {
-            func.instruction(&Instruction::LocalGet(
-                slot_local(component, block, slot, local_offset),
-            ));
+            func.instruction(&Instruction::LocalGet(slot_local(
+                component,
+                block,
+                slot,
+                local_offset,
+            )));
         }
 
         func.instruction(&Instruction::End);

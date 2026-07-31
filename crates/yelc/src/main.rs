@@ -250,15 +250,25 @@ fn compile(
         OutputFormat::Wit => {
             // Unified path: library files (no exports) get a well-formed
             // package + library world from the same builder.
-            let wit_code = codegen::generate_wit(lowered.components(), lowered.interfaces(), ctx, &wit_options)
-                .map_err(|e| anyhow::anyhow!("wit generation error: {}", e))?;
+            let wit_code = codegen::generate_wit(
+                lowered.components(),
+                lowered.interfaces(),
+                ctx,
+                &wit_options,
+            )
+            .map_err(|e| anyhow::anyhow!("wit generation error: {}", e))?;
             println!("{}", wit_code);
         }
         OutputFormat::Wasm => {
             use std::io::Write;
 
             let effective_opt_args: Option<Vec<String>> = if release {
-                Some(RELEASE_WASM_OPT_ARGS.iter().map(|s| s.to_string()).collect())
+                Some(
+                    RELEASE_WASM_OPT_ARGS
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                )
             } else if opt {
                 Some(wasm_opt_args.clone())
             } else {

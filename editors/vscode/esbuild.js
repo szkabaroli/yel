@@ -6,14 +6,19 @@ const path = require("path");
 
 const production = process.argv.includes("--production");
 const watch = process.argv.includes("--watch");
+// Bundle only, without building the LSP binary. CI uses this: the production
+// path cross-compiles five Rust targets, and it *warns* rather than fails when
+// a target has no linker — so on a runner it would exit 0 having produced no
+// binaries at all. The bundle and the typecheck are what CI can honestly gate.
+const skipLsp = process.argv.includes("--skip-lsp");
 
 // Build targets for LSP binary (used in production)
 const targets = [
-  { triple: "aarch64-apple-darwin", output: "yel-lsp-darwin-arm64" },
-  { triple: "x86_64-apple-darwin", output: "yel-lsp-darwin-x64" },
-  { triple: "x86_64-unknown-linux-gnu", output: "yel-lsp-linux-x64" },
-  { triple: "aarch64-unknown-linux-gnu", output: "yel-lsp-linux-arm64" },
-  { triple: "x86_64-pc-windows-msvc", output: "yel-lsp-win32-x64.exe" },
+  { triple: "aarch64-apple-darwin", output: "yelc-lsp-darwin-arm64" },
+  { triple: "x86_64-apple-darwin", output: "yelc-lsp-darwin-x64" },
+  { triple: "x86_64-unknown-linux-gnu", output: "yelc-lsp-linux-x64" },
+  { triple: "aarch64-unknown-linux-gnu", output: "yelc-lsp-linux-arm64" },
+  { triple: "x86_64-pc-windows-msvc", output: "yelc-lsp-win32-x64.exe" },
 ];
 
 async function buildLspBinary() {
@@ -30,14 +35,14 @@ async function buildLspBinary() {
     for (const target of targets) {
       console.log(`  Building for ${target.triple}...`);
       try {
-        execSync(`cargo build --release -p yel-lsp --target ${target.triple}`, {
+        execSync(`cargo build --release -p yelc-lsp --target ${target.triple}`, {
           cwd: workspaceRoot,
           stdio: "inherit",
         });
 
         const srcName = target.output.endsWith(".exe")
-          ? "yel-lsp.exe"
-          : "yel-lsp";
+          ? "yelc-lsp.exe"
+          : "yelc-lsp";
         const source = path.join(
           workspaceRoot,
           "target",
@@ -63,7 +68,7 @@ async function buildLspBinary() {
     // In development, just build for current platform
     console.log("Building LSP binary for current platform...");
     try {
-      execSync("cargo build --release -p yel-lsp", {
+      execSync("cargo build --release -p yelc-lsp", {
         cwd: workspaceRoot,
         stdio: "inherit",
       });
@@ -99,7 +104,11 @@ async function buildExtension() {
 
 async function main() {
   try {
-    await buildLspBinary();
+    if (skipLsp) {
+      console.log("Skipping LSP binary build (--skip-lsp)");
+    } else {
+      await buildLspBinary();
+    }
     await buildExtension();
   } catch (e) {
     console.error("Build failed:", e);

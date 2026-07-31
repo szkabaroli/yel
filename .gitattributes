@@ -1,0 +1,15 @@
+# LF in the working tree on every platform, Windows included.
+#
+# Not cosmetic: the parser reports byte offsets, the identity and parity sweeps
+# compare spans, and the WIT/DOT snapshots are byte-compared. A CRLF checkout
+# shifts every offset past the first newline and fails those tests for a reason
+# that has nothing to do with the change under test. Git for Windows defaults to
+# core.autocrlf=true, so the CI matrix needs this to be stated, not assumed.
+* text=auto eol=lf
+
+*.wasm binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.vsix binary

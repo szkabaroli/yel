@@ -1,0 +1,19 @@
+id = "yel"
+name = "Yel"
+version = "0.1.0"
+schema_version = 1
+authors = ["Sz. Kovács Roland <szkabaroli@gmail.com>"]
+description = "Yel language support — diagnostics, document symbols and hover via yelc-lsp"
+repository = "https://github.com/szkabaroli/yel"
+
+[language_servers.yelc-lsp]
+name = "yelc-lsp"
+language = "Yel"
+
+# Local grammar for now (file:// is Zed's documented dev workflow). After a
+# grammar edit: commit in editors/tree-sitter-yel, put the new SHA here,
+# reinstall the dev extension. Swap for a GitHub URL once the grammar is
+# pushed as its own repository.
+[grammars.yel]
+repository = "file:///Users/rolandsz.kovacs/Documents/Code/yel/editors/tree-sitter-yel"
+rev = "670cbd93df62595e31038ae0150beb05080c8971"

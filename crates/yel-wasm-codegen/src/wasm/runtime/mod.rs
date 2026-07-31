@@ -8,11 +8,14 @@
 pub mod memory;
 pub mod strings;
 
+pub use memory::{
+    AllocatorGlobals, emit_alloc, emit_allocator_globals, emit_cabi_realloc, emit_free,
+    emit_load_fat_ptr, emit_pack_fat_ptr_to_i64, emit_store_fat_ptr,
+};
 use rustc_hash::FxHashMap as HashMap;
-pub use memory::{emit_alloc, emit_allocator_globals, emit_cabi_realloc, emit_free, emit_store_fat_ptr, emit_load_fat_ptr, emit_pack_fat_ptr_to_i64, AllocatorGlobals};
 pub use strings::{
-    emit_bool_to_string, emit_concat_n, emit_f32_to_string, emit_s32_to_string,
-    emit_s64_to_string, emit_starts_with, StringData,
+    StringData, emit_bool_to_string, emit_concat_n, emit_f32_to_string, emit_s32_to_string,
+    emit_s64_to_string, emit_starts_with,
 };
 use yel_core::{DefId, Ty};
 
@@ -257,4 +260,3 @@ impl RuntimeFunctions {
         self.filter_indices.get(&filter_id).copied()
     }
 }
-

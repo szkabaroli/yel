@@ -1085,15 +1085,19 @@ The artifact-level differential arrives after
    this file claimed it was open for a day after S7 said otherwise — the two
    statements were 700 lines apart and neither knew about the other, which is the
    argument for one status line rather than two.
-4. **Phase 2 landed** — ✅ 2026-07-30, `crates/yelc-hir`, types only.
-   ⚠️ **`type_of` is the exception**, and it is now the gate: see
-   [What the seam could not be written as](#2--type_of-has-no-receiver-and-its-memo-has-the-wrong-key-space).
-   Phase 3 cannot start against a contract with a hole where its one
-   syntax→`Ty` function should be.
-5. **`include`'s level decided** — [`modules.md` §7](../modules.md): does an
-   `include` name a package or a module? *"Decide before HIR is built on it."*
-   ❌ **open**, and the symbol table's second level is already built for either
-   answer, so this gates the lowering rather than the shape.
+4. ~~**Phase 2 landed**~~ ✅ 2026-07-30, `crates/yelc-hir`, types only.
+   `type_of` was the exception and the residual gate; **closed 2026-07-30**
+   when its owner was named — stage 3's lowering context, in `yelc-hir`
+   ([decision](#decided-2026-07-30--the-owner-is-stage-3s-lowering-context-in-yelc-hir)).
+   The code lands with phase 3, deliberately: the owner is a type phase 3
+   constructs.
+5. ~~**`include`'s level decided**~~ ✅ **2026-07-30** — an `include` names a
+   **module**, and the question dissolved rather than being answered directly:
+   the Go model ([`modules.md`](../modules.md), *"every file declares, and
+   disagreement is an error"*) makes the package the directory, so a file has no
+   top module of its own for `include` to mean. §4.1's reading stands, now with
+   the mechanism (`E0071`/`E0072`, `yelc-hir/src/packageck.rs`) landed and tested
+   ahead of the lowering.
 
 That is the whole gate. Everything that used to sit here is now *work*, below.
 
@@ -1563,12 +1567,49 @@ writing the lowering, because the lowering knows which file it is in, knows what
 `self` is, and would have picked a memo key without noticing it was choosing.
 [Details](#what-the-seam-could-not-be-written-as).
 
-**One type is not landed and it is the gate on phase 3:** `type_of`. See the same
-section.
+**One type is not landed:** `type_of`. It was the gate on phase 3; the gate
+**closed 2026-07-30** when its owner was named — a lowering context struct in
+`yelc-hir` holding `&mut CompilerContext` and a memo keyed by `TypeId`
+([decision](#decided-2026-07-30--the-owner-is-stage-3s-lowering-context-in-yelc-hir)).
+The decision is made and the code is not written, deliberately: the owner is a
+type phase 3 constructs, so `type_of` lands **with** the lowering rather than
+before it. Nothing blocks phase 3.
 
-### Phase 3 · HIR build + resolve
+### Phase 3 · HIR build + resolve — 🚧 **core landed 2026-07-31**, uncommitted
 
 The stage proper — [Brief](#brief), [Contract](#contract), [D1–D6](#decisions).
+
+**What landed** (staged, not committed, per standing instruction):
+
+- **The vocabulary** — `expr.rs` (~40 node kinds), `module.rs` items/bodies.
+  `Match` is the only conditional (§9); `MethodCall` does not exist (pure UFCS,
+  `modules.md` §8); no `String`, no `Ty` on any node; `Prop { owner, member }`
+  replaces the frozen props-as-locals hack (`lower.rs:894–911`) — D3's fix
+  applied one level up.
+- **Member rows on `Definitions`** (`yelc-sema`) — fields, cases, properties,
+  member functions as `(owner, index)`-addressed rows, because under one
+  namespace a member name cannot be a root binding. Seam change, logged.
+- **`lower_files`** — H1's three phases, kind-major registration in the frozen
+  order, `type_of` on the lowering context (memo keyed by `TypeId`), D5
+  globals-then-components, the five desugarings, D7 nesting, F13 merge,
+  recovery lowering everywhere (H5).
+- **The walker** (`visit.rs`, one, exhaustive, `thir/visit.rs`'s shape) and
+  **signal deps** (`signalck.rs`) — the frozen `signalck` one stage earlier:
+  per-body *and* per-site read/write sets over `Prop`/global-field references,
+  computed after the desugaring and before checking, needing names only.
+  Ordering argument recorded in `signalck.rs`'s module doc. Pass files
+  are named `<pass>ck.rs` by convention — `packageck`, `signalck`, stage 4's
+  `typeck`; the lowering constructs and is not a pass in this sense.
+- **`yelc2 --emit-hir`** — definition table with resolved declared types, then
+  items with bodies, deps lines, and every desugaring visible.
+- **44 `yelc-hir` tests** (invariants H1/H2/H4/H5 by name, desugarings, D5,
+  scoping, deps) and the **frozen differential**
+  (`tests/frozen_parity.rs`): definition table contents-and-order identical
+  over **2000/2000** corpus programs, mapping stated in the file, E0071 the
+  only diagnostic carve-out.
+
+**Numbers** — see [Numbers](#numbers--surprises). **Still owed** — the list at
+the end of that section; each entry says why it is not in this landing.
 
 ### What this restructuring costs
 
@@ -1937,7 +1978,11 @@ gets waved through as an expected reordering.
 ### D6 · Doc comments attach to the nearest preceding comment run
 
 **Decided 2026-07-29: attach, using the nearest preceding comment run with no
-blank line between it and the item.**
+blank line between it and the item.** *Refined 2026-07-31 at implementation:*
+only **`///`** lines are documentation — plain `//` never attaches and ends a
+run. WIT's parser was read first (`trim_start_matches('/')` blurs the two);
+Rust's hard line was chosen instead, cheap now and expensive after tooling
+ships the blurry rule.
 
 Stage 1 deliberately left this open — the green tree holds trivia and decides
 nothing about ownership ([`stage-1-syntax.md`](stage-1-syntax.md)), so 3 owns
@@ -1955,4 +2000,68 @@ consumer.
 
 ## Numbers · Surprises
 
-*To be written at close-out.*
+**Phase 3 core, measured 2026-07-31** (all uncommitted):
+
+| | |
+|---|---|
+| workspace | **642 → 675 / 0 failed / 2 ignored** |
+| corpus sweep | 2000/2000 lower **without panic**; 996 clean, 1004 reject with **E0071 only** (the package rule — see Surprise 1) |
+| positive fixtures | 85/90 exit clean; 5 E0071-only (the five with no `package` clause); **0** unexpected errors |
+| diagnostic fixtures | the stage-3-owned codes fire: E0010 `duplicate_definition`, E0040 `duplicate_children`, E0060 `syntax_error`; type-level fixtures correctly silent until stage 4 |
+| Definitions differential | **2000/2000 identical**, item-level, contents and order, vs frozen `lower_to_hir` |
+| mutation tests | differential: 2/2 killed (registration order flip, kind swap); suite: 3/3 killed (F13 off, UFCS receiver dropped, deps writes-as-reads); all restorations verified by content comparison |
+| phase-1 checkpoint | taken 2026-07-31 (`yelc-sema/tests/builtin_checkpoint.rs`, 10 tests) — owed since `9a54ad1` |
+
+### Surprises
+
+1. **The package rule rejects half the frozen corpus.** 1004/2000 corpus
+   programs and 5/90 positive fixtures predate `package`-in-every-file
+   (2026-07-30) and now fail with E0071 and nothing else. Approved surface
+   break, but its scale means every future artifact differential must carve it
+   out or the corpus must be regenerated *with* clauses (frozen accepts them) —
+   **a decision for the user, not a phase**. Recorded in the differential's
+   module doc as carve-out 1.
+2. **The phase-1 checkpoint falsified its own premise's membership.** The
+   narrowing doc-comment's "9 names in `Namespace::Type`" is right by count and
+   wrong by contents: `option`/`result` are allocated but never name-registered
+   (reachable only through type syntax), while `Brush` and `event-value` —
+   documented nowhere — are registered. The Dom global is deliberately
+   unregistered. And frozen `FunctionDef.params` is vestigial (`vec![]` on
+   every builtin); real signatures live only on the interned `Func` type — the
+   first arity comparison measured the wrong field and reported eleven false
+   mismatches.
+3. **`count += 1` reads `count`.** The deps pass's first test expected 3 read
+   sites and found 4 — the desugared right-hand side is a real read. The test
+   was wrong; the pass was right.
+4. **Ten UI primitive spellings have no `TyKind`** (`length` … `easing`).
+   Measured absent from every checked-in program as an *annotation*; `type_of`
+   answers `None`. Decision owed before stage 4 (options in `lower.rs`'s
+   module doc).
+5. **User builtin-name shadowing diverges silently.** Frozen registers builtin
+   callables as defs, so `len: func()…` collides (E0010); the new table keeps
+   builtins out of `Definitions`, so the same program registers and shadows.
+   No corpus program hits it; recorded rather than reconciled.
+
+### Landed after close-out, same day (2026-07-31, uncommitted)
+
+- **The module produce/consume loop.** `--emit-module` (write side; refuses on
+  errors) and `from "geometry" include Geo;` (read side: `FROM_KW`/`INCLUDE_KW`
+  contextual, `--include DIR` on the driver, artifact load-and-bind *before*
+  lowering because a module binding is registration). `std:` specifiers are
+  reserved for compiler-shipped modules and refused rather than searched.
+  `SerializedDef` gained member rows (`FORMAT` 2 → 3). Resolution crosses the
+  package boundary — `Geo.Geometry.origin-x` lowers to the foreign `DefId` and
+  `signalck` records the cross-package read. Four e2e tests over the real
+  binary; workspace 675 → 687. Decision text: `plans/modules.md` § *the
+  specifier is a plain-name string*.
+
+### Still owed, and why not here
+
+| item | why deferred |
+|---|---|
+| ~~D6 doc-comment attachment~~ | ✅ **landed 2026-07-31**: `HirModule.docs` (`DefId → Name` side table, write-once), extraction over the S1-guaranteed source text, shown in `--emit-hir` as `///` lines. **Only `///` attaches** — plain `//` is commentary (Rust's rule, adopted after reading WIT's blur; refines D6's "comment run" wording). Seven tests; blank-line rule and the `///`-vs-`//` distinction each mutation-tested. Keyed by `DefId`, not the decision's literal `NodeMap<HirId>` — type declarations have no HIR node under the member-row design; deviation and the attribute-span edge recorded on the field. Top-level items only; members follow with the LSP |
+| `ToArtifact`/`FromArtifact` for HIR nodes | serialization of the whole new vocabulary; sized like its own phase; nothing loads HIR artifacts yet. ⚠️ Narrowed 2026-07-31: the **declaration surface** now serializes — `SerializedDef` gained member rows, `Stamp::FORMAT` 2 → 3, wire-byte pin re-blessed *after* the bump per its own protocol, round-tripped through a polluted interner, load side mutation-tested. `yelc2 --emit-module PATH` writes it, refusing on `has_errors()`. What remains deferred is HIR **bodies** |
+| provenance **renderer** + "no generated identifier in any diagnostic" test + the three UI type-error fixtures | need stage 4's checker to *produce* those diagnostics; the recording half (map origins via `synthesize`) is in |
+| D5 item-order divergence measurement | there is no artifact until stages 5–7; `--emit-hir` shows the item order, but the obligation is about output bytes |
+| E0070 `InvalidPackageName` | frozen fires it somewhere later in its pipeline; new tree's site undecided (`package_underscore.yel` currently silent) |
+| `--emit-hir` byte-stability test | holds by construction (no hash-map iteration reaches the dump); the two-run comparison test is cheap and should land with the next driver touch |

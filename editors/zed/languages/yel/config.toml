@@ -1,0 +1,23 @@
+# Mirrors editors/vscode/language-configuration.json. The grammar is the
+# highlighting-grade flat-token one in editors/tree-sitter-yel (Zed does not
+# read the VS Code extension's TextMate grammar); queries live beside this
+# file in highlights.scm.
+name = "Yel"
+grammar = "yel"
+# `.yelir` is the HIR-dump form — designed to be a subset of yel
+# (plans/desugar/README.md), so it shares the language and the grammar. The
+# *compiler* does not accept all of it yet (the README's §1 measures the
+# parser gaps); the flat highlighting grammar parses it clean today.
+path_suffixes = ["yel", "yelir"]
+line_comments = ["// "]
+block_comment = ["/* ", " */"]
+autoclose_before = ";:.,=}])>"
+# Kebab-case names (`starts-with`, `font-size`) are single words in yel.
+word_characters = ["-"]
+brackets = [
+    { start = "{", end = "}", close = true, newline = true },
+    { start = "[", end = "]", close = true, newline = true },
+    { start = "(", end = ")", close = true, newline = false },
+    { start = "<", end = ">", close = false, newline = false },
+    { start = "\"", end = "\"", close = true, newline = false, not_in = ["string"] },
+]

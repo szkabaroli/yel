@@ -4,12 +4,15 @@ use rustc_hash::FxHashMap;
 use serde::Serialize;
 use yelc_base::Interner;
 
-use crate::definitions::{Definition, Definitions};
+use crate::definitions::{Definition, Definitions, MemberDirection, MemberKind};
 use crate::ids::DefId;
 use crate::types::{Ty, TyKind, TypeInterner};
 
 use super::PackageName;
-use super::wire::{SerializedDef, SerializedDefPath, StructuralTy, TypeIndex};
+use super::wire::{
+    SerializedDef, SerializedDefPath, SerializedMember, SerializedMemberKind, StructuralTy,
+    TypeIndex,
+};
 
 /// Rewrites compilation-local handles into artifact-local ones.
 ///
@@ -41,6 +44,29 @@ impl<'a> ArtifactWriter<'a> {
             table: Vec::new(),
             seen: FxHashMap::default(),
         }
+    }
+
+    /// The member rows of a definition, in table (= source) order.
+    pub fn write_members(&mut self, id: DefId) -> Vec<SerializedMember> {
+        let members = self.defs.members(id).to_vec();
+        members
+            .iter()
+            .map(|member| SerializedMember {
+                name: self.names.str(member.name).to_string(),
+                kind: match member.kind {
+                    MemberKind::Field => SerializedMemberKind::Field,
+                    MemberKind::Case => SerializedMemberKind::Case,
+                    MemberKind::Property { direction } => match direction {
+                        MemberDirection::None => SerializedMemberKind::Property,
+                        MemberDirection::In => SerializedMemberKind::PropertyIn,
+                        MemberDirection::Out => SerializedMemberKind::PropertyOut,
+                        MemberDirection::InOut => SerializedMemberKind::PropertyInOut,
+                    },
+                    MemberKind::Function => SerializedMemberKind::Function,
+                },
+                ty: member.ty.map(|ty| self.write_ty(ty)),
+            })
+            .collect()
     }
 
     /// The finished type table, in the order entries were written.
@@ -198,6 +224,7 @@ impl ToArtifact for Definition {
             path: writer.write_def_path(self.id),
             ty: self.ty.to_artifact(writer),
             is_export: self.is_export,
+            members: writer.write_members(self.id),
         }
     }
 }

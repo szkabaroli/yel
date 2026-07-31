@@ -46,9 +46,7 @@
 //! emission order), which matches the legacy codegen ordering 1:1.
 
 use crate::ids::DefId;
-use crate::lir::block::{
-    LirGlobalRef, LirOp, LirSlotId, LirSlotValType, LirTypeRef,
-};
+use crate::lir::block::{LirGlobalRef, LirOp, LirSlotId, LirSlotValType, LirTypeRef};
 
 use super::blocks::BlockLowering;
 
@@ -100,14 +98,12 @@ impl<'a> BlockLowering<'a> {
                     child
                 )
             });
-        let child_ctor_block = child_blocks
-            .internal_constructor_block
-            .unwrap_or_else(|| {
-                panic!(
-                    "lower_mount_component: child {:?} has no internal_constructor_block",
-                    child
-                )
-            });
+        let child_ctor_block = child_blocks.internal_constructor_block.unwrap_or_else(|| {
+            panic!(
+                "lower_mount_component: child {:?} has no internal_constructor_block",
+                child
+            )
+        });
         self.emit(LirOp::CallBlock {
             block: child_ctor_block,
             args: Vec::new(),

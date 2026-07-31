@@ -107,7 +107,6 @@ pub enum ThirExprKind {
     // ========================================================================
     // List and Record Literals (Part 2 of list-construct-plan.md)
     // ========================================================================
-
     /// List literal: [a, b, c]
     /// Element type is inferred from context or first element.
     ListLiteral {

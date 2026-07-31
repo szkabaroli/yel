@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a branch supersedes the run in flight for it. `main` is exempt:
+# its runs are the record of what the branch was at each commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Fewer, larger diagnostics; no incremental artifacts to cache or invalidate.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # The rewrite tree (plans/rewrite/README.md) is held at zero warnings.
+      #
+      # `--no-deps` is load-bearing, not tidiness: `cargo clippy -- -D warnings`
+      # passes the deny to *every* locally-built crate, including path
+      # dependencies. `yel-core` is a dev-dependency of `yelc-hir`, so without
+      # this the frozen tree's warnings fail the rewrite tree's gate — and the
+      # frozen tree is read-only, so they cannot be fixed.
+      - name: clippy — rewrite crates (deny warnings)
+        run: |
+          cargo clippy --locked --no-deps --all-targets \
+            -p yelc-base -p yelc-syntax -p yelc-hir \
+            -p yelc-sema -p yelc-driver -p yelc-lsp \
+            -- -D warnings
+
+      # The frozen tree and the older crates are checked, not gated: they are
+      # read-only reference (crates/{yel-core,yel-wasm-codegen,yelc}) and carry
+      # ~90 warnings that no PR is allowed to fix. What still *fails* here is a
+      # crate-level `deny` from a `[lints.clippy]` section — notably the
+      # `disallowed_types` determinism guard in clippy.toml.
+      #
+      # `--lib --bins`, not `--all-targets`: `yel-wasm-codegen`'s own
+      # `tests/execution.rs` violates the guard it denies (two `std::HashSet`s),
+      # which is a real pre-existing failure in a file the freeze forbids
+      # touching. Widen this to `--all-targets` when the freeze lifts.
+      - name: clippy — frozen and legacy crates (check only)
+        run: |
+          cargo clippy --locked --lib --bins \
+            -p yel-core -p yel-wasm-codegen -p yelc \
+            -p yel-host -p yel-lsp -p yel-smith
+
+  test:
+    name: build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Build
+        run: cargo build --locked --workspace --all-targets
+
+      # Everything except the three crates that own corpus-dependent targets.
+      - name: Test
+        run: |
+          cargo test --locked --workspace \
+            --exclude yelc-syntax --exclude yelc-hir --exclude yelc-sema
+
+      # Those three crates, minus the five test targets that read `corpus/src`.
+      #
+      # The 8000 corpus artifacts are untracked (see .gitignore), so a CI
+      # checkout does not have them, and `corpus_sources()` panics rather than
+      # shrinking silently — which is the right behaviour and the reason these
+      # are named here instead of being made to skip. Regenerating in CI is not
+      # a substitute: a corpus generated at any SHA but the freeze SHA is a
+      # *different* corpus (plans/rewrite/corpus.md), so it would not be the
+      # oracle these tests compare against.
+      #
+      # Excluded targets: yelc-syntax/{corpus,parity,identity},
+      # yelc-hir/frozen_parity, yelc-sema/single_namespace. They run in
+      # corpus.yml and locally after scripts/freeze-corpus.sh.
+      - name: Test — corpus-independent targets of the corpus crates
+        run: |
+          cargo test --locked -p yelc-syntax --lib \
+            --test attributes --test blocks --test generics \
+            --test includes --test returns
+          cargo test --locked -p yelc-hir --lib \
+            --test lowering --test package_identity
+          cargo test --locked -p yelc-sema --lib \
+            --test artifact --test intrinsic_checkpoint
+
+  freeze-check:
+    name: freeze check
+    runs-on: ubuntu-latest
+    # Only meaningful against a base: it asks what this branch changed in the
+    # frozen tree relative to main.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The script diffs against the merge base, so a shallow clone is not
+          # enough — it needs both branches' history.
+          fetch-depth: 0
+      - name: Is the frozen tree unmodified?
+        run: scripts/freeze-check.sh origin/${{ github.base_ref }}
+
+  vscode:
+    name: vscode extension
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit -p tsconfig.json
+      # `--skip-lsp`: the full production build cross-compiles yelc-lsp for five
+      # targets and only *warns* when one has no linker, so it cannot gate
+      # anything on a runner. Bundling is what this job proves.
+      - name: Bundle
+        run: node esbuild.js --production --skip-lsp

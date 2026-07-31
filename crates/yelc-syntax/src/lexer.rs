@@ -192,6 +192,23 @@ impl<'a> Lexer<'a> {
     // -- numbers -----------------------------------------------------------
 
     fn read_number(&mut self) -> TokenKind {
+        // `0x` + at least one hex digit. Checked before `read_digits` so
+        // `0xFF` is one literal rather than `0` and an identifier `xFF`; a
+        // bare `0x` falls through and stays exactly that split.
+        if self.curr() == Some('0')
+            && self.lookahead() == Some('x')
+            && self.content[self.offset..]
+                .chars()
+                .nth(2)
+                .is_some_and(|c| c.is_ascii_hexdigit())
+        {
+            self.eat_char();
+            self.eat_char();
+            while self.curr().is_some_and(|c| c.is_ascii_hexdigit()) {
+                self.eat_char();
+            }
+            return INT_LITERAL;
+        }
         self.read_digits();
 
         let mut is_float = false;
@@ -403,8 +420,7 @@ impl<'a> Lexer<'a> {
                     self.eat_char();
                     AND_AND
                 } else {
-                    self.report(self.offset - 1, "expected `&&`");
-                    UNKNOWN
+                    AMP
                 }
             }
             '|' => {
@@ -412,8 +428,7 @@ impl<'a> Lexer<'a> {
                     self.eat_char();
                     OR_OR
                 } else {
-                    self.report(self.offset - 1, "expected `||`");
-                    UNKNOWN
+                    PIPE
                 }
             }
             '+' => {

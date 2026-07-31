@@ -100,7 +100,10 @@ pub fn lower_all<'a>(
 
     // Retain HIR components for the `--hir` debug dump (globals carry no node
     // tree, so they don't appear in it).
-    let hir: Vec<HirComponent> = items.into_iter().filter_map(HirItem::into_component).collect();
+    let hir: Vec<HirComponent> = items
+        .into_iter()
+        .filter_map(HirItem::into_component)
+        .collect();
 
     Ok(Lowered { module, hir })
 }

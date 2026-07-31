@@ -37,9 +37,7 @@ fn build_block_func_name(
     s
 }
 
-use super::super::{
-    ImportLayout, MemoryLayout, WasmPackageBuilder, to_kebab_case, to_wit_name,
-};
+use super::super::{ImportLayout, MemoryLayout, WasmPackageBuilder, to_kebab_case, to_wit_name};
 
 impl<'a> WasmPackageBuilder<'a> {
     pub(super) fn generate_name_section_multi(
@@ -179,7 +177,8 @@ impl<'a> WasmPackageBuilder<'a> {
                     .get_block_name(comp.def_id, *block_id)
                     .unwrap_or_else(|| BlockDebugName::kind("block"));
                 let block = comp.get_block(*block_id);
-                let fn_name = build_block_func_name(&comp_name, &info, block, &comp.slots, block_id.0);
+                let fn_name =
+                    build_block_func_name(&comp_name, &info, block, &comp.slots, block_id.0);
                 type_names.append(ty_idx, &format!("type-{}", fn_name));
             }
         }
@@ -554,7 +553,8 @@ impl<'a> WasmPackageBuilder<'a> {
                 .unwrap_or_else(|| BlockDebugName::kind("block"));
 
             let block = component.get_block(*block_id);
-            let name = build_block_func_name(&comp_prefix, &info, block, &component.slots, block_id.0);
+            let name =
+                build_block_func_name(&comp_prefix, &info, block, &component.slots, block_id.0);
             func_names.append(wasm_func_idx, &name);
         }
 

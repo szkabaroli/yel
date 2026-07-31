@@ -11,7 +11,9 @@ use std::fmt;
 /// - Records, Enums, Variants
 /// - Functions
 /// - Fields (within their owner)
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize,
+)]
 pub struct DefId(pub u32);
 
 impl DefId {
@@ -180,7 +182,9 @@ impl fmt::Display for BlockId {
 /// → block lowering. Used to annotate effects registered inside a
 /// for-body so their update_blocks can fan out over the correct
 /// for's tracking array.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize,
+)]
 pub struct ForId(pub u32);
 
 impl ForId {
@@ -202,7 +206,9 @@ impl fmt::Display for ForId {
 /// Identifier for an `if` op within a component. Stable across tree → block
 /// lowering. Used to key the per-if-op typed boundary structs in the
 /// concrete-typed mount-tree.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize,
+)]
 pub struct IfId(pub u32);
 
 impl IfId {
@@ -225,7 +231,9 @@ impl fmt::Display for IfId {
 /// mount-tree. One id per emitted boundary struct (component root, each
 /// `if` anchor, each branch, each `for` anchor, each iter body). Stable
 /// per `LirResource`.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize,
+)]
 pub struct TreeBoundaryId(pub u32);
 
 impl TreeBoundaryId {
@@ -249,7 +257,9 @@ impl fmt::Display for TreeBoundaryId {
 /// into `LirModule::interfaces`. World items (resources, imported
 /// functions) reference their interface by this id; an import with no
 /// interface id is a *freeform* world-level function.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize,
+)]
 pub struct InterfaceId(pub u32);
 
 impl InterfaceId {

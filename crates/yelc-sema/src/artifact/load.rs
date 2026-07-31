@@ -4,11 +4,11 @@ use rustc_hash::FxHashMap;
 use serde::de::DeserializeOwned;
 use yelc_base::{Interner, Span};
 
-use crate::definitions::Definitions;
+use crate::definitions::{Definitions, Member, MemberDirection, MemberKind};
 use crate::ids::{DefId, PackageId};
 use crate::types::{Ty, TyKind, TypeInterner};
 
-use super::wire::{SerializedDefPath, StructuralTy, TypeIndex};
+use super::wire::{SerializedDefPath, SerializedMemberKind, StructuralTy, TypeIndex};
 use super::{Artifact, LoadError, PackageName};
 
 /// A package read back into *this* compilation.
@@ -263,7 +263,8 @@ impl Artifact {
             type_remap.push(types.intern(kind));
         }
 
-        // Pass 3 — attach declared types, now that both remaps exist.
+        // Pass 3 — attach declared types and member rows, now that both
+        // remaps exist.
         for (serialized, id) in self.defs.iter().zip(&registered) {
             if let Some(index) = serialized.ty {
                 let ty = type_remap.get(index as usize).copied().ok_or(
@@ -273,6 +274,44 @@ impl Artifact {
                     },
                 )?;
                 defs.set_ty(*id, ty);
+            }
+            for member in &serialized.members {
+                let ty = match member.ty {
+                    Some(index) => Some(type_remap.get(index as usize).copied().ok_or(
+                        LoadError::TypeIndexOutOfRange {
+                            referenced: index,
+                            table_len: self.types.len(),
+                        },
+                    )?),
+                    None => None,
+                };
+                let kind = match member.kind {
+                    SerializedMemberKind::Field => MemberKind::Field,
+                    SerializedMemberKind::Case => MemberKind::Case,
+                    SerializedMemberKind::Property => MemberKind::Property {
+                        direction: MemberDirection::None,
+                    },
+                    SerializedMemberKind::PropertyIn => MemberKind::Property {
+                        direction: MemberDirection::In,
+                    },
+                    SerializedMemberKind::PropertyOut => MemberKind::Property {
+                        direction: MemberDirection::Out,
+                    },
+                    SerializedMemberKind::PropertyInOut => MemberKind::Property {
+                        direction: MemberDirection::InOut,
+                    },
+                    SerializedMemberKind::Function => MemberKind::Function,
+                };
+                defs.add_member(
+                    *id,
+                    Member {
+                        name: names.intern(&member.name),
+                        kind,
+                        // This compilation has not read that package's sources.
+                        span: Span::default(),
+                        ty,
+                    },
+                );
             }
         }
 

@@ -876,9 +876,7 @@ pub fn emit_program_record_types(
             },
         }]);
         registry.str_bytes_array_idx = Some(sb_idx);
-        registry
-            .type_names
-            .push((sb_idx, "str_bytes".to_string()));
+        registry.type_names.push((sb_idx, "str_bytes".to_string()));
         sb_idx + 1
     };
 
@@ -1097,8 +1095,7 @@ fn collect_list_and_tuple_tys(
 
     let mut list_seen: rustc_hash::FxHashSet<yel_core::Ty> = rustc_hash::FxHashSet::default();
     let mut tuple_seen: rustc_hash::FxHashSet<yel_core::Ty> = rustc_hash::FxHashSet::default();
-    let mut gc_variant_seen: rustc_hash::FxHashSet<yel_core::Ty> =
-        rustc_hash::FxHashSet::default();
+    let mut gc_variant_seen: rustc_hash::FxHashSet<yel_core::Ty> = rustc_hash::FxHashSet::default();
     let mut list_order: Vec<yel_core::Ty> = Vec::new();
     let mut tuple_order: Vec<yel_core::Ty> = Vec::new();
     let mut gc_variant_order: Vec<yel_core::Ty> = Vec::new();
@@ -1225,18 +1222,19 @@ fn collect_list_and_tuple_tys(
             let case_ids = v.cases.clone();
             for case_def_id in case_ids {
                 if let DefKind::VariantCase(c) = ctx.defs.kind(case_def_id)
-                    && let Some(payload_ty) = c.payload {
-                        walk(
-                            ctx,
-                            payload_ty,
-                            &mut list_seen,
-                            &mut tuple_seen,
-                            &mut gc_variant_seen,
-                            &mut list_order,
-                            &mut tuple_order,
-                            &mut gc_variant_order,
-                        );
-                    }
+                    && let Some(payload_ty) = c.payload
+                {
+                    walk(
+                        ctx,
+                        payload_ty,
+                        &mut list_seen,
+                        &mut tuple_seen,
+                        &mut gc_variant_seen,
+                        &mut list_order,
+                        &mut tuple_order,
+                        &mut gc_variant_order,
+                    );
+                }
             }
         }
     }
@@ -1527,10 +1525,10 @@ fn is_is_gc_variant_recursive(
             }
             if let InternedTyKind::Adt(d) = ctx.ty_kind(inner)
                 && matches!(ctx.defs.kind(*d), DefKind::Record(_))
-                    && is_dtr_record_for_collapse(ctx, *d)
-                {
-                    return false;
-                }
+                && is_dtr_record_for_collapse(ctx, *d)
+            {
+                return false;
+            }
             is_gc_variant_payload_admissible(ctx, inner, registry, visiting)
         }
         InternedTyKind::Result { ok, err } => {
@@ -1615,9 +1613,7 @@ fn is_gc_variant_payload_admissible(
                     if matches!(ctx.defs.kind(*d), DefKind::Record(_)));
             collapses || is_is_gc_variant_recursive(ctx, ty, registry, visiting)
         }
-        InternedTyKind::Result { .. } => {
-            is_is_gc_variant_recursive(ctx, ty, registry, visiting)
-        }
+        InternedTyKind::Result { .. } => is_is_gc_variant_recursive(ctx, ty, registry, visiting),
         _ => false,
     }
 }
@@ -1782,10 +1778,12 @@ fn topo_sort_gc_variant_tys(ctx: &CompilerContext, tys: &[Ty]) -> Vec<Ty> {
         };
         for i in 0..case_count {
             if let Some(p_ty) = case_payload_ty(ctx, parent, i)
-                && ty_set.contains(&p_ty) && p_ty != parent {
-                    deps.entry(p_ty).or_default().push(parent);
-                    *in_degree.entry(parent).or_insert(0) += 1;
-                }
+                && ty_set.contains(&p_ty)
+                && p_ty != parent
+            {
+                deps.entry(p_ty).or_default().push(parent);
+                *in_degree.entry(parent).or_insert(0) += 1;
+            }
         }
     }
     // Start with all zero-in-degree nodes, in original insertion order.
@@ -1842,22 +1840,24 @@ fn list_element_storage_type(
     // store a concrete `(ref null $<inner_arr>)` so callers can
     // `array.get` directly without going through $fat_value.
     if let InternedTyKind::List(_) = ctx.ty_kind(elem_ty)
-        && let Some(&inner_arr_idx) = registry.list_array_type_idx.get(&elem_ty) {
-            return ValType::Ref(RefType {
-                nullable: true,
-                heap_type: HeapType::Concrete(inner_arr_idx),
-            });
-        }
+        && let Some(&inner_arr_idx) = registry.list_array_type_idx.get(&elem_ty)
+    {
+        return ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(inner_arr_idx),
+        });
+    }
     // Phase 5e.3: tuples — store a concrete `(ref null $tuple_<n>)`
     // typed struct ref. The tuple struct type was emitted alongside
     // record types in this rec group.
     if let InternedTyKind::Tuple(_) = ctx.ty_kind(elem_ty)
-        && let Some(&tup_idx) = registry.tuple_struct_type_idx.get(&elem_ty) {
-            return ValType::Ref(RefType {
-                nullable: true,
-                heap_type: HeapType::Concrete(tup_idx),
-            });
-        }
+        && let Some(&tup_idx) = registry.tuple_struct_type_idx.get(&elem_ty)
+    {
+        return ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(tup_idx),
+        });
+    }
     // Option-of-ref collapse — MUST precede the GcVariant check.
     // `internal_repr(option<record|tuple|scalar-list|collapsing-option>)`
     // collapses to the inner's nullable ref (none = null, some(v) = v), so
@@ -1910,11 +1910,17 @@ fn option_collapse_elem_valtype(
             registry.record_type_idx.get(d).copied().and_then(mk)
         }
         // option<tuple> → the tuple's GC struct ref.
-        InternedTyKind::Tuple(_) => registry.tuple_struct_type_idx.get(&inner).copied().and_then(mk),
+        InternedTyKind::Tuple(_) => registry
+            .tuple_struct_type_idx
+            .get(&inner)
+            .copied()
+            .and_then(mk),
         // option<scalar-list> → the inner list's typed array ref.
-        InternedTyKind::List(_) if is_gc_eligible_list_ty(ctx, inner) => {
-            registry.list_array_type_idx.get(&inner).copied().and_then(mk)
-        }
+        InternedTyKind::List(_) if is_gc_eligible_list_ty(ctx, inner) => registry
+            .list_array_type_idx
+            .get(&inner)
+            .copied()
+            .and_then(mk),
         // option<collapsing-option> → recurse.
         InternedTyKind::Option(_) => option_collapse_elem_valtype(ctx, inner, registry),
         _ => None,
@@ -2034,12 +2040,13 @@ fn record_field_storage_type(ctx: &CompilerContext, ty: Ty, registry: &RecordGcT
         // slots (or vice versa).
         InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
             if is_is_gc_variant(ctx, ty, registry)
-                && let Some(&super_idx) = registry.gc_variant_super_idx.get(&ty) {
-                    return ValType::Ref(RefType {
-                        nullable: true,
-                        heap_type: HeapType::Concrete(super_idx),
-                    });
-                }
+                && let Some(&super_idx) = registry.gc_variant_super_idx.get(&ty)
+            {
+                return ValType::Ref(RefType {
+                    nullable: true,
+                    heap_type: HeapType::Concrete(super_idx),
+                });
+            }
             // Collapsing option<record|tuple|scalar-list>: store the inner's
             // concrete ref (none = null), matching `internal_repr`'s collapse
             // and the signal-storage / list-element rules — NOT anyref, so a
@@ -2098,12 +2105,13 @@ fn record_field_storage_type(ctx: &CompilerContext, ty: Ty, registry: &RecordGcT
             // User variants: typed supertype ref when migrated.
             DefKind::Variant(_) => {
                 if is_is_gc_variant(ctx, ty, registry)
-                    && let Some(&super_idx) = registry.gc_variant_super_idx.get(&ty) {
-                        return ValType::Ref(RefType {
-                            nullable: true,
-                            heap_type: HeapType::Concrete(super_idx),
-                        });
-                    }
+                    && let Some(&super_idx) = registry.gc_variant_super_idx.get(&ty)
+                {
+                    return ValType::Ref(RefType {
+                        nullable: true,
+                        heap_type: HeapType::Concrete(super_idx),
+                    });
+                }
                 ValType::Ref(RefType {
                     nullable: true,
                     heap_type: HeapType::Abstract {

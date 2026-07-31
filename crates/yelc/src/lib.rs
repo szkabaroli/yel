@@ -176,7 +176,12 @@ mod wasi_impl {
                 // Single WIT document per compilation: library files produce
                 // a valid package + library world; files with exports get
                 // their full world.
-                let wit_code = match codegen::generate_wit(lowered.components(), lowered.interfaces(), ctx, &wit_options) {
+                let wit_code = match codegen::generate_wit(
+                    lowered.components(),
+                    lowered.interfaces(),
+                    ctx,
+                    &wit_options,
+                ) {
                     Ok(code) => code,
                     Err(e) => {
                         let msg = format!("WIT generation error: {}", e);
@@ -276,7 +281,11 @@ mod wasi_impl {
             }
             OutputFormat::Dot => {
                 let dot_code = if !lowered.components().is_empty() {
-                    match codegen::generate_dot(lowered.components(), ctx, &codegen::DotOptions::new()) {
+                    match codegen::generate_dot(
+                        lowered.components(),
+                        ctx,
+                        &codegen::DotOptions::new(),
+                    ) {
                         Ok(code) => code,
                         Err(e) => format!("// DOT generation error: {}", e),
                     }
@@ -389,7 +398,12 @@ pub mod native {
                 // Single WIT document per compilation: the builder handles
                 // any number of components plus globals, and still emits
                 // valid output (library world) when there are no exports.
-                let wit_code = match codegen::generate_wit(lowered.components(), lowered.interfaces(), ctx, &wit_options) {
+                let wit_code = match codegen::generate_wit(
+                    lowered.components(),
+                    lowered.interfaces(),
+                    ctx,
+                    &wit_options,
+                ) {
                     Ok(code) => code,
                     Err(e) => {
                         let msg = format!("WIT generation error: {}", e);

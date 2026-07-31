@@ -17,7 +17,7 @@ use yelc_syntax::ParsedFile;
 /// Order is the argument order, standing in for the driver's sorted file list —
 /// which file is "first" is what the mismatch diagnostic is written against.
 fn check(sources: &[&str]) -> (Option<PackageIdentity>, Vec<ErrorCode>, CompilerContext) {
-    let mut ctx = CompilerContext::with_builtins(PackageId::LOCAL);
+    let mut ctx = CompilerContext::with_intrinsics(PackageId::LOCAL);
     let mut parsed: Vec<ParsedFile> = Vec::new();
     for content in sources {
         let source = ctx.sources.add_inline(*content);
@@ -44,7 +44,13 @@ fn agreeing_files_are_one_package() {
     let identity = identity.expect("two agreeing files establish an identity");
     assert_eq!(&*ctx.names.str(identity.namespace), "my");
     assert_eq!(&*ctx.names.str(identity.name), "app");
-    assert_eq!(identity.version.map(|v| ctx.names.str(v).to_string()).as_deref(), Some("0.1.0"));
+    assert_eq!(
+        identity
+            .version
+            .map(|v| ctx.names.str(v).to_string())
+            .as_deref(),
+        Some("0.1.0")
+    );
 }
 
 #[test]
@@ -108,10 +114,7 @@ fn every_file_with_no_clause_is_reported() {
     let (identity, codes, _) = check(&["global Alpha {\n}\n", "global Beta {\n}\n"]);
     assert_eq!(
         codes,
-        vec![
-            ErrorCode::MissingPackageDecl,
-            ErrorCode::MissingPackageDecl
-        ]
+        vec![ErrorCode::MissingPackageDecl, ErrorCode::MissingPackageDecl]
     );
     assert_eq!(identity, None);
 }

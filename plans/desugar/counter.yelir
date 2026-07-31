@@ -30,58 +30,58 @@ module Dom {
     }
 
     @import(name = "create-element")
-    create-element: extern func(tag: string) -> node;
+    create-element: extern func(tag: string) -> u32;
 
     @import(name = "create-text")
-    create-text: externfunc(content: string) -> node;
+    create-text: extern func(content: string) -> u32;
 
     @import(name = "create-comment")
-    create-comment: extern func(content: string) -> node;
+    create-comment: extern func(content: string) -> u32;
 
     @import(name = "set-attribute")
-    set-attribute: extern func(node: node, name: string, value: attribute-value);
+    set-attribute: extern func(node: u32, name: string, value: attribute-value);
 
     @import(name = "remove-attribute")
-    remove-attribute: extern func(node: node, name: string);
+    remove-attribute: extern func(node: u32, name: string);
 
     @import(name = "set-text-content")
-    set-text-content: extern func(node: node, content: string);
+    set-text-content: extern func(node: u32, content: string);
 
     @import(name = "set-style")
-    set-style: extern func(node: node, property: string, value: string);
+    set-style: extern func(node: u32, property: string, value: string);
 
     @import(name = "set-class")
-    set-class: extern func(node: node, class-name: string);
+    set-class: extern func(node: u32, class-name: string);
 
     @import(name = "append-child")
-    append-child: extern func(parent: node, child: node);
+    append-child: extern func(parent: u32, child: u32);
 
     @import(name = "insert-before")
-    insert-before: extern func(parent: node, node: node, reference: node);
+    insert-before: extern func(parent: u32, node: u32, reference: u32);
 
     @import(name = "remove-child")
-    remove-child: extern func(parent: node, child: node);
+    remove-child: extern func(parent: u32, child: u32);
 
     @import(name = "remove")
-    remove: extern func(node: node);
+    remove: extern func(node: u32);
 
     @import(name = "get-parent")
-    get-parent: extern func(node: node) -> node;
+    get-parent: extern func(node: u32) -> u32;
 
     @import(name = "get-next-sibling")
-    get-next-sibling: extern func(node: node) -> node;
+    get-next-sibling: extern func(node: u32) -> u32;
 
     @import(name = "add-event-listener")
-    add-event-listener: extern func(node: node, event: string, handler-id: u32);
+    add-event-listener: extern func(node: u32, event: string, handler-id: u32);
 
     @import(name = "remove-event-listener")
-    remove-event-listener: extern func(node: node, event: string, handler-id: u32);
+    remove-event-listener: extern func(node: u32, event: string, handler-id: u32);
 
     @import(name = "insert-after")
-    insert-after: extern func(parent: node, node: node, anchor: node);
+    insert-after: extern func(parent: u32, node: u32, anchor: u32);
 
     @import(name = "create-fragment")
-    create-fragment: extern func() -> node;
+    create-fragment: extern func() -> u32;
 }
 
 @interface(name = "yel:ui/dispatch@0.1.0")
@@ -134,14 +134,14 @@ module CounterComponent {
     }
 
     record If0 {
-        anchor: node,
-        parent: node,
+        anchor: u32,
+        parent: u32,
         active: bool,
         branch-then: If0Then,
     }
 
     record If0Then {
-        wrapper: node,
+        wrapper: u32,
     }
 
     registry: list<Handle>;
@@ -200,9 +200,9 @@ module CounterComponent {
         self
     }
 
-    constructor: func(self: Component, parent: node) {}
+    constructor: func(self: Component, parent: u32) {}
 
-    mount: func(self: Component, parent: node) {
+    mount: func(self: Component, parent: u32) {
         let root = create-element-into(parent, "VStack");
 
         let text-box = create-element-into(root, "Text");
@@ -268,14 +268,14 @@ module CounterComponent {
         }
     }
 
-    if-branch-mount: func(self: Component, parent: node, if-0: If0,
+    if-branch-mount: func(self: Component, parent: u32, if-0: If0,
                           branch: If0Then) {
         branch.wrapper = create-element-into(parent, "Text");
         set-text-content(branch.wrapper, "high!");
         insert-after(parent, branch.wrapper, if-0.anchor);
     }
 
-    if-branch-unmount: func(self: Component, parent: node, branch: If0Then) {
+    if-branch-unmount: func(self: Component, parent: u32, branch: If0Then) {
         remove(branch.wrapper);
     }
 
@@ -296,13 +296,13 @@ record Handle {
     next: s32,
 }
 
-create-element-into: func(parent: node, tag: string) -> node {
+create-element-into: func(parent: u32, tag: string) -> u32 {
     let n = create-element(tag);
     append-child(parent, n);
     n
 }
 
-set-attribute-str: func(node: node, name: string, value: string) {
+set-attribute-str: func(node: u32, name: string, value: string) {
     set-attribute(node, name, str(value));
 }
 

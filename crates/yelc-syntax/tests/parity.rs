@@ -220,6 +220,7 @@ fn accept_reject_parity_over_random_mutations() {
     let mut rng = Rng::new(RANDOM_SEED);
     let mut checked = 0usize;
     let mut catch_all = 0usize;
+    let mut widened = 0usize;
     let mut unexplained: Vec<(String, bool, bool)> = Vec::new();
 
     for path in mutation_seeds() {
@@ -240,6 +241,12 @@ fn accept_reject_parity_over_random_mutations() {
                 catch_all += 1;
                 continue;
             }
+            // The opposite direction: the mutation landed a token the surface
+            // gained after the freeze, checked against the new lexer.
+            if frozen && !new && support::widenings::explains_frozen_rejection(&mutated) {
+                widened += 1;
+                continue;
+            }
             unexplained.push((format!("{name}#random@{index}: {mutated:?}"), frozen, new));
         }
     }
@@ -250,7 +257,7 @@ fn accept_reject_parity_over_random_mutations() {
     );
     eprintln!(
         "random parity: {checked} checked, {catch_all} catch-all divergence(s), \
-         {} unexplained",
+         {widened} widening(s), {} unexplained",
         unexplained.len()
     );
     assert!(

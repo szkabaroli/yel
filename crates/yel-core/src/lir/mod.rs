@@ -43,16 +43,15 @@ pub mod tree_shape;
 
 // Block-based types
 pub use block::{
-    LirExprId, LirBindingMode, LirBlock, LirBlockEffect, LirGlobalRef, LirOp, LirSlotId, LirSlotInfo,
-    ArithOp, ArrayItemRepr, BinOperand, CompareOp, LirSlotKind, LirSlotValType, LirTypeRef, MemoryValueType, StoreWidth, StringId,
+    ArithOp, ArrayItemRepr, BinOperand, CompareOp, LirBindingMode, LirBlock, LirBlockEffect,
+    LirExprId, LirGlobalRef, LirOp, LirSlotId, LirSlotInfo, LirSlotKind, LirSlotValType,
+    LirTypeRef, MemoryValueType, StoreWidth, StringId,
 };
 
 // Arena traits — abstract over expr/string/slot ownership and the
 // function-shape so non-component callers (flow functions) can plug
 // into the same code-gen helpers.
-pub use arena::{
-    LirResourceArena, LirExprArena, LirFunctionLike, LirSlotArena, LirStringArena,
-};
+pub use arena::{LirExprArena, LirFunctionLike, LirResourceArena, LirSlotArena, LirStringArena};
 
 // Function metadata: identity (DefId vs BlockId) + calling convention
 // (implicit params + return types). Pure data; the body lives in the
@@ -67,8 +66,8 @@ pub use expr::{LirExpr, LirExprKind, LirLiteral};
 
 // Layout utilities
 pub use layout::{
-    align_to, discriminant_size, per_valtype_counts, FlatValTypeCounts,
-    LirCoreValType, LirLayoutContext, LirTypeLayout, RecordLayout, VariantLayout,
+    FlatValTypeCounts, LirCoreValType, LirLayoutContext, LirTypeLayout, RecordLayout,
+    VariantLayout, align_to, discriminant_size, per_valtype_counts,
 };
 
 // Main lowering entry point — re-exported for back-compat. The
@@ -91,4 +90,4 @@ pub use signal::{LirEffect, LirSignal};
 
 // Per-signal storage layout (Phase 1.1a: where each signal lives —
 // in the component's $Comp_<i> GC struct or in linear memory).
-pub use signal_layout::{compute_signal_layout, GcSlot, SignalLayout, SignalStorage};
+pub use signal_layout::{GcSlot, SignalLayout, SignalStorage, compute_signal_layout};

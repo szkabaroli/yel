@@ -513,6 +513,34 @@ pub fn mutation_seeds() -> Vec<PathBuf> {
 /// than the frozen one, and the literal shape anti-spec A10 names. It also sat
 /// outside `DIVERGENCE_COUNT`, so the ratchet could not see it. One module, one
 /// list, one evidence function, visible to both test binaries.
+/// Approved surface widenings: inputs the frozen parser rejects and the new
+/// one accepts because the language grew. Same discipline as
+/// [`catch_all`] — the excuse is a checked property of the input, not a
+/// label.
+pub mod widenings {
+    use yelc_base::{Diagnostics, SourceId};
+    use yelc_syntax::token::TokenKind;
+
+    /// 2026-07-31: `&`, `|` and hex integer literals became surface (the
+    /// `.yelir` subset, user-approved — `plans/desugar/README.md` §1; the
+    /// token-count pin in `token.rs` carries the entry). The frozen lexer
+    /// hard-errors on all three ("expected `&&`"), so a mutation landing one
+    /// inside otherwise-valid text diverges frozen-rejects/new-accepts. The
+    /// evidence is read out of the new lexer: the input really contains a
+    /// widened token.
+    pub fn explains_frozen_rejection(content: &str) -> bool {
+        let mut diags = Diagnostics::new();
+        let lexed = yelc_syntax::lexer::lex(SourceId(0), content, &mut diags);
+        let mut offset = 0usize;
+        lexed.tokens.iter().zip(&lexed.widths).any(|(kind, width)| {
+            let start = offset;
+            offset += *width as usize;
+            matches!(kind, TokenKind::AMP | TokenKind::PIPE)
+                || (*kind == TokenKind::INT_LITERAL && content[start..offset].starts_with("0x"))
+        })
+    }
+}
+
 pub mod catch_all {
     use super::single_token_deletions;
     use yelc_base::{Diagnostics, Interner, SourceId};

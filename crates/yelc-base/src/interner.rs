@@ -4,9 +4,9 @@
 //! a [`Name`] (an index). This reduces memory usage and enables fast
 //! equality comparisons via integer comparison.
 
-use serde::{Serialize, Deserialize};
-use std::borrow::Borrow;
 use rustc_hash::FxHashMap as HashMap;
+use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use parking_lot::Mutex;
 ///
 /// This is a lightweight handle (a `u32` index) that can be used to
 /// retrieve the original string from an [`Interner`].
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Name(pub u32);
 
 /// A reference-counted string wrapper.
@@ -80,7 +80,6 @@ impl PartialEq<String> for ArcStr {
     }
 }
 
-
 /// Internal interner state.
 #[derive(Debug)]
 struct Internal {
@@ -94,18 +93,32 @@ struct Internal {
 /// cheaply and used to retrieve the original string.
 #[derive(Debug)]
 pub struct Interner {
-    data: Mutex<Internal>,
+    data: Arc<Mutex<Internal>>,
 }
 
 impl Interner {
     /// Create a new empty interner.
     pub fn new() -> Interner {
         Interner {
-            data: Mutex::new(Internal {
+            data: Arc::new(Mutex::new(Internal {
                 map: HashMap::default(),
                 vec: Vec::new(),
-            }),
+            })),
         }
+    }
+
+    /// Make this interner the one [`Name`]'s `Debug` resolves against, for the
+    /// current thread.
+    ///
+    /// rustc's `Symbol` does the same through its session globals: a `Debug`
+    /// impl has no context parameter, so showing `Name("count")` instead of
+    /// `Name(16)` requires the interner to be reachable from thin air. The
+    /// driver installs its context's interner once; a thread with none
+    /// installed — most tests — gets the index form, and a `Name` minted by a
+    /// *different* interner falls back to its index rather than resolving to
+    /// an unrelated string.
+    pub fn install_for_debug(&self) {
+        DEBUG_INTERNER.with(|slot| *slot.borrow_mut() = Some(Arc::clone(&self.data)));
     }
 
     /// Intern a string, returning its unique [`Name`].
@@ -131,6 +144,27 @@ impl Interner {
     pub fn str(&self, name: Name) -> ArcStr {
         let data = self.data.lock();
         data.vec[name.0 as usize].clone()
+    }
+}
+
+thread_local! {
+    static DEBUG_INTERNER: std::cell::RefCell<Option<Arc<Mutex<Internal>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `Name("count")` when a debug interner is installed and knows this name;
+/// `Name(16)` otherwise. See [`Interner::install_for_debug`].
+impl fmt::Debug for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let resolved = DEBUG_INTERNER.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .and_then(|data| data.lock().vec.get(self.0 as usize).cloned())
+        });
+        match resolved {
+            Some(text) => write!(f, "Name({:?})", &*text),
+            None => write!(f, "Name({})", self.0),
+        }
     }
 }
 

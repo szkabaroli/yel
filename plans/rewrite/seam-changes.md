@@ -1202,3 +1202,143 @@ and the restoration verified by content comparison, not by assumption.
 multi-file program and no `package` clause, so both suites stay green through the
 whole change. That is the oracle's vocabulary blindness (`scope.md`), which is
 why the tests above are hand-written rather than inferred from a sweep.
+
+---
+
+## Phase 3's two seam changes — 2026-07-31
+
+**1 · `Definitions` gains member rows** (`yelc-sema`): `Member { name, kind,
+span, ty }`, `MemberKind::{Field, Case, Property{direction}, Function}`,
+addressed as `(owner DefId, index)` with index = source order. **Why the table
+and not the HIR item:** under one namespace a member name cannot be a
+root-scope binding (every component's `width` would collide), the frozen
+answer — a `DefId` per member, never name-registered — fills the table with
+entries no scope can reach, and the artifact needs exported members to
+typecheck cross-package calls, which an HIR-side table could not serialize.
+Phase 2 writes the resolved types into the rows; `None` stays `None` (H4).
+
+**2 · `HirMap::synthesize(origin) → HirId`** (`yelc-hir`): forward-only
+allocation for desugaring products. The landed contract had one allocator,
+`next_hir_id`, which panics on a second id for one node — correct for
+primaries and unusable for `x += 1`'s rebuilt left-hand side, which reads the
+same syntax twice. The contract never said how a synthesized node gets an id;
+this is that hole, filled: forward map total (diagnostics can always ask
+where a node came from), reverse map primaries-only (one right answer per
+syntax node), H2's injectivity a statement about primaries. `LocalId` also
+added to `ids.rs` — body-scoped, allocation order = source order.
+
+**Measured.** Workspace **642 → 675 / 0 / 2**; freeze-check clean; the
+mutation and differential evidence is in the stage file's Numbers.
+
+---
+
+## The frontend gets one entry point — 2026-07-31
+
+`yelc_hir::check_package(path, include_dirs, std_modules, ctx) →
+CheckedPackage` — discovery, parsing, `packageck`, `includes`, `lower` (and
+`signalck` at its tail) behind **one call**, ark's `check_program` shape
+(`arkc-frontend/src/lib.rs`, adopted at the user's direction). The driver's
+`run()` is argument plumbing, emit formatting, and exit codes; its module doc
+now says that if a phase name appears in it, something escaped.
+
+Two relocations with a doc reversal owned: `includes.rs` (specifier semantics,
+module binding) and file **discovery** moved from the driver into `yelc-hir` —
+the discovery file had argued *"which files is I/O and belongs to the
+driver"*, and ark draws the line the other way; the revised doc says why the
+new line is better (a language rule that touches the disk, not disk-touching
+with rules). The embedded std registry stays driver-side as a parameter —
+`build.rs` output is binary packaging, and the circularity a frontend-side
+registry would need (`yelc-hir`'s build script depending on `yelc-hir`) is the
+architecture agreeing.
+
+**Taken further the same day, at the user's direction:** `run()` itself and
+both emitters (`emit.rs`, `emit_hir.rs`) moved into `yelc-hir` — ark keeps
+`emit_ast` in `arkc-frontend` too. The frontend exposes a clap-free
+[`RunArgs`] (the `SemaArgs` shape); `yelc-driver` is now **one file**: the
+clap surface, a field-by-field conversion, and
+`exit(yelc_hir::run(&args, STD_MODULES))`. 140 lines, no `driver/` directory,
+nothing left that could drift from the frontend.
+
+**Measured.** Workspace 697 / 0 / 2 unchanged through both moves; the six
+include e2e tests unchanged; freeze-check clean.
+
+---
+
+## `sym.rs` ported from ark — the file, not the idea — 2026-07-31
+
+**Course correction, named as one.** The standing rule is *ports of ark, not
+fresh designs*, and the resolution machinery had drifted into derivation:
+`BodyLowering` hand-rolled `scopes: Vec<FxHashMap<Name, LocalId>>` — ark's
+`levels`, reinvented privately — and hardcoded the lookup ladder as a method
+nothing else could reuse.
+
+`yelc-hir/src/sym.rs` is now a port of `arkc-frontend/src/sym.rs`: `SymTable`,
+`Symbol`, `SymbolKind`, `ModuleSymTable`, `push_level`/`pop_level`/`get`/
+`insert`/`get_string`, same walk order. Ark's commented-out `dependencies` and
+`prelude` slots are live here — included modules sit in the outer table,
+intrinsics are the prelude. Two deviations, both forced and declared in the
+header: `SymbolKind` payloads are yel's ids at `Definitions` granularity, and
+`outer`/`prelude` are consulted through a context parameter because yel's
+outer table lives on the `CompilerContext` the lowering also mutates (ark
+holds `Rc<SymTable>`).
+
+`BodyLowering` now resolves through **one `symtable.get` walk** (ark's
+`check_expr_ident` shape) everywhere — bare names, callees, and the path-call
+base dispatch — with the enclosing item's members seeded as the outermost
+level, and ark's level-balance assert (`typecheck/function.rs`) at every
+body's close. Stage 4's pattern binders and the LSP's "what is in scope here"
+get the same object instead of a private ladder.
+
+**Measured.** Workspace 697 / 0 / 2 and the six include e2e tests unchanged
+through the swap — the resolution behavior is pinned by the existing suite,
+which is what made the port safe. freeze-check clean.
+
+---
+
+## Module resolution goes through the package's own table — 2026-07-31
+
+At the user's direction, the include/use machinery now follows ark's split by
+**function name**: loading is `program.rs`'s `add_std_package` /
+`add_dependency_package` (ark's `ProgramParser` vocabulary), and `includes.rs`
+scans and binds — the `useck` bite that `include` needs. The two syntaxes'
+division of labour is now structural:
+
+- **`include`** binds a *module name* (`Sym::Module` in the root); the
+  module's items stay in its package's own table.
+- **`use X.{…}`** (future, `useck.rs` port) pulls *items* across into the
+  using scope — the only thing that ever copies a name.
+
+The copying design died with it: `Module.scope`, `bind_in_module` and
+`lookup_in_module` deleted (A9). The earlier shape copied every loaded
+definition into a per-module scope — a second owner for every name, ark never
+does it, and `use` would have made it a three-way copy.
+`CompilerContext::module_member` is ark's `table_for_module` walk instead:
+module row → its package → that package's own table. The depth-two argument
+that hung on `bind_in_module`'s signature moved to the module doc.
+
+**Measured.** Workspace 699 / 0 / 2 and the six include e2e tests unchanged
+through the restructure; freeze-check clean.
+
+---
+
+## `yelc-lsp` — ark's language server, copied and adapted — 2026-07-31
+
+`ark-language-server` (811 lines, `lsp-server` + crossbeam `select!` loop +
+threadpool — dora's LSP architecture) copied file-for-file into
+`crates/yelc-lsp`: same `ServerState`/`MainLoopTask`/`event_loop` shapes, same
+`SymbolScanner` nesting mechanism, and the stale-diagnostics clearing via
+`files_with_errors` that a fresh design would have missed. Deviations, each
+declared in the file headers: projects are **directories** (yel's package
+model; `yel-project.json` honored when present), compilation is
+`check_package_with_overlay` so diagnostics track unsaved buffers (new
+frontend entry, `check_package` delegates), nothing non-`Send` crosses
+threads (workers reparse from content), and ark's hover **stub** is filled
+with the tables built for it — definition kinds, declared types via the newly
+public `emit_hir::render_ty`, and the D6 docs.
+
+**Verified over the wire**, not by review: a scripted stdio session against
+the real binary — E0010 published on a duplicate, cleared to zero on the fix
+(the ark clearing trick working), hover on `App` showing kind + type + the
+`///` doc, documentSymbol nesting `count` under `App`.
+
+Workspace 699 / 0 / 2; freeze-check clean.

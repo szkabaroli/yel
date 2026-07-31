@@ -17,7 +17,12 @@ use yel_core::lir::{LirBlock, LirResource, LirSlotId, LirSlotInfo, LirSlotKind};
 /// pointer on the stack. The canonical-ABI realloc with `old_ptr = 0` and
 /// `old_size = 0` is a plain allocation of `size` bytes at `align`. The caller
 /// consumes the pointer (e.g. `local.set`).
-pub(super) fn emit_cabi_realloc_fixed(func: &mut Function, align: u32, size: u32, cabi_realloc: u32) {
+pub(super) fn emit_cabi_realloc_fixed(
+    func: &mut Function,
+    align: u32,
+    size: u32,
+    cabi_realloc: u32,
+) {
     func.instruction(&Instruction::I32Const(0));
     func.instruction(&Instruction::I32Const(0));
     func.instruction(&Instruction::I32Const(align as i32));
@@ -215,4 +220,3 @@ pub(super) fn push_valtype_locals(
         locals.push((counts.3, ValType::F64));
     }
 }
-

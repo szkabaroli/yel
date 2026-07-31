@@ -17,9 +17,10 @@ impl<'a> WasmPackageBuilder<'a> {
     /// read from the registered `known.variants.event_value` builtin variant —
     /// so dispatch decode derives the ordinal instead of hardcoding it.
     fn event_value_case_disc(&self, case_name: &str) -> Result<i32, CodegenError> {
-        let ev = self.ctx.known.variants.event_value.ok_or_else(|| {
-            CodegenError::InvalidIR("event-value variant not registered".into())
-        })?;
+        let ev =
+            self.ctx.known.variants.event_value.ok_or_else(|| {
+                CodegenError::InvalidIR("event-value variant not registered".into())
+            })?;
         let var = self
             .ctx
             .defs
@@ -338,12 +339,12 @@ impl<'a> WasmPackageBuilder<'a> {
                     .as_ref()
                     .and_then(|r| r.store_fat_ptr)
                     .ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "dispatch: payload-binding handler needs store_fat_ptr but the \
+                    CodegenError::InvalidIR(
+                        "dispatch: payload-binding handler needs store_fat_ptr but the \
                              runtime helper was not emitted (runtime_needs scan missed it?)"
-                                .to_string(),
-                        )
-                    })?;
+                            .to_string(),
+                    )
+                })?;
                 func.instruction(&Instruction::I32Const(offset));
                 func.instruction(&Instruction::LocalGet(PARAM_SLOT0_I64));
                 func.instruction(&Instruction::I32WrapI64);

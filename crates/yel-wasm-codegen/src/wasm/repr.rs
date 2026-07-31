@@ -146,13 +146,15 @@ impl WasmPackageBuilder<'_> {
             return InternalRepr::GcRef(type_idx);
         }
         if let yel_core::types::InternedTyKind::Tuple(_) = self.ctx.ty_kind(ty)
-            && let Some(&tup_idx) = self.record_gc_types.tuple_struct_type_idx.get(&ty) {
-                return InternalRepr::GcRef(tup_idx);
-            }
+            && let Some(&tup_idx) = self.record_gc_types.tuple_struct_type_idx.get(&ty)
+        {
+            return InternalRepr::GcRef(tup_idx);
+        }
         if self.is_scalar_list_ty(ty)
-            && let Some(&arr_idx) = self.record_gc_types.list_array_type_idx.get(&ty) {
-                return InternalRepr::GcArrayRef(arr_idx);
-            }
+            && let Some(&arr_idx) = self.record_gc_types.list_array_type_idx.get(&ty)
+        {
+            return InternalRepr::GcArrayRef(arr_idx);
+        }
         // Option-of-ref collapse: option<T> where T has a ref repr is
         // itself just a nullable ref of T's heap type (none = null,
         // some(v) = v). No discriminant slot internally.
@@ -184,9 +186,10 @@ impl WasmPackageBuilder<'_> {
         // `yel_core::lir::block_lower::is_gc_variant_ty`; both
         // sides MUST agree per Ty.
         if self.is_gc_variant(ty)
-            && let Some(&super_idx) = self.record_gc_types.gc_variant_super_idx.get(&ty) {
-                return InternalRepr::GcVariant(super_idx);
-            }
+            && let Some(&super_idx) = self.record_gc_types.gc_variant_super_idx.get(&ty)
+        {
+            return InternalRepr::GcVariant(super_idx);
+        }
         // strings-to-GC (`plans/strings-to-gc.md`): a `String` is a GC byte
         // array `(ref $str_bytes)`. `$str_bytes` is always emitted, so the
         // index is present for every program that reaches here.
@@ -669,9 +672,13 @@ impl WasmPackageBuilder<'_> {
                 DefKind::Field(f) => f.ty,
                 _ => continue,
             };
-            let (_name, field_offset, _ty) = layout.field_offsets.get(i).cloned().ok_or_else(|| {
-                CodegenError::InvalidIR(format!("record leaf accesses: field offset missing for {}", i))
-            })?;
+            let (_name, field_offset, _ty) =
+                layout.field_offsets.get(i).cloned().ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "record leaf accesses: field offset missing for {}",
+                        i
+                    ))
+                })?;
             let gc_idx = *field_gc.get(i).ok_or_else(|| {
                 CodegenError::InvalidIR("record leaf accesses: gc field index out of range".into())
             })?;
@@ -679,9 +686,7 @@ impl WasmPackageBuilder<'_> {
             chain.push((type_idx, gc_idx));
             let abs_off = base_offset + field_offset;
             match self.ctx.ty_kind(fty) {
-                InternedTyKind::Adt(d)
-                    if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) =>
-                {
+                InternedTyKind::Adt(d) if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) => {
                     // Nested record: recurse, extending the chain + offset.
                     self.collect_record_leaf_accesses(*d, abs_off, &chain, out)?;
                 }

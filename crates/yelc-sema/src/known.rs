@@ -222,9 +222,9 @@ mod tests {
     /// The registration and the resolution loop the **same** inventory, so an
     /// entry cannot be one without the other.
     ///
-    /// This is the half of A1 that lives here: `stdlib::register_builtins` is
+    /// This is the half of A1 that lives here: `stdlib::register_intrinsics` is
     /// where the registration happens and
-    /// `stdlib::tests::register_builtins_registers_the_lang_items_into_definitions`
+    /// `stdlib::tests::register_intrinsics_registers_the_lang_items_into_definitions`
     /// is where it is checked, but the property is about this file's
     /// `Known::ALL` and belongs beside it.
     #[test]

@@ -454,9 +454,14 @@ const EDITOR_SAMPLE_COUNT: usize = 3;
 /// the one place a name is declared against the *builtin* inventory rather than
 /// against another user declaration. A sweep that reports "no program does X"
 /// while not reading every program is a sample presented as a census.
-const TRACKED_YEL_FILES: usize =
-    CORPUS_COUNT + POSITIVE_FIXTURE_COUNT + DIAGNOSTIC_FIXTURE_COUNT + EXAMPLE_COUNT
-        + KNOWN_BUG_FIXTURE_COUNT + STDLIB_COUNT + CORE_EXAMPLE_COUNT + EDITOR_SAMPLE_COUNT;
+const TRACKED_YEL_FILES: usize = CORPUS_COUNT
+    + POSITIVE_FIXTURE_COUNT
+    + DIAGNOSTIC_FIXTURE_COUNT
+    + EXAMPLE_COUNT
+    + KNOWN_BUG_FIXTURE_COUNT
+    + STDLIB_COUNT
+    + CORE_EXAMPLE_COUNT
+    + EDITOR_SAMPLE_COUNT;
 
 /// The **only** tracked `.yel` file the frozen parser rejects, named rather
 /// than skipped.
@@ -700,12 +705,22 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 fn no_checked_in_program_reuses_a_name_across_kinds() {
     let mut scanned = 0;
     let mut reusing = Vec::new();
+    let mut rejected = Vec::new();
 
-    for path in all_sources() {
+    let sources = all_sources();
+    let total = sources.len();
+
+    for path in sources {
         let source = std::fs::read_to_string(&path).expect("readable");
         let Ok(parsed) =
             yel_core::syntax::parser::parse_file_with_source_id(&source, yel_core::SourceId(0))
         else {
+            rejected.push(
+                path.file_name()
+                    .expect("file")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
             continue;
         };
         scanned += 1;
@@ -756,9 +771,19 @@ fn no_checked_in_program_reuses_a_name_across_kinds() {
         }
     }
 
-    assert!(
-        scanned >= CORPUS_COUNT,
-        "only {scanned} programs parsed; the sweep collapsed",
+    // `parsed == total`, not `parsed >= CORPUS_COUNT`: the bound let 117 files
+    // fail silently and still reported a clean census. The one file the frozen
+    // parser rejects is named, so a new rejection is a failure rather than a
+    // quietly smaller sample.
+    assert_eq!(
+        rejected, UNPARSEABLE,
+        "the set of files the frozen parser rejects moved; the sweep is now \
+         reporting a census over a smaller sample than it claims",
+    );
+    assert_eq!(
+        scanned,
+        total - UNPARSEABLE.len(),
+        "only {scanned} of {total} programs parsed; the sweep collapsed",
     );
     assert_eq!(
         reusing,

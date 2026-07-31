@@ -351,11 +351,17 @@ mod tests {
         let dom = ctx.dom_imports().clone();
 
         let sig = |def_id: DefId| -> (Vec<InternedTyKind>, InternedTyKind) {
-            let f = ctx.defs.as_function(def_id).expect("dom import is a function");
+            let f = ctx
+                .defs
+                .as_function(def_id)
+                .expect("dom import is a function");
             let params = f
                 .params
                 .iter()
-                .map(|p| ctx.ty_kind(ctx.defs.type_of(*p).expect("param type")).clone())
+                .map(|p| {
+                    ctx.ty_kind(ctx.defs.type_of(*p).expect("param type"))
+                        .clone()
+                })
                 .collect();
             (params, ctx.ty_kind(f.ret_ty).clone())
         };
@@ -393,7 +399,10 @@ mod tests {
         let mut ctx = CompilerContext::new();
         lookup_known_definitions(&mut ctx);
         let av = ctx.known.variants.attribute_value();
-        let var = ctx.defs.as_variant(av).expect("AttributeValue is a variant");
+        let var = ctx
+            .defs
+            .as_variant(av)
+            .expect("AttributeValue is a variant");
         assert_eq!(var.cases.len(), 14);
     }
 }

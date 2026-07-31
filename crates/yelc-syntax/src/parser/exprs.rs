@@ -63,11 +63,16 @@ fn infix_op(kind: TokenKind) -> Option<(u8, InfixOp)> {
         GT => (5, InfixOp::Binary(ast::BinaryOp::Gt)),
         LE => (5, InfixOp::Binary(ast::BinaryOp::Le)),
         GE => (5, InfixOp::Binary(ast::BinaryOp::Ge)),
-        ADD => (6, InfixOp::Binary(ast::BinaryOp::Add)),
-        SUB => (6, InfixOp::Binary(ast::BinaryOp::Sub)),
-        MUL => (7, InfixOp::Binary(ast::BinaryOp::Mul)),
-        DIV => (7, InfixOp::Binary(ast::BinaryOp::Div)),
-        MODULO => (7, InfixOp::Binary(ast::BinaryOp::Mod)),
+        // Rust's relative order: comparison, then `|`, `&`, shifts (level 8,
+        // composed in `parse_binary` — they are two adjacent tokens, not
+        // lexer tokens), then arithmetic.
+        PIPE => (6, InfixOp::Binary(ast::BinaryOp::BitOr)),
+        AMP => (7, InfixOp::Binary(ast::BinaryOp::BitAnd)),
+        ADD => (9, InfixOp::Binary(ast::BinaryOp::Add)),
+        SUB => (9, InfixOp::Binary(ast::BinaryOp::Sub)),
+        MUL => (10, InfixOp::Binary(ast::BinaryOp::Mul)),
+        DIV => (10, InfixOp::Binary(ast::BinaryOp::Div)),
+        MODULO => (10, InfixOp::Binary(ast::BinaryOp::Mod)),
         _ => return None,
     };
     Some(entry)
@@ -137,11 +142,28 @@ impl<'a> Parser<'a> {
         let mark = self.mark();
         let mut lhs = self.parse_unary();
 
-        while let Some((level, op)) = infix_op(self.current()) {
+        loop {
+            // `<<` / `>>` are two ADJACENT tokens, never lexer tokens:
+            // `list<list<s32>>` must keep closing generics as two `>`s, so
+            // the join is the expression parser's (rustc does the reverse,
+            // splitting `>>` while parsing types). `nth(1)` is the raw next
+            // token — any trivia between the two breaks the pair.
+            let (level, op, width) = if self.current() == LT && self.nth(1) == LT {
+                (8, InfixOp::Binary(ast::BinaryOp::Shl), 2)
+            } else if self.current() == GT && self.nth(1) == GT {
+                (8, InfixOp::Binary(ast::BinaryOp::Shr), 2)
+            } else if let Some((level, op)) = infix_op(self.current()) {
+                (level, op, 1)
+            } else {
+                break;
+            };
             if level < min_level {
                 break;
             }
             self.advance();
+            if width == 2 {
+                self.advance();
+            }
             let rhs = self.parse_binary(level + 1);
             lhs = match op {
                 InfixOp::Binary(op) => {
@@ -435,13 +457,19 @@ impl<'a> Parser<'a> {
         let node_span = self.finish_node(LITERAL_EXPR);
 
         let expr_kind = match kind {
-            INT_LITERAL => match text.parse::<i64>() {
-                Ok(value) => ast::ExprKind::Int(value),
-                Err(err) => {
-                    self.error_at(span, format!("invalid integer literal: {err}"));
-                    ast::ExprKind::Error
+            INT_LITERAL => {
+                let parsed = match text.strip_prefix("0x") {
+                    Some(hex) => i64::from_str_radix(hex, 16),
+                    None => text.parse::<i64>(),
+                };
+                match parsed {
+                    Ok(value) => ast::ExprKind::Int(value),
+                    Err(err) => {
+                        self.error_at(span, format!("invalid integer literal: {err}"));
+                        ast::ExprKind::Error
+                    }
                 }
-            },
+            }
             FLOAT_LITERAL => match text.parse::<f64>() {
                 Ok(value) => ast::ExprKind::Float(value),
                 Err(err) => {

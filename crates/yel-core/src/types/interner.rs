@@ -2,8 +2,8 @@
 
 use crate::ids::DefId;
 use crate::syntax::ast::TyKind as AstTyKind;
-use serde::{Serialize, Deserialize};
 use rustc_hash::FxHashMap as HashMap;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// An interned type reference.
@@ -322,7 +322,10 @@ impl TypeInterner {
                 params,
                 return_type,
             } => {
-                let param_tys: Vec<_> = params.iter().map(|(_, t)| self.intern_ast_ty(&t.kind)).collect();
+                let param_tys: Vec<_> = params
+                    .iter()
+                    .map(|(_, t)| self.intern_ast_ty(&t.kind))
+                    .collect();
                 let ret_ty = return_type.as_ref().map(|t| self.intern_ast_ty(&t.kind));
                 self.intern_func(param_tys, ret_ty)
             }

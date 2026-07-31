@@ -67,6 +67,23 @@ impl HirMap {
         hir
     }
 
+    /// Allocate a [`HirId`] for a node the lowering **synthesized** — a
+    /// desugaring product with no AST node of its own.
+    ///
+    /// `origin` is the construct it was made from: `x += 1` synthesizes a
+    /// `Binary` whose origin is the assignment statement. Recorded **forward
+    /// only** — the reverse map keeps pointing at the *primary* lowering of
+    /// that AST node, so H2's injectivity is a statement about primaries and a
+    /// synthesized node can never shadow one. `node_of` still answers for every
+    /// id, which is what diagnostics need; `hir_of` deliberately does not,
+    /// because "the HIR node for this syntax" has exactly one right answer.
+    pub fn synthesize(&mut self, origin: SourceNodeId) -> HirId {
+        let hir = HirId::new(self.next);
+        self.next += 1;
+        self.map.insert(hir, origin);
+        hir
+    }
+
     /// The AST node a HIR node came from.
     pub fn node_of(&self, hir: HirId) -> Option<SourceNodeId> {
         self.map.get(&hir).copied()

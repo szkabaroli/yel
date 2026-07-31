@@ -108,7 +108,9 @@ pub enum HirLiteral {
     /// Tuple literal.
     Tuple(Vec<HirExpr>),
     /// Record literal with field expressions.
-    Record { fields: Vec<(String, HirExpr)> },
+    Record {
+        fields: Vec<(String, HirExpr)>,
+    },
 }
 
 // Operator types live in `crate::ops` — they're not HIR-specific.

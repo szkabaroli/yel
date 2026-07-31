@@ -365,20 +365,40 @@ fn export_boundary_contract_is_produced() {
         .iter()
         .filter(|i| i.direction == InterfaceDirection::Export)
         .collect();
-    assert_eq!(exports.len(), 1, "one export interface for the one exported component");
+    assert_eq!(
+        exports.len(),
+        1,
+        "one export interface for the one exported component"
+    );
     let iface = exports[0];
     assert_eq!(ctx.str(iface.name).to_string(), "app-component");
-    assert_eq!(iface.resources.len(), 1, "the interface owns the component resource");
+    assert_eq!(
+        iface.resources.len(),
+        1,
+        "the interface owns the component resource"
+    );
 
     let fn_names: Vec<String> = iface
         .functions
         .iter()
         .map(|f| ctx.str(f.name).to_string())
         .collect();
-    assert!(fn_names.contains(&"mount".to_string()), "functions: {fn_names:?}");
-    assert!(fn_names.contains(&"unmount".to_string()), "functions: {fn_names:?}");
-    assert!(fn_names.contains(&"get-count".to_string()), "functions: {fn_names:?}");
-    assert!(fn_names.contains(&"set-count".to_string()), "functions: {fn_names:?}");
+    assert!(
+        fn_names.contains(&"mount".to_string()),
+        "functions: {fn_names:?}"
+    );
+    assert!(
+        fn_names.contains(&"unmount".to_string()),
+        "functions: {fn_names:?}"
+    );
+    assert!(
+        fn_names.contains(&"get-count".to_string()),
+        "functions: {fn_names:?}"
+    );
+    assert!(
+        fn_names.contains(&"set-count".to_string()),
+        "functions: {fn_names:?}"
+    );
 
     // The constructor takes no receiver param and returns own<resource>
     // (encoded as the `Constructor` receiver + no explicit result type).
@@ -389,7 +409,11 @@ fn export_boundary_contract_is_produced() {
         .expect("constructor present");
     assert!(ctor.params.is_empty() && ctor.result.is_none());
     // Methods (mount/getters/setters) take borrow<resource>.
-    let mount = iface.functions.iter().find(|f| ctx.str(f.name).to_string() == "mount").unwrap();
+    let mount = iface
+        .functions
+        .iter()
+        .find(|f| ctx.str(f.name).to_string() == "mount")
+        .unwrap();
     assert!(matches!(mount.receiver, LirReceiver::Borrow(_)));
 }
 
@@ -417,9 +441,18 @@ fn known_bugs_silently_discarded_members() {
 
         let spec_path = yel_path.with_extension("dropped");
         let spec = std::fs::read_to_string(&spec_path).unwrap_or_else(|e| {
-            panic!("[{}] missing .dropped file {}: {}", name, spec_path.display(), e)
+            panic!(
+                "[{}] missing .dropped file {}: {}",
+                name,
+                spec_path.display(),
+                e
+            )
         });
-        let dropped: Vec<&str> = spec.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let dropped: Vec<&str> = spec
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
         assert!(!dropped.is_empty(), "[{}] .dropped file is empty", name);
 
         let mut compiler = Compiler::new();

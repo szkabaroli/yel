@@ -1,7 +1,7 @@
 {
   "name": "yel-vscode",
   "displayName": "Yel Language Support",
-  "description": "Language support for Yel",
+  "description": "Language support for Yel (yelc-lsp, the rewrite frontend)",
   "version": "0.1.0",
   "publisher": "szkabaroli",
   "repository": {

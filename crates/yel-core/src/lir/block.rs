@@ -6,8 +6,8 @@
 //! - Storage is pre-allocated (SlotId for temps and memory)
 //! - Strings and expressions are interned (StringId, LirExprId)
 
-use std::collections::BTreeSet;
 use rustc_hash::FxHashMap as HashMap;
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 

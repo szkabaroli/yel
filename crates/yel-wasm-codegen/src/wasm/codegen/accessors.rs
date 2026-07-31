@@ -73,7 +73,6 @@ struct CompositeMember {
     gc_field_index: u32,
 }
 
-
 /// When canonical-ABI joined-flat slot type
 /// `vt_joined` differs from a case payload's actual valtype
 /// `vt_case`, emit the reinterpret bridge. Same-width int/float
@@ -374,7 +373,14 @@ impl<'a> WasmPackageBuilder<'a> {
                 for elem_ty in elems {
                     let l = self.layout_ctx.layout_of(elem_ty);
                     offset = yel_core::lir::align_to(offset, l.align);
-                    self.emit_free_region(out, locals, elem_ty, base_local, byte_off + offset, free_fn)?;
+                    self.emit_free_region(
+                        out,
+                        locals,
+                        elem_ty,
+                        base_local,
+                        byte_off + offset,
+                        free_fn,
+                    )?;
                     offset += l.size;
                 }
             }
@@ -385,7 +391,14 @@ impl<'a> WasmPackageBuilder<'a> {
                 out.push(Instruction::LocalGet(base_local));
                 out.push(Instruction::I32Load8U(ma(byte_off, 0)));
                 out.push(Instruction::If(BlockType::Empty));
-                self.emit_free_region(out, locals, inner, base_local, byte_off + payload_off, free_fn)?;
+                self.emit_free_region(
+                    out,
+                    locals,
+                    inner,
+                    base_local,
+                    byte_off + payload_off,
+                    free_fn,
+                )?;
                 out.push(Instruction::End);
             }
             InternedTyKind::Result { ok, err } => {
@@ -398,11 +411,25 @@ impl<'a> WasmPackageBuilder<'a> {
                 out.push(Instruction::I32Load8U(ma(byte_off, 0)));
                 out.push(Instruction::If(BlockType::Empty)); // disc != 0 → err
                 if let Some(err_ty) = err {
-                    self.emit_free_region(out, locals, err_ty, base_local, byte_off + payload_off, free_fn)?;
+                    self.emit_free_region(
+                        out,
+                        locals,
+                        err_ty,
+                        base_local,
+                        byte_off + payload_off,
+                        free_fn,
+                    )?;
                 }
                 out.push(Instruction::Else);
                 if let Some(ok_ty) = ok {
-                    self.emit_free_region(out, locals, ok_ty, base_local, byte_off + payload_off, free_fn)?;
+                    self.emit_free_region(
+                        out,
+                        locals,
+                        ok_ty,
+                        base_local,
+                        byte_off + payload_off,
+                        free_fn,
+                    )?;
                 }
                 out.push(Instruction::End);
             }
@@ -410,18 +437,22 @@ impl<'a> WasmPackageBuilder<'a> {
                 let def_id = *def_id;
                 if let Some(rec) = self.ctx.defs.as_record(def_id) {
                     let fields = rec.fields.clone();
-                    let layout = self
-                        .layout_ctx
-                        .record_layout_by_id(def_id)
-                        .ok_or_else(|| {
-                            CodegenError::InvalidIR(format!(
-                                "cabi_post: record layout missing for {:?}",
-                                def_id
-                            ))
-                        })?;
+                    let layout = self.layout_ctx.record_layout_by_id(def_id).ok_or_else(|| {
+                        CodegenError::InvalidIR(format!(
+                            "cabi_post: record layout missing for {:?}",
+                            def_id
+                        ))
+                    })?;
                     for (i, _fid) in fields.iter().enumerate() {
                         let (_, foff, fty) = layout.field_offsets[i].clone();
-                        self.emit_free_region(out, locals, fty, base_local, byte_off + foff, free_fn)?;
+                        self.emit_free_region(
+                            out,
+                            locals,
+                            fty,
+                            base_local,
+                            byte_off + foff,
+                            free_fn,
+                        )?;
                     }
                 } else if let Some(var) = self.ctx.defs.as_variant(def_id) {
                     let vd = var.clone();
@@ -447,7 +478,14 @@ impl<'a> WasmPackageBuilder<'a> {
                                 out.push(Instruction::I32Const(c as i32));
                                 out.push(Instruction::I32Eq);
                                 out.push(Instruction::If(BlockType::Empty));
-                                self.emit_free_region(out, locals, pty, base_local, byte_off + payload_off, free_fn)?;
+                                self.emit_free_region(
+                                    out,
+                                    locals,
+                                    pty,
+                                    base_local,
+                                    byte_off + payload_off,
+                                    free_fn,
+                                )?;
                                 out.push(Instruction::End);
                             }
                         }
@@ -501,7 +539,8 @@ impl<'a> WasmPackageBuilder<'a> {
         let slots = self.flatten_core_slots(value_ty);
         debug_assert_eq!(
             slots.len(),
-            self.canonical_flat_valtypes(value_ty, crate::wasm::repr::WitBoundary::assert()).len(),
+            self.canonical_flat_valtypes(value_ty, crate::wasm::repr::WitBoundary::assert())
+                .len(),
             "spill trampoline: flat-slot count must match the wide setter's param count"
         );
         let value_base = yel_core::lir::align_to(4, self.layout_ctx.align_of(value_ty));
@@ -663,7 +702,8 @@ impl<'a> WasmPackageBuilder<'a> {
 
             self.current_self_local = Some(self_ref_local);
             self.current_self_comp_idx = Some(ci);
-            let flat_valtypes = self.canonical_flat_valtypes(signal_ty, crate::wasm::repr::WitBoundary::assert());
+            let flat_valtypes =
+                self.canonical_flat_valtypes(signal_ty, crate::wasm::repr::WitBoundary::assert());
             // SLR (POR + records with string / list<scalar>
             // fields) all route through the GC-backed getter path.
             let is_por = self.is_single_level_record(signal_ty);
@@ -796,7 +836,12 @@ impl<'a> WasmPackageBuilder<'a> {
                         })?
                         .cabi_realloc;
                     // Allocate lift scratch.
-                    super::scratch::emit_cabi_realloc_fixed(&mut func, layout_info.align, layout_info.size, cabi_realloc);
+                    super::scratch::emit_cabi_realloc_fixed(
+                        &mut func,
+                        layout_info.align,
+                        layout_info.size,
+                        cabi_realloc,
+                    );
                     func.instruction(&Instruction::LocalSet(scratch_ptr_local));
 
                     // Lower the record into the scratch member-by-member;
@@ -832,7 +877,12 @@ impl<'a> WasmPackageBuilder<'a> {
                     // Allocate the canonical-ABI lift scratch, then lower the
                     // tuple GC struct into it member-by-member and return the
                     // scratch pointer.
-                    super::scratch::emit_cabi_realloc_fixed(&mut func, layout_info.align, layout_info.size, cabi_realloc);
+                    super::scratch::emit_cabi_realloc_fixed(
+                        &mut func,
+                        layout_info.align,
+                        layout_info.size,
+                        cabi_realloc,
+                    );
                     func.instruction(&Instruction::LocalSet(scratch_ptr_local));
                     let prefix: Vec<(u32, u32)> = vec![(struct_ty, field_path[0])];
                     self.emit_composite_lift_to_memory(
@@ -885,7 +935,12 @@ impl<'a> WasmPackageBuilder<'a> {
                     })?
                     .cabi_realloc;
                 // cabi_realloc(0, 0, align, size) -> ptr
-                super::scratch::emit_cabi_realloc_fixed(&mut func, layout_info.align, layout_info.size, cabi_realloc);
+                super::scratch::emit_cabi_realloc_fixed(
+                    &mut func,
+                    layout_info.align,
+                    layout_info.size,
+                    cabi_realloc,
+                );
                 func.instruction(&Instruction::LocalSet(scratch_ptr_local));
                 // Walk struct fields in declaration order. Each non-ref
                 // field maps 1:1 to one canonical slot. Each GC array
@@ -1075,7 +1130,9 @@ impl<'a> WasmPackageBuilder<'a> {
             // valtypes count. Reserve the self-ref local right after
             // all params so it's always at the correct index whether
             // we take the POR or the param-mirrored field path.
-            let actual_flat_count = self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert()).len() as u32;
+            let actual_flat_count = self
+                .canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert())
+                .len() as u32;
             let self_ref_local: u32 = 1 + actual_flat_count;
             let mut func = Function::new([(
                 1,
@@ -1096,8 +1153,7 @@ impl<'a> WasmPackageBuilder<'a> {
             // struct field is a single `(ref $str_bytes)`. Un-materialize
             // the (ptr, len) into a GC byte array and `struct.set`. This
             // is the WIT-boundary "string in" site.
-            if matches!(self.ctx.ty_kind(ty), InternedTyKind::String)
-            {
+            if matches!(self.ctx.ty_kind(ty), InternedTyKind::String) {
                 let arr_type_idx = self.record_gc_types.str_bytes_array_idx.ok_or_else(|| {
                     CodegenError::InvalidIR(
                         "string setter: $str_bytes array type not registered".into(),
@@ -1134,7 +1190,8 @@ impl<'a> WasmPackageBuilder<'a> {
             if matches!(self.ctx.ty_kind(ty), InternedTyKind::Option(_))
                 && self.option_collapses_to_ref(ty).is_some()
             {
-                let declared_vts = self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
+                let declared_vts =
+                    self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
                 self.emit_self_ref(&mut func, comp_idx)?;
                 self.emit_member_pack(
                     &mut func,
@@ -1163,7 +1220,8 @@ impl<'a> WasmPackageBuilder<'a> {
                 // Build the tuple GC struct from the canonical-ABI flat params
                 // (recursively — see `emit_composite_pack`) and store the
                 // resulting ref into the component field.
-                let declared_vts = self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
+                let declared_vts =
+                    self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
                 self.emit_self_ref(&mut func, comp_idx)?;
                 self.emit_composite_pack(
                     &mut func,
@@ -1191,7 +1249,8 @@ impl<'a> WasmPackageBuilder<'a> {
                 super::super::repr::InternalRepr::GcVariant(_)
             ) {
                 self.emit_self_ref(&mut func, comp_idx)?;
-                let declared_vts = self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
+                let declared_vts =
+                    self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
                 self.emit_pack_canonical_to_gc_variant(
                     &mut func,
                     ty,
@@ -1232,7 +1291,8 @@ impl<'a> WasmPackageBuilder<'a> {
                 // Push self ref, then build the record GC struct from the
                 // flat params (un-materializing string/list (ptr, len) pairs
                 // into GC refs), then `struct.set` on the component field.
-                let declared_vts = self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
+                let declared_vts =
+                    self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
                 self.emit_self_ref(&mut func, comp_idx)?;
                 self.emit_composite_pack(
                     &mut func,
@@ -1301,9 +1361,7 @@ impl<'a> WasmPackageBuilder<'a> {
         let cabi_realloc = self
             .alloc_funcs
             .as_ref()
-            .ok_or_else(|| {
-                CodegenError::InvalidIR("GcVariant lift: cabi_realloc missing".into())
-            })?
+            .ok_or_else(|| CodegenError::InvalidIR("GcVariant lift: cabi_realloc missing".into()))?
             .cabi_realloc;
         let layout_info = self.layout_ctx.layout_of(signal_ty);
 
@@ -1313,12 +1371,19 @@ impl<'a> WasmPackageBuilder<'a> {
         // nested-field lifts share a single case-loop + payload
         // implementation. Scratch locals 3 (ptr) and 4 (len) are reserved by
         // the getter for inner materializer returns.
-        super::scratch::emit_cabi_realloc_fixed(func, layout_info.align, layout_info.size, cabi_realloc);
+        super::scratch::emit_cabi_realloc_fixed(
+            func,
+            layout_info.align,
+            layout_info.size,
+            cabi_realloc,
+        );
         func.instruction(&Instruction::LocalSet(scratch_ptr_local));
 
-        let struct_ty = self.gc_layouts[ci].component_struct_type_idx.ok_or_else(|| {
-            CodegenError::InvalidIR("GcVariant lift: missing component_struct_type_idx".into())
-        })?;
+        let struct_ty = self.gc_layouts[ci]
+            .component_struct_type_idx
+            .ok_or_else(|| {
+                CodegenError::InvalidIR("GcVariant lift: missing component_struct_type_idx".into())
+            })?;
         let field_idx = self.components[ci]
             .signal_layout
             .signal_field_path(sig_idx)
@@ -1368,12 +1433,21 @@ impl<'a> WasmPackageBuilder<'a> {
             })?
             .cabi_realloc;
         let layout_info = self.layout_ctx.layout_of(signal_ty);
-        super::scratch::emit_cabi_realloc_fixed(func, layout_info.align, layout_info.size, cabi_realloc);
+        super::scratch::emit_cabi_realloc_fixed(
+            func,
+            layout_info.align,
+            layout_info.size,
+            cabi_realloc,
+        );
         func.instruction(&Instruction::LocalSet(scratch_ptr_local));
 
-        let struct_ty = self.gc_layouts[ci].component_struct_type_idx.ok_or_else(|| {
-            CodegenError::InvalidIR("option-collapsed lift: missing component_struct_type_idx".into())
-        })?;
+        let struct_ty = self.gc_layouts[ci]
+            .component_struct_type_idx
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(
+                    "option-collapsed lift: missing component_struct_type_idx".into(),
+                )
+            })?;
         let field_path = self.components[ci].signal_layout.signal_field_path(sig_idx);
         let chain = [(struct_ty, field_path[0])];
         self.emit_member_lift_to_memory(
@@ -1387,8 +1461,6 @@ impl<'a> WasmPackageBuilder<'a> {
         func.instruction(&Instruction::LocalGet(scratch_ptr_local));
         Ok(())
     }
-
-
 
     /// Lift one gc-variant case payload (struct index 0 of the case subtype) to
     /// canonical-ABI bytes: scalar → typed store; string / typed list →
@@ -1469,8 +1541,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // A string payload's case-subtype field is a
         // `(ref null $str_bytes)` — materialize to (ptr, len) like a typed
         // list.
-        if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
-        {
+        if matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String) {
             let arr_type_idx = self.record_gc_types.str_bytes_array_idx.ok_or_else(|| {
                 CodegenError::InvalidIR("GcVariant string payload lift: $str_bytes missing".into())
             })?;
@@ -1520,15 +1591,11 @@ impl<'a> WasmPackageBuilder<'a> {
             self.internal_repr(payload_ty),
             super::super::repr::InternalRepr::GcVariant(_)
         ) {
-            let inner_base = canonical_slots
-                .get(1)
-                .map(|s| s.offset)
-                .ok_or_else(|| {
-                    CodegenError::InvalidIR(
-                        "GcVariant payload lift (nested): missing outer slot for inner"
-                            .into(),
-                    )
-                })?;
+            let inner_base = canonical_slots.get(1).map(|s| s.offset).ok_or_else(|| {
+                CodegenError::InvalidIR(
+                    "GcVariant payload lift (nested): missing outer slot for inner".into(),
+                )
+            })?;
             let payload_source = GcRefSource::PayloadOf {
                 inner: &source,
                 case_sub_idx,
@@ -1614,8 +1681,6 @@ impl<'a> WasmPackageBuilder<'a> {
         emit_canonical_scalar_store(func, self.ctx, payload_ty);
         Ok(())
     }
-
-
 
     /// Emit `$pack_color_to_attr_slots` body — the per-program
     /// helper that lifts a `(ref null $var_color)` to the canonical-ABI
@@ -1861,8 +1926,13 @@ impl<'a> WasmPackageBuilder<'a> {
         // Tuple element — build each tuple GC ref from its canonical-flat
         // bytes via the composite pack and `arr.set` it (the tuple
         // twin of the record branch below).
-        if matches!(self.ctx.ty_kind(elem_ty), yel_core::types::InternedTyKind::Tuple(_))
-            && self.record_gc_types.tuple_struct_type_idx.contains_key(&elem_ty)
+        if matches!(
+            self.ctx.ty_kind(elem_ty),
+            yel_core::types::InternedTyKind::Tuple(_)
+        ) && self
+            .record_gc_types
+            .tuple_struct_type_idx
+            .contains_key(&elem_ty)
         {
             let elem_size = self.layout_ctx.size_of(elem_ty);
             emit_gc_array_unmaterialize_loop(
@@ -1901,37 +1971,38 @@ impl<'a> WasmPackageBuilder<'a> {
             && matches!(
                 self.ctx.defs.kind(*d),
                 yel_core::definitions::DefKind::Record(_)
-            ) && self.record_gc_types.record_type_idx.contains_key(d)
-            {
-                let elem_size = self.layout_ctx.size_of(elem_ty);
-                emit_gc_array_unmaterialize_loop(
-                    &mut func,
-                    ptr_local,
-                    len_local,
-                    idx_local,
-                    Some(elem_addr_local),
-                    elem_size,
-                    |func| {
-                        // arr.set(idx, <composite pack from canonical bytes at elem_addr>)
-                        func.instruction(&Instruction::LocalGet(arr_local));
-                        func.instruction(&Instruction::LocalGet(idx_local));
-                        self.emit_composite_pack(
-                            func,
-                            elem_ty,
-                            CanonicalSource::Memory {
-                                address_local: elem_addr_local,
-                                offset: 0,
-                            },
-                            &[],
-                        )?;
-                        func.instruction(&Instruction::ArraySet(arr_type_idx));
-                        Ok(())
-                    },
-                )?;
-                func.instruction(&Instruction::LocalGet(arr_local));
-                func.instruction(&Instruction::End); // function
-                return Ok(func);
-            }
+            )
+            && self.record_gc_types.record_type_idx.contains_key(d)
+        {
+            let elem_size = self.layout_ctx.size_of(elem_ty);
+            emit_gc_array_unmaterialize_loop(
+                &mut func,
+                ptr_local,
+                len_local,
+                idx_local,
+                Some(elem_addr_local),
+                elem_size,
+                |func| {
+                    // arr.set(idx, <composite pack from canonical bytes at elem_addr>)
+                    func.instruction(&Instruction::LocalGet(arr_local));
+                    func.instruction(&Instruction::LocalGet(idx_local));
+                    self.emit_composite_pack(
+                        func,
+                        elem_ty,
+                        CanonicalSource::Memory {
+                            address_local: elem_addr_local,
+                            offset: 0,
+                        },
+                        &[],
+                    )?;
+                    func.instruction(&Instruction::ArraySet(arr_type_idx));
+                    Ok(())
+                },
+            )?;
+            func.instruction(&Instruction::LocalGet(arr_local));
+            func.instruction(&Instruction::End); // function
+            return Ok(func);
+        }
         // Nested-list element — each elem is itself a typed GC array ref;
         // build it from the canonical (ptr, len) at elem_addr via the inner
         // un-materializer and `array.set` it.
@@ -2215,7 +2286,9 @@ impl<'a> WasmPackageBuilder<'a> {
             .alloc_funcs
             .as_ref()
             .ok_or_else(|| {
-                CodegenError::InvalidIR("collapsed-option materializer requires cabi_realloc".into())
+                CodegenError::InvalidIR(
+                    "collapsed-option materializer requires cabi_realloc".into(),
+                )
             })?
             .cabi_realloc;
         let (elem_size, elem_align) =
@@ -2225,19 +2298,25 @@ impl<'a> WasmPackageBuilder<'a> {
             .first()
             .map(|s| s.offset)
             .ok_or_else(|| CodegenError::InvalidIR("collapsed-option mat: no disc slot".into()))?;
-        let payload_off = canonical_slots
-            .get(1)
-            .map(|s| s.offset)
-            .ok_or_else(|| CodegenError::InvalidIR("collapsed-option mat: no payload slot".into()))?;
+        let payload_off = canonical_slots.get(1).map(|s| s.offset).ok_or_else(|| {
+            CodegenError::InvalidIR("collapsed-option mat: no payload slot".into())
+        })?;
         let mut local_decls: Vec<(u32, ValType)> = vec![
-            (1, ValType::I32),                        // 1 = len
-            (1, ValType::I32),                        // 2 = data_ptr
-            (1, ValType::I32),                        // 3 = idx
-            (1, ValType::I32),                        // 4 = elem_addr
-            (1, ValType::Ref(wasm_encoder::RefType {  // 5 = elem_ref (anyref)
-                nullable: true,
-                heap_type: HeapType::Abstract { shared: false, ty: wasm_encoder::AbstractHeapType::Any },
-            })),
+            (1, ValType::I32), // 1 = len
+            (1, ValType::I32), // 2 = data_ptr
+            (1, ValType::I32), // 3 = idx
+            (1, ValType::I32), // 4 = elem_addr
+            (
+                1,
+                ValType::Ref(wasm_encoder::RefType {
+                    // 5 = elem_ref (anyref)
+                    nullable: true,
+                    heap_type: HeapType::Abstract {
+                        shared: false,
+                        ty: wasm_encoder::AbstractHeapType::Any,
+                    },
+                }),
+            ),
             (1, ValType::I32), // 6 = mat_ptr
             (1, ValType::I32), // 7 = mat_len
         ];
@@ -2368,13 +2447,17 @@ impl<'a> WasmPackageBuilder<'a> {
                     .list_array_type_idx
                     .get(&inner_ty)
                     .ok_or_else(|| {
-                        CodegenError::InvalidIR("collapsed-option list lift: missing inner arr".into())
+                        CodegenError::InvalidIR(
+                            "collapsed-option list lift: missing inner arr".into(),
+                        )
                     })?;
                 let mat_fn = *self
                     .gc_list_materializer_fn_indices
                     .get(&arr_idx)
                     .ok_or_else(|| {
-                        CodegenError::InvalidIR("collapsed-option list lift: missing inner mat".into())
+                        CodegenError::InvalidIR(
+                            "collapsed-option list lift: missing inner mat".into(),
+                        )
                     })?;
                 let ptr_slot = *canonical_slots.get(1).ok_or_else(|| {
                     CodegenError::InvalidIR("collapsed-option list lift: no ptr slot".into())
@@ -2402,7 +2485,6 @@ impl<'a> WasmPackageBuilder<'a> {
         }
     }
 
-
     /// Finish the un-materializer for a `list<option<inner>>` collapsed-ref
     /// element: for each canonical `(disc, payload)`, a `some` (disc == 0)
     /// rebuilds the inner ref and `array.set`s it; a `none` leaves the
@@ -2422,14 +2504,12 @@ impl<'a> WasmPackageBuilder<'a> {
     ) -> Result<Function, CodegenError> {
         let elem_size = self.layout_ctx.layout_of(elem_ty).size;
         let canonical_slots = self.flatten_core_slots(elem_ty);
-        let disc_off = canonical_slots
-            .first()
-            .map(|s| s.offset)
-            .ok_or_else(|| CodegenError::InvalidIR("collapsed-option unmat: no disc slot".into()))?;
-        let payload_off = canonical_slots
-            .get(1)
-            .map(|s| s.offset)
-            .ok_or_else(|| CodegenError::InvalidIR("collapsed-option unmat: no payload slot".into()))?;
+        let disc_off = canonical_slots.first().map(|s| s.offset).ok_or_else(|| {
+            CodegenError::InvalidIR("collapsed-option unmat: no disc slot".into())
+        })?;
+        let payload_off = canonical_slots.get(1).map(|s| s.offset).ok_or_else(|| {
+            CodegenError::InvalidIR("collapsed-option unmat: no payload slot".into())
+        })?;
         emit_gc_array_unmaterialize_loop(
             &mut func,
             ptr_local,
@@ -2468,8 +2548,6 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(func)
     }
 
-
-
     /// non-for-loop expression context (e.g. `.filter()` source, method call).
     pub(super) fn generate_gc_list_materializer(
         &mut self,
@@ -2496,8 +2574,10 @@ impl<'a> WasmPackageBuilder<'a> {
         // A `list<string>` whose element is a `$str_bytes`
         // ref. Per element: materialize the inner byte array to (ptr, len)
         // and write the canonical 8-byte (ptr, len) slot.
-        if matches!(self.ctx.ty_kind(elem_ty), yel_core::types::InternedTyKind::String)
-        {
+        if matches!(
+            self.ctx.ty_kind(elem_ty),
+            yel_core::types::InternedTyKind::String
+        ) {
             return self.generate_gc_list_string_materializer(arr_type_idx);
         }
         // Nested-list element — each elem is itself a typed
@@ -2869,8 +2949,6 @@ impl<'a> WasmPackageBuilder<'a> {
         }
     }
 
-
-
     /// Reach-generic GcVariant lift: dispatch on the value's active case via
     /// a `ref.test` cascade and write the canonical-ABI discriminant + payload
     /// bytes at `scratch_ptr_local + base_offset + slot.offset`. The outer ref
@@ -2937,7 +3015,9 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::I32Const(disc_abs as i32));
                 func.instruction(&Instruction::I32Add);
             }
-            func.instruction(&Instruction::I32Const(self.gc_variant_wit_disc(gc_variant_ty, k) as i32));
+            func.instruction(&Instruction::I32Const(
+                self.gc_variant_wit_disc(gc_variant_ty, k) as i32,
+            ));
             func.instruction(&Instruction::I32Store8(mem_arg(0, 0)));
 
             if let Some(payload_ty) =
@@ -3013,11 +3093,7 @@ impl<'a> WasmPackageBuilder<'a> {
     /// Push the GcVariant supertype ref described by `source` onto the
     /// stack — the reach-generic entry the composite payload lift re-emits per
     /// case. See [`GcRefSource`].
-    fn emit_gc_ref(
-        &self,
-        func: &mut Function,
-        source: GcRefSource,
-    ) -> Result<(), CodegenError> {
+    fn emit_gc_ref(&self, func: &mut Function, source: GcRefSource) -> Result<(), CodegenError> {
         match source {
             GcRefSource::SelfChain { ci, chain } => self.emit_gc_field_chain(func, ci, chain),
             GcRefSource::LocalChain { ref_local, chain } => {
@@ -3072,8 +3148,6 @@ impl<'a> WasmPackageBuilder<'a> {
         }
     }
 
-
-
     /// Describe a composite (record ADT / tuple) as its GC struct type index
     /// plus per-member canonical layout; `None` for non-composite types.
     fn composite_gc_members(
@@ -3101,7 +3175,9 @@ impl<'a> WasmPackageBuilder<'a> {
                     .get(&record_def_id)
                     .cloned()
                     .ok_or_else(|| {
-                        CodegenError::InvalidIR("composite members: missing gc field indices".into())
+                        CodegenError::InvalidIR(
+                            "composite members: missing gc field indices".into(),
+                        )
                     })?;
                 let layout = self
                     .layout_ctx
@@ -3122,7 +3198,9 @@ impl<'a> WasmPackageBuilder<'a> {
                     };
                     let (_name, field_offset, _t) =
                         layout.field_offsets.get(i).cloned().ok_or_else(|| {
-                            CodegenError::InvalidIR("composite members: missing field offset".into())
+                            CodegenError::InvalidIR(
+                                "composite members: missing field offset".into(),
+                            )
                         })?;
                     members.push(CompositeMember {
                         ty: field_ty,
@@ -3277,7 +3355,9 @@ impl<'a> WasmPackageBuilder<'a> {
                     offset: offset + member.canonical_offset,
                 },
             };
-            let member_flat = self.canonical_flat_valtypes(member.ty, crate::wasm::repr::WitBoundary::assert()).len() as u32;
+            let member_flat = self
+                .canonical_flat_valtypes(member.ty, crate::wasm::repr::WitBoundary::assert())
+                .len() as u32;
             // A record's fields concatenate in canonical order, so this
             // member's declared valtypes are the corresponding window of the
             // parent's declared region.
@@ -3368,7 +3448,12 @@ impl<'a> WasmPackageBuilder<'a> {
                     offset: offset + payload_offset,
                 },
             };
-            self.emit_member_pack(func, inner_ty, inner_source, declared_vts.get(1..).unwrap_or(&[]))?;
+            self.emit_member_pack(
+                func,
+                inner_ty,
+                inner_source,
+                declared_vts.get(1..).unwrap_or(&[]),
+            )?;
             func.instruction(&Instruction::Else);
             func.instruction(&Instruction::RefNull(wasm_encoder::HeapType::Concrete(
                 arr_idx,
@@ -3412,7 +3497,8 @@ impl<'a> WasmPackageBuilder<'a> {
         // memory-sourced values are a single typed load.
         match source {
             CanonicalSource::Params { first_param } => {
-                let flat = self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
+                let flat =
+                    self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert());
                 for (i, &vt_natural) in flat.iter().enumerate() {
                     func.instruction(&Instruction::LocalGet(first_param + i as u32));
                     let vt_declared = declared_vts.get(i).copied().unwrap_or(vt_natural);
@@ -3515,7 +3601,9 @@ impl<'a> WasmPackageBuilder<'a> {
                     func.instruction(&Instruction::I32Load8U(super::scratch::mem_arg(0, 0)));
                 }
             }
-            func.instruction(&Instruction::I32Const(self.gc_variant_wit_disc(ty, k) as i32));
+            func.instruction(&Instruction::I32Const(
+                self.gc_variant_wit_disc(ty, k) as i32
+            ));
             func.instruction(&Instruction::I32Eq);
             func.instruction(&Instruction::If(result_ty));
             if let Some(payload_ty) = super::super::gc_types::case_payload_ty(self.ctx, ty, k) {
@@ -3568,20 +3656,22 @@ impl<'a> WasmPackageBuilder<'a> {
                     self.emit_member_pack(func, payload_ty, payload_source, child_declared)?;
                     func.instruction(&Instruction::StructNew(case_sub_idx));
                 } else {
-                    let is_ptr_len_payload = matches!(
-                        self.ctx.ty_kind(payload_ty),
-                        InternedTyKind::String
-                    ) || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                        && self
-                            .record_gc_types
-                            .list_array_type_idx
-                            .contains_key(&payload_ty));
+                    let is_ptr_len_payload =
+                        matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
+                            || (matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
+                                && self
+                                    .record_gc_types
+                                    .list_array_type_idx
+                                    .contains_key(&payload_ty));
                     match payload_source {
                         CanonicalSource::Params { first_param } => {
                             // Push each payload slot, bridging the declared
                             // (possibly parent-joined) width down to the case's
                             // own natural width.
-                            let payload_flat = self.canonical_flat_valtypes(payload_ty, crate::wasm::repr::WitBoundary::assert());
+                            let payload_flat = self.canonical_flat_valtypes(
+                                payload_ty,
+                                crate::wasm::repr::WitBoundary::assert(),
+                            );
                             for (i, vt_payload) in payload_flat.iter().enumerate() {
                                 func.instruction(&Instruction::LocalGet(first_param + i as u32));
                                 let vt_declared =
@@ -3628,12 +3718,6 @@ impl<'a> WasmPackageBuilder<'a> {
         }
         Ok(())
     }
-
-
-
-
-
-
 
     /// **Boundary-only.** Lower a composite (record / tuple) GC struct to its
     /// canonical-ABI bytes at `address_local + base_offset`. The composite is
@@ -3705,7 +3789,8 @@ impl<'a> WasmPackageBuilder<'a> {
                 _ => {
                     return Err(CodegenError::InvalidIR(
                         "composite lift: source must be a self chain, a typed local, or a \
-                         variant payload".into(),
+                         variant payload"
+                            .into(),
                     ));
                 }
             };
@@ -3915,8 +4000,7 @@ impl<'a> WasmPackageBuilder<'a> {
                         case_sub_idx,
                         chain,
                     } => {
-                        member_chain =
-                            chain.iter().copied().chain(std::iter::once(hop)).collect();
+                        member_chain = chain.iter().copied().chain(std::iter::once(hop)).collect();
                         GcRefSource::PayloadOf {
                             inner,
                             case_sub_idx,
@@ -4058,7 +4142,7 @@ impl<'a> WasmPackageBuilder<'a> {
         ));
         func.instruction(&Instruction::If(block_ty));
         func.instruction(&Instruction::I32Const(
-            self.gc_variant_wit_disc(ty, k) as i32,
+            self.gc_variant_wit_disc(ty, k) as i32
         ));
         if let Some(payload_ty) = super::super::gc_types::case_payload_ty(self.ctx, ty, k) {
             self.emit_case_payload_to_joined_stack(
@@ -4091,7 +4175,7 @@ impl<'a> WasmPackageBuilder<'a> {
         payload_ty: Ty,
         joined: &[wasm_encoder::ValType],
     ) -> Result<(), CodegenError> {
-        use super::super::gc_types::{struct_get_op_for_payload, StructGetVariant};
+        use super::super::gc_types::{StructGetVariant, struct_get_op_for_payload};
         use yel_core::types::InternedTyKind;
         let payload_vts: Vec<wasm_encoder::ValType> = self
             .flatten_core_slots(payload_ty)
@@ -4113,7 +4197,10 @@ impl<'a> WasmPackageBuilder<'a> {
             && self.composite_gc_members(payload_ty)?.is_none()
             && !matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::String)
             && !(matches!(self.ctx.ty_kind(payload_ty), InternedTyKind::List(_))
-                && self.record_gc_types.list_array_type_idx.contains_key(&payload_ty));
+                && self
+                    .record_gc_types
+                    .list_array_type_idx
+                    .contains_key(&payload_ty));
         if is_scalar_leaf {
             // Read the (possibly packed) scalar payload with correct
             // signedness, then widen to the joined slot valtype.
@@ -4190,7 +4277,6 @@ impl<'a> WasmPackageBuilder<'a> {
             }
         }
     }
-
 }
 
 /// Store a materialized `(ptr, len)` pair (on the stack, len on top) into

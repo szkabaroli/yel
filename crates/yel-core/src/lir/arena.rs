@@ -27,9 +27,7 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::ids::{BlockId, DefId, LocalId};
 use crate::interner::Name;
 
-use super::block::{
-    LirExprId, LirBindingMode, LirBlock, LirOp, LirSlotId, LirSlotInfo, StringId,
-};
+use super::block::{LirBindingMode, LirBlock, LirExprId, LirOp, LirSlotId, LirSlotInfo, StringId};
 use super::expr::LirExpr;
 use super::function::{CallingConv, FunctionRole};
 use super::signal::LirSignal;

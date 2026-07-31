@@ -27,8 +27,8 @@ use super::super::{
     FuncTypes, ImportLayout, MemoryLayout, WasmPackageBuilder, to_kebab_case, to_wit_name,
 };
 use super::scratch::compute_mount_retention_counts;
-use crate::wasm::gc_types::{GlobalsBlockLayout, compute_globals_block_layout};
 use crate::wasm::AllocatorFuncs;
+use crate::wasm::gc_types::{GlobalsBlockLayout, compute_globals_block_layout};
 
 impl<'a> WasmPackageBuilder<'a> {
     pub(crate) fn build_core_module(&mut self) -> Result<Module, CodegenError> {
@@ -150,7 +150,12 @@ impl<'a> WasmPackageBuilder<'a> {
                     continue;
                 }
                 let mut params = vec![ValType::I32]; // self
-                params.extend(self.canonical_flat_valtypes(signal.ty, crate::wasm::repr::WitBoundary::assert()));
+                params.extend(
+                    self.canonical_flat_valtypes(
+                        signal.ty,
+                        crate::wasm::repr::WitBoundary::assert(),
+                    ),
+                );
                 let comp_name = to_kebab_case(&self.ctx.str(component.name));
                 let sig_name = to_kebab_case(&self.ctx.str(self.ctx.defs.name(signal.def_id)));
                 let idx = intern_type(
@@ -200,7 +205,8 @@ impl<'a> WasmPackageBuilder<'a> {
             // right WASM value type (f32 stays f32, not i32). Previously this
             // hardcoded i32 for every param which caused validation failures
             // when `list<f32>` element values were passed as f32.
-            let per_elem = self.flatten_core_valtypes(elem_ty, crate::wasm::repr::WitBoundary::assert());
+            let per_elem =
+                self.flatten_core_valtypes(elem_ty, crate::wasm::repr::WitBoundary::assert());
             let mut params = Vec::with_capacity(per_elem.len() * count);
             for _ in 0..count {
                 params.extend_from_slice(&per_elem);
@@ -220,8 +226,7 @@ impl<'a> WasmPackageBuilder<'a> {
         let mut list_append_types: rustc_hash::FxHashMap<Ty, u32> =
             rustc_hash::FxHashMap::default();
         // List-get helper type indices, interned in the same late block.
-        let mut list_get_types: rustc_hash::FxHashMap<Ty, u32> =
-            rustc_hash::FxHashMap::default();
+        let mut list_get_types: rustc_hash::FxHashMap<Ty, u32> = rustc_hash::FxHashMap::default();
 
         // Precompute the wasm function type for every host import (component
         // callbacks, global callbacks, DOM), keyed by callee `DefId`. The
@@ -230,14 +235,15 @@ impl<'a> WasmPackageBuilder<'a> {
         // lowering (leading `i32` self for `Borrow` receivers, flattened
         // params, ret_ptr for multi-value results). `intern_type` dedups
         // structurally identical signatures.
-        let mut import_types: rustc_hash::FxHashMap<DefId, u32> =
-            rustc_hash::FxHashMap::default();
+        let mut import_types: rustc_hash::FxHashMap<DefId, u32> = rustc_hash::FxHashMap::default();
         {
             let imports = self.imports.clone();
             for import in &imports {
                 let (params_flat, results_flat) = self.import_wasm_type(import);
                 let iface_kebab = to_kebab_case(
-                    &self.ctx.str(self.import_interfaces[import.interface.index()].name),
+                    &self
+                        .ctx
+                        .str(self.import_interfaces[import.interface.index()].name),
                 );
                 let fname = to_kebab_case(&self.ctx.str(import.name));
                 let idx = intern_type(
@@ -1475,7 +1481,11 @@ impl<'a> WasmPackageBuilder<'a> {
                         continue;
                     }
                     // Returned-by-value (≤1 flat slot) getters allocate nothing.
-                    if self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert()).len() <= 1 {
+                    if self
+                        .canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert())
+                        .len()
+                        <= 1
+                    {
                         continue;
                     }
                     // Only GC-migrated getters materialise a fresh buffer;
@@ -1514,7 +1524,11 @@ impl<'a> WasmPackageBuilder<'a> {
                         continue;
                     }
                     // self handle (1) + flattened value > MAX_FLAT_PARAMS (16).
-                    if 1 + self.canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert()).len() <= 16 {
+                    if 1 + self
+                        .canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert())
+                        .len()
+                        <= 16
+                    {
                         continue;
                     }
                     setter_spill_plan.push((next, comp_idx, sig_idx, ty));
@@ -1777,8 +1791,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // Gap 3: maps a spill trampoline's index → the wide setter's wasm
         // index it forwards to. Filled here in the export loop (where the wide
         // setter index is known) and read by the code-section body pass.
-        let mut spill_wide_idx: rustc_hash::FxHashMap<u32, u32> =
-            rustc_hash::FxHashMap::default();
+        let mut spill_wide_idx: rustc_hash::FxHashMap<u32, u32> = rustc_hash::FxHashMap::default();
         for exported_comp in exported_components.iter() {
             let prefix = to_kebab_case(&self.ctx.str(exported_comp.name));
 
@@ -1970,8 +1983,7 @@ impl<'a> WasmPackageBuilder<'a> {
         //             predicate's `LirExprId` children resolve.
         let filter_calls_clone = self.filter_calls.clone();
         let module_carrier_name = self.ctx.intern("<module>");
-        let module_scope =
-            ModuleScope::new(module_carrier_name, self.global_default_exprs.clone());
+        let module_scope = ModuleScope::new(module_carrier_name, self.global_default_exprs.clone());
         for (filter_id, (comp_idx, elem_ty, elem_size, param, predicate)) in
             filter_calls_clone.iter().enumerate()
         {
@@ -2061,14 +2073,24 @@ impl<'a> WasmPackageBuilder<'a> {
                     .export_constructor_block
                     .expect("exported component must have export_constructor_block synthesized");
                 let ctor = component.get_block(ctor_block);
-                code.function(&self.generate_block_function(component, Some(comp_idx), ctor, true)?);
+                code.function(&self.generate_block_function(
+                    component,
+                    Some(comp_idx),
+                    ctor,
+                    true,
+                )?);
                 // Reset handler counter before mount - dispatch uses same ordering
                 self.reset_handler_counter();
                 let mount_block = component
                     .export_mount_block
                     .expect("exported component must have export_mount_block synthesized");
                 let mount = component.get_block(mount_block);
-                code.function(&self.generate_block_function(component, Some(comp_idx), mount, true)?);
+                code.function(&self.generate_block_function(
+                    component,
+                    Some(comp_idx),
+                    mount,
+                    true,
+                )?);
                 let unmount_block = component
                     .export_unmount_block
                     .expect("exported component must have export_unmount_block synthesized");
@@ -2118,7 +2140,12 @@ impl<'a> WasmPackageBuilder<'a> {
                     continue;
                 }
                 let is_lc = super::block_fn::block_is_lifecycle(component, block.id);
-                code.function(&self.generate_block_function(component, Some(comp_idx), block, is_lc)?);
+                code.function(&self.generate_block_function(
+                    component,
+                    Some(comp_idx),
+                    block,
+                    is_lc,
+                )?);
             }
         }
 

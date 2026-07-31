@@ -57,7 +57,11 @@ fn main() {
     let mut lir_components = Vec::new();
     for thir in &thir_items {
         let lir = compiler.lower_to_lir(thir);
-        println!("LIR lowered: {} (export={})", compiler.context().str(lir.name), lir.is_export);
+        println!(
+            "LIR lowered: {} (export={})",
+            compiler.context().str(lir.name),
+            lir.is_export
+        );
         println!("  Mount block: {:?}", lir.mount_block);
         println!("  Blocks count: {}", lir.blocks.len());
         let mount_block = lir.get_block(lir.mount_block);
@@ -78,11 +82,16 @@ fn main() {
     // Generate WASM with all components
     match generate_wasm(&lir_components, compiler.context()) {
         Ok(wasm_bytes) => {
-            std::fs::write("/tmp/test_nested_components.wasm", &wasm_bytes).expect("Failed to write WASM");
-            println!("Generated {} bytes of WASM to /tmp/test_nested_components.wasm", wasm_bytes.len());
+            std::fs::write("/tmp/test_nested_components.wasm", &wasm_bytes)
+                .expect("Failed to write WASM");
+            println!(
+                "Generated {} bytes of WASM to /tmp/test_nested_components.wasm",
+                wasm_bytes.len()
+            );
 
             // Disassemble to WAT for inspection
-            let wat = wasmprinter::print_bytes(&wasm_bytes).unwrap_or_else(|e| format!("Failed to print: {}", e));
+            let wat = wasmprinter::print_bytes(&wasm_bytes)
+                .unwrap_or_else(|e| format!("Failed to print: {}", e));
             std::fs::write("/tmp/test_nested_components.wat", &wat).expect("Failed to write WAT");
             println!("Wrote WAT to /tmp/test_nested_components.wat");
 

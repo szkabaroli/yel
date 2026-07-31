@@ -242,6 +242,24 @@ not by reading the plan.** `<T>` and function bodies came out of `stdlib/`,
 `match` came out of asking what consumes a variant. Analysis found the fourth
 (`primitive`) and has been sitting on it, undecided, longest.
 
+> **Settled 2026-07-31: there is no `primitive` item form.** The construct is
+> named **intrinsic**, and its surface form is an `extern func` declaration
+> under an `@intrinsic(op = "…")` attribute — an intrinsic maps a
+> compiler-internal symbol into source, and calls inline to the op at codegen
+> rather than becoming wasm calls. The `BuiltinTable` was renamed
+> `IntrinsicTable` (`yelc-sema/src/intrinsics.rs`) with the decision; the
+> attribute's semantics land with the std-as-modules work.
+>
+> **And with it, `Arity` is gone (same day):** an intrinsic declarable as an
+> `extern func` cannot be variadic — yel has no varargs syntax — so `concat`
+> became `func(parts: list<string>) -> string`, interpolation desugars to a
+> **list literal** whose static length feeds codegen's `concat_N`
+> monomorphization, and the `Arity` enum (whose `Fixed(n)` then merely
+> duplicated `params.len()`) was deleted with a tombstone in `intrinsics.rs`.
+> C1c's argument stands; the list-typed signature is the option it did not
+> consider. Stage 4 inherits one obligation: the interpolation desugar emits
+> `concat([…])`, not `concat(…)`.
+
 ### 2026-07-29 — attributes on items, and `unsafe`
 
 **Decided.** Items may carry attributes, written `@name` or `@name(args)` before

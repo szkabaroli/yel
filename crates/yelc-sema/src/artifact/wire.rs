@@ -176,4 +176,31 @@ pub struct SerializedDef {
     /// The declared type, as an index into the artifact's type table.
     pub ty: Option<TypeIndex>,
     pub is_export: bool,
+    /// Member rows, in source order — the order is the member address, so it
+    /// is as load-bearing on the wire as it is in the table.
+    pub members: Vec<SerializedMember>,
+}
+
+/// One member row on the wire. No span: a loaded definition's spans are
+/// `Span::default()` — this compilation has not read that package's sources —
+/// and a member's is no different.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct SerializedMember {
+    pub name: String,
+    pub kind: SerializedMemberKind,
+    pub ty: Option<TypeIndex>,
+}
+
+/// [`MemberKind`](crate::definitions::MemberKind), flattened for the wire —
+/// the direction folds in rather than nesting, because postcard encodes by
+/// position and a flat enum is one byte.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum SerializedMemberKind {
+    Field,
+    Case,
+    Property,
+    PropertyIn,
+    PropertyOut,
+    PropertyInOut,
+    Function,
 }

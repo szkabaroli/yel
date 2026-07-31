@@ -110,6 +110,7 @@ impl<'a> Parser<'a> {
         }
 
         match self.current() {
+            FROM_KW => self.parse_include_decl(attributes),
             RECORD_KW => self.parse_record_decl(attributes),
             ENUM_KW => self.parse_enum_decl(attributes),
             VARIANT_KW => self.parse_variant_decl(attributes),
@@ -204,6 +205,62 @@ impl<'a> Parser<'a> {
             Some(list) => self.orphaned_attributes(list, message),
             None => self.member_hole(message),
         }
+    }
+
+    // -- include -----------------------------------------------------------
+
+    /// `from "list" include List;` / `from "std:list" include List;`
+    ///
+    /// The specifier is a plain **string** — one token, no interpolation — so
+    /// the grammar carries no opinion about what is inside it; `std:` is the
+    /// resolver's convention. The name after `include` is what gets bound.
+    fn parse_include_decl(&mut self, attributes: Option<ast::AttributeList>) -> ast::ItemKind {
+        if let Some(list) = attributes {
+            return self.orphaned_attributes(&list, "attributes cannot precede `from`");
+        }
+        self.start_node();
+        self.assert(FROM_KW);
+
+        self.start_node();
+        let (specifier, specifier_span) = if self.is(STRING_LITERAL) {
+            let span = self.current_span();
+            let text = self.current_text();
+            let inner = text
+                .strip_prefix('"')
+                .unwrap_or(text)
+                .strip_suffix('"')
+                .unwrap_or(text);
+            let name = self.intern(inner);
+            self.advance();
+            (Some(name), Some(span))
+        } else if self.is(TEMPLATE_LITERAL) {
+            // A string with `{…}` parts is a computed locator, which this
+            // declaration deliberately is not. Report, consume nothing beyond
+            // the mark, and let recovery resynchronise.
+            self.error_here("a module specifier is a plain string, not a template");
+            let hole = self.zero_width_error_node();
+            self.record_recovery_mark(hole);
+            (None, None)
+        } else {
+            self.error_here("expected a module specifier string after `from`");
+            let hole = self.zero_width_error_node();
+            self.record_recovery_mark(hole);
+            (None, None)
+        };
+        self.finish_node(INCLUDE_PATH);
+
+        self.expect(INCLUDE_KW);
+        let name = self.expect_name();
+        self.expect(SEMICOLON);
+        let span = self.finish_node(INCLUDE_DECL);
+
+        ast::ItemKind::Include(ast::IncludeDecl {
+            id: self.new_node_id(),
+            span,
+            specifier,
+            specifier_span,
+            name,
+        })
     }
 
     // -- package -----------------------------------------------------------

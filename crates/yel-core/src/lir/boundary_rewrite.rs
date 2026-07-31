@@ -143,8 +143,7 @@ pub fn rewrite_struct_field_ops(component: &mut LirResource) -> usize {
             // `b_id`, the rewriter falls back to lazy in-flow
             // synthesis inside `rewrite_ops` (which sees additional
             // `BindBoundaryLocal` / `Alloc*Boundary` bindings).
-            let (blocks, struct_types) =
-                (&mut component.blocks, &component.struct_types);
+            let (blocks, struct_types) = (&mut component.blocks, &component.struct_types);
             try_synthesize_ancestor_chain(
                 struct_types,
                 *b_id,
@@ -418,7 +417,9 @@ fn rewrite_ops(
                 field_idx,
                 result,
             } => {
-                if let Some(rec) = resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out) {
+                if let Some(rec) =
+                    resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out)
+                {
                     *total += 1;
                     out.push(LirOp::StructGet {
                         rec,
@@ -438,7 +439,9 @@ fn rewrite_ops(
                 field_idx,
                 value,
             } => {
-                if let Some(rec) = resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out) {
+                if let Some(rec) =
+                    resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out)
+                {
                     *total += 1;
                     out.push(LirOp::StructSet {
                         rec,
@@ -458,7 +461,9 @@ fn rewrite_ops(
                 field_idx,
                 value,
             } => {
-                if let Some(rec) = resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out) {
+                if let Some(rec) =
+                    resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out)
+                {
                     *total += 1;
                     out.push(LirOp::StructSetConst {
                         rec,
@@ -647,7 +652,10 @@ mod stage4_tests {
         assert!(matches!(
             comp.blocks[0].ops[0],
             LirOp::StructGet {
-                rec: LirSlotId::Block { block: BlockId(0), idx: 0 },
+                rec: LirSlotId::Block {
+                    block: BlockId(0),
+                    idx: 0
+                },
                 field_idx: 5,
                 result: LirSlotId::Resource { idx: 0 },
             }

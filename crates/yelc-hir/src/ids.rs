@@ -140,12 +140,10 @@ impl SourceNodeId {
 /// turns it into a [`Ty`](yelc_sema::Ty) when the definition tables are
 /// populated.
 ///
-/// ⚠️ **That step is not in this crate yet.** The brief's `type_of` could not be
-/// landed with the seam: it is written `fn type_of(&mut self, ty: TypeId) -> Ty`
-/// with no receiver named anywhere, and its memo is specified as a
-/// [`NodeMap<Ty>`](crate::NodeMap) — which keys [`HirId`], not `TypeId`. Naming
-/// its owner is a contract decision and is recorded as the remaining gate in
-/// `plans/rewrite/stage-3-hir-build.md`.
+/// That step is [`crate::lower`]'s `type_of`, on the lowering context — the
+/// owner named 2026-07-30 after the seam landed without it (the brief wrote
+/// `fn type_of(&mut self, …)` with no receiver, and a memo keyed by the wrong
+/// id space; `plans/rewrite/stage-3-hir-build.md` records both defects).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TypeId(pub SourceNodeId);
 
@@ -157,6 +155,37 @@ impl TypeId {
     /// The AST node this refers to.
     pub fn node(self) -> SourceNodeId {
         self.0
+    }
+}
+
+/// Identifies one local within one [`HirBody`](crate::HirBody) — a parameter,
+/// a `let` binding, a loop or arm binder.
+///
+/// **Body-scoped**: local 0 of one body and local 0 of another are unrelated.
+/// Allocation order is source order within the body, and that order is
+/// load-bearing — `LocalId` ordinals reach the checker, and D1's uniform prop
+/// list is only free if a closure-valued prop's locals come out in the same
+/// order the frozen split produced (stage 3 D1, the caveat).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct LocalId(pub u32);
+
+impl LocalId {
+    pub fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl Idx for LocalId {
+    fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
     }
 }
 

@@ -433,7 +433,9 @@ impl Definitions {
 
     /// Check if a definition is a signal (reactive property).
     pub fn is_signal(&self, def_id: DefId) -> bool {
-        self.items.get(def_id).is_some_and(|d| matches!(&d.kind, DefKind::Signal(_)))
+        self.items
+            .get(def_id)
+            .is_some_and(|d| matches!(&d.kind, DefKind::Signal(_)))
     }
 
     /// Find field by name within a record.
@@ -598,19 +600,16 @@ impl Definitions {
     pub fn owning_global_block(&self, prop_def_id: DefId) -> Option<DefId> {
         for block_id in self.globals() {
             if let Some(g) = self.as_global(block_id)
-                && g.properties.contains(&prop_def_id) {
-                    return Some(block_id);
-                }
+                && g.properties.contains(&prop_def_id)
+            {
+                return Some(block_id);
+            }
         }
         None
     }
 
     /// Find global property by name. Returns (index, def_id).
-    pub fn find_global_property(
-        &self,
-        owner: DefId,
-        prop_name: Name,
-    ) -> Option<(FieldIdx, DefId)> {
+    pub fn find_global_property(&self, owner: DefId, prop_name: Name) -> Option<(FieldIdx, DefId)> {
         let props = match self.kind(owner) {
             DefKind::Global(g) => &g.properties,
             _ => return None,

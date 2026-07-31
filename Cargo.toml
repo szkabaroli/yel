@@ -8,6 +8,7 @@ members = [
   "crates/yelc-driver",
   "crates/yelc-sema",
   "crates/yelc-hir",
+  "crates/yelc-lsp",
   "crates/yel-host",
   "crates/yel-lsp",
   "crates/yel-smith",

@@ -1,0 +1,42 @@
+[package]
+name = "yelc-lsp"
+version.workspace = true
+edition = "2024"
+description = "Language server for Yel, on the rewrite frontend (yelc-hir)"
+license.workspace = true
+
+[[bin]]
+name = "yelc-lsp"
+path = "src/main.rs"
+
+# Copied from ark's `ark-language-server` (same stack, same shape): lsp-server
+# + lsp-types + crossbeam select loop + threadpool. NOT tower-lsp/tokio — the
+# reference is synchronous with worker threads, and it is simpler for it.
+[dependencies]
+lsp-server = "0.7.2"
+lsp-types = "0.94.0"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+threadpool = "1"
+crossbeam = "0.8"
+walkdir = "2"
+log = "0.4"
+env_logger = "0.11"
+yelc-base.workspace = true
+yelc-sema.workspace = true
+yelc-hir.workspace = true
+yelc-syntax.workspace = true
+
+# Determinism guard, allowed here — see clippy.toml. The guard exists so that
+# iteration order cannot leak into emitted WASM/WIT/DOT; the language server
+# emits none of those, only diagnostics and hovers keyed by path. Same stance as
+# `yel-host`, the other non-output crate.
+[lints.clippy]
+disallowed_types = "allow"
+
+# The embedded stdlib, same as yelc2's — build.rs compiles stdlib/*.yel.
+[build-dependencies]
+yelc-base.workspace = true
+yelc-hir.workspace = true
+yelc-sema.workspace = true
+yelc-syntax.workspace = true

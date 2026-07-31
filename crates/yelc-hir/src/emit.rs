@@ -7,44 +7,40 @@
 use std::fmt::Write as _;
 
 use yelc_base::{Interner, Span};
-use yelc_sema::{Arity, CompilerContext, Known, LoweringTarget};
+use yelc_sema::{CompilerContext, Known, LoweringTarget};
 use yelc_syntax::NodeId;
 use yelc_syntax::ast::visit::{self, Visitor};
 use yelc_syntax::ast::*;
 use yelc_syntax::green::GreenNode;
 
 // ---------------------------------------------------------------------------
-// Builtins
+// Intrinsics
 // ---------------------------------------------------------------------------
 
-/// The builtin table and the lang-items, in registration order.
+/// The intrinsic table and the lang-items, in registration order.
 ///
-/// Both halves, because a builtin is one of two shapes and the bug this dump
+/// Both halves, because a builtin is one of two shapes (intrinsic row vs lang item) and the bug this dump
 /// was added for was exactly half of it being empty: the callable rows lived in
-/// `BuiltinTable` and the named definitions were registered nowhere, so
+/// `IntrinsicTable` and the named definitions were registered nowhere, so
 /// `resolve_known` had never once succeeded outside a test.
-pub fn builtins(context: &CompilerContext) -> String {
+pub fn intrinsics(context: &CompilerContext) -> String {
     let mut out = String::new();
 
-    let _ = writeln!(out, "builtins ({})", context.builtins.len());
-    for (id, builtin) in context.builtins.iter() {
-        let lowering = match &builtin.lowering {
+    let _ = writeln!(out, "intrinsics ({})", context.intrinsics.len());
+    for (id, intrinsic) in context.intrinsics.iter() {
+        let lowering = match &intrinsic.lowering {
             LoweringTarget::Op(op) => format!("op {op}"),
             LoweringTarget::HostImport { interface, func } => {
                 format!("import {interface}#{func}")
             }
         };
-        let arity = match &builtin.arity {
-            Arity::Fixed(n) => format!("{n}"),
-            Arity::Variadic { min, .. } => format!("{min}.."),
-        };
         let _ = writeln!(
             out,
-            "  {:?} {} arity={arity} params={} {lowering} {:?}",
+            "  {:?} {} params={} {lowering} {:?}",
             id,
-            context.names.str(builtin.name),
-            builtin.params.len(),
-            builtin.visibility,
+            context.names.str(intrinsic.name),
+            intrinsic.params.len(),
+            intrinsic.visibility,
         );
     }
 

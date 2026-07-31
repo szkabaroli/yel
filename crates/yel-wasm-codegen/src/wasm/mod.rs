@@ -33,8 +33,7 @@ use yel_core::lir::{
 };
 use yel_core::lir::{
     LirExpr, LirExprId, LirExprKind, LirGlobal, LirImport, LirInterface, LirModule, LirReceiver,
-    LirResource,
-    LirSlotId,
+    LirResource, LirSlotId,
 };
 use yel_core::types::Ty;
 use yel_core::{definitions::DefKind, types::InternedTyKind};
@@ -1347,7 +1346,9 @@ impl<'a> WasmPackageBuilder<'a> {
             params.push(ValType::I32); // self handle
         }
         for (_, pty) in &import.params {
-            params.extend(self.canonical_flat_valtypes(*pty, crate::wasm::repr::WitBoundary::assert()));
+            params.extend(
+                self.canonical_flat_valtypes(*pty, crate::wasm::repr::WitBoundary::assert()),
+            );
         }
         let mut results = match import.result {
             Some(rty) => {
@@ -1881,7 +1882,9 @@ impl<'a> WasmPackageBuilder<'a> {
             // ONLY for non-DTR records (memory-backed); DTR records
             // use the SLR struct.new path in expr.rs which never
             // calls record_ctor.
-            v.extend(self.canonical_flat_valtypes(field_ty, crate::wasm::repr::WitBoundary::assert()));
+            v.extend(
+                self.canonical_flat_valtypes(field_ty, crate::wasm::repr::WitBoundary::assert()),
+            );
         }
         v
     }
@@ -1968,10 +1971,14 @@ impl<'a> WasmPackageBuilder<'a> {
                     store: StoreWidth::I32_8,
                 });
                 let ok_flat = ok
-                    .map(|t| self.canonical_flat_valtypes(t, crate::wasm::repr::WitBoundary::assert()))
+                    .map(|t| {
+                        self.canonical_flat_valtypes(t, crate::wasm::repr::WitBoundary::assert())
+                    })
                     .unwrap_or_default();
                 let err_flat = err
-                    .map(|t| self.canonical_flat_valtypes(t, crate::wasm::repr::WitBoundary::assert()))
+                    .map(|t| {
+                        self.canonical_flat_valtypes(t, crate::wasm::repr::WitBoundary::assert())
+                    })
                     .unwrap_or_default();
                 let joined = join_flat_valtypes(&ok_flat, &err_flat);
                 // Align the payload base to the joined payload's alignment.
@@ -2056,7 +2063,12 @@ impl<'a> WasmPackageBuilder<'a> {
                         };
                         case_flats.push(
                             payload
-                                .map(|t| self.canonical_flat_valtypes(t, crate::wasm::repr::WitBoundary::assert()))
+                                .map(|t| {
+                                    self.canonical_flat_valtypes(
+                                        t,
+                                        crate::wasm::repr::WitBoundary::assert(),
+                                    )
+                                })
                                 .unwrap_or_default(),
                         );
                     }

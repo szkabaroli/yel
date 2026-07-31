@@ -39,9 +39,8 @@ impl<I: Idx, T> IndexVec<I, T> {
 
     /// Push a value and return its index.
     pub fn push(&mut self, value: T) -> I {
-        let idx = I::new(
-            u32::try_from(self.raw.len()).expect("IndexVec exceeded u32::MAX entries"),
-        );
+        let idx =
+            I::new(u32::try_from(self.raw.len()).expect("IndexVec exceeded u32::MAX entries"));
         self.raw.push(value);
         idx
     }

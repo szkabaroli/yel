@@ -26,8 +26,10 @@
 //! # The table is a two-level tree
 //!
 //! A [`Scope`] holds `Name → [Sym]`. There is one root scope — this package's
-//! own declarations — plus one child scope per `include`, held as a [`Module`]
-//! and named from the root by [`Sym::Module`].
+//! own declarations — plus one [`Module`] row per `include`, named from the
+//! root by [`Sym::Module`]. A module has **no scope of its own**: its names
+//! live in its package's own table, looked into through
+//! `CompilerContext::module_member` (ark's `table_for_module` walk).
 //!
 //! **Two levels, and no deeper.** WIT interfaces do not nest, and
 //! [`plans/modules.md` §3](../../../plans/modules.md) refuses source-level module
@@ -36,8 +38,6 @@
 //! `DefKind` has no `Module` variant, so a module inside a module does not
 //! compile.
 //!
-//! Nothing populates a module scope yet — `include` does not parse. The shape is
-//! here so that the thing which will populate it has somewhere correct to go.
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -191,8 +191,14 @@ pub struct Module {
     pub package: PackageId,
     /// Where the `include` was written.
     pub span: Span,
-    scope: Scope,
 }
+
+// A module deliberately has **no scope of its own** (removed 2026-07-31).
+// The earlier design copied every loaded definition into a per-module scope
+// via `bind_in_module`; ark never copies — `table_for_module` fetches the
+// target module's *own* table and looks names up there, and
+// `CompilerContext::module_member` is that walk here. One set of names, one
+// owner, nothing to drift.
 
 /// One registered definition.
 ///
@@ -218,11 +224,69 @@ pub struct Definition {
     pub overload: OverloadKey,
 }
 
+/// One declared member of a definition: a record field, an enum or variant
+/// case, a component/global/element property, a member function or callback.
+///
+/// # Why members are rows on the owner and not definitions
+///
+/// Under one namespace a member name cannot be a root-scope binding — every
+/// component declaring `width` would collide. The frozen tree solved this by
+/// giving members their own `DefId`s and never registering the names; that
+/// makes member identity a first-class id at the cost of a definition table
+/// full of entries no scope can reach. Here a member is addressed as
+/// `(owner DefId, index)` — the index is stable because member order is source
+/// order, and *"which member"* is a question always asked about a known owner.
+///
+/// `ty` is `None` until stage 3's phase 2 resolves the written annotation, and
+/// stays `None` when the annotation does not resolve — never a placeholder
+/// (H4). An enum case has no annotation and stays `None` forever.
+#[derive(Clone, Debug)]
+pub struct Member {
+    pub name: Name,
+    pub kind: MemberKind,
+    /// Where the member's name was written.
+    pub span: Span,
+    /// The declared type, once resolved. What it means per kind: a field's
+    /// type, a variant case's payload, a property's type, a function's `Func`
+    /// type.
+    pub ty: Option<Ty>,
+}
+
+/// What a [`Member`] is. The direction only means something on a global's
+/// property; everything else is [`MemberDirection::None`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MemberKind {
+    /// A record field.
+    Field,
+    /// An enum case (never typed) or a variant case (`ty` is the payload).
+    Case,
+    /// A component, global, or element property.
+    Property { direction: MemberDirection },
+    /// A member function: a component function, a global callback, an extern
+    /// component method. `ty` is its `Func` type.
+    Function,
+}
+
+/// `in` / `out` / `in-out` on a global property, or nothing was written.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MemberDirection {
+    None,
+    In,
+    Out,
+    InOut,
+}
+
 /// Every definition in the package being compiled, and the scopes that name
 /// them.
+#[derive(Debug)]
 pub struct Definitions {
     package: PackageId,
     defs: Vec<Definition>,
+    /// Member rows per definition, parallel to `defs`. A separate vector
+    /// rather than a field on [`Definition`] so the artifact layer, which
+    /// serializes definitions row by row, decides independently what to do
+    /// with members.
+    members: Vec<Vec<Member>>,
     root: Scope,
     modules: Vec<Module>,
 }
@@ -309,6 +373,7 @@ impl Definitions {
         Self {
             package,
             defs: Vec::new(),
+            members: Vec::new(),
             root: Scope::default(),
             modules: Vec::new(),
         }
@@ -370,6 +435,7 @@ impl Definitions {
             is_export,
             overload,
         });
+        self.members.push(Vec::new());
         self.root.insert(name, kind.sym(id));
         Ok(id)
     }
@@ -388,7 +454,6 @@ impl Definitions {
             name,
             package,
             span,
-            scope: Scope::default(),
         });
         self.root.insert(name, Sym::Module(id));
         Ok(id)
@@ -427,35 +492,6 @@ impl Definitions {
         Ok(())
     }
 
-    /// Bind a name inside a module scope.
-    ///
-    /// `def` belongs to the module's package, not to this one. Takes a
-    /// [`DefKind`] rather than a [`Sym`] on purpose: `DefKind` has no `Module`
-    /// variant, so a module inside a module is a compile error and the tree
-    /// cannot grow a third level.
-    pub fn bind_in_module(
-        &mut self,
-        module: ModuleId,
-        name: Name,
-        kind: DefKind,
-        def: DefId,
-    ) -> Result<(), Collision> {
-        let span = self.modules[module.index()].span;
-        if let Some(&existing) = self.modules[module.index()].scope.get(name).first() {
-            return Err(Collision {
-                name,
-                existing,
-                existing_span: self.span_of(existing),
-                attempted: Some(kind),
-                span,
-            });
-        }
-        self.modules[module.index()]
-            .scope
-            .insert(name, kind.sym(def));
-        Ok(())
-    }
-
     /// Every symbol bound to `name` in the root scope, in registration order.
     ///
     /// More than one only for an overload set. Takes no kind — that is the whole
@@ -476,11 +512,6 @@ impl Definitions {
             .iter()
             .find(|sym| sym.kind() == Some(kind))
             .and_then(|sym| sym.def())
-    }
-
-    /// Every symbol bound to `name` inside a module scope.
-    pub fn lookup_in_module(&self, module: ModuleId, name: Name) -> &[Sym] {
-        self.modules[module.index()].scope.get(name)
     }
 
     pub fn module(&self, id: ModuleId) -> &Module {
@@ -573,6 +604,50 @@ impl Definitions {
     /// WIT emission.
     pub fn iter(&self) -> impl Iterator<Item = &Definition> {
         self.defs.iter()
+    }
+
+    /// Append a member row to a definition. Rows keep **source order**, which
+    /// is what makes `(owner, index)` a stable member address.
+    ///
+    /// Duplicate member names are *not* rejected here: whether `x` twice in one
+    /// record is an error is the caller's rule, reported with the caller's
+    /// message. This table records what was declared.
+    ///
+    /// # Panics
+    ///
+    /// If `owner` belongs to another package — same rule as
+    /// [`Definitions::set_ty`], same reason.
+    pub fn add_member(&mut self, owner: DefId, member: Member) -> u32 {
+        assert_eq!(
+            owner.package, self.package,
+            "a DefId from another package was written through this table",
+        );
+        let rows = &mut self.members[owner.index as usize];
+        rows.push(member);
+        (rows.len() - 1) as u32
+    }
+
+    /// The member rows of a definition, in source order.
+    pub fn members(&self, owner: DefId) -> &[Member] {
+        assert_eq!(
+            owner.package, self.package,
+            "a DefId from another package was read through this table",
+        );
+        &self.members[owner.index as usize]
+    }
+
+    /// Record a member's resolved declared type — stage 3 phase 2's write.
+    ///
+    /// # Panics
+    ///
+    /// On a foreign `owner` or an out-of-range index: both are compiler bugs,
+    /// not user errors.
+    pub fn set_member_ty(&mut self, owner: DefId, index: u32, ty: Ty) {
+        assert_eq!(
+            owner.package, self.package,
+            "a DefId from another package was written through this table",
+        );
+        self.members[owner.index as usize][index as usize].ty = Some(ty);
     }
 }
 
@@ -744,29 +819,23 @@ mod tests {
         assert_eq!(collision.attempted_description(), "a module");
     }
 
-    /// The tree is two levels: a module scope resolves independently of the
-    /// root, and its definitions are the *module's* package's.
+    /// A module row is a *pointer*, not a scope: it names the package whose
+    /// own table holds the names, and nothing about its contents leaks into
+    /// the root. (The copying `bind_in_module` scope was removed 2026-07-31 —
+    /// see the note on [`Module`].)
     #[test]
-    fn a_module_scope_is_a_second_level_that_does_not_leak() {
+    fn a_module_row_points_at_its_package_and_owns_no_names() {
         let interner = Interner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         let foreign = PackageId::new(4);
         let module = defs
             .register_module(interner.intern("Sha256"), foreign, span())
             .unwrap();
-        let hash = interner.intern("hash");
-        defs.bind_in_module(module, hash, DefKind::Value, DefId::new(foreign, 9))
-            .unwrap();
-
-        assert_eq!(
-            defs.lookup_in_module(module, hash),
-            [Sym::Value(DefId::new(foreign, 9))],
-        );
+        assert_eq!(defs.module(module).package, foreign);
         assert!(
-            defs.lookup(hash).is_empty(),
+            defs.lookup(interner.intern("hash")).is_empty(),
             "a module's names must not reach the root scope",
         );
-        assert_eq!(defs.module(module).package, foreign);
     }
 
     /// A foreign definition has no span this compilation can render, and the

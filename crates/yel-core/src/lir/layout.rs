@@ -321,11 +321,12 @@ impl<'ctx> LirLayoutContext<'ctx> {
 
         for &case_def_id in &variant.cases {
             if let crate::definitions::DefKind::VariantCase(case) = self.ctx.defs.kind(case_def_id)
-                && let Some(payload_ty) = case.payload {
-                    let payload_layout = self.layout_of(payload_ty);
-                    max_payload_size = max_payload_size.max(payload_layout.size);
-                    max_payload_align = max_payload_align.max(payload_layout.align);
-                }
+                && let Some(payload_ty) = case.payload
+            {
+                let payload_layout = self.layout_of(payload_ty);
+                max_payload_size = max_payload_size.max(payload_layout.size);
+                max_payload_align = max_payload_align.max(payload_layout.align);
+            }
         }
 
         let payload_offset = align_to(disc_size, max_payload_align);
@@ -470,7 +471,6 @@ impl<'ctx> LirLayoutContext<'ctx> {
             Shape::DiscOnly => vec![LirCoreValType::I32],
         }
     }
-
 }
 
 /// Per-valtype tally over a flattened valtype list.
@@ -514,7 +514,6 @@ fn join_flat_lir_valtypes(a: &[LirCoreValType], b: &[LirCoreValType]) -> Vec<Lir
     }
     out
 }
-
 
 // ============================================================================
 // Helper functions

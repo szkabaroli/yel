@@ -680,7 +680,11 @@ fn hash_op<H: Hasher>(
                 }
             }
         }
-        RefCast { from, ty_ref, result } => {
+        RefCast {
+            from,
+            ty_ref,
+            result,
+        } => {
             sn.norm(*from).hash(h);
             ty_ref.hash(h);
             sn.norm(*result).hash(h);
@@ -689,7 +693,12 @@ fn hash_op<H: Hasher>(
             sn.norm(*from).hash(h);
             sn.norm(*result).hash(h);
         }
-        ArrayGetTyped { ty_ref, arr, idx, result } => {
+        ArrayGetTyped {
+            ty_ref,
+            arr,
+            idx,
+            result,
+        } => {
             ty_ref.hash(h);
             sn.norm(*arr).hash(h);
             sn.norm(*idx).hash(h);

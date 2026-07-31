@@ -49,7 +49,7 @@ what gets *written*.
 | — | `yelc-base` | keep-list items | ✅ **landed** (infrastructure, no stage) | — | 2026-07-28 |
 | 1 | `yelc-syntax` | `yel-core/src/syntax/` | ✅ **landed** | agent + integrator | 2026-07-28 |
 | 2 | `yelc-driver` | — (new: the observation instrument, binary `yelc2`) | ✅ **landed** | integrator | 2026-07-28 |
-| 3 | `yelc-hir` | `yel-core/src/hir/` **+ `yelc-sema`** (`context.rs`, `definitions.rs`, `known.rs`, `stdlib_lookup.rs`, `types/`, ~3.5k) | 🚧 [brief](stage-3-hir-build.md) — **phases 0–2 landed**; phase 3 (the lowering) not started, gated on naming `type_of`'s owner | — | ph.0 `1d12250` · ph.1 `9a54ad1` · ph.2 2026-07-30 |
+| 3 | `yelc-hir` | `yel-core/src/hir/` **+ `yelc-sema`** (`context.rs`, `definitions.rs`, `known.rs`, `stdlib_lookup.rs`, `types/`, ~3.5k) | 🚧 [brief](stage-3-hir-build.md) — **phases 0–3 core landed** (ph. 3 uncommitted 2026-07-31: vocabulary, three-phase lowering, UI desugar, signalck, `--emit-hir`, 2000/2000 Definitions differential); remainder listed in § Still owed | — | ph.0 `1d12250` · ph.1 `9a54ad1` · ph.2 2026-07-30 |
 | 4 | `yelc-hir` | `yel-core/src/thir/` | 📝 [brief](stage-4-hir-check.md), blocked on 3 | — | — |
 | 5 | `yelc-lir` | `yel-core/src/lir/` | ⬜ [stub](stage-5-lir.md), blocked on 4 | — | — |
 | 6 | `yelc-lower` | `yel-core/src/lower_to_lir/` | ⬜ [stub](stage-6-lower.md), blocked on 5 | — | — |

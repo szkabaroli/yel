@@ -10,8 +10,8 @@
 
 use yelc_base::Span;
 
-use crate::builtins::{Arity, Builtin, BuiltinTable, LoweringTarget, Visibility};
 use crate::context::CompilerContext;
+use crate::intrinsics::{Intrinsic, IntrinsicTable, LoweringTarget, Visibility};
 use crate::known::Known;
 use crate::types::{Ty, TyKind};
 
@@ -25,7 +25,7 @@ use crate::types::{Ty, TyKind};
 ///
 /// | shape | table | why |
 /// |---|---|---|
-/// | callable — `len`, `concat`, `min` | [`BuiltinTable`] | it has an arity, a type scheme and a lowering target |
+/// | callable — `len`, `concat`, `min` | [`IntrinsicTable`] | it has an arity, a type scheme and a lowering target |
 /// | named definition — the [`Known`] inventory | [`Definitions`](crate::definitions::Definitions) | it has none of the three, and ordinary name lookup must find it |
 ///
 /// The second half was **missing until 2026-07-30**: `Known::resolve` looks
@@ -33,7 +33,7 @@ use crate::types::{Ty, TyKind};
 /// [`CompilerContext::resolve_known`] could not succeed outside a test fixture
 /// — a complete mechanism with no registration site
 /// ([anti-spec A9](../../../plans/rewrite/anti-spec.md)).
-pub fn register_builtins(ctx: &mut CompilerContext) {
+pub fn register_intrinsics(ctx: &mut CompilerContext) {
     let t = &ctx.types;
 
     // The one type parameter the stdlib needs. Every generic builtin below is
@@ -47,11 +47,10 @@ pub fn register_builtins(ctx: &mut CompilerContext) {
         ret: Some(Ty::BOOL),
     });
 
-    let mut add = |name: &str, arity, params, ret, lowering, visibility| {
+    let mut add = |name: &str, params, ret, lowering, visibility| {
         let name = ctx.names.intern(name);
-        ctx.builtins.register(Builtin {
+        ctx.intrinsics.register(Intrinsic {
             name,
-            arity,
             params,
             ret,
             lowering,
@@ -66,7 +65,6 @@ pub fn register_builtins(ctx: &mut CompilerContext) {
     // OverloadKey exists.
     add(
         "len",
-        Arity::Fixed(1),
         vec![list_t],
         Some(Ty::S32),
         LoweringTarget::Op("list_len"),
@@ -74,7 +72,6 @@ pub fn register_builtins(ctx: &mut CompilerContext) {
     );
     add(
         "len",
-        Arity::Fixed(1),
         vec![Ty::STRING],
         Some(Ty::S32),
         LoweringTarget::Op("string_len"),
@@ -82,7 +79,6 @@ pub fn register_builtins(ctx: &mut CompilerContext) {
     );
     add(
         "filter",
-        Arity::Fixed(2),
         vec![list_t, predicate],
         Some(list_t),
         LoweringTarget::Op("list_filter"),
@@ -93,7 +89,6 @@ pub fn register_builtins(ctx: &mut CompilerContext) {
     // resolve, because it is what a user writes.
     add(
         "starts-with",
-        Arity::Fixed(2),
         vec![Ty::STRING, Ty::STRING],
         Some(Ty::BOOL),
         LoweringTarget::Op("string_starts_with"),
@@ -101,7 +96,6 @@ pub fn register_builtins(ctx: &mut CompilerContext) {
     );
     add(
         "min",
-        Arity::Fixed(2),
         vec![Ty::S32, Ty::S32],
         Some(Ty::S32),
         LoweringTarget::Op("s32_min"),
@@ -109,7 +103,6 @@ pub fn register_builtins(ctx: &mut CompilerContext) {
     );
     add(
         "max",
-        Arity::Fixed(2),
         vec![Ty::S32, Ty::S32],
         Some(Ty::S32),
         LoweringTarget::Op("s32_max"),
@@ -117,7 +110,6 @@ pub fn register_builtins(ctx: &mut CompilerContext) {
     );
     add(
         "some",
-        Arity::Fixed(1),
         vec![param0],
         Some(option_t),
         LoweringTarget::Op("option_some"),
@@ -125,7 +117,6 @@ pub fn register_builtins(ctx: &mut CompilerContext) {
     );
     add(
         "none",
-        Arity::Fixed(0),
         vec![],
         Some(option_t),
         LoweringTarget::Op("option_none"),
@@ -139,13 +130,14 @@ pub fn register_builtins(ctx: &mut CompilerContext) {
     // and lowering must find, and leaving them undeclared is how `concat` ended
     // up with a comment saying it was variadic and a declaration saying it took
     // nothing (F12's shape).
+    // One argument: the parts list. Interpolation desugars to a list literal
+    // whose static length is what codegen monomorphizes `concat_N` from — the
+    // unbounded arity lives in a value now, not in the signature (see the
+    // `Arity` tombstone in `intrinsics.rs`).
+    let list_string = t.intern(TyKind::List(Ty::STRING));
     add(
         "concat",
-        Arity::Variadic {
-            min: 0,
-            element: Ty::STRING,
-        },
-        vec![],
+        vec![list_string],
         Some(Ty::STRING),
         LoweringTarget::Op("concat"),
         Visibility::Internal,
@@ -162,7 +154,6 @@ pub fn register_builtins(ctx: &mut CompilerContext) {
     ] {
         add(
             name,
-            Arity::Fixed(1),
             vec![from],
             Some(Ty::STRING),
             LoweringTarget::Op(op),
@@ -219,7 +210,7 @@ fn register_known_definitions(ctx: &mut CompilerContext) {
 }
 
 /// Names a user may write. Everything else is a desugaring target.
-pub fn user_facing(table: &BuiltinTable) -> impl Iterator<Item = &Builtin> {
+pub fn user_facing(table: &IntrinsicTable) -> impl Iterator<Item = &Intrinsic> {
     table
         .iter()
         .map(|(_, b)| b)
@@ -229,17 +220,17 @@ pub fn user_facing(table: &BuiltinTable) -> impl Iterator<Item = &Builtin> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtins::BuiltinId;
     use crate::definitions::DefKind;
+    use crate::intrinsics::IntrinsicId;
 
     fn ctx() -> CompilerContext {
         let mut ctx = CompilerContext::default();
-        register_builtins(&mut ctx);
+        register_intrinsics(&mut ctx);
         ctx
     }
 
     /// **The registration site A9 said had to exist.** Until 2026-07-30 this
-    /// function touched `ctx.builtins` and never `ctx.defs`, so `Known::resolve`
+    /// function touched `ctx.intrinsics` and never `ctx.defs`, so `Known::resolve`
     /// — which looks names up in `ctx.defs` — could not succeed anywhere but a
     /// test fixture.
     ///
@@ -248,7 +239,7 @@ mod tests {
     /// `register_known_definitions` call fails this, and so does adding a
     /// `Known` variant without registering it.
     #[test]
-    fn register_builtins_registers_the_lang_items_into_definitions() {
+    fn register_intrinsics_registers_the_lang_items_into_definitions() {
         let ctx = ctx();
         assert!(
             !Known::ALL.is_empty(),
@@ -258,7 +249,7 @@ mod tests {
             let name = ctx.names.intern(item.source_name());
             assert!(
                 ctx.defs.lookup_def(name, item.kind()).is_some(),
-                "`{}` is a lang-item and register_builtins did not put it in \
+                "`{}` is a lang-item and register_intrinsics did not put it in \
                  Definitions; resolve_known cannot succeed",
                 item.source_name(),
             );
@@ -281,7 +272,7 @@ mod tests {
         for name in ["len", "filter", "concat", "s32-to-string"] {
             let interned = ctx.names.intern(name);
             assert!(
-                !ctx.builtins.overloads(interned).is_empty(),
+                !ctx.intrinsics.overloads(interned).is_empty(),
                 "`{name}` is a builtin",
             );
             assert!(
@@ -320,7 +311,7 @@ mod tests {
         for name in ["len", "filter", "starts-with", "min", "max", "some", "none"] {
             let interned = ctx.names.intern(name);
             assert!(
-                !ctx.builtins.overloads(interned).is_empty(),
+                !ctx.intrinsics.overloads(interned).is_empty(),
                 "LANGUAGE.md documents `{name}` and it does not resolve",
             );
         }
@@ -330,9 +321,9 @@ mod tests {
     #[test]
     fn len_has_two_overloads_that_lower_differently() {
         let ctx = ctx();
-        let ids: Vec<BuiltinId> = ctx.builtins.overloads(ctx.names.intern("len")).to_vec();
+        let ids: Vec<IntrinsicId> = ctx.intrinsics.overloads(ctx.names.intern("len")).to_vec();
         assert_eq!(ids.len(), 2);
-        let targets: Vec<_> = ids.iter().map(|&id| ctx.builtins.lowering(id)).collect();
+        let targets: Vec<_> = ids.iter().map(|&id| ctx.intrinsics.lowering(id)).collect();
         assert_ne!(
             targets[0], targets[1],
             "two overloads that lower to the same op are one builtin",
@@ -345,8 +336,8 @@ mod tests {
     #[test]
     fn generic_builtins_use_one_shared_param_type() {
         let ctx = ctx();
-        let id = ctx.builtins.overloads(ctx.names.intern("filter"))[0];
-        let filter = ctx.builtins.get(id);
+        let id = ctx.intrinsics.overloads(ctx.names.intern("filter"))[0];
+        let filter = ctx.intrinsics.get(id);
         assert_eq!(filter.params[0], filter.ret.unwrap(), "list<T> -> list<T>");
         assert!(matches!(
             ctx.types.kind(filter.params[0]),
@@ -354,14 +345,20 @@ mod tests {
         ));
     }
 
-    /// C1c, against the real registration rather than a fixture.
+    /// C1c's successor, against the real registration: `concat` takes the
+    /// parts as one `list<string>`, so an interpolation of any length fits
+    /// inside its single argument.
     #[test]
-    fn concat_accepts_any_interpolation_length() {
+    fn concat_takes_the_parts_as_one_list() {
         let ctx = ctx();
-        let id = ctx.builtins.overloads(ctx.names.intern("concat"))[0];
-        for parts in [0, 1, 7, 32] {
-            assert!(ctx.builtins.get(id).arity.accepts(parts));
-        }
+        let id = ctx.intrinsics.overloads(ctx.names.intern("concat"))[0];
+        let row = ctx.intrinsics.get(id);
+        assert!(row.accepts(1));
+        assert!(!row.accepts(2));
+        assert_eq!(
+            ctx.types.kind(row.params[0]),
+            crate::types::TyKind::List(Ty::STRING)
+        );
     }
 
     /// The internal rows are real rows, not omissions — but they are not part
@@ -370,9 +367,9 @@ mod tests {
     #[test]
     fn internal_builtins_are_separable_from_the_documented_surface() {
         let ctx = ctx();
-        let documented = user_facing(&ctx.builtins).count();
+        let documented = user_facing(&ctx.intrinsics).count();
         assert_eq!(documented, 8, "7 documented names, `len` twice");
-        assert!(ctx.builtins.len() > documented, "internal rows exist too");
+        assert!(ctx.intrinsics.len() > documented, "internal rows exist too");
     }
 
     /// Registration takes no input, so it must be reproducible — this is what
@@ -381,10 +378,10 @@ mod tests {
     fn registration_is_deterministic() {
         let a = ctx();
         let b = ctx();
-        assert_eq!(a.builtins.len(), b.builtins.len());
-        for ((_, x), (_, y)) in a.builtins.iter().zip(b.builtins.iter()) {
+        assert_eq!(a.intrinsics.len(), b.intrinsics.len());
+        for ((_, x), (_, y)) in a.intrinsics.iter().zip(b.intrinsics.iter()) {
             assert_eq!(a.names.str(x.name), b.names.str(y.name));
-            assert_eq!(x.arity, y.arity);
+            assert_eq!(x.params, y.params);
             assert_eq!(x.lowering, y.lowering);
         }
 

@@ -61,18 +61,24 @@
 //! (decision D0a) because it is analysis about a program, not infrastructure.
 
 pub mod artifact;
-pub mod builtins;
+pub mod compilation;
 pub mod context;
 pub mod definitions;
 pub mod ids;
+pub mod intrinsics;
 pub mod known;
 pub mod stdlib;
 pub mod types;
 
 pub use artifact::{Artifact, LoadError, LoadedPackage, PackageName, Stamp};
-pub use builtins::{Arity, Builtin, BuiltinId, BuiltinTable, LoweringTarget, Visibility};
+pub use compilation::{
+    Compilation, ModuleDefinition, ModuleDefinitionId, PackageDefinition, PackageRole,
+};
 pub use context::CompilerContext;
-pub use definitions::{Collision, DefKind, Definition, Definitions, Module, Sym};
+pub use definitions::{
+    Collision, DefKind, Definition, Definitions, Member, MemberDirection, MemberKind, Module, Sym,
+};
 pub use ids::{DefId, DefPath, ModuleId, OverloadKey, PackageId};
+pub use intrinsics::{Intrinsic, IntrinsicId, IntrinsicTable, LoweringTarget, Visibility};
 pub use known::{Known, KnownItems, MissingKnownItems};
 pub use types::{Ty, TyKind, TypeInterner};

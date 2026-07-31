@@ -373,13 +373,27 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::If(BlockType::Empty));
 
                 for nested_op in &if_op.then_ops {
-                    self.emit_op(func, nested_op, component, Some(comp_idx), block, local_offset)?;
+                    self.emit_op(
+                        func,
+                        nested_op,
+                        component,
+                        Some(comp_idx),
+                        block,
+                        local_offset,
+                    )?;
                 }
 
                 if !if_op.else_ops.is_empty() {
                     func.instruction(&Instruction::Else);
                     for nested_op in &if_op.else_ops {
-                        self.emit_op(func, nested_op, component, Some(comp_idx), block, local_offset)?;
+                        self.emit_op(
+                            func,
+                            nested_op,
+                            component,
+                            Some(comp_idx),
+                            block,
+                            local_offset,
+                        )?;
                     }
                 }
 
@@ -971,7 +985,14 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::BrIf(1));
 
                 for nested_op in body_ops {
-                    self.emit_op(func, nested_op, component, Some(comp_idx), block, local_offset)?;
+                    self.emit_op(
+                        func,
+                        nested_op,
+                        component,
+                        Some(comp_idx),
+                        block,
+                        local_offset,
+                    )?;
                 }
 
                 func.instruction(&Instruction::Br(0));
@@ -1874,12 +1895,15 @@ impl<'a> WasmPackageBuilder<'a> {
         block: &LirBlock,
         local_offset: u32,
     ) -> Result<(), CodegenError> {
-        let &layout_idx = self.global_block_def_to_idx.get(&block_def).ok_or_else(|| {
-            CodegenError::InvalidIR(format!(
-                "GlobalFieldSet: no globals layout for block {:?}",
-                block_def
-            ))
-        })?;
+        let &layout_idx = self
+            .global_block_def_to_idx
+            .get(&block_def)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "GlobalFieldSet: no globals layout for block {:?}",
+                    block_def
+                ))
+            })?;
         let g = self.globals_layouts[layout_idx].field_core_globals[field as usize];
         func.instruction(&Instruction::LocalGet(slot_local(
             component,

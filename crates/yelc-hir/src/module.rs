@@ -1,39 +1,127 @@
 //! The unit stage 3 produces and stage 4 annotates.
 
-use yelc_base::{IndexVec, SourceId};
-use yelc_sema::{PackageId, Ty};
+use rustc_hash::FxHashMap;
+use yelc_base::{IndexVec, Name, SourceId};
+use yelc_sema::{DefId, PackageId, Ty};
 
-use crate::ids::{BodyId, HirItemId};
+use crate::expr::{HirBlock, HirLocal};
+use crate::ids::{BodyId, HirId, HirItemId, LocalId};
 use crate::map::HirMap;
 use crate::node_map::NodeMap;
 
-/// One top-level item: a component, a global, an element, an extern component,
-/// a record, an enum, a variant.
+/// One top-level item: a component or a global.
 ///
-/// # Deliberately uninhabited, and that is the seam
+/// # Where everything else went
 ///
-/// Phase 2 lands the *types*; phase 3 declares this vocabulary and writes the
-/// lowering ([`plans/rewrite/stage-3-hir-build.md` § Phase 2](../../../plans/rewrite/stage-3-hir-build.md)).
-/// An empty enum is the honest form of *"not yet decided"*: it cannot be
-/// constructed, so nothing can be lowered into it by accident and no placeholder
-/// variant exists to become permanent
-/// ([no silent fallbacks](../../../plans/rewrite/keep-list.md)).
+/// A record, enum, variant, element or extern component declares *shape* and no
+/// behaviour — it registers a definition with member rows
+/// ([`Definitions`](yelc_sema::Definitions)) and there is nothing left to
+/// lower, so it has no HIR item. The frozen tree reached the same two-variant
+/// spine and it is kept by writing, not by copying
+/// (`plans/rewrite/README.md` § read, do not port).
 ///
-/// What is already decided about it, so phase 3 does not re-derive it:
-/// **one uniform item spine** — a real `{Component, Global, …}` enum, not two
-/// parallel pipelines ([D1](../../../plans/rewrite/anti-spec.md)) — and
-/// **globals carry no body**, only their functions
-/// ([D4](../../../plans/rewrite/stage-3-hir-build.md)).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HirItem {}
+/// What was decided before this vocabulary was written, honoured here:
+/// **one uniform item spine** (D1 — no parallel pipelines), and **globals carry
+/// no body, only their functions** (D4).
+#[derive(Debug)]
+pub enum HirItem {
+    Component(HirComponent),
+    Global(HirGlobal),
+}
 
-/// One body: a function's, a handler's, a closure's, a generated region's.
+impl HirItem {
+    pub fn def(&self) -> DefId {
+        match self {
+            HirItem::Component(component) => component.def,
+            HirItem::Global(global) => global.def,
+        }
+    }
+
+    pub fn name(&self) -> Name {
+        match self {
+            HirItem::Component(component) => component.name,
+            HirItem::Global(global) => global.name,
+        }
+    }
+}
+
+/// A component: its member functions, its property defaults, and its UI tree
+/// desugared to one **build body** whose value is a builder expression.
+#[derive(Debug)]
+pub struct HirComponent {
+    pub hir_id: HirId,
+    pub def: DefId,
+    pub name: Name,
+    pub is_export: bool,
+    /// Reactive-property defaults, in member order. Kept on the item and not in
+    /// the member table because a default is an *expression*, and `yelc-sema`
+    /// sits below the expression vocabulary — the same wall that placed
+    /// `type_of`. D4's letter ("defaults stay in the definition") bends here so
+    /// its spirit (no body on the definition side) can hold.
+    pub defaults: Vec<HirDefault>,
+    /// User-written functions, source order.
+    pub functions: Vec<HirFunction>,
+    /// The desugared UI tree. Its tail is a [`Fragment`] of the root builder
+    /// expressions; a component with no UI nodes has a build body with an
+    /// empty one. Handler closures inside it are ordinary [`Closure`] bodies.
+    ///
+    /// [`Fragment`]: crate::HirExprKind::Fragment
+    /// [`Closure`]: crate::HirExprKind::Closure
+    pub build: BodyId,
+}
+
+/// A global: a host-boundary singleton. No body, no build — only its functions
+/// (D4) and its property defaults.
+#[derive(Debug)]
+pub struct HirGlobal {
+    pub hir_id: HirId,
+    pub def: DefId,
+    pub name: Name,
+    pub is_export: bool,
+    pub defaults: Vec<HirDefault>,
+    /// Callbacks. `body: None` means the host implements it.
+    pub functions: Vec<HirFunction>,
+}
+
+/// One member property's default expression, as a body of its own — a default
+/// is evaluated outside any function, so it cannot borrow another body's local
+/// arena, and a closure written as a default needs one.
+#[derive(Debug)]
+pub struct HirDefault {
+    /// Index into the owner's rows in
+    /// [`Definitions::members`](yelc_sema::Definitions::members).
+    pub member: u32,
+    /// A parameterless body whose tail is the default's value.
+    pub body: BodyId,
+}
+
+/// One member function: a component function, a global callback.
+#[derive(Debug)]
+pub struct HirFunction {
+    pub hir_id: HirId,
+    pub name: Name,
+    /// Index into the owner's member rows — the declared `Func` type lives
+    /// there after phase 2.
+    pub member: u32,
+    pub is_export: bool,
+    /// `None` when someone else implements it: a host callback, an extern
+    /// method. Not a hole — the ordinary case for a global.
+    pub body: Option<BodyId>,
+}
+
+/// One body: a function's, a closure's, a setter's, a component's build.
 ///
-/// Uninhabited for the same reason as [`HirItem`]. Bodies are held here and
-/// reached by [`BodyId`] rather than nested inside items, so a pass that only
-/// needs signatures never walks one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HirBody {}
+/// Parameters are the leading locals; `locals` is every local in **allocation
+/// order**, which is source order — the order is load-bearing (`LocalId`
+/// ordinals reach the checker; stage 3 D1's caveat).
+#[derive(Debug)]
+pub struct HirBody {
+    pub hir_id: HirId,
+    /// The leading `params.len()` entries of `locals`.
+    pub params: u32,
+    pub locals: IndexVec<LocalId, HirLocal>,
+    pub block: HirBlock,
+}
 
 /// The HIR for one package.
 ///
@@ -69,6 +157,33 @@ pub struct HirModule {
     pub bodies: IndexVec<BodyId, HirBody>,
     /// Where every HIR node came from. See [`HirMap`].
     pub map: HirMap,
+    /// D6 — doc comments, attached: the nearest preceding **`///`** run with
+    /// no blank line between it and the item, joined in source order, `///`
+    /// and one leading space stripped. Plain `//` is commentary and never
+    /// attaches (Rust's line; WIT's parser blurs the two and any comment
+    /// becomes docs — read and deliberately not copied). A side table, not a
+    /// node field (B3).
+    ///
+    /// Keyed by `DefId` rather than the decision's literal `NodeMap<HirId>`:
+    /// the member-row design left type declarations (records, enums,
+    /// variants, elements, externs) with no HIR node to key on, and `DefId`
+    /// is the id space that covers every registered item. Top-level
+    /// definitions only for now; member docs follow with the LSP work.
+    /// Write-once, asserted in [`HirModule::attach_doc`]. Iterate sorted when
+    /// output needs it (A6) — the map itself is hash-ordered.
+    ///
+    /// Known edge, recorded not chased: an item whose span starts *after* its
+    /// `@attribute` list would have the run broken by the attribute line.
+    /// No top-level item carries attributes in practice yet (intrinsics are
+    /// members, and members are not covered by v1); when one does, the fix is
+    /// to anchor the scan at the attribute list's start.
+    pub docs: FxHashMap<DefId, Name>,
+    /// Signal dependencies per body — what each reads and writes of reactive
+    /// state, keyed by the body's `hir_id`. Computed at the end of stage 3 on
+    /// the resolved, desugared bodies; sorted and deduplicated (A6). The
+    /// frozen equivalent lived on `CompilerContext` (`signal_deps`), and D0a
+    /// moved it here: analysis about HIR belongs beside HIR (B3's shape).
+    pub dependencies: NodeMap<crate::signalck::BodyDependencies>,
     /// The type of every expression.
     ///
     /// # Empty after stage 3, total after stage 4
@@ -88,6 +203,16 @@ pub struct HirModule {
 }
 
 impl HirModule {
+    /// Attach an item's doc text. Write-once: two docs for one definition is
+    /// a lowering bug, not a merge.
+    pub fn attach_doc(&mut self, def: DefId, text: Name) {
+        let previous = self.docs.insert(def, text);
+        assert!(
+            previous.is_none(),
+            "definition {def:?} was given a second doc comment"
+        );
+    }
+
     /// An empty package, before anything is lowered into it.
     pub fn new(id: PackageId, sources: Vec<SourceId>) -> Self {
         Self {
@@ -96,6 +221,8 @@ impl HirModule {
             items: IndexVec::new(),
             bodies: IndexVec::new(),
             map: HirMap::new(),
+            docs: FxHashMap::default(),
+            dependencies: NodeMap::new(),
             types: NodeMap::new(),
         }
     }

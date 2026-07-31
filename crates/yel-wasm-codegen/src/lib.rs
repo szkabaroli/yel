@@ -17,12 +17,12 @@ pub mod wit;
 pub mod wit_ast;
 
 // pub use lir_rust::generate_rust;
-pub use dot::{generate_dot, DotOptions};
+pub use dot::{DotOptions, generate_dot};
 pub use wasm::functions::{
-    generate_component, generate_function_module, ComponentPackage, FunctionInput,
+    ComponentPackage, FunctionInput, generate_component, generate_function_module,
 };
-pub use wasm::{generate_wasm, generate_wasm_module, generate_wasm_with_wit, WasmWithWitOptions};
-pub use wit::{generate_wit, WitOptions};
+pub use wasm::{WasmWithWitOptions, generate_wasm, generate_wasm_module, generate_wasm_with_wit};
+pub use wit::{WitOptions, generate_wit};
 
 /// Code generation error.
 #[derive(Error, Debug)]

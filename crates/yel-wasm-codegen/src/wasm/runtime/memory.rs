@@ -146,7 +146,11 @@ pub fn emit_alloc(globals: &AllocatorGlobals) -> Function {
 
     // block_size = curr[4]
     func.instruction(&Instruction::LocalGet(4));
-    func.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
     func.instruction(&Instruction::LocalSet(5));
 
     // br_if $found if block_size >= aligned_size
@@ -161,7 +165,11 @@ pub fn emit_alloc(globals: &AllocatorGlobals) -> Function {
 
     // curr = curr.next
     func.instruction(&Instruction::LocalGet(4));
-    func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
     func.instruction(&Instruction::LocalSet(4));
 
     // br $search
@@ -207,13 +215,25 @@ pub fn emit_alloc(globals: &AllocatorGlobals) -> Function {
     // split_block.next = curr.next
     func.instruction(&Instruction::LocalGet(6)); // split_block
     func.instruction(&Instruction::LocalGet(4)); // curr
-    func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
-    func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
 
     // split_block.size = remainder
     func.instruction(&Instruction::LocalGet(6)); // split_block
     func.instruction(&Instruction::LocalGet(7)); // remainder
-    func.instruction(&Instruction::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
 
     // Update links: if prev == 0 then free_list = split_block else prev.next = split_block
     func.instruction(&Instruction::LocalGet(3)); // prev
@@ -224,7 +244,11 @@ pub fn emit_alloc(globals: &AllocatorGlobals) -> Function {
     func.instruction(&Instruction::Else);
     func.instruction(&Instruction::LocalGet(3)); // prev
     func.instruction(&Instruction::LocalGet(6)); // split_block
-    func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
     func.instruction(&Instruction::End);
 
     // return curr
@@ -239,14 +263,26 @@ pub fn emit_alloc(globals: &AllocatorGlobals) -> Function {
     func.instruction(&Instruction::If(BlockType::Empty));
     // prev == 0: free_list = curr.next
     func.instruction(&Instruction::LocalGet(4)); // curr
-    func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
     func.instruction(&Instruction::GlobalSet(globals.free_list));
     func.instruction(&Instruction::Else);
     // prev != 0: prev.next = curr.next
     func.instruction(&Instruction::LocalGet(3)); // prev
     func.instruction(&Instruction::LocalGet(4)); // curr
-    func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
-    func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
     func.instruction(&Instruction::End);
 
     // return curr
@@ -327,7 +363,11 @@ pub fn emit_free(globals: &AllocatorGlobals) -> Function {
 
     // curr = curr.next
     func.instruction(&Instruction::LocalGet(4));
-    func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
     func.instruction(&Instruction::LocalSet(4));
 
     // br $find_pos
@@ -347,12 +387,20 @@ pub fn emit_free(globals: &AllocatorGlobals) -> Function {
     // ptr.size = aligned_size
     func.instruction(&Instruction::LocalGet(0)); // ptr
     func.instruction(&Instruction::LocalGet(2)); // aligned_size
-    func.instruction(&Instruction::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
 
     // ptr.next = curr
     func.instruction(&Instruction::LocalGet(0)); // ptr
     func.instruction(&Instruction::LocalGet(4)); // curr
-    func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
 
     // free_list = ptr
     func.instruction(&Instruction::LocalGet(0));
@@ -364,7 +412,11 @@ pub fn emit_free(globals: &AllocatorGlobals) -> Function {
     // prev_end = prev + prev.size
     func.instruction(&Instruction::LocalGet(3)); // prev
     func.instruction(&Instruction::LocalGet(3)); // prev
-    func.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
     func.instruction(&Instruction::I32Add);
     func.instruction(&Instruction::LocalSet(5)); // prev_end
 
@@ -378,10 +430,18 @@ pub fn emit_free(globals: &AllocatorGlobals) -> Function {
     // prev.size = prev.size + aligned_size
     func.instruction(&Instruction::LocalGet(3)); // prev
     func.instruction(&Instruction::LocalGet(3)); // prev
-    func.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
     func.instruction(&Instruction::LocalGet(2)); // aligned_size
     func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
 
     // ptr is now absorbed into prev
     // ptr = prev (for next coalesce check)
@@ -390,7 +450,11 @@ pub fn emit_free(globals: &AllocatorGlobals) -> Function {
 
     // aligned_size = prev.size (updated)
     func.instruction(&Instruction::LocalGet(3)); // prev
-    func.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
     func.instruction(&Instruction::LocalSet(2)); // aligned_size = prev.size
 
     func.instruction(&Instruction::Else); // not adjacent to prev
@@ -399,17 +463,29 @@ pub fn emit_free(globals: &AllocatorGlobals) -> Function {
     // ptr.size = aligned_size
     func.instruction(&Instruction::LocalGet(0)); // ptr
     func.instruction(&Instruction::LocalGet(2)); // aligned_size
-    func.instruction(&Instruction::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
 
     // ptr.next = curr
     func.instruction(&Instruction::LocalGet(0)); // ptr
     func.instruction(&Instruction::LocalGet(4)); // curr
-    func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
 
     // prev.next = ptr
     func.instruction(&Instruction::LocalGet(3)); // prev
     func.instruction(&Instruction::LocalGet(0)); // ptr
-    func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
 
     func.instruction(&Instruction::End); // end if $merge_prev
     func.instruction(&Instruction::End); // end if $no_prev
@@ -426,7 +502,11 @@ pub fn emit_free(globals: &AllocatorGlobals) -> Function {
     // block_end = ptr + ptr.size
     func.instruction(&Instruction::LocalGet(0)); // ptr
     func.instruction(&Instruction::LocalGet(0)); // ptr
-    func.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
     func.instruction(&Instruction::I32Add);
     func.instruction(&Instruction::LocalSet(6)); // block_end
 
@@ -440,17 +520,37 @@ pub fn emit_free(globals: &AllocatorGlobals) -> Function {
     // ptr.size = ptr.size + curr.size
     func.instruction(&Instruction::LocalGet(0)); // ptr
     func.instruction(&Instruction::LocalGet(0)); // ptr
-    func.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
     func.instruction(&Instruction::LocalGet(4)); // curr
-    func.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
     func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
 
     // ptr.next = curr.next
     func.instruction(&Instruction::LocalGet(0)); // ptr
     func.instruction(&Instruction::LocalGet(4)); // curr
-    func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
-    func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
 
     func.instruction(&Instruction::End); // end if $merge_next
 
@@ -512,7 +612,10 @@ pub fn emit_cabi_realloc(alloc_func: u32, free_func: u32) -> Function {
     func.instruction(&Instruction::LocalGet(4)); // new_ptr (dst)
     func.instruction(&Instruction::LocalGet(0)); // old_ptr (src)
     func.instruction(&Instruction::LocalGet(5)); // copy_size
-    func.instruction(&Instruction::MemoryCopy { dst_mem: 0, src_mem: 0 });
+    func.instruction(&Instruction::MemoryCopy {
+        dst_mem: 0,
+        src_mem: 0,
+    });
 
     // free(old_ptr, old_size)
     func.instruction(&Instruction::LocalGet(0));
@@ -548,14 +651,22 @@ pub fn emit_store_fat_ptr() -> Function {
     // Store ptr at addr
     func.instruction(&Instruction::LocalGet(0)); // addr
     func.instruction(&Instruction::LocalGet(1)); // ptr
-    func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
 
     // Store len at addr+4
     func.instruction(&Instruction::LocalGet(0)); // addr
     func.instruction(&Instruction::I32Const(4));
     func.instruction(&Instruction::I32Add);
     func.instruction(&Instruction::LocalGet(2)); // len
-    func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
 
     func.instruction(&Instruction::End);
     func
@@ -573,13 +684,21 @@ pub fn emit_load_fat_ptr() -> Function {
 
     // Load ptr from addr
     func.instruction(&Instruction::LocalGet(0)); // addr
-    func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
 
     // Load len from addr+4
     func.instruction(&Instruction::LocalGet(0)); // addr
     func.instruction(&Instruction::I32Const(4));
     func.instruction(&Instruction::I32Add);
-    func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    func.instruction(&Instruction::I32Load(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
 
     func.instruction(&Instruction::End);
     func
@@ -627,7 +746,10 @@ pub fn emit_memcpy() -> Function {
     func.instruction(&Instruction::LocalGet(0)); // dst
     func.instruction(&Instruction::LocalGet(1)); // src
     func.instruction(&Instruction::LocalGet(2)); // len
-    func.instruction(&Instruction::MemoryCopy { dst_mem: 0, src_mem: 0 });
+    func.instruction(&Instruction::MemoryCopy {
+        dst_mem: 0,
+        src_mem: 0,
+    });
 
     func.instruction(&Instruction::End);
 

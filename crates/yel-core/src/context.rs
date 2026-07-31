@@ -390,9 +390,7 @@ impl CompilerContext {
         Vec<crate::lir::LirImport>,
     ) {
         use crate::ids::InterfaceId;
-        use crate::lir::{
-            InterfaceDirection, LirIfaceFn, LirImport, LirInterface, LirReceiver,
-        };
+        use crate::lir::{InterfaceDirection, LirIfaceFn, LirImport, LirInterface, LirReceiver};
         use crate::naming::to_kebab_case;
         use crate::types::{InternedTyKind, Ty};
 
@@ -632,7 +630,11 @@ impl CompilerContext {
             functions.push(LirIfaceFn {
                 name: self.intern("mount"),
                 params: vec![(root_name, u32_ty)],
-                result: if has_children_slot { Some(u32_ty) } else { None },
+                result: if has_children_slot {
+                    Some(u32_ty)
+                } else {
+                    None
+                },
                 receiver: LirReceiver::Borrow(comp_id),
                 def: comp_id,
             });
@@ -734,9 +736,11 @@ impl CompilerContext {
             // Declared methods — `self: borrow<resource>` + the method's own
             // params/result. Names are already interned; no new interning here.
             for method_id in &method_ids {
-                let Some((mname, ret_ty, param_ids)) = self.defs.as_function(*method_id).map(|f| {
-                    (f.name, f.ret_ty, f.params.clone())
-                }) else {
+                let Some((mname, ret_ty, param_ids)) = self
+                    .defs
+                    .as_function(*method_id)
+                    .map(|f| (f.name, f.ret_ty, f.params.clone()))
+                else {
                     continue;
                 };
                 let mut params = Vec::new();
@@ -746,7 +750,11 @@ impl CompilerContext {
                     };
                     params.push((self.defs.name(*pid), pty));
                 }
-                let result = if ret_ty == Ty::UNIT { None } else { Some(ret_ty) };
+                let result = if ret_ty == Ty::UNIT {
+                    None
+                } else {
+                    Some(ret_ty)
+                };
                 functions.push(LirIfaceFn {
                     name: mname,
                     params,

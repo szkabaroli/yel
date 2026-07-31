@@ -10,8 +10,8 @@
 //!
 //! This renderer walks LIR directly and does not depend on any codegen
 //! helpers; emit order is deterministic for snapshot stability.
-use std::fmt::Write;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::fmt::Write;
 
 use yel_core::{
     CompilerContext, DefId, InternedTyKind, NodeId, Ty,

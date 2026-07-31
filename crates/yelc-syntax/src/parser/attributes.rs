@@ -73,7 +73,18 @@ use yelc_base::Span;
 /// `@deprecated`) motivated the **argument form** — see [`ast::AttributeArg`] —
 /// but no decision has landed that yel *has* them, and a registry entry with no
 /// decision behind it is a shape-only port (anti-spec A9).
-pub(crate) const KNOWN_ATTRIBUTES: &[&str] = &["unsafe", "primitive"];
+pub(crate) const KNOWN_ATTRIBUTES: &[&str] = &[
+    "unsafe",
+    "primitive",
+    // The WIT-boundary trio the desugar artifact writes and
+    // `plans/desugar/README.md` §1 measured as absent from this list —
+    // `@interface(name = …)` on a module, `@import`/`@export` on functions.
+    // Recognised here so the artifact's own vocabulary is not a typo;
+    // what each *means* is stage 6's (`plans/modules.md` §6).
+    "interface",
+    "import",
+    "export",
+];
 
 /// Recovery set for an attribute argument list.
 const ATTRIBUTE_ARG_RECOVERY: TokenSet =

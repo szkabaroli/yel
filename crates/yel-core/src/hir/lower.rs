@@ -4,23 +4,23 @@ use rustc_hash::FxHashMap as HashMap;
 
 use crate::context::CompilerContext;
 use crate::definitions::{
-    ComponentDef, DefKind, ElementDef, EnumDef, FieldDef, FunctionDef, GlobalDef,
-    GlobalPropDirection, ExternComponentDef, Namespace, ParameterDef, RecordDef, SignalDef,
-    VariantCaseDef, VariantDef,
+    ComponentDef, DefKind, ElementDef, EnumDef, ExternComponentDef, FieldDef, FunctionDef,
+    GlobalDef, GlobalPropDirection, Namespace, ParameterDef, RecordDef, SignalDef, VariantCaseDef,
+    VariantDef,
 };
-use crate::syntax::ast::PropertyDirection;
 use crate::diagnostic::{Diagnostic, ErrorCode};
 use crate::ids::{DefId, FieldIdx, NodeId, VariantIdx};
 use crate::source::Span;
-use crate::syntax::ast::{self, PropModifier};
 use crate::syntax::Spanned;
+use crate::syntax::ast::PropertyDirection;
+use crate::syntax::ast::{self, PropModifier};
 use crate::types::{InternedTyKind, Ty};
 
-use super::expr::{BinOp, HirExpr, HirExprKind, HirInterpolationPart, HirLiteral, HirStatement, UnaryOp};
-use super::local_scope::LocalScope;
-use super::node::{
-    HirBinding, HirComponent, HirGlobal, HirHandler, HirItem, HirNode, HirNodeKind,
+use super::expr::{
+    BinOp, HirExpr, HirExprKind, HirInterpolationPart, HirLiteral, HirStatement, UnaryOp,
 };
+use super::local_scope::LocalScope;
+use super::node::{HirBinding, HirComponent, HirGlobal, HirHandler, HirItem, HirNode, HirNodeKind};
 
 /// Parse a `#rrggbb` or `#rrggbbaa` color hex literal into (r, g, b, a) bytes.
 /// Invalid input yields fully-transparent black.
@@ -96,11 +96,15 @@ impl<'ctx> HirLowering<'ctx> {
     /// Report a duplicate name error.
     fn report_duplicate(&mut self, name: &str, new_span: Span, existing_def_id: DefId) {
         let existing_span = self.ctx.defs.span(existing_def_id);
-        let source_name = self.ctx.source_map
+        let source_name = self
+            .ctx
+            .source_map
             .get(existing_span.source)
             .map(|s| s.name().to_string())
             .unwrap_or_else(|| "<unknown>".to_string());
-        let line = self.ctx.source_map
+        let line = self
+            .ctx
+            .source_map
             .get(existing_span.source)
             .map(|s| s.line_col(existing_span.start).0)
             .unwrap_or(0);
@@ -361,7 +365,11 @@ impl<'ctx> HirLowering<'ctx> {
         );
 
         // Register in Component namespace (elements are used like components)
-        if let Some(existing) = self.ctx.defs.register_name(name, Namespace::Component, def_id) {
+        if let Some(existing) = self
+            .ctx
+            .defs
+            .register_name(name, Namespace::Component, def_id)
+        {
             self.report_duplicate(&element.name, span, existing);
         }
 
@@ -406,7 +414,11 @@ impl<'ctx> HirLowering<'ctx> {
         );
 
         // Register in Component namespace
-        if let Some(existing) = self.ctx.defs.register_name(name, Namespace::Component, def_id) {
+        if let Some(existing) = self
+            .ctx
+            .defs
+            .register_name(name, Namespace::Component, def_id)
+        {
             self.report_duplicate(&import_comp.name, span, existing);
         }
 
@@ -616,7 +628,9 @@ impl<'ctx> HirLowering<'ctx> {
         let mut callback_ids: Vec<DefId> = global
             .callbacks
             .iter()
-            .map(|cb| self.lower_global_fn_sig(def_id, &cb.node, cb.span, /* is_export */ false))
+            .map(|cb| {
+                self.lower_global_fn_sig(def_id, &cb.node, cb.span, /* is_export */ false)
+            })
             .collect();
         callback_ids.extend(func_from_props);
 
@@ -733,7 +747,11 @@ impl<'ctx> HirLowering<'ctx> {
             span,
         );
 
-        if let Some(existing) = self.ctx.defs.register_name(name, Namespace::Component, def_id) {
+        if let Some(existing) = self
+            .ctx
+            .defs
+            .register_name(name, Namespace::Component, def_id)
+        {
             self.report_duplicate(&component.name, span, existing);
         }
 
@@ -900,14 +918,16 @@ impl<'ctx> HirLowering<'ctx> {
                 let prop_name = self.ctx.defs.name(prop_id);
                 let prop_ty = self.ctx.defs.type_of(prop_id).unwrap_or(Ty::ERROR);
                 let prop_span = self.ctx.defs.span(prop_id);
-                self.locals.define_with_def_id(prop_name, prop_ty, prop_span, Some(prop_id));
+                self.locals
+                    .define_with_def_id(prop_name, prop_ty, prop_span, Some(prop_id));
             }
             // Also add callbacks to local scope so they can be called
             for &cb_id in &comp_def.callbacks {
                 let cb_name = self.ctx.defs.name(cb_id);
                 let cb_ty = self.ctx.defs.type_of(cb_id).unwrap_or(Ty::ERROR);
                 let cb_span = self.ctx.defs.span(cb_id);
-                self.locals.define_with_def_id(cb_name, cb_ty, cb_span, Some(cb_id));
+                self.locals
+                    .define_with_def_id(cb_name, cb_ty, cb_span, Some(cb_id));
             }
             ids
         } else {
@@ -921,9 +941,10 @@ impl<'ctx> HirLowering<'ctx> {
             if let Some(default_ast) = &ast_prop.node.default {
                 let prop_name = self.ctx.intern(&ast_prop.node.name);
                 // Find the matching signal by name
-                if let Some(&prop_id) = prop_ids.iter().find(|&&id| {
-                    self.ctx.defs.name(id) == prop_name
-                }) {
+                if let Some(&prop_id) = prop_ids
+                    .iter()
+                    .find(|&&id| self.ctx.defs.name(id) == prop_name)
+                {
                     let default_expr = self.lower_expr(&default_ast.node, default_ast.span);
                     // Update the signal def with the lowered default expression
                     if let DefKind::Signal(signal_def) = &mut self.ctx.defs.get_mut(prop_id).kind {
@@ -954,7 +975,9 @@ impl<'ctx> HirLowering<'ctx> {
 
         let kind = match node {
             ast::Node::Element(elem) => self.lower_element(elem),
-            ast::Node::Text(text) => HirNodeKind::Text(self.lower_expr(&text.content.node, text.content.span)),
+            ast::Node::Text(text) => {
+                HirNodeKind::Text(self.lower_expr(&text.content.node, text.content.span))
+            }
             ast::Node::If(if_node) => self.lower_if(if_node),
             ast::Node::For(for_node) => self.lower_for(for_node),
             ast::Node::Children => HirNodeKind::ChildrenSlot,
@@ -1187,10 +1210,8 @@ impl<'ctx> HirLowering<'ctx> {
                 // variant constructor call so the rest of the pipeline only
                 // has to deal with variants — no dedicated primitive repr.
                 let (r, g, b, a) = parse_color_hex(hex);
-                let mk_byte = |v: u8| HirExpr::new(
-                    HirExprKind::Literal(HirLiteral::Int(v as i64)),
-                    span,
-                );
+                let mk_byte =
+                    |v: u8| HirExpr::new(HirExprKind::Literal(HirLiteral::Int(v as i64)), span);
                 let payload_tuple = HirExpr::new(
                     HirExprKind::Literal(HirLiteral::Tuple(vec![
                         mk_byte(r),
@@ -1285,14 +1306,14 @@ impl<'ctx> HirLowering<'ctx> {
                     if let Some(def_id) = self.ctx.defs.lookup(interned, Namespace::Type)
                         && (self.ctx.defs.as_enum(def_id).is_some()
                             || self.ctx.defs.as_variant(def_id).is_some())
-                        {
-                            return HirExpr::new(
-                                HirExprKind::Path {
-                                    segments: vec![name.clone(), field.clone()],
-                                },
-                                span,
-                            );
-                        }
+                    {
+                        return HirExpr::new(
+                            HirExprKind::Path {
+                                segments: vec![name.clone(), field.clone()],
+                            },
+                            span,
+                        );
+                    }
                     // Global property read: MailStore.items
                     if self.ctx.defs.lookup(interned, Namespace::Global).is_some() {
                         return HirExpr::new(
@@ -1374,7 +1395,9 @@ impl<'ctx> HirLowering<'ctx> {
                 let lowered_parts: Vec<HirInterpolationPart> = parts
                     .iter()
                     .map(|p| match p {
-                        ast::InterpolationPart::Literal(s) => HirInterpolationPart::Literal(s.clone()),
+                        ast::InterpolationPart::Literal(s) => {
+                            HirInterpolationPart::Literal(s.clone())
+                        }
                         ast::InterpolationPart::Expr(e) => {
                             HirInterpolationPart::Expr(self.lower_expr(&e.node, e.span))
                         }
@@ -1412,7 +1435,9 @@ impl<'ctx> HirLowering<'ctx> {
             ast::Literal::Color(_) => {
                 // Color literals are desugared to Color.rgba(...) in lower_expr;
                 // lower_literal should never see them.
-                unreachable!("Color literal reached lower_literal — must be desugared at lower_expr")
+                unreachable!(
+                    "Color literal reached lower_literal — must be desugared at lower_expr"
+                )
             }
             ast::Literal::List(items) => HirLiteral::List(
                 items
@@ -1480,9 +1505,12 @@ impl<'ctx> HirLowering<'ctx> {
                     .iter()
                     .map(|s| self.lower_statement(&s.node, s.span))
                     .collect(),
-                else_branch: else_branch
-                    .as_ref()
-                    .map(|stmts| stmts.iter().map(|s| self.lower_statement(&s.node, s.span)).collect()),
+                else_branch: else_branch.as_ref().map(|stmts| {
+                    stmts
+                        .iter()
+                        .map(|s| self.lower_statement(&s.node, s.span))
+                        .collect()
+                }),
             },
 
             ast::Statement::Let {

@@ -8,9 +8,9 @@ use super::ast::{
 };
 use crate::source::{SourceId, Span};
 use crate::syntax::NodeId;
+use pest::Parser;
 use pest::iterators::{Pair, Pairs};
 use pest::pratt_parser::{Assoc, Op, PrattParser};
-use pest::Parser;
 use pest_derive::Parser;
 use std::sync::LazyLock;
 
@@ -1591,7 +1591,7 @@ fn parse_expr_with_span(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Spanned
                         expected: "prefix operator".into(),
                         found: format!("{:?}", op.as_rule()),
                         span: Some(op_span),
-                    })
+                    });
                 }
             };
             let combined_span = Span::new(op_span.source, op_span.start, rhs_span.end);
@@ -1725,7 +1725,7 @@ fn parse_expr_with_span(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Spanned
                                 expected: "infix operator".into(),
                                 found: format!("{:?}", op.as_rule()),
                                 span: Some(ctx.span(&op)),
-                            })
+                            });
                         }
                     };
                     Ok((
@@ -2052,9 +2052,10 @@ fn parse_string_expr(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Expr, Pars
         return Ok(Expr::Literal(Literal::String(String::new())));
     }
     if parts.len() == 1
-        && let InterpolationPart::Literal(s) = &parts[0] {
-            return Ok(Expr::Literal(Literal::String(s.clone())));
-        }
+        && let InterpolationPart::Literal(s) = &parts[0]
+    {
+        return Ok(Expr::Literal(Literal::String(s.clone())));
+    }
 
     Ok(Expr::Interpolation(parts))
 }

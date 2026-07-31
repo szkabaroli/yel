@@ -1057,7 +1057,6 @@ impl<'a> WitAstBuilder<'a> {
         Ok(())
     }
 
-
     /// Create the world.
     ///
     /// `import_interface_ids` are every import interface rendered from the

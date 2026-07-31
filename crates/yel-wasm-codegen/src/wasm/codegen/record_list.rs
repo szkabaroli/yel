@@ -3,10 +3,10 @@
 //! and shared across all components that need them.
 
 use wasm_encoder::{BlockType, Function, Instruction, ValType};
+use yel_core::ids::LocalId;
 use yel_core::lir::arena::LirResourceArena;
 use yel_core::lir::{LirExpr, LirExprKind};
 use yel_core::types::InternedTyKind;
-use yel_core::ids::LocalId;
 use yel_core::{DefId, DefKind, Ty};
 
 use super::super::CodegenError;
@@ -397,12 +397,12 @@ impl<'a> WasmPackageBuilder<'a> {
         );
 
         let local_decls: Vec<(u32, ValType)> = vec![
-            (1, ValType::I32),       // src_len
-            (1, arr_ref_ty),         // scratch_arr
-            (1, ValType::I32),       // result_count
-            (1, ValType::I32),       // loop_index
-            (1, item_val_ty),        // item
-            (1, arr_ref_ty),         // final_arr
+            (1, ValType::I32), // src_len
+            (1, arr_ref_ty),   // scratch_arr
+            (1, ValType::I32), // result_count
+            (1, ValType::I32), // loop_index
+            (1, item_val_ty),  // item
+            (1, arr_ref_ty),   // final_arr
         ];
         let mut func = Function::new(local_decls);
 
@@ -554,10 +554,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // Locals: src_len i32, new_arr (ref null $arr).
         let src_len_local = 2u32;
         let new_arr_local = 3u32;
-        let local_decls: Vec<(u32, ValType)> = vec![
-            (1, ValType::I32),
-            (1, arr_ref_ty),
-        ];
+        let local_decls: Vec<(u32, ValType)> = vec![(1, ValType::I32), (1, arr_ref_ty)];
         let mut func = Function::new(local_decls);
 
         // src_len = array.len(src)

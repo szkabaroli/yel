@@ -1,4 +1,6 @@
-//! Package identity: the check that a directory of files is **one** package.
+//! `packageck` — the package-identity pass: the check that a directory of
+//! files is **one** package. (Pass naming convention: `<pass>ck.rs` — see
+//! `signalck.rs`.)
 //!
 //! `plans/modules.md` — "Decided 2026-07-30 — every file declares, and
 //! disagreement is an error". Go's rule: every file in a package directory
@@ -97,7 +99,9 @@ pub fn check_package_identity(
                     render(&first, ctx),
                 );
                 let note = match ctx.sources.get(first_span.source) {
-                    Some(source) => format!("`{}` is declared in {}", render(&first, ctx), source.name()),
+                    Some(source) => {
+                        format!("`{}` is declared in {}", render(&first, ctx), source.name())
+                    }
                     None => format!("`{}` is declared in another file", render(&first, ctx)),
                 };
                 ctx.diagnostics.push(

@@ -19,7 +19,7 @@ use crate::ids::DefId;
 
 use super::expr::{ThirExpr, ThirExprKind, ThirStatement};
 use super::node::{ThirBinding, ThirComponent, ThirGlobal, ThirHandler, ThirNode, ThirNodeKind};
-use super::visit::{walk_expr, walk_stmt, ThirVisitor};
+use super::visit::{ThirVisitor, walk_expr, walk_stmt};
 
 /// Per-component signal dependency analysis.
 ///
@@ -73,10 +73,7 @@ pub fn check_component(
 /// derived-signal default expressions contribute to the dependency graph —
 /// so `binding_reads` and `handler_writes` stay empty and `effects_by_signal`
 /// only contains `EffectSource::DerivedSignal` entries.
-pub fn check_global(
-    global: &ThirGlobal,
-    is_signal: &impl Fn(DefId) -> bool,
-) -> SignalDependencies {
+pub fn check_global(global: &ThirGlobal, is_signal: &impl Fn(DefId) -> bool) -> SignalDependencies {
     analyze_global(global, is_signal)
 }
 

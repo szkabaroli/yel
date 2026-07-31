@@ -96,6 +96,11 @@ impl<T> Recovery for Recovered<T> {
 // ---------------------------------------------------------------------------
 
 /// Root of one parsed file.
+///
+/// `Debug` prints the whole typed tree — and the green tree inside it, which
+/// recurses too (derived `Debug` all the way down). Verbose by design; the
+/// `--debug-*` flags exist to show what is actually held, not a summary.
+#[derive(Debug)]
 pub struct File {
     pub id: NodeId,
     pub source: SourceId,
@@ -131,6 +136,7 @@ pub struct File {
 ///
 /// A consumer counting parameters got the wrong number, and sibling source order
 /// — the one ordering guarantee the seam does make — did not hold.
+#[derive(Debug)]
 pub struct RecoveryMark {
     pub id: NodeId,
     pub span: Span,
@@ -142,6 +148,7 @@ pub struct RecoveryMark {
 #[derive(Debug)]
 pub enum ItemKind {
     Package(PackageDecl),
+    Include(IncludeDecl),
     Record(RecordDecl),
     Enum(EnumDecl),
     Variant(VariantDecl),
@@ -161,6 +168,7 @@ impl ItemKind {
     pub fn id(&self) -> NodeId {
         match self {
             ItemKind::Package(it) => it.id,
+            ItemKind::Include(it) => it.id,
             ItemKind::Record(it) => it.id,
             ItemKind::Enum(it) => it.id,
             ItemKind::Variant(it) => it.id,
@@ -175,6 +183,7 @@ impl ItemKind {
     pub fn span(&self) -> Span {
         match self {
             ItemKind::Package(it) => it.span,
+            ItemKind::Include(it) => it.span,
             ItemKind::Record(it) => it.span,
             ItemKind::Enum(it) => it.span,
             ItemKind::Variant(it) => it.span,
@@ -290,6 +299,28 @@ pub struct PackageDecl {
     /// The version text without its leading `@`, e.g. `1.0.0`.
     pub version: Option<Name>,
     pub version_span: Option<Span>,
+}
+
+/// `from "list" include List;` / `from "std:list" include List;`
+///
+/// The string is a **locator** the driver resolves — through its include
+/// directories, or, for the reserved `std:` prefix, from the modules the
+/// compiler will ship and load itself. The identifier after `include` is the
+/// module name bound in scope; nothing requires it to echo the specifier.
+/// Grammar knows nothing about `std:` — a specifier is one string, and its
+/// prefix is a resolver-level convention (2026-07-31; refines
+/// `plans/modules.md` §4.1's `from`-form with a plain-name locator in place
+/// of a WIT id).
+#[derive(Debug)]
+pub struct IncludeDecl {
+    pub id: NodeId,
+    pub span: Span,
+    /// The string's content, quotes stripped, exactly as written. `None` when
+    /// the string itself was a hole (reported).
+    pub specifier: Option<Name>,
+    pub specifier_span: Option<Span>,
+    /// The name after `include` — what the module is called in scope.
+    pub name: MaybeIdent,
 }
 
 /// `record Name { field: type, … }`
@@ -1180,6 +1211,10 @@ pub enum BinaryOp {
     Ge,
     And,
     Or,
+    BitAnd,
+    BitOr,
+    Shl,
+    Shr,
 }
 
 #[derive(Debug)]

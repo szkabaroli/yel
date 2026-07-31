@@ -7,9 +7,9 @@
 
 use yelc_base::{Diagnostics, Interner, SourceMap};
 
-use crate::builtins::BuiltinTable;
 use crate::definitions::Definitions;
 use crate::ids::PackageId;
+use crate::intrinsics::IntrinsicTable;
 use crate::known::KnownItems;
 use crate::types::TypeInterner;
 
@@ -48,7 +48,17 @@ pub struct CompilerContext {
     pub names: Interner,
     pub types: TypeInterner,
     pub defs: Definitions,
-    pub builtins: BuiltinTable,
+    /// Definition tables of every **included** package, loaded from module
+    /// artifacts. Each owns the ids of its own package; `defs` owns the local
+    /// ones. Anything that must describe a `DefId` it did not mint goes
+    /// through [`CompilerContext::definition`], which dispatches on the id's
+    /// package — the per-table accessors assert ownership and panic on a
+    /// foreign id, deliberately.
+    pub imported: Vec<Definitions>,
+    /// The compilation's structure — packages, modules, file assignments
+    /// (dora's arenas; `plans/rewrite/definition-arenas.md` step 1).
+    pub compilation: crate::compilation::Compilation,
+    pub intrinsics: IntrinsicTable,
     pub sources: SourceMap,
     pub diagnostics: Diagnostics,
     /// Resolved lang-items. `None` until [`CompilerContext::resolve_known`].
@@ -61,7 +71,9 @@ impl CompilerContext {
             names: Interner::new(),
             types: TypeInterner::new(),
             defs: Definitions::new(package),
-            builtins: BuiltinTable::new(),
+            imported: Vec::new(),
+            compilation: crate::compilation::Compilation::new(),
+            intrinsics: IntrinsicTable::new(),
             sources: SourceMap::new(),
             diagnostics: Diagnostics::new(),
             known: None,
@@ -74,22 +86,22 @@ impl CompilerContext {
     /// [`CompilerContext::new`] gives an *empty* context — no builtin resolves
     /// in it and [`CompilerContext::known`] panics. Both exist because the
     /// difference is the thing worth being able to state: the sequence
-    /// `new → register_builtins → resolve_known` is what
+    /// `new → register_intrinsics → resolve_known` is what
     /// [`crate::known`] documents, and this is the one place it is written down
     /// as code instead of as prose that every caller re-derives.
     ///
     /// # Panics
     ///
     /// If a [`Known`](crate::known::Known) entry has no definition afterwards.
-    /// [`register_builtins`](crate::stdlib::register_builtins) loops the same
+    /// [`register_intrinsics`](crate::stdlib::register_intrinsics) loops the same
     /// inventory `resolve` reads, so this cannot fire from a language change —
     /// only from the registration being removed, which is exactly what it is
     /// here to catch.
-    pub fn with_builtins(package: PackageId) -> Self {
+    pub fn with_intrinsics(package: PackageId) -> Self {
         let mut ctx = Self::new(package);
-        crate::stdlib::register_builtins(&mut ctx);
+        crate::stdlib::register_intrinsics(&mut ctx);
         ctx.resolve_known().unwrap_or_else(|missing| {
-            panic!("register_builtins left the lang-item table incomplete: {missing}")
+            panic!("register_intrinsics left the lang-item table incomplete: {missing}")
         });
         ctx
     }
@@ -110,6 +122,48 @@ impl CompilerContext {
     /// finished. Panicking beats returning an `Option` that 47 call sites would
     /// each unwrap-or-diagnose for a case none of them can actually observe —
     /// see [`crate::known`] and decision C2.
+    /// The table owning a `DefId`, local or imported. `None` for a package
+    /// this compilation never loaded — a bug upstream, but a renderer should
+    /// degrade rather than panic.
+    pub fn tables_of(&self, def: crate::ids::DefId) -> Option<&Definitions> {
+        self.package_table(def.package)
+    }
+
+    /// A definition by id, wherever it lives.
+    pub fn definition(&self, def: crate::ids::DefId) -> Option<&crate::definitions::Definition> {
+        self.tables_of(def).map(|table| table.get(def))
+    }
+
+    /// A definition's member rows, wherever it lives.
+    pub fn members_of(&self, def: crate::ids::DefId) -> &[crate::definitions::Member] {
+        self.tables_of(def).map_or(&[], |table| table.members(def))
+    }
+
+    /// The table owning a package's declarations — local or loaded.
+    pub fn package_table(&self, package: crate::ids::PackageId) -> Option<&Definitions> {
+        if package == self.defs.package() {
+            return Some(&self.defs);
+        }
+        self.imported
+            .iter()
+            .find(|table| table.package() == package)
+    }
+
+    /// Look a name up **inside** a bound module — ark's `table_for_module`
+    /// walk: module row → its package → that package's own table. Members are
+    /// never copied into the consumer; a module is looked *into*.
+    pub fn module_member(
+        &self,
+        module: crate::ids::ModuleId,
+        name: yelc_base::Name,
+    ) -> Option<crate::ids::DefId> {
+        let package = self.defs.module(module).package;
+        self.package_table(package)?
+            .lookup(name)
+            .iter()
+            .find_map(|sym| sym.def())
+    }
+
     pub fn known(&self) -> &KnownItems {
         self.known
             .as_ref()
@@ -137,12 +191,12 @@ mod tests {
     ///
     /// The version of this test that stood until 2026-07-30 registered the
     /// lang-items itself, from a helper in this module — so it passed while
-    /// `register_builtins` touched no definition table at all, and every
+    /// `register_intrinsics` touched no definition table at all, and every
     /// non-test caller of [`CompilerContext::known`] would have panicked. A
     /// fixture that reimplements the step under test measures the fixture.
     #[test]
     fn known_items_resolve_after_registration() {
-        let ctx = CompilerContext::with_builtins(PackageId::LOCAL);
+        let ctx = CompilerContext::with_intrinsics(PackageId::LOCAL);
         let _ = ctx.known().get(Known::Color);
     }
 
@@ -178,19 +232,28 @@ mod tests {
     /// D0's boundary, asserted by the type system: a context that could hold
     /// LIR state would need a dependency this crate does not have. Documented
     /// here because a compile error leaves no trace in the test suite.
+    ///
+    /// `imported` was admitted 2026-07-31 — the tables of included packages,
+    /// the same class of state as `defs` itself. `compilation` was admitted
+    /// the same day — dora's package/module arenas
+    /// (`plans/rewrite/definition-arenas.md` step 1). The guard fired on
+    /// both, which is the guard working: every addition gets named here or
+    /// does not land.
     #[test]
-    fn the_context_has_six_fields_plus_a_projection() {
+    fn the_context_has_eight_fields_plus_a_projection() {
         let ctx = CompilerContext::default();
         let CompilerContext {
             names: _,
             types: _,
             defs: _,
-            builtins: _,
+            imported: _,
+            compilation: _,
+            intrinsics: _,
             sources: _,
             diagnostics: _,
             known: _,
         } = ctx;
-        // Destructuring is exhaustive: a seventh decision-bearing field cannot
+        // Destructuring is exhaustive: a ninth decision-bearing field cannot
         // be added without this failing to compile.
     }
 }

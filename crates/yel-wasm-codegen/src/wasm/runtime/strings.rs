@@ -489,9 +489,9 @@ pub fn emit_f32_to_string() -> Function {
     //   6: write_ptr (i32)
     //   7: temp (i32)
     let mut func = Function::new([
-        (1, ValType::I32),  // is_negative
-        (1, ValType::F32),  // abs_value
-        (5, ValType::I32),  // int_part, frac_part, digit_count, write_ptr, temp
+        (1, ValType::I32), // is_negative
+        (1, ValType::F32), // abs_value
+        (5, ValType::I32), // int_part, frac_part, digit_count, write_ptr, temp
     ]);
 
     const BUFFER_PTR: i32 = 0; // Fixed buffer location

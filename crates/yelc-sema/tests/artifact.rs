@@ -337,11 +337,13 @@ fn two_kinds_sharing_a_name_no_longer_load_as_two_definitions() {
         path: path("Panel", DefKind::Type),
         ty: None,
         is_export: true,
+        members: Vec::new(),
     });
     artifact.defs.push(yelc_sema::artifact::SerializedDef {
         path: path("Panel", DefKind::Component),
         ty: None,
         is_export: true,
+        members: Vec::new(),
     });
 
     let consumer_names = Interner::new();
@@ -406,11 +408,13 @@ fn a_colliding_definition_is_rejected_not_dropped() {
         path: path("len", DefKind::Value),
         ty: None,
         is_export: true,
+        members: Vec::new(),
     });
     artifact.defs.push(yelc_sema::artifact::SerializedDef {
         path: path("len", DefKind::Value),
         ty: None,
         is_export: true,
+        members: Vec::new(),
     });
 
     let names = Interner::new();
@@ -813,15 +817,18 @@ fn the_wire_bytes_are_pinned_so_a_schema_change_cannot_be_silent() {
     producer.declare("State", DefKind::Global, None);
 
     /// The format version is byte 6; `FORMAT_BYTE` below pins that.
+    // Re-blessed 2026-07-31 with FORMAT 3: `SerializedDef` gained `members`
+    // (the trailing 0 per def is the empty member list). The bump preceded the
+    // re-bless, per this assertion's own message.
     const PINNED: &[u8] = &[
-        5, 48, 46, 49, 46, 48, 2, 4, 116, 101, 115, 116, 8, 97, 114, 116, 105, 102, 97, 99, 116, 5,
+        5, 48, 46, 49, 46, 48, 3, 4, 116, 101, 115, 116, 8, 97, 114, 116, 105, 102, 97, 99, 116, 5,
         49, 46, 48, 46, 48, 2, 3, 13, 0, 4, 4, 116, 101, 115, 116, 8, 97, 114, 116, 105, 102, 97,
-        99, 116, 5, 49, 46, 48, 46, 48, 0, 1, 6, 87, 105, 100, 103, 101, 116, 0, 0, 1, 4, 116, 101,
-        115, 116, 8, 97, 114, 116, 105, 102, 97, 99, 116, 5, 49, 46, 48, 46, 48, 1, 1, 7, 119, 105,
-        100, 103, 101, 116, 115, 0, 1, 1, 1, 4, 116, 101, 115, 116, 8, 97, 114, 116, 105, 102, 97,
-        99, 116, 5, 49, 46, 48, 46, 48, 2, 1, 5, 80, 97, 110, 101, 108, 0, 0, 1, 4, 116, 101, 115,
-        116, 8, 97, 114, 116, 105, 102, 97, 99, 116, 5, 49, 46, 48, 46, 48, 3, 1, 5, 83, 116, 97,
-        116, 101, 0, 0, 1,
+        99, 116, 5, 49, 46, 48, 46, 48, 0, 1, 6, 87, 105, 100, 103, 101, 116, 0, 0, 1, 0, 4, 116,
+        101, 115, 116, 8, 97, 114, 116, 105, 102, 97, 99, 116, 5, 49, 46, 48, 46, 48, 1, 1, 7, 119,
+        105, 100, 103, 101, 116, 115, 0, 1, 1, 1, 0, 4, 116, 101, 115, 116, 8, 97, 114, 116, 105,
+        102, 97, 99, 116, 5, 49, 46, 48, 46, 48, 2, 1, 5, 80, 97, 110, 101, 108, 0, 0, 1, 0, 4,
+        116, 101, 115, 116, 8, 97, 114, 116, 105, 102, 97, 99, 116, 5, 49, 46, 48, 46, 48, 3, 1, 5,
+        83, 116, 97, 116, 101, 0, 0, 1, 0,
     ];
 
     assert_eq!(
@@ -925,6 +932,7 @@ fn a_path_with_no_segments_is_rejected() {
         },
         ty: None,
         is_export: true,
+        members: Vec::new(),
     });
 
     let names = Interner::new();
@@ -1021,4 +1029,87 @@ fn an_empty_package_round_trips() {
         .unwrap();
     assert_eq!(loaded.defs().len(), 0);
     assert_eq!(loaded.type_count(), 0);
+}
+
+/// Member rows survive the round trip — through a **differently populated**
+/// consumer interner, so a name or type index that accidentally carried a
+/// producer handle cannot pass by coincidence. Added with FORMAT 3, which is
+/// the schema change this exercises.
+#[test]
+fn member_rows_round_trip_through_a_different_interner() {
+    let mut producer = Producer::new();
+    let record = producer.declare("Point", DefKind::Type, None);
+    producer.defs.add_member(
+        record,
+        yelc_sema::Member {
+            name: producer.names.intern("x"),
+            kind: yelc_sema::MemberKind::Field,
+            span: span(),
+            ty: Some(Ty::S32),
+        },
+    );
+    producer.defs.add_member(
+        record,
+        yelc_sema::Member {
+            name: producer.names.intern("label"),
+            kind: yelc_sema::MemberKind::Field,
+            span: span(),
+            ty: Some(Ty::STRING),
+        },
+    );
+    let global = producer.declare("Store", DefKind::Global, None);
+    producer.defs.add_member(
+        global,
+        yelc_sema::Member {
+            name: producer.names.intern("total"),
+            kind: yelc_sema::MemberKind::Property {
+                direction: yelc_sema::MemberDirection::InOut,
+            },
+            span: span(),
+            ty: None,
+        },
+    );
+
+    let bytes = encode(&producer.build());
+    let artifact = decode(&bytes).expect("decodes");
+
+    // The consumer's interner is pre-polluted so producer indices are wrong.
+    let consumer_names = Interner::new();
+    for filler in ["aa", "bb", "cc", "dd"] {
+        consumer_names.intern(filler);
+    }
+    let consumer_types = TypeInterner::new();
+    let loaded = artifact
+        .load(PackageId(9), &consumer_names, &consumer_types)
+        .expect("loads");
+
+    let defs = loaded.defs();
+    let point = defs
+        .lookup_def(consumer_names.intern("Point"), DefKind::Type)
+        .expect("Point loaded");
+    let members = defs.members(point);
+    assert_eq!(members.len(), 2);
+    assert_eq!(&*consumer_names.str(members[0].name), "x");
+    assert_eq!(members[0].kind, yelc_sema::MemberKind::Field);
+    assert_eq!(
+        consumer_types.kind(members[0].ty.expect("typed")),
+        TyKind::S32
+    );
+    assert_eq!(&*consumer_names.str(members[1].name), "label");
+    assert_eq!(
+        consumer_types.kind(members[1].ty.expect("typed")),
+        TyKind::String
+    );
+
+    let store = defs
+        .lookup_def(consumer_names.intern("Store"), DefKind::Global)
+        .expect("Store loaded");
+    let members = defs.members(store);
+    assert_eq!(
+        members[0].kind,
+        yelc_sema::MemberKind::Property {
+            direction: yelc_sema::MemberDirection::InOut
+        }
+    );
+    assert_eq!(members[0].ty, None, "an unresolved member stays unresolved");
 }

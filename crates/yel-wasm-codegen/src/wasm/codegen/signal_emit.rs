@@ -518,7 +518,6 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(())
     }
 
-
     /// Emit calls to every effect-update block whose dependency set
     /// includes `signal`. Handles both:
     ///   - global signals: scan *all* components' effects

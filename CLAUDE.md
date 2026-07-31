@@ -68,6 +68,33 @@ cargo run -p yelc -- ir --pretty path.yel   # dump LIR
 wasm-tools validate out.wasm
 ```
 
+## CI (`.github/workflows/`)
+
+`ci.yml` runs on every PR and every push to `main`:
+
+| job | what it gates |
+|-----|---------------|
+| `rustfmt` | `cargo fmt --all --check` — the whole repo, frozen tree included |
+| `clippy` | **rewrite crates at `-D warnings`**; frozen/legacy crates checked, not gated |
+| `test` | build + test on ubuntu / macos / windows |
+| `freeze check` | PRs only — `scripts/freeze-check.sh` against the base branch |
+| `vscode extension` | `tsc --noEmit` + esbuild bundle (`--skip-lsp`) |
+
+Two things to know before you touch it:
+
+- **The clippy job must keep `--no-deps`.** `cargo clippy -- -D warnings` applies
+  the deny to every locally-built crate, path dependencies included, and
+  `yel-core` is a dev-dependency of `yelc-hir`. Without `--no-deps` the frozen
+  tree's ~90 warnings fail the rewrite tree's gate, and the freeze forbids
+  fixing them.
+- **Five test targets do not run in CI**: `yelc-syntax/{corpus,parity,identity}`,
+  `yelc-hir/frozen_parity`, `yelc-sema/single_namespace`. They sweep
+  `corpus/src`, which is untracked, and the corpus is only sound when generated
+  at the freeze SHA. They run in `corpus.yml` (weekly + manual), which rebuilds
+  the frozen compiler at that SHA in a worktree and verifies the result against
+  `corpus/SHA256SUMS` before sweeping. Run them locally after
+  `scripts/freeze-corpus.sh`.
+
 ## When you change things
 
 - Pipeline shape, IR fields, or crate boundaries → update `docs/ARCHITECTURE.md` in the same change.

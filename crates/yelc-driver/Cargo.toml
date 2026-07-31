@@ -9,6 +9,14 @@ license.workspace = true
 name = "yelc2"
 path = "src/main.rs"
 
+[build-dependencies]
+# build.rs IS the compiler, compiling the stdlib to embedded modules — the same
+# crates the driver links, built once more for the host.
+yelc-base.workspace = true
+yelc-hir.workspace = true
+yelc-sema.workspace = true
+yelc-syntax.workspace = true
+
 [dependencies]
 clap.workspace = true
 yelc-base.workspace = true

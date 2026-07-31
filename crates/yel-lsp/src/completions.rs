@@ -389,9 +389,9 @@ fn get_property_type(
                     .properties
                     .iter()
                     .find(|p| p.node.name == property)
-                {
-                    return Some(prop.node.ty.kind.clone());
-                }
+            {
+                return Some(prop.node.ty.kind.clone());
+            }
         }
     }
 

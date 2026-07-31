@@ -318,6 +318,10 @@ mod fresh {
                 // The frozen AST keeps the package as a bare `PackageId` with
                 // no span, so there is nothing to compare it against.
                 na::ItemKind::Package(_) => {}
+                // The frozen grammar has no `include` at all — a program
+                // containing one never reaches this comparison, because the
+                // frozen side fails to parse it first.
+                na::ItemKind::Include(_) => {}
                 na::ItemKind::Record(_) => out.push(("item:record", span.start, span.end)),
                 na::ItemKind::Enum(_) => out.push(("item:enum", span.start, span.end)),
                 na::ItemKind::Variant(_) => out.push(("item:variant", span.start, span.end)),

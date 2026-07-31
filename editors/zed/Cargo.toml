@@ -1,0 +1,18 @@
+[package]
+name = "zed-yel"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Zed compiles this crate to WASM itself when the extension is installed
+# ("Install Dev Extension"), so it must stand alone rather than join the
+# repository workspace — hence the empty [workspace] table below.
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"
+
+[workspace]

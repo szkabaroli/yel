@@ -11,7 +11,9 @@ use std::fmt;
 /// - Records, Enums, Variants
 /// - Functions
 /// - Fields (within their owner)
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize,
+)]
 pub struct DefId(pub u32);
 
 impl DefId {
@@ -140,7 +142,9 @@ impl fmt::Display for ExprId {
 ///
 /// General-purpose: an interface is a named group of functions at the module
 /// boundary. Nothing about it is UI-specific.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize,
+)]
 pub struct InterfaceId(pub u32);
 
 impl InterfaceId {

@@ -355,6 +355,107 @@ one, this is the precedent, and it should be re-derived rather than assumed.
 `package` clause of every file and nothing else, so it runs before the collector
 and reports without a symbol table. It is not a stage-3 phase 2 concern.
 
+### `use X.{…}` ports ark's `useck.rs` — recorded 2026-07-31, before the feature
+
+`arkc-frontend/src/useck.rs` (604 lines, dora's usecheck) is the reference to
+**port, not paraphrase**, when `use` lands — it is the pure-resolution
+counterpart to `includes.rs`'s loading half, and it already fits the
+`<pass>ck.rs` convention. Three things it solves that a fresh design would
+miss:
+
+1. **Fixed-point iteration** — one `use` can expose the name another `use`
+   needs, so it loops `while did_resolve_symbol`, and only the final pass
+   reports unresolved paths.
+2. **Group error isolation** — `use foo::{a, b, c}` recurses per member with
+   the resolved prefix as seed; an error on `a` does not kill `b` or `c`.
+3. **`insert_use` is not `insert`** — a use-binding carries visibility and its
+   own shadow diagnostics.
+
+`includes.rs` currently fuses one bite of useck's job (binding the module
+name); when the port happens, that bind moves into it and the loading half
+stays where it is — ark's own factoring.
+
+### Landed same day — the stdlib ships embedded, compiled by the compiler's own build
+
+`yelc-driver/build.rs` compiles every `stdlib/<name>.yel` through the real
+pipeline (parse → packageck → lower, **refusing the build** on any error — a
+stdlib file that stops compiling is a compiler regression, not a skippable
+input) and embeds the resulting `.yelmod`s in the binary. `from "std:num"
+include Num;` resolves from that embedded set and never from `--include`
+directories — asserted by an e2e test that plants a garbage decoy where a
+search would find it and requires the compilation to *succeed*.
+
+Both stamp halves come from the same `yelc-sema` build, so the embedded
+artifacts cannot version-skew against their own loader. The `std:` load path
+and the file path share one `load_and_bind`, so they cannot drift.
+
+First consequence caught by the first dump: `Num.min` through a module is a
+**function** member, and `signalck` recorded it as a state read — its
+`state_of` never checked member kinds. Fixed (properties only) with a
+regression test; the counter-shape tests still pin the property case.
+
+### Open wart — every module ships a private copy of the lang items
+
+Found 2026-07-31 by `--debug-defs` on a std-including program: the imported
+std table's row 0 is **`Color`**. The producer compiles with the prelude
+registered (`with_intrinsics`), and `--emit-module` serializes the whole
+table, ambient lang items included — so each loaded module carries its own
+`Color`, and `Num.Color` resolves to the module's copy rather than the
+consumer's.
+
+Harmless today: nothing in any stdlib file *references* a lang item, so the
+duplicate rows are dead weight, not wrong answers. But both candidate fixes
+have teeth, which is why this is recorded rather than patched:
+
+- **Filter the prelude at emit** — correct until the first stdlib member is
+  *typed* as a lang item (a color-typed property): its `Adt` path would then
+  name a definition the artifact no longer contains, and the module breaks at
+  load, not at emit, in the consumer's build, with the producer long gone.
+- **Prelude-aware paths** — the real fix: a lang-item reference serializes as
+  *"the prelude's `Color`"* and the loader resolves it against the consumer's
+  own lang items, making the prelude one shared identity across every package
+  instead of a per-module possession. This is a small design decision about
+  what `SerializedDefPath` may point at, adjacent to `std:` identity.
+
+**Decide when the first lang-item-typed stdlib member forces it**, and not
+later than that: the failure mode of doing nothing is a load error in a
+downstream compilation, which is the worst place to learn about it.
+
+### Decided 2026-07-31 — the specifier is a plain-name string, `std:` reserved
+
+**Landed, superseding the WIT-id locator draft above.** The surface form is:
+
+```yel
+from "geometry" include Geo;      // searched through the driver's --include dirs
+from "std:list" include List;     // reserved: modules the compiler ships and loads itself
+```
+
+Three deliberate narrowings against the draft:
+
+- **The locator is a plain name**, not a WIT id — no namespace, no version.
+  Versions were already ruled non-load-bearing above; a bare name is what is
+  left when you delete the parts that were slated for deletion.
+- **`std:` is a resolver convention, not grammar.** The parser sees one string
+  and carries no opinion about its contents; the driver refuses `std:` with
+  *"reserved, never searched in `--include` directories"* until the compiler
+  ships its own modules. Refusal rather than fallback, because silently giving
+  user files the `std:` namespace is the one thing the prefix exists to
+  prevent — asserted by an e2e test that plants a decoy `list.yelmod` and
+  expects the refusal anyway.
+- **The bound name is free.** `from "geometry" include Geo;` — nothing requires
+  the identifier to echo the specifier; it is the module's name in scope and
+  collides like any declaration (E0010, same message).
+
+**What landed with it (all uncommitted):** `FROM_KW`/`INCLUDE_KW` (contextual;
+token pins 74 → 76, node kinds 85 → 87, both re-pinned with dated notes),
+`IncludeDecl` in the AST, `--include DIR` (repeatable) on the driver,
+artifact-load-and-bind before lowering (H1: a module binding is registration),
+`CompilerContext.imported` with package-dispatching accessors so foreign
+`DefId`s render and analyze safely, module-aware resolution in the lowering,
+and four e2e tests over the real binary — including the full
+write-in-one-process, resolve-in-another loop, with `signalck` recording the
+cross-package property read.
+
 ### The specifier shapes are disjoint by construction
 
 An earlier draft required the interface segment on WIT ids so `ns:name` and

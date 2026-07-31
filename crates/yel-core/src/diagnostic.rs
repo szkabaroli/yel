@@ -190,12 +190,13 @@ impl Diagnostic {
 
         // Source location
         if let Some(span) = self.span
-            && let Some(source) = source_map.get(span.source) {
-                let (line, col) = source.line_col(span.start);
-                output.push_str(&format!("  --> {}:{}:{}\n", source.name(), line, col));
-                output.push_str(&source.snippet(line, 1));
-                output.push('\n');
-            }
+            && let Some(source) = source_map.get(span.source)
+        {
+            let (line, col) = source.line_col(span.start);
+            output.push_str(&format!("  --> {}:{}:{}\n", source.name(), line, col));
+            output.push_str(&source.snippet(line, 1));
+            output.push('\n');
+        }
 
         // Notes
         for note in &self.notes {

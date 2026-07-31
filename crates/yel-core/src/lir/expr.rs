@@ -1,16 +1,16 @@
 //! LIR expression types.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 // LIR uses operator semantics from the neutral `crate::ops` module —
 // not from `crate::hir::expr`, because LIR has multiple frontends
 // (HIR/THIR for yel-lang components, the graph IR for the flow
 // frontend) and shouldn't reach into any one of them.
-use crate::ops::{BinOp, UnaryOp};
+use super::block::LirExprId;
 use crate::ids::{DefId, FieldIdx, LocalId};
+use crate::ops::{BinOp, UnaryOp};
 use crate::source::Span;
 use crate::types::Ty;
-use super::block::LirExprId;
 
 /// LIR literal values (primitives only - compound types use dedicated constructs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,13 +49,21 @@ pub struct LirExpr {
 
 impl LirExpr {
     pub fn new(kind: LirExprKind, ty: Ty) -> Self {
-        Self { kind, ty, span: None }
+        Self {
+            kind,
+            ty,
+            span: None,
+        }
     }
 
     /// Like [`LirExpr::new`], but records the source span the expression was
     /// lowered from so later phases can still produce located diagnostics.
     pub fn new_spanned(kind: LirExprKind, ty: Ty, span: Span) -> Self {
-        Self { kind, ty, span: Some(span) }
+        Self {
+            kind,
+            ty,
+            span: Some(span),
+        }
     }
 }
 
@@ -77,12 +85,12 @@ pub enum LirExprKind {
     /// Unary operation.
     Unary { op: UnaryOp, operand: LirExprId },
     /// Field access (by index).
-    Field { base: LirExprId, field_idx: FieldIdx },
-    /// Index access.
-    Index {
+    Field {
         base: LirExprId,
-        index: LirExprId,
+        field_idx: FieldIdx,
     },
+    /// Index access.
+    Index { base: LirExprId, index: LirExprId },
     /// Function call by callee `DefId`. The callee may be a host import
     /// (DOM function, component callback, or global callback) or a local
     /// function; codegen resolves it through the import registry /
@@ -172,7 +180,6 @@ pub enum LirExprKind {
     // ========================================================================
     // List and Record Constructs (Part 2 of list-construct-plan.md)
     // ========================================================================
-
     /// Static list (all elements constant, stored in data section).
     /// Result is (ptr, len) pair pointing to pre-initialized data.
     ListStatic {
@@ -245,8 +252,5 @@ pub enum LirStatement {
         else_branch: Option<Vec<LirStatement>>,
     },
     /// Let binding: allocates a local variable.
-    Let {
-        local_id: LocalId,
-        value: LirExpr,
-    },
+    Let { local_id: LocalId, value: LirExpr },
 }

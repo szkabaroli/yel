@@ -7,18 +7,18 @@
 //! 4. Separates static vs dynamic bindings
 //! 5. Converts to block-based representation for codegen
 
-use std::cell::RefCell;
 use rustc_hash::FxHashMap as HashMap;
+use std::cell::RefCell;
 
+use super::blocks::BlockLowering;
 use crate::context::CompilerContext;
 use crate::definitions::DefKind;
 use crate::hir::expr::HirLiteral;
 use crate::ids::{DefId, LocalId, NodeId};
 use crate::interner::Name;
-use super::blocks::BlockLowering;
 use crate::source::Span;
 use crate::thir::expr::ThirClosure;
-use crate::thir::visit::{walk_expr, ThirVisitor};
+use crate::thir::visit::{ThirVisitor, walk_expr};
 use crate::thir::{
     ThirBinding, ThirComponent, ThirExpr, ThirExprKind, ThirHandler, ThirInterpolationPart,
     ThirNode, ThirNodeKind, ThirStatement,
@@ -74,12 +74,14 @@ fn lower_primitive_literal(lit: &HirLiteral, ty: Ty, ctx: &CompilerContext) -> L
             LirLiteral::F32(normalized)
         }
         HirLiteral::List(_) | HirLiteral::Tuple(_) | HirLiteral::Record { .. } => {
-            panic!("Compound literals should be handled as ListConstruct/TupleConstruct/RecordConstruct")
+            panic!(
+                "Compound literals should be handled as ListConstruct/TupleConstruct/RecordConstruct"
+            )
         }
     }
 }
 use crate::lir::module::{LirGlobal, LirGlobalProperty};
-use crate::lir::node::{LirBinding, LirResource, LirHandler, LirNode, LirNodeKind};
+use crate::lir::node::{LirBinding, LirHandler, LirNode, LirNodeKind, LirResource};
 use crate::lir::signal::{LirEffect, LirSignal, UpdateKind};
 
 /// Internal tree-based representation used during lowering.
@@ -140,7 +142,11 @@ pub fn lower_globals(
                     let default = thir_defaults
                         .get(&def_id)
                         .map(|thir_expr| lowering.lower_expr(thir_expr));
-                    LirGlobalProperty { def_id, direction, default }
+                    LirGlobalProperty {
+                        def_id,
+                        direction,
+                        default,
+                    }
                 })
                 .collect();
             Some(LirGlobal {
@@ -310,10 +316,7 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
 
     /// Extract signals from the component's properties.
     /// Uses type-checked defaults from ThirComponent.signal_defaults.
-    fn lower_signals(
-        &mut self,
-        signal_defaults: &HashMap<DefId, ThirExpr>,
-    ) -> Vec<LirSignal> {
+    fn lower_signals(&mut self, signal_defaults: &HashMap<DefId, ThirExpr>) -> Vec<LirSignal> {
         // Only meaningful in component scope — module-scope lowering has no
         // owning component to extract signals from.
         let component_def_id = match self.scope {
@@ -655,7 +658,9 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
                 // by typeck. Only primitive literals should reach here.
                 match lit {
                     HirLiteral::List(_) | HirLiteral::Tuple(_) | HirLiteral::Record { .. } => {
-                        panic!("Compound literal should be converted to specialized THIR kind by typeck")
+                        panic!(
+                            "Compound literal should be converted to specialized THIR kind by typeck"
+                        )
                     }
                     _ => LirExprKind::Literal(lower_primitive_literal(lit, expr.ty, self.ctx)),
                 }
@@ -791,8 +796,11 @@ impl<'ctx, 'comp> LirLowering<'ctx, 'comp> {
             ThirExprKind::Closure(closure) => {
                 // Lower closure to LirExprKind::Closure for use in filter/map/etc.
                 let lowered_params: Vec<(LocalId, Ty)> = closure.params.clone();
-                let lowered_body: Vec<LirStatement> =
-                    closure.body.iter().map(|s| self.lower_statement(s)).collect();
+                let lowered_body: Vec<LirStatement> = closure
+                    .body
+                    .iter()
+                    .map(|s| self.lower_statement(s))
+                    .collect();
                 LirExprKind::Closure {
                     params: lowered_params,
                     body: lowered_body,

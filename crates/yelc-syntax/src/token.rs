@@ -113,6 +113,8 @@ pub const KEYWORD_FIRST: TokenSet = TokenSet::new(&[
     IF_KW,
     ELSE_KW,
     FOR_KW,
+    FROM_KW,
+    INCLUDE_KW,
     RETURN_KW,
     IN_KW,
     OUT_KW,
@@ -141,6 +143,7 @@ pub const ITEM_FIRST: TokenSet = TokenSet::new(&[
     COMPONENT_KW,
     EXPORT_KW,
     PACKAGE_KW,
+    FROM_KW,
 ]);
 
 /// Synchronising set for anything that lives inside a top-level item: bail out
@@ -258,6 +261,10 @@ pub enum TokenKind {
     IF_KW,
     ELSE_KW,
     FOR_KW,
+    /// `from "list" include List;` — both halves contextual, like every
+    /// keyword: `from` and `include` stay legal names everywhere a name is.
+    FROM_KW,
+    INCLUDE_KW,
     /// Contextual like every other keyword here: it is in [`KEYWORD_FIRST`] and
     /// therefore in [`NAME_FIRST`], so `return` remains a legal *name* — a
     /// property, a record field, an element, a `let` binder. What it is **not**
@@ -308,6 +315,8 @@ pub enum TokenKind {
     // operators — logic
     AND_AND,
     OR_OR,
+    AMP,
+    PIPE,
     NOT,
 
     // operators — arithmetic
@@ -334,6 +343,10 @@ pub enum TokenKind {
 
     PACKAGE_DECL,
     PACKAGE_ID,
+
+    INCLUDE_DECL,
+    /// The `std:numerics` / `counter` specifier inside an `include`.
+    INCLUDE_PATH,
 
     RECORD_DECL,
     RECORD_FIELD_LIST,
@@ -467,6 +480,8 @@ impl TokenKind {
             ELEMENT_KW => "element",
             EXTERN_KW => "extern",
             PACKAGE_KW => "package",
+            FROM_KW => "from",
+            INCLUDE_KW => "include",
             EXPORT_KW => "export",
             FUNC_KW => "func",
             CALLBACK_KW => "callback",
@@ -509,6 +524,8 @@ impl TokenKind {
             GE => ">=",
             AND_AND => "&&",
             OR_OR => "||",
+            AMP => "&",
+            PIPE => "|",
             NOT => "!",
             ADD => "+",
             SUB => "-",
@@ -539,6 +556,8 @@ pub fn keyword_kind(word: &str) -> Option<TokenKind> {
         "element" => ELEMENT_KW,
         "extern" => EXTERN_KW,
         "package" => PACKAGE_KW,
+        "from" => FROM_KW,
+        "include" => INCLUDE_KW,
         "export" => EXPORT_KW,
         "func" => FUNC_KW,
         "callback" => CALLBACK_KW,
@@ -595,7 +614,21 @@ mod tests {
         // IDENTIFIER. So `return` stays a legal name everywhere a name is legal;
         // what changed is the *statement* dispatch, and only there. See
         // `parser/stmts.rs::parse_return_stmt` and `tests/returns.rs`.
-        assert_eq!(TokenKind::EOF as u8, 74, "token kind count changed");
+        // 74 → 76 on 2026-07-31: FROM_KW and INCLUDE_KW, for
+        // `from "list" include List;` (user-approved surface addition; the
+        // specifier is a string so that `std:` can stay a resolver-level
+        // convention rather than grammar). Same class as RETURN_KW: both join
+        // KEYWORD_FIRST ⊆ NAME_FIRST, so `from` and `include` stay legal
+        // names; membership changes only in ITEM_FIRST (and therefore
+        // ITEM_RECOVERY), where FROM_KW — the item's first token — dispatches.
+        // 76 → 78 on 2026-07-31: AMP and PIPE, for the bitwise expressions
+        // the desugar artifact writes (`handler-id & 0xFFFF`,
+        // `current-handle << 16 | 0` — plans/desugar/README.md §1). Both were
+        // hard lexer errors before ("expected `&&`"), so the addition is a
+        // strict widening; `<<`/`>>` deliberately did NOT become kinds — the
+        // expression parser joins adjacent `<`/`>` pairs instead, because
+        // `list<list<s32>>` must keep closing generics as two tokens.
+        assert_eq!(TokenKind::EOF as u8, 78, "token kind count changed");
         // 76 → 78 on 2026-07-29: TYPE_PARAM_LIST and TYPE_PARAM, for
         // `func<T>(…)` (LANGUAGE.md § Type Parameters). Purely additive — no
         // existing kind moved, which is what keeps the corpus comparable.
@@ -647,9 +680,12 @@ mod tests {
         // than fixed, because the mechanical fix needs a variant count Rust
         // does not give on stable, and a sentinel variant would be a fake kind
         // in an enum whose members are all real.
+        // 85 → 87 on 2026-07-31: INCLUDE_DECL and INCLUDE_PATH, inserted
+        // beside PACKAGE_DECL/PACKAGE_ID where they belong in the grouping —
+        // not appended, per the blind spot named above.
         assert_eq!(
             TokenKind::INDEX_EXPR as u8 - TokenKind::EOF as u8,
-            85,
+            87,
             "node kind count changed"
         );
     }

@@ -13,8 +13,8 @@ use yel_core::lir::arena::LirResourceArena;
 use yel_core::lir::{LirBindingMode, LirExpr, LirExprKind, LirLiteral};
 use yel_core::types::InternedTyKind;
 
-use super::codegen::{mem_arg, slot_local_resource_only};
 use super::WasmPackageBuilder;
+use super::codegen::{mem_arg, slot_local_resource_only};
 
 impl WasmPackageBuilder<'_> {
     pub(super) fn emit_expr(
@@ -83,7 +83,11 @@ impl WasmPackageBuilder<'_> {
                                             "Runtime functions not initialized".to_string(),
                                         )
                                     })?;
-                                func.instruction(&Instruction::Call(runtime_funcs.load_fat_ptr.expect("load_fat_ptr must be in runtime_needs (scan missed it?)")));
+                                func.instruction(&Instruction::Call(
+                                    runtime_funcs.load_fat_ptr.expect(
+                                        "load_fat_ptr must be in runtime_needs (scan missed it?)",
+                                    ),
+                                ));
                             }
                             // Record types (Adt) - return pointer as-is (field access will use it)
                             _ => {}
@@ -159,7 +163,11 @@ impl WasmPackageBuilder<'_> {
                                             "Runtime functions not initialized".to_string(),
                                         )
                                     })?;
-                                func.instruction(&Instruction::Call(runtime_funcs.load_fat_ptr.expect("load_fat_ptr must be in runtime_needs (scan missed it?)")));
+                                func.instruction(&Instruction::Call(
+                                    runtime_funcs.load_fat_ptr.expect(
+                                        "load_fat_ptr must be in runtime_needs (scan missed it?)",
+                                    ),
+                                ));
                             }
                             // Record types (Adt) - return pointer as-is (field access will use it)
                             _ => {}
@@ -355,7 +363,11 @@ impl WasmPackageBuilder<'_> {
                         } else {
                             todo!("s32-to-string requires 1 arg: {:?}", expr.kind)
                         }
-                        let f = self.runtime_funcs.as_ref().and_then(|r| r.s32_to_string).expect("s32_to_string must be in runtime_needs (scan missed it?)");
+                        let f = self
+                            .runtime_funcs
+                            .as_ref()
+                            .and_then(|r| r.s32_to_string)
+                            .expect("s32_to_string must be in runtime_needs (scan missed it?)");
                         func.instruction(&Instruction::Call(f));
                         // Helper returns (ptr, len). strings-to-GC: re-intern
                         // into a $str_bytes ref so strings stay GC-native.
@@ -368,7 +380,11 @@ impl WasmPackageBuilder<'_> {
                         } else {
                             todo!("bool-to-string requires 1 arg: {:?}", expr.kind)
                         }
-                        let f = self.runtime_funcs.as_ref().and_then(|r| r.bool_to_string).expect("bool_to_string must be in runtime_needs (scan missed it?)");
+                        let f = self
+                            .runtime_funcs
+                            .as_ref()
+                            .and_then(|r| r.bool_to_string)
+                            .expect("bool_to_string must be in runtime_needs (scan missed it?)");
                         func.instruction(&Instruction::Call(f));
                         self.emit_str_bytes_unmaterialize(func)?;
                     }
@@ -379,7 +395,11 @@ impl WasmPackageBuilder<'_> {
                         } else {
                             todo!("u32-to-string requires 1 arg: {:?}", expr.kind)
                         }
-                        let f = self.runtime_funcs.as_ref().and_then(|r| r.s32_to_string).expect("s32_to_string must be in runtime_needs (scan missed it?)");
+                        let f = self
+                            .runtime_funcs
+                            .as_ref()
+                            .and_then(|r| r.s32_to_string)
+                            .expect("s32_to_string must be in runtime_needs (scan missed it?)");
                         func.instruction(&Instruction::Call(f));
                         self.emit_str_bytes_unmaterialize(func)?;
                     }
@@ -391,7 +411,11 @@ impl WasmPackageBuilder<'_> {
                             CodegenError::InvalidIR(format!("{} requires 1 arg", func_name))
                         })?;
                         self.emit_expr(func, component.expr(*arg), component)?;
-                        let f = self.runtime_funcs.as_ref().and_then(|r| r.s64_to_string).expect("s64_to_string must be in runtime_needs (scan missed it?)");
+                        let f = self
+                            .runtime_funcs
+                            .as_ref()
+                            .and_then(|r| r.s64_to_string)
+                            .expect("s64_to_string must be in runtime_needs (scan missed it?)");
                         func.instruction(&Instruction::Call(f));
                         self.emit_str_bytes_unmaterialize(func)?;
                     }
@@ -400,7 +424,11 @@ impl WasmPackageBuilder<'_> {
                             CodegenError::InvalidIR("f32-to-string requires 1 arg".to_string())
                         })?;
                         self.emit_expr(func, component.expr(*arg), component)?;
-                        let f = self.runtime_funcs.as_ref().and_then(|r| r.f32_to_string).expect("f32_to_string must be in runtime_needs (scan missed it?)");
+                        let f = self
+                            .runtime_funcs
+                            .as_ref()
+                            .and_then(|r| r.f32_to_string)
+                            .expect("f32_to_string must be in runtime_needs (scan missed it?)");
                         func.instruction(&Instruction::Call(f));
                         self.emit_str_bytes_unmaterialize(func)?;
                     }
@@ -413,7 +441,11 @@ impl WasmPackageBuilder<'_> {
                         // dedicated f64_to_string runtime helper is not yet
                         // generated. This is lossy but validates cleanly and
                         // produces sensible interpolation output.
-                        let f = self.runtime_funcs.as_ref().and_then(|r| r.f32_to_string).expect("f32_to_string must be in runtime_needs (scan missed it?)");
+                        let f = self
+                            .runtime_funcs
+                            .as_ref()
+                            .and_then(|r| r.f32_to_string)
+                            .expect("f32_to_string must be in runtime_needs (scan missed it?)");
                         func.instruction(&Instruction::F32DemoteF64);
                         func.instruction(&Instruction::Call(f));
                         self.emit_str_bytes_unmaterialize(func)?;
@@ -428,7 +460,11 @@ impl WasmPackageBuilder<'_> {
                             CodegenError::InvalidIR("char-to-string requires 1 arg".to_string())
                         })?;
                         self.emit_expr(func, component.expr(*arg), component)?;
-                        let f = self.runtime_funcs.as_ref().and_then(|r| r.s32_to_string).expect("s32_to_string must be in runtime_needs (scan missed it?)");
+                        let f = self
+                            .runtime_funcs
+                            .as_ref()
+                            .and_then(|r| r.s32_to_string)
+                            .expect("s32_to_string must be in runtime_needs (scan missed it?)");
                         func.instruction(&Instruction::Call(f));
                         self.emit_str_bytes_unmaterialize(func)?;
                     }
@@ -462,10 +498,8 @@ impl WasmPackageBuilder<'_> {
                                 self.emit_str_bytes_materialize(func)?;
                             }
                             // Call concat<n>
-                            let concat_fn = self
-                                .runtime_funcs
-                                .as_ref()
-                                .and_then(|r| r.concat(arity));
+                            let concat_fn =
+                                self.runtime_funcs.as_ref().and_then(|r| r.concat(arity));
                             if let Some(concat_fn) = concat_fn {
                                 func.instruction(&Instruction::Call(concat_fn));
                             }
@@ -486,7 +520,9 @@ impl WasmPackageBuilder<'_> {
                             let mut handled_via_emit = false;
                             // GcArrayRef path: array.len instruction.
                             use super::repr::InternalRepr;
-                            if let InternalRepr::GcArrayRef(_) = self.internal_repr(component.expr(*arg).ty) {
+                            if let InternalRepr::GcArrayRef(_) =
+                                self.internal_repr(component.expr(*arg).ty)
+                            {
                                 self.emit_expr(func, component.expr(*arg), component)?;
                                 func.instruction(&Instruction::ArrayLen);
                                 handled_via_emit = true;
@@ -594,7 +630,11 @@ impl WasmPackageBuilder<'_> {
                         // Stack: [str_ptr, str_len, prefix_ptr, prefix_len]
 
                         // Call starts_with(str_ptr, str_len, prefix_ptr, prefix_len) -> bool
-                        let f = self.runtime_funcs.as_ref().and_then(|r| r.starts_with).expect("starts_with must be in runtime_needs (scan missed it?)");
+                        let f = self
+                            .runtime_funcs
+                            .as_ref()
+                            .and_then(|r| r.starts_with)
+                            .expect("starts_with must be in runtime_needs (scan missed it?)");
                         func.instruction(&Instruction::Call(f));
                         // Stack: [bool]
                     }
@@ -706,7 +746,11 @@ impl WasmPackageBuilder<'_> {
                         })?;
                         let predicate = self.filter_calls[filter_id].4.clone();
                         let mut captured_signals: Vec<(DefId, Ty)> = Vec::new();
-                        self.extract_signal_reads(&predicate, component.exprs(), &mut captured_signals);
+                        self.extract_signal_reads(
+                            &predicate,
+                            component.exprs(),
+                            &mut captured_signals,
+                        );
 
                         // Push src list as typed array ref. Internal
                         // repr must be GcArrayRef post Stage 6 — the
@@ -764,9 +808,7 @@ impl WasmPackageBuilder<'_> {
                         // position the return value is left for the consumer
                         // (interpolation, default initializer, etc.).
                         if let Some(import_layout) = &self.import_layout {
-                            if let Some(cb_func_idx) =
-                                import_layout.import_index(*func_def_id)
-                            {
+                            if let Some(cb_func_idx) = import_layout.import_index(*func_def_id) {
                                 // The callback IMPORT signature is built with
                                 // the canonical ABI (`canonical_flat_valtypes`,
                                 // see codegen/build.rs) and switches to the
@@ -779,7 +821,10 @@ impl WasmPackageBuilder<'_> {
                                 // and option-of-ref collapses; deciding from the
                                 // internal shape there disagreed with the import
                                 // and underflowed the stack.
-                                let result_flat = self.canonical_flat_valtypes(expr.ty, crate::wasm::repr::WitBoundary::assert());
+                                let result_flat = self.canonical_flat_valtypes(
+                                    expr.ty,
+                                    crate::wasm::repr::WitBoundary::assert(),
+                                );
                                 let uses_indirect_return = result_flat.len() > 1;
 
                                 // Component callbacks are resource methods —
@@ -836,19 +881,18 @@ impl WasmPackageBuilder<'_> {
                 // Phase 5e.3: tuple field access via struct.get when
                 // the base tuple has GC-ref internal repr.
                 if let InternedTyKind::Tuple(_) = self.ctx.ty_kind(base.ty)
-                    && let super::repr::InternalRepr::GcRef(tup_idx) =
-                        self.internal_repr(base.ty)
-                    {
-                        self.emit_expr(func, base, component)?;
-                        func.instruction(&Instruction::RefAsNonNull);
-                        func.instruction(&Instruction::StructGet {
-                            struct_type_index: tup_idx,
-                            field_index: field_idx.0,
-                        });
-                        // §1.5: struct.get leaves one value (the field's
-                        // scalar or GC ref) — internal single-slot count.
-                        return Ok(self.internal_stack_slots(expr.ty));
-                    }
+                    && let super::repr::InternalRepr::GcRef(tup_idx) = self.internal_repr(base.ty)
+                {
+                    self.emit_expr(func, base, component)?;
+                    func.instruction(&Instruction::RefAsNonNull);
+                    func.instruction(&Instruction::StructGet {
+                        struct_type_index: tup_idx,
+                        field_index: field_idx.0,
+                    });
+                    // §1.5: struct.get leaves one value (the field's
+                    // scalar or GC ref) — internal single-slot count.
+                    return Ok(self.internal_stack_slots(expr.ty));
+                }
                 // Phase 2 GC migration: if the base is a primitive-only
                 // record, it sits on the stack as `(ref null $<rec>_record)`
                 // — replace the legacy `add offset; load` with one
@@ -936,13 +980,12 @@ impl WasmPackageBuilder<'_> {
                     // `array.get`; RecordConstruct passes through as a
                     // typed array; legacy consumers (rare post-Stage-7)
                     // materialize at their own call site.
-                    let typed_array_field = matches!(
-                        self.ctx.ty_kind(field_ty),
-                        InternedTyKind::List(_)
-                    ) && self
-                        .record_gc_types
-                        .list_array_type_idx
-                        .contains_key(&field_ty);
+                    let typed_array_field =
+                        matches!(self.ctx.ty_kind(field_ty), InternedTyKind::List(_))
+                            && self
+                                .record_gc_types
+                                .list_array_type_idx
+                                .contains_key(&field_ty);
                     if typed_array_field {
                         return Ok(1);
                     }
@@ -1255,13 +1298,7 @@ impl WasmPackageBuilder<'_> {
                 // types AND for boundary writes (set-attribute, exports,
                 // callback returns).
                 if let InternalRepr::GcVariant(_) = self.internal_repr(expr.ty) {
-                    self.emit_variant_ctor_gc(
-                        func,
-                        expr.ty,
-                        *case_idx,
-                        payload,
-                        component,
-                    )?;
+                    self.emit_variant_ctor_gc(func, expr.ty, *case_idx, payload, component)?;
                     return Ok(1);
                 }
                 // §1.5: internally every value is a single stack slot. The only
@@ -1301,9 +1338,11 @@ impl WasmPackageBuilder<'_> {
                 if let InternalRepr::GcArrayRef(arr_ty_idx) = self.internal_repr(expr.ty) {
                     let elem_ty = match self.ctx.ty_kind(expr.ty) {
                         InternedTyKind::List(e) => *e,
-                        _ => return Err(CodegenError::InvalidIR(
-                            "ListStatic GC: expected list type".into(),
-                        )),
+                        _ => {
+                            return Err(CodegenError::InvalidIR(
+                                "ListStatic GC: expected list type".into(),
+                            ));
+                        }
                     };
                     let len_val = *len;
                     let data_off = *data_offset;
@@ -1312,20 +1351,16 @@ impl WasmPackageBuilder<'_> {
                         func.instruction(&Instruction::ArrayNewDefault(arr_ty_idx));
                         return Ok(1);
                     }
-                    let elem_is_string = matches!(
-                        self.ctx.ty_kind(elem_ty),
-                        InternedTyKind::String
-                    );
+                    let elem_is_string =
+                        matches!(self.ctx.ty_kind(elem_ty), InternedTyKind::String);
                     let elem_size: u32 = if elem_is_string {
                         8
                     } else {
                         // Scalar element size — match canonical info.
                         match self.ctx.ty_kind(elem_ty) {
-                            InternedTyKind::Bool
-                            | InternedTyKind::S8 | InternedTyKind::U8 => 1,
+                            InternedTyKind::Bool | InternedTyKind::S8 | InternedTyKind::U8 => 1,
                             InternedTyKind::S16 | InternedTyKind::U16 => 2,
-                            InternedTyKind::S64 | InternedTyKind::U64
-                            | InternedTyKind::F64 => 8,
+                            InternedTyKind::S64 | InternedTyKind::U64 | InternedTyKind::F64 => 8,
                             _ => 4,
                         }
                     };
@@ -1421,7 +1456,9 @@ impl WasmPackageBuilder<'_> {
                     for elem in elements {
                         // For RecordConstruct elements, emit field values directly (not calling ctor)
                         // This is because list_ctor stores fields inline
-                        if let LirExprKind::RecordConstruct { fields, .. } = &component.expr(*elem).kind {
+                        if let LirExprKind::RecordConstruct { fields, .. } =
+                            &component.expr(*elem).kind
+                        {
                             for field in fields {
                                 self.emit_expr(func, component.expr(*field), component)?;
                                 // Phase 5e.4: legacy list_ctor expects
@@ -1432,15 +1469,15 @@ impl WasmPackageBuilder<'_> {
                                 if self.is_scalar_list_ty(component.expr(*field).ty)
                                     && let super::repr::InternalRepr::GcArrayRef(arr_idx) =
                                         self.internal_repr(component.expr(*field).ty)
-                                    {
-                                        let mat_fn = *self
+                                {
+                                    let mat_fn = *self
                                             .gc_list_materializer_fn_indices
                                             .get(&arr_idx)
                                             .ok_or_else(|| CodegenError::InvalidIR(
                                                 "ListConstruct (legacy): missing materializer for GC list field".into(),
                                             ))?;
-                                        func.instruction(&Instruction::Call(mat_fn));
-                                    }
+                                    func.instruction(&Instruction::Call(mat_fn));
+                                }
                             }
                         } else {
                             // Other elements: emit normally
@@ -1488,18 +1525,18 @@ impl WasmPackageBuilder<'_> {
                         .record_type_idx
                         .get(record_def)
                         .copied()
-                    {
-                        for field_expr in fields.iter() {
-                            // Every SLR field pushes exactly the value the
-                            // parent struct.new consumes: scalars unboxed,
-                            // a string as its `$str_bytes` ref, a list as
-                            // its typed `(ref null $arr)`. Nothing needs a
-                            // fat-pointer box anymore.
-                            self.emit_expr(func, component.expr(*field_expr), component)?;
-                        }
-                        func.instruction(&Instruction::StructNew(type_idx));
-                        return Ok(1);
+                {
+                    for field_expr in fields.iter() {
+                        // Every SLR field pushes exactly the value the
+                        // parent struct.new consumes: scalars unboxed,
+                        // a string as its `$str_bytes` ref, a list as
+                        // its typed `(ref null $arr)`. Nothing needs a
+                        // fat-pointer box anymore.
+                        self.emit_expr(func, component.expr(*field_expr), component)?;
                     }
+                    func.instruction(&Instruction::StructNew(type_idx));
+                    return Ok(1);
+                }
                 // Use record constructor helper - no local conflicts!
                 // Emit all field values onto the stack, then call $ctor_X
                 for field in fields {
@@ -1683,8 +1720,8 @@ impl WasmPackageBuilder<'_> {
                 // non-active case payload reads garbage / pads — the
                 // GC migration trades that silent garbage for a hard
                 // trap, which is strictly better.
-                use super::repr::InternalRepr;
                 use super::gc_types::StructGetVariant;
+                use super::repr::InternalRepr;
                 let case_sub_idx = match self.internal_repr(base.ty) {
                     InternalRepr::GcVariant(_) => *self
                         .record_gc_types
@@ -1860,7 +1897,8 @@ impl WasmPackageBuilder<'_> {
         // Compute the parent's full flat valtypes. The first slot is always
         // the i32 discriminant; the rest is the slot-wise join over all
         // cases' payload flattenings.
-        let parent_flat = self.flatten_core_valtypes(parent_ty, crate::wasm::repr::WitBoundary::assert());
+        let parent_flat =
+            self.flatten_core_valtypes(parent_ty, crate::wasm::repr::WitBoundary::assert());
         let joined_payload_slots = if parent_flat.is_empty() {
             &[] as &[ValType]
         } else {
@@ -2154,7 +2192,9 @@ impl WasmPackageBuilder<'_> {
             .gc_list_materializer_fn_indices
             .get(&str_bytes_idx)
             .ok_or_else(|| {
-                CodegenError::InvalidIR("string materialize: missing $str_bytes materializer".into())
+                CodegenError::InvalidIR(
+                    "string materialize: missing $str_bytes materializer".into(),
+                )
             })?;
         func.instruction(&Instruction::Call(mat));
         Ok(())
@@ -2491,9 +2531,10 @@ impl WasmPackageBuilder<'_> {
     /// `yel-core/src/stdlib_lookup.rs`).
     fn is_color_ty(&self, ty: Ty) -> bool {
         if let InternedTyKind::Adt(d) = self.ctx.ty_kind(ty)
-            && let Some(color_def) = self.ctx.known.variants.color {
-                return *d == color_def;
-            }
+            && let Some(color_def) = self.ctx.known.variants.color
+        {
+            return *d == color_def;
+        }
         false
     }
 
@@ -2509,13 +2550,14 @@ impl WasmPackageBuilder<'_> {
         expr: &LirExpr,
         component: &dyn LirResourceArena,
     ) -> Result<(), CodegenError> {
-        let helper = self
-            .pack_color_helper_fn_idx
-            .ok_or_else(|| CodegenError::InvalidIR(
+        let helper = self.pack_color_helper_fn_idx.ok_or_else(|| {
+            CodegenError::InvalidIR(
                 "attr-value color: $pack_color_to_attr_slots helper not registered — \
                  build.rs should emit it whenever the program references the language \
-                 `color` type".into(),
-            ))?;
+                 `color` type"
+                    .into(),
+            )
+        })?;
         // attribute-value disc = 13 (color case).
         func.instruction(&Instruction::I32Const(13));
         // Push the color ref; the helper consumes it and produces
@@ -2637,7 +2679,8 @@ impl WasmPackageBuilder<'_> {
         // Composite argument that isn't a single (ptr, len) pair — the import
         // wants its full canonical flattening, which the argument side does not
         // yet lower. Fail loud instead of pushing the internal ref.
-        let canonical = self.canonical_flat_valtypes(arg.ty, crate::wasm::repr::WitBoundary::assert());
+        let canonical =
+            self.canonical_flat_valtypes(arg.ty, crate::wasm::repr::WitBoundary::assert());
         if canonical.len() > 1 && !matches!(self.internal_repr(arg.ty), InternalRepr::Scalar(_)) {
             return Err(CodegenError::InvalidIR(format!(
                 "callback arg: composite argument of type {:?} not yet lowered to \
@@ -2765,9 +2808,7 @@ impl WasmPackageBuilder<'_> {
         // signal-store / Field consumers — not the canonical (disc,
         // payload) flat slots. Re-pack the canonical bytes into a
         // case-subtype struct.
-        if let crate::wasm::repr::InternalRepr::GcVariant(_) =
-            self.internal_repr(ret_ty)
-        {
+        if let crate::wasm::repr::InternalRepr::GcVariant(_) = self.internal_repr(ret_ty) {
             return self.emit_cb_gc_variant_return_load(func, ret_addr, ret_ty);
         }
         self.emit_cb_indirect_return_load(func, ret_addr, ret_ty)
@@ -2848,9 +2889,7 @@ impl WasmPackageBuilder<'_> {
             func.instruction(&Instruction::If(result_block_ty));
 
             // Build case k.
-            if let Some(payload_ty) =
-                super::gc_types::case_payload_ty(self.ctx, ret_ty, k)
-            {
+            if let Some(payload_ty) = super::gc_types::case_payload_ty(self.ctx, ret_ty, k) {
                 self.emit_cb_gc_variant_load_case_payload(
                     func,
                     ret_addr,
@@ -2898,7 +2937,8 @@ impl WasmPackageBuilder<'_> {
         use wasm_encoder::ValType;
         use yel_core::types::InternedTyKind;
 
-        let payload_canonical = self.flatten_core_valtypes(payload_ty, crate::wasm::repr::WitBoundary::assert());
+        let payload_canonical =
+            self.flatten_core_valtypes(payload_ty, crate::wasm::repr::WitBoundary::assert());
 
         // strings-to-GC: a string payload comes back as canonical
         // (ptr, len) in memory and rebuilds a `$str_bytes` GC ref. Every
@@ -3458,23 +3498,53 @@ mod tests {
     fn binary_ops_unsigned_use_unsigned_comparisons() {
         let mut ctx = CompilerContext::new();
         let u32_ty = ctx.intern_ty(InternedTyKind::U32);
-        assert!(matches!(single_binop(&ctx, BinOp::Lt, u32_ty), Operator::I32LtU));
-        assert!(matches!(single_binop(&ctx, BinOp::Gt, u32_ty), Operator::I32GtU));
-        assert!(matches!(single_binop(&ctx, BinOp::Le, u32_ty), Operator::I32LeU));
-        assert!(matches!(single_binop(&ctx, BinOp::Ge, u32_ty), Operator::I32GeU));
-        assert!(matches!(single_binop(&ctx, BinOp::Div, u32_ty), Operator::I32DivU));
-        assert!(matches!(single_binop(&ctx, BinOp::Mod, u32_ty), Operator::I32RemU));
+        assert!(matches!(
+            single_binop(&ctx, BinOp::Lt, u32_ty),
+            Operator::I32LtU
+        ));
+        assert!(matches!(
+            single_binop(&ctx, BinOp::Gt, u32_ty),
+            Operator::I32GtU
+        ));
+        assert!(matches!(
+            single_binop(&ctx, BinOp::Le, u32_ty),
+            Operator::I32LeU
+        ));
+        assert!(matches!(
+            single_binop(&ctx, BinOp::Ge, u32_ty),
+            Operator::I32GeU
+        ));
+        assert!(matches!(
+            single_binop(&ctx, BinOp::Div, u32_ty),
+            Operator::I32DivU
+        ));
+        assert!(matches!(
+            single_binop(&ctx, BinOp::Mod, u32_ty),
+            Operator::I32RemU
+        ));
 
         // u64 uses the i64 unsigned opcodes.
         let u64_ty = ctx.intern_ty(InternedTyKind::U64);
-        assert!(matches!(single_binop(&ctx, BinOp::Lt, u64_ty), Operator::I64LtU));
-        assert!(matches!(single_binop(&ctx, BinOp::Div, u64_ty), Operator::I64DivU));
+        assert!(matches!(
+            single_binop(&ctx, BinOp::Lt, u64_ty),
+            Operator::I64LtU
+        ));
+        assert!(matches!(
+            single_binop(&ctx, BinOp::Div, u64_ty),
+            Operator::I64DivU
+        ));
 
         // Signed types keep the signed opcodes.
         let s32_ty = ctx.intern_ty(InternedTyKind::S32);
-        assert!(matches!(single_binop(&ctx, BinOp::Lt, s32_ty), Operator::I32LtS));
+        assert!(matches!(
+            single_binop(&ctx, BinOp::Lt, s32_ty),
+            Operator::I32LtS
+        ));
         let s64_ty = ctx.intern_ty(InternedTyKind::S64);
-        assert!(matches!(single_binop(&ctx, BinOp::Lt, s64_ty), Operator::I64LtS));
+        assert!(matches!(
+            single_binop(&ctx, BinOp::Lt, s64_ty),
+            Operator::I64LtS
+        ));
     }
 
     /// Regression: `emit_binary_op` must emit `i64`-wide instructions for
@@ -3574,8 +3644,6 @@ mod tests {
     // These tests construct `RuntimeFunctions` with sentinel indices
     // (unique per field) so a `Call(sentinel)` in the emitted stream
     // uniquely identifies which runtime helper was selected.
-
-
 
     // ---- parser-visible smoke: the wrapper produces a valid module ----
 

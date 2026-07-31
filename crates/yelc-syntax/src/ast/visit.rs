@@ -41,6 +41,10 @@ pub trait Visitor: Sized {
     fn visit_attribute_arg(&mut self, node: &AttributeArg) {
         walk_attribute_arg(self, node);
     }
+    fn visit_include_decl(&mut self, node: &IncludeDecl) {
+        walk_include_decl(self, node);
+    }
+
     fn visit_package_decl(&mut self, node: &PackageDecl) {
         walk_package_decl(self, node);
     }
@@ -231,6 +235,7 @@ pub fn walk_file<V: Visitor>(v: &mut V, node: &File) {
 pub fn walk_item<V: Visitor>(v: &mut V, node: &ItemKind) {
     match node {
         ItemKind::Package(it) => v.visit_package_decl(it),
+        ItemKind::Include(it) => v.visit_include_decl(it),
         ItemKind::Record(it) => v.visit_record_decl(it),
         ItemKind::Enum(it) => v.visit_enum_decl(it),
         ItemKind::Variant(it) => v.visit_variant_decl(it),
@@ -258,6 +263,11 @@ pub fn walk_attribute<V: Visitor>(v: &mut V, node: &Attribute) {
 pub fn walk_attribute_arg<V: Visitor>(v: &mut V, node: &AttributeArg) {
     walk_maybe_ident(v, &node.name);
     v.visit_expr(&node.value);
+}
+
+pub fn walk_include_decl<V: Visitor>(v: &mut V, node: &IncludeDecl) {
+    // The specifier is a token run, not a node; only the bound name walks.
+    walk_maybe_ident(v, &node.name);
 }
 
 pub fn walk_package_decl<V: Visitor>(v: &mut V, node: &PackageDecl) {
