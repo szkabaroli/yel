@@ -81,7 +81,7 @@ pub struct File {
     /// Intrinsic element type definitions.
     pub elements: Vec<Spanned<Element>>,
     /// Imported component declarations.
-    pub import_components: Vec<Spanned<ImportComponent>>,
+    pub extern_components: Vec<Spanned<ExternComponent>>,
     /// Global singleton declarations.
     pub globals: Vec<Spanned<Global>>,
     /// Component definitions.
@@ -365,7 +365,10 @@ impl Serialize for TyKind {
                 map.serialize_entry("types", &kinds)?;
                 map.end()
             }
-            TyKind::Func { params, return_type } => {
+            TyKind::Func {
+                params,
+                return_type,
+            } => {
                 let params_kinds: Vec<_> = params.iter().map(|(n, t)| (n, &t.kind)).collect();
                 let mut map = serializer.serialize_map(Some(3))?;
                 map.serialize_entry("kind", "func")?;
@@ -422,7 +425,9 @@ impl<'de> Deserialize<'de> for TyKind {
                         "params" => params = Some(map.next_value()?),
                         "return_type" => return_type = Some(map.next_value()?),
                         "name" => name = Some(map.next_value()?),
-                        _ => { let _: serde::de::IgnoredAny = map.next_value()?; }
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
                     }
                 }
 
@@ -461,12 +466,10 @@ impl<'de> Deserialize<'de> for TyKind {
                         let inner = of.ok_or_else(|| de::Error::missing_field("of"))?;
                         Ok(TyKind::Option(Box::new(Ty::dummy(*inner))))
                     }
-                    "result" => {
-                        Ok(TyKind::Result {
-                            ok: ok.unwrap_or(None).map(|k| Box::new(Ty::dummy(*k))),
-                            err: err.unwrap_or(None).map(|k| Box::new(Ty::dummy(*k))),
-                        })
-                    }
+                    "result" => Ok(TyKind::Result {
+                        ok: ok.unwrap_or(None).map(|k| Box::new(Ty::dummy(*k))),
+                        err: err.unwrap_or(None).map(|k| Box::new(Ty::dummy(*k))),
+                    }),
                     "tuple" => {
                         let types = types.ok_or_else(|| de::Error::missing_field("types"))?;
                         Ok(TyKind::Tuple(types.into_iter().map(Ty::dummy).collect()))
@@ -475,20 +478,50 @@ impl<'de> Deserialize<'de> for TyKind {
                         let params = params.ok_or_else(|| de::Error::missing_field("params"))?;
                         Ok(TyKind::Func {
                             params: params.into_iter().map(|(n, k)| (n, Ty::dummy(k))).collect(),
-                            return_type: return_type.unwrap_or(None).map(|k| Box::new(Ty::dummy(*k))),
+                            return_type: return_type
+                                .unwrap_or(None)
+                                .map(|k| Box::new(Ty::dummy(*k))),
                         })
                     }
                     "named" => {
                         let name = name.ok_or_else(|| de::Error::missing_field("name"))?;
                         Ok(TyKind::Named(name))
                     }
-                    other => Err(de::Error::unknown_variant(other, &[
-                        "bool", "s8", "s16", "s32", "s64", "u8", "u16", "u32", "u64",
-                        "f32", "f64", "char", "string", "length", "physical-length",
-                        "angle", "duration", "percent", "relative-font-size", "color",
-                        "brush", "image", "easing", "unknown", "list", "option", "result",
-                        "tuple", "func", "named"
-                    ])),
+                    other => Err(de::Error::unknown_variant(
+                        other,
+                        &[
+                            "bool",
+                            "s8",
+                            "s16",
+                            "s32",
+                            "s64",
+                            "u8",
+                            "u16",
+                            "u32",
+                            "u64",
+                            "f32",
+                            "f64",
+                            "char",
+                            "string",
+                            "length",
+                            "physical-length",
+                            "angle",
+                            "duration",
+                            "percent",
+                            "relative-font-size",
+                            "color",
+                            "brush",
+                            "image",
+                            "easing",
+                            "unknown",
+                            "list",
+                            "option",
+                            "result",
+                            "tuple",
+                            "func",
+                            "named",
+                        ],
+                    )),
                 }
             }
         }
@@ -540,7 +573,10 @@ impl std::fmt::Display for TyKind {
             TyKind::Brush => write!(f, "brush"),
             TyKind::Image => write!(f, "image"),
             TyKind::Easing => write!(f, "easing"),
-            TyKind::Func { params, return_type } => {
+            TyKind::Func {
+                params,
+                return_type,
+            } => {
                 let param_strs: Vec<_> = params
                     .iter()
                     .map(|(name, ty)| format!("{}: {}", name, ty.kind))
@@ -881,10 +917,10 @@ pub struct Element {
     pub properties: Vec<Spanned<Property>>,
 }
 
-/// An imported component declaration: `import component Dialog { name: string; func show(); }`
+/// An external component declaration: `extern component Dialog { name: string; func show(); }`
 /// Imported components are external components provided by the host or other modules.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ImportComponent {
+pub struct ExternComponent {
     /// Component name (PascalCase).
     pub name: String,
     /// Span of the name.

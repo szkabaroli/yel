@@ -118,35 +118,6 @@ fn compile_to_component(source: &str) -> Vec<u8> {
         "HIR errors:\n{}",
         compiler.render_diagnostics()
     );
-    let mut lir_components = Vec::new();
-    let mut global_thir_defaults: std::collections::HashMap<
-        yel_core::DefId,
-        yel_core::thir::ThirExpr,
-    > = std::collections::HashMap::new();
-    for item in &hir {
-        match compiler.type_check(item) {
-            yel_core::thir::ThirItem::Component(thir) => {
-                assert!(
-                    !compiler.has_errors(),
-                    "typeck errors:\n{}",
-                    compiler.render_diagnostics()
-                );
-                lir_components.push(compiler.lower_to_lir(&thir));
-            }
-            yel_core::thir::ThirItem::Global(global) => {
-                assert!(
-                    !compiler.has_errors(),
-                    "global typeck errors:\n{}",
-                    compiler.render_diagnostics()
-                );
-                global_thir_defaults.extend(global.signal_defaults);
-            }
-        }
-    }
-    compiler.resolve_global_triggers(&mut lir_components);
-
-    let (lir_globals, lir_global_default_exprs) =
-        compiler.lower_globals_to_lir(&global_thir_defaults);
 
     let (namespace, name, version) = match file.package {
         Some(ref pkg) => (
@@ -157,20 +128,16 @@ fn compile_to_component(source: &str) -> Vec<u8> {
         None => ("yel".into(), "app".into(), "0.1.0".into()),
     };
 
-    let interfaces = compiler.build_import_interfaces();
-    let module = yel_core::lir::LirModule {
-        resources: lir_components,
-        global_defaults: lir_globals.clone(),
-        global_default_exprs: lir_global_default_exprs.clone(),
-        interfaces,
-        package: file.package.clone(),
-    };
+    let module = compiler.lower_items_to_module(&hir, file.package.clone());
+    assert!(
+        !compiler.has_errors(),
+        "typeck/lowering errors:\n{}",
+        compiler.render_diagnostics()
+    );
     let opts = codegen::WasmWithWitOptions {
         namespace,
         name,
         version,
-        global_defaults: lir_globals,
-        global_default_exprs: lir_global_default_exprs,
         wasm_opt_args: None,
     };
     codegen::generate_wasm_module(&module, compiler.context(), &opts).expect("wasm codegen")
@@ -1283,10 +1250,11 @@ fn button_click_propagates_through_full_reactive_chain() {
 /// 4 for pointers). The width-correct store/load work we did in
 /// Phase-B is still necessary — this test verifies that AFTER the
 /// alignment fix, narrow-type writes also don't corrupt neighbours.
+// Fixed by the typed-GC migration: signals no longer share a packed
+// linear-memory layout (each lives in a typed field of the `$Comp` GC
+// struct), so the narrow/wide misalignment that used to corrupt the
+// adjacent string is gone structurally. Formerly `#[ignore]`d.
 #[test]
-#[ignore = "known bug: MemoryLayout::new packs narrow + wide signals \
-             without alignment — bool at offset 0 puts the adjacent string \
-             fat-pointer at offset 1, misaligned for component-ABI lifting"]
 fn narrow_type_signal_write_preserves_adjacent_string() {
     let source = r#"
         package yel:narrowrt@0.1.0;
@@ -3436,10 +3404,9 @@ fn update_fn_dedupes_repeated_iter_shape() {
 /// — `walk_for_children` and `walk_if_active`. Multiple distinct fors and
 /// ifs in a fixture must not produce multiple copies of these walkers.
 ///
-/// Currently ignored — depends on the WAT-inspection helper and Phase 3b
-/// landing.
+/// Phase 3b (funcref shape walkers + the WAT-inspection helper) has landed,
+/// so this now passes; formerly `#[ignore]`d.
 #[test]
-#[ignore = "needs Phase 3b funcref shape walkers + WAT-inspection helper"]
 fn walker_library_shared_across_for_anchors() {
     let source = r#"
         package yel:walkerlib@0.1.0;
@@ -3512,11 +3479,10 @@ fn count_named_fns_with_prefix(bytes: &[u8], prefix: &str) -> usize {
 // ----------------------------------------------------------------------------
 // GC migration Phase 0 — behavioral pinning tests for records / tuples.
 //
-// These tests pin current (memory-backed) behavior so that the migration to
-// GC structs / arrays in Phases 1-7 can be verified non-regressively. They
-// must pass against today's implementation AND continue to pass after each
-// migration phase. The lone WAT-inspection test stays `#[ignore]` until
-// Phase 1 emits per-record GC types.
+// These tests pin record/tuple behavior across the migration to GC structs /
+// arrays (Phases 1-7, now landed). They must continue to pass after each
+// migration phase; the WAT-inspection test that was gated on per-record GC
+// types is enabled now that Phase 1+ emits them.
 //
 // Plan: /Users/rolandsz.kovacs/.claude/plans/migrate-records-tuples-to-gc.md
 // ----------------------------------------------------------------------------
@@ -3819,48 +3785,13 @@ fn nested_gc_variant_deep_and_list_payload_roundtrip() {
     }
 }
 
-/// Bug A: a collapsed `option<empty-record>` signal. An empty record has zero
-/// canonical payload slots, so `option<record {}>` flattens to just `[disc]`.
-/// The setter's collapsed-option pack used to error ("collapsed option missing
-/// payload slot") requiring a payload slot that doesn't exist, and the getter
-/// took the single-slot fast path and returned the raw record ref where the
-/// i32 disc was expected. Both are fixed (the pack builds the empty inner ref
-/// reading no payload; the getter returns `!ref.is_null` by value). Ignored
-/// end-to-end because a *separate* pre-existing bug rejects any empty record in
-/// the WIT component-type custom section (affects a plain `record {}` signal
-/// too, not just options); the codegen fix is covered by core-module
-/// validation in the fuzzer / probes.
-#[test]
-#[ignore = "empty records fail WIT component-type encoding (separate pre-existing bug)"]
-fn option_empty_record_roundtrips() {
-    let source = r#"
-        package yel:optemptyrec@0.1.0;
-        record R { }
-        export component App {
-            label: option<R> = none;
-            VStack { Text { "ok" } }
-        }
-    "#;
-    let bytes = compile_to_component(source);
-    let iface = "yel:optemptyrec/app-component@0.1.0";
-    let (mut h, _dom) = instantiate(&bytes, &[]);
-    let r = ctor_and_mount(&mut h, iface, "app");
-    let getter = get_func(&mut h, iface, "[method]app.get-label");
-    let read = |h: &mut Harness| {
-        let mut out = [Val::Bool(false)];
-        getter
-            .call(&mut h.store, &[Val::Resource(r)], &mut out)
-            .expect("get-label");
-        out[0].clone()
-    };
-    for v in [
-        Val::Option(None),
-        Val::Option(Some(Box::new(Val::Record(vec![])))),
-    ] {
-        call_setter(&mut h, iface, "app", "label", &r, v.clone());
-        assert_eq!(read(&mut h), v);
-    }
-}
+// An empty `record {}` cannot cross the component boundary: the WebAssembly
+// component model requires a record to have at least one field. Rather than
+// round-trip one (impossible), the compiler now rejects it at type-check time
+// with `error[E0044]` — see the `empty_record_at_boundary` diagnostics fixture.
+// Empty records remain usable internally; that codegen path (collapsed
+// `option<empty-record>` pack/getter) is covered by core-module validation in
+// the fuzzer / probes.
 
 /// A nested collapsing-option signal (`option<option<record>>`) must round-trip
 /// all THREE states distinctly — `none`, `some(none)`, `some(some({..}))`.

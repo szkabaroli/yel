@@ -1,0 +1,9 @@
+// E0022: field access naming a field the record does not have.
+package yel:nosuchfield@0.1.0;
+
+record R { a: s32 }
+
+export component App {
+    r: R;
+    VStack { Text { "{r.nope}" } }
+}

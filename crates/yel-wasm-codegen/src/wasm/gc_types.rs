@@ -7,7 +7,8 @@
 //! the module-shared registry-handle types. All types live in rec
 //! groups so cyclic struct ↔ array references resolve.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::VecDeque;
 use wasm_encoder::{
     AbstractHeapType, ArrayType, CompositeInnerType, CompositeType, FieldType, HeapType, RefType,
     StorageType, StructType, SubType, TypeSection, ValType,
@@ -98,7 +99,7 @@ pub struct GcTypeLayout {
     pub tree_root_type_idx: Option<u32>,
     /// Index of the trailing `(mut (ref null $<comp>_tree_root))`
     /// field on `$Comp_<Name>`. `None` when the component has no
-    /// body tree (e.g. `empty_module_carrier`). The constructor
+    /// body tree (e.g. `LirResource::empty`). The constructor
     /// populates this field with a freshly-allocated root struct so
     /// every instance starts with a non-null typed root.
     ///
@@ -761,11 +762,11 @@ pub struct RecordGcTypes {
     /// **list `Ty`** (the `Ty` whose `InternedTyKind` is `List(elem)`),
     /// NOT by the element `Ty` — matches call sites that have a
     /// `list<T>` value's `Ty` in hand at `Index` / `ListConstruct`.
-    pub list_array_type_idx: std::collections::HashMap<yel_core::Ty, u32>,
+    pub list_array_type_idx: rustc_hash::FxHashMap<yel_core::Ty, u32>,
     /// Per-tuple-type GC struct type indices, keyed by the tuple `Ty`
     /// (whose `InternedTyKind` is `Tuple(elements)`). One emitted
     /// struct per **distinct** tuple type, shared across components.
-    pub tuple_struct_type_idx: std::collections::HashMap<yel_core::Ty, u32>,
+    pub tuple_struct_type_idx: rustc_hash::FxHashMap<yel_core::Ty, u32>,
     /// Per-`option<T>` / `result<T,E>` / user-`variant` parent `Ty` →
     /// emitted **supertype** struct index (an empty `(sub (struct))`
     /// non-final type). Storage of a migrated value is a single
@@ -777,15 +778,15 @@ pub struct RecordGcTypes {
     /// supertype must already be in this map when the outer rec group
     /// is built. YEL has no recursive variants today; if it ever adds
     /// them, fold the SCC into one rec group.
-    pub gc_variant_super_idx: std::collections::HashMap<yel_core::Ty, u32>,
+    pub gc_variant_super_idx: rustc_hash::FxHashMap<yel_core::Ty, u32>,
     /// Per-`(parent Ty, case_idx)` → emitted **case-subtype** struct
     /// index (a `(sub final $supertype …)`).
     /// Cases with payload have one struct field; cases without have
     /// an empty struct.
-    pub gc_variant_case_idx: std::collections::HashMap<(yel_core::Ty, u32), u32>,
+    pub gc_variant_case_idx: rustc_hash::FxHashMap<(yel_core::Ty, u32), u32>,
     /// Per-parent `Ty` → number of cases. Lets consumers iterate cases
     /// without re-querying defs / type kinds.
-    pub gc_variant_case_count: std::collections::HashMap<yel_core::Ty, u32>,
+    pub gc_variant_case_count: rustc_hash::FxHashMap<yel_core::Ty, u32>,
 }
 
 /// Emit, in a single program-scope rec group, one `(struct ...)` GC
@@ -823,7 +824,7 @@ pub fn emit_program_record_types(
     base_type_idx: u32,
     extra_seed_tys: &[yel_core::Ty],
 ) -> (u32, RecordGcTypes) {
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap as HashMap;
     use yel_core::definitions::DefKind;
     use yel_core::types::InternedTyKind;
 
@@ -875,9 +876,7 @@ pub fn emit_program_record_types(
             },
         }]);
         registry.str_bytes_array_idx = Some(sb_idx);
-        registry
-            .type_names
-            .push((sb_idx, "str_bytes".to_string()));
+        registry.type_names.push((sb_idx, "str_bytes".to_string()));
         sb_idx + 1
     };
 
@@ -1067,7 +1066,7 @@ pub fn emit_program_record_types(
     if !sub_types.is_empty() {
         types.ty().rec(sub_types);
     }
-    let _ = HashMap::<DefId, u32>::new(); // silence import lint when empty
+    let _ = HashMap::<DefId, u32>::default(); // silence import lint when empty
     // Total reserved indices:
     //   1 ($str_bytes, always emitted)
     //   + Σ (1 + case_count) over gc-variant parents
@@ -1094,10 +1093,9 @@ fn collect_list_and_tuple_tys(
     use yel_core::definitions::DefKind;
     use yel_core::types::InternedTyKind;
 
-    let mut list_seen: std::collections::HashSet<yel_core::Ty> = std::collections::HashSet::new();
-    let mut tuple_seen: std::collections::HashSet<yel_core::Ty> = std::collections::HashSet::new();
-    let mut gc_variant_seen: std::collections::HashSet<yel_core::Ty> =
-        std::collections::HashSet::new();
+    let mut list_seen: rustc_hash::FxHashSet<yel_core::Ty> = rustc_hash::FxHashSet::default();
+    let mut tuple_seen: rustc_hash::FxHashSet<yel_core::Ty> = rustc_hash::FxHashSet::default();
+    let mut gc_variant_seen: rustc_hash::FxHashSet<yel_core::Ty> = rustc_hash::FxHashSet::default();
     let mut list_order: Vec<yel_core::Ty> = Vec::new();
     let mut tuple_order: Vec<yel_core::Ty> = Vec::new();
     let mut gc_variant_order: Vec<yel_core::Ty> = Vec::new();
@@ -1105,9 +1103,9 @@ fn collect_list_and_tuple_tys(
     fn walk(
         ctx: &yel_core::context::CompilerContext,
         ty: yel_core::Ty,
-        list_seen: &mut std::collections::HashSet<yel_core::Ty>,
-        tuple_seen: &mut std::collections::HashSet<yel_core::Ty>,
-        gc_variant_seen: &mut std::collections::HashSet<yel_core::Ty>,
+        list_seen: &mut rustc_hash::FxHashSet<yel_core::Ty>,
+        tuple_seen: &mut rustc_hash::FxHashSet<yel_core::Ty>,
+        gc_variant_seen: &mut rustc_hash::FxHashSet<yel_core::Ty>,
         list_order: &mut Vec<yel_core::Ty>,
         tuple_order: &mut Vec<yel_core::Ty>,
         gc_variant_order: &mut Vec<yel_core::Ty>,
@@ -1224,18 +1222,19 @@ fn collect_list_and_tuple_tys(
             let case_ids = v.cases.clone();
             for case_def_id in case_ids {
                 if let DefKind::VariantCase(c) = ctx.defs.kind(case_def_id)
-                    && let Some(payload_ty) = c.payload {
-                        walk(
-                            ctx,
-                            payload_ty,
-                            &mut list_seen,
-                            &mut tuple_seen,
-                            &mut gc_variant_seen,
-                            &mut list_order,
-                            &mut tuple_order,
-                            &mut gc_variant_order,
-                        );
-                    }
+                    && let Some(payload_ty) = c.payload
+                {
+                    walk(
+                        ctx,
+                        payload_ty,
+                        &mut list_seen,
+                        &mut tuple_seen,
+                        &mut gc_variant_seen,
+                        &mut list_order,
+                        &mut tuple_order,
+                        &mut gc_variant_order,
+                    );
+                }
             }
         }
     }
@@ -1508,7 +1507,7 @@ pub(crate) fn is_is_gc_variant(
     ty: yel_core::Ty,
     registry: &RecordGcTypes,
 ) -> bool {
-    let mut visiting = HashSet::new();
+    let mut visiting = HashSet::default();
     is_is_gc_variant_recursive(ctx, ty, registry, &mut visiting)
 }
 
@@ -1526,10 +1525,10 @@ fn is_is_gc_variant_recursive(
             }
             if let InternedTyKind::Adt(d) = ctx.ty_kind(inner)
                 && matches!(ctx.defs.kind(*d), DefKind::Record(_))
-                    && is_dtr_record_for_collapse(ctx, *d)
-                {
-                    return false;
-                }
+                && is_dtr_record_for_collapse(ctx, *d)
+            {
+                return false;
+            }
             is_gc_variant_payload_admissible(ctx, inner, registry, visiting)
         }
         InternedTyKind::Result { ok, err } => {
@@ -1574,7 +1573,7 @@ fn is_gc_variant_payload_admissible(
     ctx: &yel_core::context::CompilerContext,
     ty: yel_core::Ty,
     registry: &RecordGcTypes,
-    visiting: &mut std::collections::HashSet<DefId>,
+    visiting: &mut rustc_hash::FxHashSet<DefId>,
 ) -> bool {
     use yel_core::definitions::DefKind;
     use yel_core::types::InternedTyKind;
@@ -1614,9 +1613,7 @@ fn is_gc_variant_payload_admissible(
                     if matches!(ctx.defs.kind(*d), DefKind::Record(_)));
             collapses || is_is_gc_variant_recursive(ctx, ty, registry, visiting)
         }
-        InternedTyKind::Result { .. } => {
-            is_is_gc_variant_recursive(ctx, ty, registry, visiting)
-        }
+        InternedTyKind::Result { .. } => is_is_gc_variant_recursive(ctx, ty, registry, visiting),
         _ => false,
     }
 }
@@ -1626,14 +1623,14 @@ fn is_gc_variant_payload_admissible(
 /// gate. Tracks visited def ids to handle recursive records (none
 /// today, but cheap defensiveness).
 fn is_dtr_record_for_collapse(ctx: &CompilerContext, def_id: DefId) -> bool {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     is_dtr_record_for_collapse_inner(ctx, def_id, &mut seen)
 }
 
 fn is_dtr_record_for_collapse_inner(
     ctx: &CompilerContext,
     def_id: DefId,
-    seen: &mut std::collections::HashSet<DefId>,
+    seen: &mut rustc_hash::FxHashSet<DefId>,
 ) -> bool {
     let record = match ctx.defs.kind(def_id) {
         DefKind::Record(r) => r.clone(),
@@ -1756,12 +1753,23 @@ pub(crate) fn struct_get_op_for_payload(ctx: &CompilerContext, payload_ty: Ty) -
 /// descriptive message — supporting recursive variants requires
 /// folding the SCC into one rec group (future work).
 fn topo_sort_gc_variant_tys(ctx: &CompilerContext, tys: &[Ty]) -> Vec<Ty> {
+    // Determinism: the input arrives in `HashSet` traversal order
+    // (`collect_list_and_tuple_tys`'s `gc_variant_seen`), which varies
+    // run-to-run. Kahn's algorithm below preserves input order among
+    // mutually-independent nodes, so a nondeterministic input yields a
+    // nondeterministic emission order for otherwise-unordered types
+    // (e.g. `opt_string` vs `res_string_string`). Sort by interned `Ty`
+    // id first — that id is assigned in deterministic source-driven
+    // interning order — so the whole sort is reproducible.
+    let mut tys: Vec<Ty> = tys.to_vec();
+    tys.sort_by_key(|t| t.0);
+    let tys = &tys[..];
     let ty_set: HashSet<Ty> = tys.iter().copied().collect();
     // Edges: `parent → payload_parent` when payload_parent is also a
     // gc-variant Ty. We emit `payload_parent` first, so it's a "deps"
     // edge; in-degree of a node = # of gc-variant parents whose payload
     // references it.
-    let mut deps: HashMap<Ty, Vec<Ty>> = HashMap::new();
+    let mut deps: HashMap<Ty, Vec<Ty>> = HashMap::default();
     let mut in_degree: HashMap<Ty, usize> = tys.iter().map(|&t| (t, 0)).collect();
     for &parent in tys {
         let case_count = match gc_variant_case_count(ctx, parent) {
@@ -1770,10 +1778,12 @@ fn topo_sort_gc_variant_tys(ctx: &CompilerContext, tys: &[Ty]) -> Vec<Ty> {
         };
         for i in 0..case_count {
             if let Some(p_ty) = case_payload_ty(ctx, parent, i)
-                && ty_set.contains(&p_ty) && p_ty != parent {
-                    deps.entry(p_ty).or_default().push(parent);
-                    *in_degree.entry(parent).or_insert(0) += 1;
-                }
+                && ty_set.contains(&p_ty)
+                && p_ty != parent
+            {
+                deps.entry(p_ty).or_default().push(parent);
+                *in_degree.entry(parent).or_insert(0) += 1;
+            }
         }
     }
     // Start with all zero-in-degree nodes, in original insertion order.
@@ -1830,22 +1840,24 @@ fn list_element_storage_type(
     // store a concrete `(ref null $<inner_arr>)` so callers can
     // `array.get` directly without going through $fat_value.
     if let InternedTyKind::List(_) = ctx.ty_kind(elem_ty)
-        && let Some(&inner_arr_idx) = registry.list_array_type_idx.get(&elem_ty) {
-            return ValType::Ref(RefType {
-                nullable: true,
-                heap_type: HeapType::Concrete(inner_arr_idx),
-            });
-        }
+        && let Some(&inner_arr_idx) = registry.list_array_type_idx.get(&elem_ty)
+    {
+        return ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(inner_arr_idx),
+        });
+    }
     // Phase 5e.3: tuples — store a concrete `(ref null $tuple_<n>)`
     // typed struct ref. The tuple struct type was emitted alongside
     // record types in this rec group.
     if let InternedTyKind::Tuple(_) = ctx.ty_kind(elem_ty)
-        && let Some(&tup_idx) = registry.tuple_struct_type_idx.get(&elem_ty) {
-            return ValType::Ref(RefType {
-                nullable: true,
-                heap_type: HeapType::Concrete(tup_idx),
-            });
-        }
+        && let Some(&tup_idx) = registry.tuple_struct_type_idx.get(&elem_ty)
+    {
+        return ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Concrete(tup_idx),
+        });
+    }
     // Option-of-ref collapse — MUST precede the GcVariant check.
     // `internal_repr(option<record|tuple|scalar-list|collapsing-option>)`
     // collapses to the inner's nullable ref (none = null, some(v) = v), so
@@ -1898,11 +1910,17 @@ fn option_collapse_elem_valtype(
             registry.record_type_idx.get(d).copied().and_then(mk)
         }
         // option<tuple> → the tuple's GC struct ref.
-        InternedTyKind::Tuple(_) => registry.tuple_struct_type_idx.get(&inner).copied().and_then(mk),
+        InternedTyKind::Tuple(_) => registry
+            .tuple_struct_type_idx
+            .get(&inner)
+            .copied()
+            .and_then(mk),
         // option<scalar-list> → the inner list's typed array ref.
-        InternedTyKind::List(_) if is_gc_eligible_list_ty(ctx, inner) => {
-            registry.list_array_type_idx.get(&inner).copied().and_then(mk)
-        }
+        InternedTyKind::List(_) if is_gc_eligible_list_ty(ctx, inner) => registry
+            .list_array_type_idx
+            .get(&inner)
+            .copied()
+            .and_then(mk),
         // option<collapsing-option> → recurse.
         InternedTyKind::Option(_) => option_collapse_elem_valtype(ctx, inner, registry),
         _ => None,
@@ -1953,7 +1971,7 @@ fn list_elem_short_name(ctx: &CompilerContext, elem_ty: Ty) -> String {
 /// the registration side stays in EXACT lockstep with the LIR mount-path
 /// `is_gc_list` decision and codegen's `is_scalar_list_ty`.
 fn is_gc_eligible_list_ty(ctx: &CompilerContext, ty: Ty) -> bool {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     yel_core::lower_to_lir::is_scalar_list_ty_struct(ctx, ty, &mut seen)
 }
 
@@ -2022,12 +2040,13 @@ fn record_field_storage_type(ctx: &CompilerContext, ty: Ty, registry: &RecordGcT
         // slots (or vice versa).
         InternedTyKind::Option(_) | InternedTyKind::Result { .. } => {
             if is_is_gc_variant(ctx, ty, registry)
-                && let Some(&super_idx) = registry.gc_variant_super_idx.get(&ty) {
-                    return ValType::Ref(RefType {
-                        nullable: true,
-                        heap_type: HeapType::Concrete(super_idx),
-                    });
-                }
+                && let Some(&super_idx) = registry.gc_variant_super_idx.get(&ty)
+            {
+                return ValType::Ref(RefType {
+                    nullable: true,
+                    heap_type: HeapType::Concrete(super_idx),
+                });
+            }
             // Collapsing option<record|tuple|scalar-list>: store the inner's
             // concrete ref (none = null), matching `internal_repr`'s collapse
             // and the signal-storage / list-element rules — NOT anyref, so a
@@ -2086,12 +2105,13 @@ fn record_field_storage_type(ctx: &CompilerContext, ty: Ty, registry: &RecordGcT
             // User variants: typed supertype ref when migrated.
             DefKind::Variant(_) => {
                 if is_is_gc_variant(ctx, ty, registry)
-                    && let Some(&super_idx) = registry.gc_variant_super_idx.get(&ty) {
-                        return ValType::Ref(RefType {
-                            nullable: true,
-                            heap_type: HeapType::Concrete(super_idx),
-                        });
-                    }
+                    && let Some(&super_idx) = registry.gc_variant_super_idx.get(&ty)
+                {
+                    return ValType::Ref(RefType {
+                        nullable: true,
+                        heap_type: HeapType::Concrete(super_idx),
+                    });
+                }
                 ValType::Ref(RefType {
                     nullable: true,
                     heap_type: HeapType::Abstract {

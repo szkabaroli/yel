@@ -25,6 +25,7 @@ semver.workspace = true
 # Utilities
 indexmap.workspace = true
 parking_lot.workspace = true
+rustc-hash.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
@@ -35,3 +36,8 @@ pretty_assertions.workspace = true
 # set-text-content issued with the correct new value" — behaviour that
 # neither WIT snapshots nor `wasmparser` structural inspection can see.
 wasmtime.workspace = true
+
+# Determinism guard: forbid std HashMap/HashSet (random-seeded iteration order
+# leaks into emitted output). See root clippy.toml and docs/TECH_DEBT.md §7.
+[lints.clippy]
+disallowed_types = "deny"

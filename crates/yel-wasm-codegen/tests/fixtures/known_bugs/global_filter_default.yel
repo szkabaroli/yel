@@ -1,0 +1,31 @@
+package yel:globfilt@0.1.0;
+
+// A closure in a GLOBAL property default panics the compiler.
+//
+// `local_scope.rs:73` indexes an empty scope stack: the closure parameter
+// `x` is bound while lowering a module-scope initializer, and the
+// module-scope path never pushed a scope frame to bind it into.
+//
+// Scope is exactly the global property default. The same closure works in
+// both neighbouring positions, which is what makes this a bug rather than
+// an unsupported feature:
+//
+//   component App { evens: list<s32> = [1,2].filter({ x -> x > 2 }); }  OK
+//   global Store { func go() { let e = [1,2].filter({ x -> x > 2 }); } } OK
+//   global Store { evens: list<s32> = [1,2].filter({ x -> x > 2 }); }   PANIC
+//
+// This lived in `positive/` until 2026-07-29 writing `filter(|x| x > 2)`.
+// `|` is not an operator in this grammar, so `BLOCK_LEVEL_CATCH_ALL` ate the
+// whole line and `parse_global` reported nothing — the property never parsed,
+// the guard never guarded, and the fixture passed. See
+// `plans/rewrite/stage-1-syntax.md` Surprise 1.
+
+export global Store {
+    evens: list<s32> = [1, 2, 3, 4].filter({ x -> x > 2 });
+}
+
+export component App {
+    VStack {
+        Text { "filtered" }
+    }
+}

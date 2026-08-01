@@ -12,14 +12,14 @@
 //! typeck driver stores it in the `CompilerContext` side table keyed by the
 //! owning component/global `DefId` (`CompilerContext::set_signal_deps`).
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::hir::local_scope::LocalScope;
 use crate::ids::DefId;
 
 use super::expr::{ThirExpr, ThirExprKind, ThirStatement};
 use super::node::{ThirBinding, ThirComponent, ThirGlobal, ThirHandler, ThirNode, ThirNodeKind};
-use super::visit::{walk_expr, walk_stmt, ThirVisitor};
+use super::visit::{ThirVisitor, walk_expr, walk_stmt};
 
 /// Per-component signal dependency analysis.
 ///
@@ -73,10 +73,7 @@ pub fn check_component(
 /// derived-signal default expressions contribute to the dependency graph —
 /// so `binding_reads` and `handler_writes` stay empty and `effects_by_signal`
 /// only contains `EffectSource::DerivedSignal` entries.
-pub fn check_global(
-    global: &ThirGlobal,
-    is_signal: &impl Fn(DefId) -> bool,
-) -> SignalDependencies {
+pub fn check_global(global: &ThirGlobal, is_signal: &impl Fn(DefId) -> bool) -> SignalDependencies {
     analyze_global(global, is_signal)
 }
 
@@ -260,7 +257,7 @@ impl<'a, F: Fn(DefId) -> bool> Analyzer<'a, F> {
         // Setter bodies write to signals — treat them like handlers so
         // their writes are exposed.
         if let Some(setter) = &b.setter {
-            let mut writes = HashSet::new();
+            let mut writes = HashSet::default();
             self.collect_stmt_writes(setter, &mut writes);
             let mut writes: Vec<DefId> = writes.into_iter().collect();
             writes.sort_by_key(|d| d.index());
@@ -269,7 +266,7 @@ impl<'a, F: Fn(DefId) -> bool> Analyzer<'a, F> {
     }
 
     fn visit_handler(&mut self, h: &ThirHandler) {
-        let mut writes = HashSet::new();
+        let mut writes = HashSet::default();
         self.collect_stmt_writes(&h.body, &mut writes);
         let mut writes: Vec<DefId> = writes.into_iter().collect();
         writes.sort_by_key(|d| d.index());
@@ -279,7 +276,7 @@ impl<'a, F: Fn(DefId) -> bool> Analyzer<'a, F> {
     /// Collect the deduplicated, deterministically-ordered list of
     /// signal DefIds that `expr` reads.
     fn collect_reads(&self, expr: &ThirExpr) -> Vec<DefId> {
-        let mut set = HashSet::new();
+        let mut set = HashSet::default();
         self.collect_expr_reads(expr, &mut set);
         let mut out: Vec<DefId> = set.into_iter().collect();
         out.sort_by_key(|d| d.index());

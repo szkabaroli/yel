@@ -19,6 +19,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+rustc-hash.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

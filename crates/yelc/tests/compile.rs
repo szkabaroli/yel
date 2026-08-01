@@ -10,7 +10,7 @@ const LIB_ONLY: &str =
     "package yel:libonly@0.1.0;\n\nglobal Store { count: s32 = 42; label: string = \"Hello\"; }\n";
 
 /// A minimal exported component.
-const COMPONENT: &str = "package yel:ctnr@0.1.0;\n\nexport component Card {\n    title: string = \"\";\n    VStack {\n        Text { \"{title}\" }\n    }\n}\n";
+const COMPONENT: &str = "package yel:ctnr@0.1.0;\n\nexport component Panel {\n    title: string = \"\";\n    VStack {\n        Text { \"{title}\" }\n    }\n}\n";
 
 /// Unwrap a `Success`, or fail loudly with the diagnostics that came back.
 fn expect_success(outcome: CompileOutcome) -> CompileResult {
@@ -59,7 +59,10 @@ fn compiles_a_library_to_wit_with_its_declared_package() {
 fn compiles_a_component_to_a_valid_wasm_component_binary() {
     let result = expect_success(compile("card.yel", COMPONENT, OutputFormat::Wasm));
 
-    assert!(!result.wasm_bytes.is_empty(), "component should produce wasm");
+    assert!(
+        !result.wasm_bytes.is_empty(),
+        "component should produce wasm"
+    );
     assert_eq!(
         &result.wasm_bytes[..4],
         b"\0asm",
@@ -86,7 +89,10 @@ fn rust_format_is_a_disabled_placeholder() {
 fn reports_failure_with_an_error_diagnostic_on_a_parse_error() {
     let diags = expect_failure(compile("bad.yel", "@@@ not valid yel", OutputFormat::Wit));
 
-    assert!(!diags.is_empty(), "a parse error should surface diagnostics");
+    assert!(
+        !diags.is_empty(),
+        "a parse error should surface diagnostics"
+    );
     assert!(
         diags.iter().any(|d| d.severity == "error"),
         "at least one diagnostic should be an error"

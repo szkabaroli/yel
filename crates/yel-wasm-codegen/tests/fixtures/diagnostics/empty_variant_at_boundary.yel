@@ -1,0 +1,8 @@
+package yel:emptyvarbound@0.1.0;
+
+variant V { }
+
+export component App {
+    choice: option<V> = none;
+    VStack { Text { "ok" } }
+}

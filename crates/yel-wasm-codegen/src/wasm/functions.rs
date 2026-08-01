@@ -40,7 +40,7 @@
 //!   the ops that actually read those layouts, but the index must
 //!   exist.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use wasm_encoder::{
     CodeSection, ExportKind, ExportSection, Function, FunctionSection, Module, TypeSection,
@@ -81,7 +81,7 @@ pub fn generate_function_module(
     ctx: &CompilerContext,
     inputs: &[FunctionInput<'_>],
 ) -> Result<Vec<u8>, CodegenError> {
-    generate_function_module_with_names(ctx, inputs, &HashMap::new())
+    generate_function_module_with_names(ctx, inputs, &HashMap::default())
 }
 
 /// Variant of [`generate_function_module`] that lets the caller
@@ -118,7 +118,7 @@ pub fn generate_function_module_with_names(
     // Pass 1: pre-populate the DefId → wasm-func-idx map so
     // `LirOp::CallFunction` resolves during body emit (handled by
     // emit_op via `self.def_id_to_func_idx`).
-    let mut def_to_idx: HashMap<DefId, u32> = HashMap::new();
+    let mut def_to_idx: HashMap<DefId, u32> = HashMap::default();
     for (i, input) in inputs.iter().enumerate() {
         if let FunctionRole::FreeFunction { def_id, .. } = &input.lir_fn.role {
             def_to_idx.insert(*def_id, i as u32);
@@ -273,8 +273,9 @@ fn build_function(
     // emitter's `ReturnValue` arm does `local.get <value>; return`,
     // satisfying the function's typed wasm return on the stack at
     // the early-exit point. No per-caller walker needed.
+    let component: &LirResource = &builder.components[comp_idx];
     for op in &block.ops {
-        builder.emit_op(&mut func, op, comp_idx, block, 0)?;
+        builder.emit_op(&mut func, op, component, Some(comp_idx), block, 0)?;
     }
 
     // Tear down per-function state so a later function gets clean

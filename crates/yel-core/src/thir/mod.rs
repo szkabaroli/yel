@@ -13,4 +13,4 @@ pub use expr::{ThirExpr, ThirExprKind, ThirInterpolationPart, ThirPattern, ThirS
 pub use node::{
     ThirBinding, ThirComponent, ThirGlobal, ThirHandler, ThirItem, ThirNode, ThirNodeKind,
 };
-pub use typeck::{type_check, type_check_with_map, Mode, TypeCheckResult, TypeMap};
+pub use typeck::{Mode, TypeCheckResult, TypeMap, type_check, type_check_with_map};

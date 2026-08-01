@@ -1,6 +1,6 @@
 package yel:ctnr@0.1.0;
 
-export component Card {
+export component Panel {
     title: string = "";
     VStack {
         Text { "{title}" }

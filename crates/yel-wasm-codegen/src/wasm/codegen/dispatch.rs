@@ -1,7 +1,7 @@
 //! Standalone dispatch function emission + value-coercion / input-binding
 //! helpers used by dispatch when threading event payloads back to setters.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use wasm_encoder::{Function, Instruction, ValType};
 use yel_core::Ty;
@@ -13,6 +13,33 @@ use super::constants::{HANDLER_ID_HANDLE_SHIFT, HANDLER_ID_LOCAL_MASK};
 use super::scratch::{i32_narrow_store_for, mem_arg};
 
 impl<'a> WasmPackageBuilder<'a> {
+    /// The discriminant (0-based case index) of a named `event-value` case,
+    /// read from the registered `known.variants.event_value` builtin variant —
+    /// so dispatch decode derives the ordinal instead of hardcoding it.
+    fn event_value_case_disc(&self, case_name: &str) -> Result<i32, CodegenError> {
+        let ev =
+            self.ctx.known.variants.event_value.ok_or_else(|| {
+                CodegenError::InvalidIR("event-value variant not registered".into())
+            })?;
+        let var = self
+            .ctx
+            .defs
+            .as_variant(ev)
+            .ok_or_else(|| CodegenError::InvalidIR("event-value is not a variant".into()))?;
+        var.cases
+            .iter()
+            .position(|&c| match self.ctx.defs.kind(c) {
+                yel_core::definitions::DefKind::VariantCase(vc) => {
+                    &*self.ctx.str(vc.name) == case_name
+                }
+                _ => false,
+            })
+            .map(|i| i as i32)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!("event-value has no `{case_name}` case"))
+            })
+    }
+
     pub(super) fn generate_dispatch(
         &mut self,
         layouts: &[MemoryLayout],
@@ -26,7 +53,9 @@ impl<'a> WasmPackageBuilder<'a> {
         //
         // Param 1: event-value discriminant (see arm map below).
         // Param 2/3: payload joined slots.
-        //   event_disc arms (1:1 with WIT `event-value` declaration order):
+        //   event_disc arms — ordinals come from the registered
+        //   `known.variants.event_value` builtin variant (see
+        //   `event_value_case_disc`), not hardcoded. Current order:
         //     0 = none                (no-op preamble)
         //     1 = input-text(string)  — slot0=ptr zext, slot1=len
         //     2 = input-f64(f64)      — slot0 holds f64 bit pattern
@@ -71,7 +100,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // Local layout: WASM params 0..3 (4 of them), then locals start
         // at 4: [handle_local: i32], then one ref local per owner comp.
         let handle_local: u32 = 4;
-        let mut owner_self_local: HashMap<usize, u32> = HashMap::new();
+        let mut owner_self_local: HashMap<usize, u32> = HashMap::default();
         let mut local_decls: Vec<(u32, ValType)> = vec![(1, ValType::I32)];
         for (next_local, &ci) in (5_u32..).zip(owner_comps.iter()) {
             let struct_ty = self.gc_layouts[ci]
@@ -135,8 +164,8 @@ impl<'a> WasmPackageBuilder<'a> {
 
             // Binding-setter preamble: extract payload, coerce to
             // target signal's type, store, trigger effects. Skipped
-            // entirely for non-input dispatches (discriminant ≠ 2 for
-            // input-f64, etc.) so the body still runs if the host
+            // entirely for non-input dispatches (the derived input-f64 discriminant) for
+            // non-input dispatches so the body still runs if the host
             // misroutes a handler — but no signal mutation leaks.
             if let Some(target_def_id) = input_binding_target {
                 let _layout = &layouts[*owner_comp_idx];
@@ -172,7 +201,7 @@ impl<'a> WasmPackageBuilder<'a> {
                         )));
                     };
 
-                // Emit: if event_disc == 2 (input-f64), extract f64
+                // Emit: if event_disc == the input-f64 ordinal, extract f64
                 // from slot0, coerce to target_ty, store at target_addr,
                 // trigger effects. Covers every numeric target reachable
                 // via `<input type="number">` — floats (identity /
@@ -193,8 +222,9 @@ impl<'a> WasmPackageBuilder<'a> {
                         | InternedTyKind::U64
                 );
                 if supported_numeric_target {
+                    let input_f64_disc = self.event_value_case_disc("input-f64")?;
                     func.instruction(&Instruction::LocalGet(PARAM_EVENT_DISC));
-                    func.instruction(&Instruction::I32Const(2)); // input-f64
+                    func.instruction(&Instruction::I32Const(input_f64_disc));
                     func.instruction(&Instruction::I32Eq);
                     func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
 
@@ -290,7 +320,7 @@ impl<'a> WasmPackageBuilder<'a> {
                     // Trigger effects watching this signal.
                     self.emit_trigger_effects(&mut func, target_def_id, *owner_comp_idx)?;
 
-                    func.instruction(&Instruction::End); // end disc==2 guard
+                    func.instruction(&Instruction::End); // end input-f64 guard
                 }
             }
 
@@ -309,12 +339,12 @@ impl<'a> WasmPackageBuilder<'a> {
                     .as_ref()
                     .and_then(|r| r.store_fat_ptr)
                     .ok_or_else(|| {
-                        CodegenError::InvalidIR(
-                            "dispatch: payload-binding handler needs store_fat_ptr but the \
+                    CodegenError::InvalidIR(
+                        "dispatch: payload-binding handler needs store_fat_ptr but the \
                              runtime helper was not emitted (runtime_needs scan missed it?)"
-                                .to_string(),
-                        )
-                    })?;
+                            .to_string(),
+                    )
+                })?;
                 func.instruction(&Instruction::I32Const(offset));
                 func.instruction(&Instruction::LocalGet(PARAM_SLOT0_I64));
                 func.instruction(&Instruction::I32WrapI64);

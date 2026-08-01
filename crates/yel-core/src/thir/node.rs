@@ -1,6 +1,6 @@
 //! THIR UI node types.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::ids::{DefId, LocalId, NodeId};
 use crate::interner::Name;
@@ -29,16 +29,18 @@ pub struct ThirComponent {
     pub body: Vec<ThirNode>,
 }
 
-/// A THIR global-singleton definition.
+/// A THIR global-singleton definition — a first-class [`ThirItem`] variant,
+/// the peer of [`ThirComponent`].
 ///
-/// Phase 1.1c-k: globals are modelled as "singleton ThirComponents" so the
-/// same type-checked + signalck'd contract that drives component lowering
-/// also drives global lowering. Globals carry only the subset that applies:
-/// signals (properties) and their type-checked default expressions. The
-/// signal-dependency analysis produced by [`super::signalck`] lives in the
-/// `CompilerContext` side table (keyed by this global's `DefId`), not on this
-/// node. Globals have no UI body, no handlers, no mount/effects on DOM —
-/// derived-signal fanout is the only effect surface.
+/// A global carries the subset of a component that applies to a host-boundary
+/// singleton: its signals (properties) and their type-checked default
+/// expressions. It has no UI body, no handlers, and no DOM mount/effects —
+/// derived-signal fanout is its only effect surface — so it carries no node
+/// tree (that is a component-specific shape, not a missing field). Its
+/// signal-dependency analysis lives in the `CompilerContext::signal_deps`
+/// side table keyed by `DefId`, exactly as a component's does: signalck is a
+/// read-only analysis, so its output sits with the other analysis tables for
+/// both kinds of item alike, not bolted onto the node.
 #[derive(Debug, Clone)]
 pub struct ThirGlobal {
     /// DefId of this global.
@@ -78,11 +80,27 @@ impl ThirItem {
         }
     }
 
+    /// The global, if this item is one.
+    pub fn as_global(&self) -> Option<&ThirGlobal> {
+        match self {
+            ThirItem::Global(g) => Some(g),
+            ThirItem::Component(_) => None,
+        }
+    }
+
     /// Consume the item, yielding the component if it is one.
     pub fn into_component(self) -> Option<ThirComponent> {
         match self {
             ThirItem::Component(c) => Some(c),
             ThirItem::Global(_) => None,
+        }
+    }
+
+    /// Consume the item, yielding the global if it is one.
+    pub fn into_global(self) -> Option<ThirGlobal> {
+        match self {
+            ThirItem::Global(g) => Some(g),
+            ThirItem::Component(_) => None,
         }
     }
 }

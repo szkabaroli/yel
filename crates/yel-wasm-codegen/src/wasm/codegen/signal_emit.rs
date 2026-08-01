@@ -4,7 +4,6 @@
 
 use wasm_encoder::{Function, Instruction};
 use yel_core::DefId;
-use yel_core::lir::{LirExpr, LirResource};
 
 use super::super::CodegenError;
 use super::super::WasmPackageBuilder;
@@ -167,7 +166,7 @@ impl<'a> WasmPackageBuilder<'a> {
     pub(crate) fn emit_self_handle_load(
         &self,
         func: &mut Function,
-        component: &yel_core::lir::LirResource,
+        component: &dyn yel_core::lir::arena::LirResourceArena,
     ) -> Result<(), CodegenError> {
         let comp_idx = self.comp_idx_of(component).ok_or_else(|| {
             CodegenError::InvalidIR(
@@ -515,45 +514,6 @@ impl<'a> WasmPackageBuilder<'a> {
         let core_globals = self.resolve_global_core_globals(prop_def_id)?;
         for &g in &core_globals {
             func.instruction(&Instruction::GlobalGet(g));
-        }
-        Ok(())
-    }
-
-    /// Evaluate `expr` and store its value into the migrated global
-    /// property's struct fields. Mirrors
-    /// `emit_signal_struct_store_from_expr` but sources the self ref
-    /// from the per-block `(mut (ref null $globals_<i>))` global
-    /// instead of `current_self_local`.
-    pub(crate) fn emit_global_struct_store_from_expr(
-        &mut self,
-        func: &mut Function,
-        prop_def_id: DefId,
-        expr: &LirExpr,
-        component: &LirResource,
-        scratch: crate::wasm::FlatScratchBases,
-    ) -> Result<(), CodegenError> {
-        let _ = scratch;
-        let core_globals = self.resolve_global_core_globals(prop_def_id)?;
-        let slot_valtypes = self.signal_storage_valtypes(expr.ty);
-        if slot_valtypes.len() != core_globals.len() {
-            return Err(CodegenError::InvalidIR(format!(
-                "emit_global_struct_store_from_expr: storage valtypes ({}) disagree with core globals ({}) for property {:?}",
-                slot_valtypes.len(),
-                core_globals.len(),
-                prop_def_id,
-            )));
-        }
-        if slot_valtypes.is_empty() {
-            // Defensive: nothing to write. emit expr for side effects.
-            self.emit_expr(func, expr, component)?;
-            return Ok(());
-        }
-        // Emit the value expr (pushes N slots, slot 0 deepest / slot N-1
-        // on top), then `global.set` each slot in reverse so the top of
-        // stack lands in the last field — no scratch spill needed.
-        self.emit_expr(func, expr, component)?;
-        for i in (0..core_globals.len()).rev() {
-            func.instruction(&Instruction::GlobalSet(core_globals[i]));
         }
         Ok(())
     }

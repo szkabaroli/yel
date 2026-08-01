@@ -1,0 +1,25 @@
+// List operations.
+//
+// STATUS: specification artifact. Signatures parse today; nothing compiles
+// this yet. See stdlib/README.md.
+
+package yel:std@0.1.0;
+
+export global List {
+    // Documented in LANGUAGE.md § Built-in Functions.
+    len: func<T>(items: list<T>) -> s32;
+    filter: func<T>(items: list<T>, keep: func(item: T) -> bool) -> list<T>;
+
+    // Registered by the frozen compiler, absent from LANGUAGE.md. Recorded
+    // here because the source stdlib is where they would become documented —
+    // or where the decision to drop them would be made.
+    get: func<T>(items: list<T>, index: s32) -> option<T>;
+    append: func<T>(items: list<T>, item: T) -> list<T>;
+
+    // Not in either. Included because a list module without them invites
+    // every caller to write its own, and because `map` is the case that
+    // needs two type parameters.
+    first: func<T>(items: list<T>) -> option<T>;
+    map: func<T, U>(items: list<T>, transform: func(item: T) -> U) -> list<U>;
+    contains: func<T>(items: list<T>, item: T) -> bool;
+}

@@ -1,0 +1,98 @@
+name: Corpus
+
+# The five test targets that sweep the 2000-program oracle corpus:
+#   yelc-syntax/{corpus,parity,identity}, yelc-hir/frozen_parity,
+#   yelc-sema/single_namespace
+#
+# They cannot run in ci.yml. The corpus bodies are untracked (209 MB — see
+# .gitignore), and `corpus_sources()` panics on a missing corpus rather than
+# shrinking the sweep silently, so a normal checkout cannot run them at all.
+#
+# Regenerating is only sound at the **freeze SHA**: seed N does not reproduce
+# the same program across yel-smith versions, so a corpus built at any other
+# commit is a different corpus and not the oracle these tests compare against
+# (plans/rewrite/corpus.md). This job therefore rebuilds the frozen compiler
+# from that exact commit in a worktree, regenerates, and checks the result
+# against the tracked digests before running anything.
+#
+# Not on every PR: it is a release build of the frozen compiler plus 8000
+# artifact generations.
+
+on:
+  schedule:
+    # Mondays, 04:00 UTC.
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  corpus:
+    name: oracle corpus sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `git worktree add <freeze_sha>` needs that commit present.
+          fetch-depth: 0
+
+      - name: Read the freeze point
+        id: freeze
+        run: |
+          sha="$(sed -n 's/^freeze_sha=//p' corpus/MANIFEST)"
+          if [ -z "$sha" ]; then
+            echo "corpus/MANIFEST has no freeze_sha" >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "freeze SHA: $sha"
+          cat corpus/MANIFEST
+
+      # Pinned, not `stable`, and deliberately: the corpus is compared by digest
+      # against artifacts the recorded toolchain produced. A newer rustc or
+      # wasm-tools can change emitted bytes for reasons that have nothing to do
+      # with this repo, which would read as an oracle divergence. Both versions
+      # come from corpus/MANIFEST; bump them here when the corpus is refrozen.
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools@1.227.1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Regenerate the corpus at the freeze SHA
+        run: |
+          git worktree add ../freeze "${{ steps.freeze.outputs.sha }}"
+          cd ../freeze
+          scripts/freeze-corpus.sh 2000 corpus
+
+      # The whole point of keeping SHA256SUMS when the bodies were untracked:
+      # `shasum -c` still answers "did anything move?" over all 8000 files.
+      - name: Does the regenerated corpus match the tracked digests?
+        run: |
+          if diff -u <(LC_ALL=C sort corpus/SHA256SUMS) \
+                     <(LC_ALL=C sort ../freeze/corpus/SHA256SUMS) > /tmp/digest.diff; then
+            echo "corpus reproduced byte-for-byte at the freeze SHA"
+          else
+            echo "::error::regenerated corpus differs from corpus/SHA256SUMS"
+            echo "Either the frozen compiler's output moved, or the toolchain"
+            echo "drifted from the versions recorded in corpus/MANIFEST."
+            head -50 /tmp/digest.diff
+            exit 1
+          fi
+
+      - name: Install the corpus into the working checkout
+        run: |
+          cp -R ../freeze/corpus/src ../freeze/corpus/wit \
+                ../freeze/corpus/dot ../freeze/corpus/wasm corpus/
+          echo "src=$(ls -1 corpus/src | wc -l) wasm=$(ls -1 corpus/wasm | wc -l)"
+
+      - name: Sweep
+        run: |
+          cargo test --locked -p yelc-syntax \
+            --test corpus --test parity --test identity
+          cargo test --locked -p yelc-hir --test frozen_parity
+          cargo test --locked -p yelc-sema --test single_namespace

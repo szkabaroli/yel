@@ -5,8 +5,8 @@
 //!   yel-smith --seed 12345 > output.yel
 
 use arbitrary::Unstructured;
-use yel_smith::{Config, YelModule};
 use std::io::{self, Read, Write};
+use yel_smith::{Config, YelModule};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -21,9 +21,11 @@ fn main() -> anyhow::Result<()> {
         io::stdin().read_to_end(&mut data)?;
         if data.is_empty() {
             // Generate some random data if stdin is empty
-            generate_from_seed(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos() as u64)
+            generate_from_seed(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos() as u64,
+            )
         } else {
             data
         }

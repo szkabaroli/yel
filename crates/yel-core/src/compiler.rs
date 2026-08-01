@@ -7,14 +7,16 @@ use crate::context::CompilerContext;
 use crate::diagnostic::{Diagnostic, ErrorCode};
 use crate::hir::{HirItem, lower_file};
 use crate::ids::DefId;
-use crate::lir::{LirExpr, LirResource, lower_component as lower_to_lir, lower_globals};
+use crate::lir::{
+    LirExpr, LirGlobal, LirModule, LirResource, lower_component as lower_to_lir, lower_globals,
+};
 use crate::source::{SourceId, Span};
 use crate::stdlib_lookup::lookup_known_definitions;
-use crate::syntax::ast::File;
+use crate::syntax::ast::{File, PackageId};
 use crate::syntax::parser::{CatchedError, ParseError, parse_file_with_source_id};
 use crate::thir::{ThirComponent, ThirExpr, ThirItem, type_check};
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::path::Path;
 
 /// Result type for compilation.
@@ -150,18 +152,19 @@ impl Compiler {
         &self.ctx
     }
 
-    /// Build the **import-side boundary contract** as data on the module:
-    /// one [`LirInterface`] per *foreign-package* global (today only the
-    /// built-in `Dom` global). Each entry carries its package, the ADTs it
-    /// owns inline (`owned_types`), and its functions as plain signatures —
-    /// the backend renders this directly instead of re-deriving DOM from
-    /// `ctx.dom_imports()`. Local globals still flow through the existing
-    /// `create_globals_interfaces` path (they reference shared types, not
-    /// inline ones); they migrate onto the contract next.
-    pub fn build_import_interfaces(
+    /// Build the module's **import-side boundary contract** and **host-import
+    /// registry** as data on the module — one unified source for every
+    /// imported function and the WIT interfaces that declare them. See
+    /// [`CompilerContext::build_import_contract`]. `component_def_ids` are the
+    /// components in resource order (for stable import indices).
+    pub fn build_import_contract(
         &self,
-    ) -> crate::index_vec::IndexVec<crate::ids::InterfaceId, crate::lir::LirInterface> {
-        self.ctx.build_import_interfaces()
+        component_def_ids: &[DefId],
+    ) -> (
+        crate::index_vec::IndexVec<crate::ids::InterfaceId, crate::lir::LirInterface>,
+        Vec<crate::lir::LirImport>,
+    ) {
+        self.ctx.build_import_contract(component_def_ids)
     }
 
     /// Load and parse a source file.
@@ -297,12 +300,89 @@ impl Compiler {
         crate::lower_to_lir::resolve_global_triggers(&self.ctx, resources)
     }
 
-    /// Lower type-checked global property defaults to LIR.
+    /// Lower type-checked global blocks to first-class LIR globals, plus the
+    /// shared default-expression arena they index into.
     pub fn lower_globals_to_lir(
         &self,
         thir_defaults: &HashMap<DefId, ThirExpr>,
-    ) -> (HashMap<DefId, LirExpr>, Vec<LirExpr>) {
+    ) -> (Vec<LirGlobal>, Vec<LirExpr>) {
         lower_globals(thir_defaults, &self.ctx)
+    }
+
+    /// Lower a whole module's HIR top-level items to a [`LirModule`] — the
+    /// single uniform spine every driver (CLI, tests, fuzzer) shares instead
+    /// of hand-rolling the item match plus the trailing module passes.
+    ///
+    /// Type-checks each item; components lower to resources, globals'
+    /// type-checked defaults accumulate; then the module-level passes run:
+    /// `resolve_global_triggers`, global lowering (→ `LirGlobal`s + the shared
+    /// default-expr arena), and the import contract (`imports` + WIT
+    /// `interfaces`). Errors **accumulate** in the context — callers check
+    /// [`Self::has_errors`] and render diagnostics themselves rather than this
+    /// returning `Result`.
+    pub fn lower_items_to_module(
+        &mut self,
+        items: &[HirItem],
+        package: Option<PackageId>,
+    ) -> LirModule {
+        // Type-check every item first. LIR lowering assumes well-typed input,
+        // so if any item errored we stop before lowering and hand back an
+        // empty module — the caller bails on `has_errors()`. Checking after
+        // the whole list (not per item) means a file's type errors are all
+        // reported at once, matching the accumulate-diagnostics convention.
+        let thir_items: Vec<ThirItem> = items.iter().map(|item| self.type_check(item)).collect();
+        if self.has_errors() {
+            return LirModule {
+                package,
+                ..LirModule::default()
+            };
+        }
+
+        let mut resources = Vec::new();
+        let mut global_thir_defaults: HashMap<DefId, ThirExpr> = HashMap::default();
+        for thir in thir_items {
+            match thir {
+                ThirItem::Component(thir) => resources.push(self.lower_to_lir(&thir)),
+                ThirItem::Global(global) => {
+                    global_thir_defaults.extend(global.signal_defaults);
+                }
+            }
+        }
+        // Module-level passes: synthesize per-observer global fanout blocks
+        // and expand `TriggerEffects` placeholders (must run after every
+        // component is lowered), then lower globals and build the import
+        // contract off the finished resource set.
+        self.resolve_global_triggers(&mut resources);
+        let (globals, mut global_exprs) = self.lower_globals_to_lir(&global_thir_defaults);
+        // Plan the module-start init in LIR (a block of ops), so the backend
+        // transcribes it rather than building it imperatively.
+        let global_init_block =
+            crate::lower_to_lir::synth_globals_init_block(&self.ctx, &globals, &mut global_exprs);
+        let component_def_ids: Vec<DefId> = resources.iter().map(|r| r.def_id).collect();
+        let (mut interfaces, imports) = self.build_import_contract(&component_def_ids);
+        // §6.7 Phase 1: also produce the export-direction boundary contract as
+        // data. Nothing consumes it yet (the WIT renderer still synthesizes the
+        // export surface via `create_component_interface`); appended here so it
+        // rides `LirModule.interfaces`, where the import renderer skips every
+        // non-`Import` entry. Wiring the renderer onto it is Phase 2.
+        for iface in self.ctx.build_export_interfaces(&resources) {
+            interfaces.push(iface);
+        }
+        // §6.7 Phase 3: `extern component X` declarations become Import-direction
+        // resource interfaces in the same contract (rendered by the shared
+        // `render_resource_interface`).
+        for iface in self.ctx.build_extern_component_interfaces() {
+            interfaces.push(iface);
+        }
+        LirModule {
+            resources,
+            globals,
+            global_exprs,
+            global_init_block,
+            imports,
+            interfaces,
+            package,
+        }
     }
 
     /// Check if there were any errors.

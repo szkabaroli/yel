@@ -18,6 +18,7 @@ through the WebAssembly Component Model.
   - [Records](#records)
   - [Enums](#enums)
   - [Variants](#variants)
+  - [Type Parameters](#type-parameters)
 - [Components](#components)
   - [Properties (State)](#properties-state)
   - [Composition](#composition)
@@ -28,6 +29,7 @@ through the WebAssembly Component Model.
   - [Event Handlers](#event-handlers)
   - [Two-Way Bindings](#two-way-bindings)
   - [Conditional Rendering](#conditional-rendering)
+  - [Match Rendering](#match-rendering)
   - [List Rendering](#list-rendering)
 - [Globals](#globals)
   - [In-Tree Shared State](#in-tree-shared-state)
@@ -43,6 +45,8 @@ through the WebAssembly Component Model.
   - [Function and Method Calls](#function-and-method-calls)
   - [Closures](#closures)
   - [Ternary Expressions](#ternary-expressions)
+  - [Match](#match)
+  - [Function Bodies](#function-bodies)
   - [Ranges](#ranges)
 - [Statements](#statements)
 - [Built-in Elements](#built-in-elements)
@@ -188,6 +192,38 @@ variant Filter {
 
 The built-in `option<T>` type is a variant with `some(T)` and `none` cases.
 Construct option values with `some(value)` and `none`.
+
+### Type Parameters
+
+A function may declare type parameters, so one definition works for many types:
+
+```yel
+first: func<T>(items: list<T>) -> option<T>;
+map: func<T, U>(items: list<T>, transform: func(T) -> U) -> list<U>;
+```
+
+The parameter list goes after `func` and before the arguments. Parameters are
+named like types (`T`, `U`, `Item`) and are in scope for the whole signature.
+
+**Type arguments are inferred at the call site** from the argument types — there
+is no syntax for passing them explicitly:
+
+```yel
+names: list<string> = ["ana", "bo"];
+head: option<string> = first(names);    // T is string
+```
+
+If a call does not determine every parameter, that is an error at the call, the
+same as any other type that cannot be inferred.
+
+**There are no constraints.** A type parameter accepts any type, and a generic
+body may only do what works for every type — pass it, store it, return it. There
+is no way to require that `T` is comparable or printable, so `func<T>(a: T, b: T)
+-> bool` cannot compare `a` and `b`.
+
+Generic **types** — a user-written `record Pair<T>` — are not part of this. The
+built-in `list<T>`, `option<T>` and `result<T, E>` are the only parameterised
+types, and user types are concrete.
 
 ---
 
@@ -406,6 +442,25 @@ if MailStore.has-selection {
 
 Branches mount and unmount their children. The condition is any boolean
 expression.
+
+### Match Rendering
+
+Use [`match`](#match) to pick a UI subtree by the *shape* of a value, rather than
+by a boolean. Each arm's body is a subtree:
+
+```yel
+match filter {
+    all -> Text { "everything" }
+    none -> Text { "nothing" }
+    some(items) -> VStack {
+        for item in items { Text { "{item}" } }
+    }
+}
+```
+
+Arms mount and unmount their children exactly as `if` branches do, and the
+subtree re-renders when the matched value changes. The same exhaustiveness rule
+applies: every case needs an arm, or a `_` arm to cover the rest.
 
 ### List Rendering
 
@@ -649,6 +704,109 @@ selected ? #2563eb : #00000000
 selected-index >= 0 ? some(filtered[selected-index]) : none
 ```
 
+### Match
+
+`match` branches on the *shape* of a value, binding any payload it carries. It is
+the only way to take a variant apart.
+
+```yel
+match filter {
+    all -> "everything"
+    none -> "nothing"
+    some(items) -> "{items.len()} selected"
+}
+```
+
+Arms use `->`, the same producer arrow as closures. A block-bodied arm needs no
+separator; an expression arm is followed by a comma when another arm follows on
+the same line.
+
+**Patterns**
+
+| Pattern | Example | Matches |
+|---------|---------|---------|
+| Case | `none`, `all` | a case of the value's variant or enum, carrying no payload |
+| Case with payload | `some(items)` | that case, binding the payload to `items` |
+| Nested | `some(some(x))` | patterns nest to any depth |
+| Boolean | `true`, `false` | a `bool` value |
+| Binding | `rest` | anything, binding it to `rest` |
+| Wildcard | `_` | anything, binding nothing |
+
+A bare lowercase name is a **case pattern** when it names a case of the value's
+type, and a **binding** otherwise. So in a `match` on an `option<s32>`, `none`
+matches the empty case, while `total` binds the whole option.
+
+**Matches must be exhaustive.** Every case of the value's type needs an arm, or a
+`_` arm must cover the rest. A `match` missing a case is a compile error naming
+the cases you left out — this is what makes variants safe to add cases to.
+
+```yel
+match status {
+    pending -> "waiting"
+    active -> "running"
+    // error: non-exhaustive match, missing `completed`
+}
+```
+
+**Where a `match` can appear.** Like `if`, the same keyword means three things
+depending on *where you write it*, and the position is what decides — there is no
+different syntax to remember:
+
+| Written in | It is | Arms produce |
+|-------------|-------|--------------|
+| a value position | a match **expression** (below) | a value; every arm the same type |
+| a component body | a [match in a template](#match-rendering) | UI subtrees |
+| a handler, closure or `set` block | a [match **statement**](#match-statements) | nothing |
+
+As an expression, every arm must produce the same type:
+
+```yel
+label: string = match status {
+    pending -> "waiting"
+    active -> "running"
+    completed -> "done"
+};
+```
+
+### Function Bodies
+
+A function declaration may carry a body, written as a block after the signature:
+
+```yel
+export global Math {
+    double: func(n: s32) -> s32 { n * 2 }
+
+    clamp: func(value: s32, low: s32, high: s32) -> s32 {
+        if value < low { low }
+        else if value > high { high }
+        else { value }
+    }
+}
+```
+
+Parameters are declared **once**, in the signature, and are in scope for the
+body. A block's value is its final expression; a block with no final expression
+produces nothing.
+
+**A function body and a [closure](#closures) body are the same construct** — the
+same statements, the same scoping, the same value rule. The difference is only
+where the parameters come from:
+
+```yel
+double: func(n: s32) -> s32 { n * 2 }   // parameters from the signature
+{ n: s32 -> n * 2 }                     // parameters from the closure head
+```
+
+A declaration **without** a body stays a declaration — that is how a `global`
+declares a callback the host implements, and how a component declares one its
+parent supplies:
+
+```yel
+export global Clock {
+    now: func() -> s64;                 // the host implements this
+}
+```
+
 ### Ranges
 
 Range expressions create sequences (used with `for` loops or list operations):
@@ -697,6 +855,69 @@ if count > 10 {
     label = "normal";
 }
 ```
+
+### For Statements
+
+`for` iterates in statement position, with the same syntax it uses in a
+[template](#list-rendering):
+
+```yel
+for item in items {
+    total = total + item.price;
+}
+
+for i in 0..count {
+    array-set(out, i, none);
+}
+```
+
+Over a list, the loop variable is each element. Over a [range](#ranges), it is
+each value in turn.
+
+Like [`if`](#if-statements) and [`match`](#match-statements), `for` is the same
+construct in both positions — the difference is only what the body contains:
+UI nodes in a template, statements in a block.
+
+There is no `while`. A loop that is not over a list or a range has no way to be
+written; if one is needed, that is a separate decision.
+
+### Return
+
+`return` exits a function early:
+
+```yel
+starts-with: func(text: string, prefix: string) -> bool {
+    if bytes-len(prefix) > bytes-len(text) { return false; }
+
+    for i in 0..bytes-len(prefix) {
+        if byte-at(text, i) != byte-at(prefix, i) { return false; }
+    }
+
+    true
+}
+```
+
+`return expr;` produces a value; `return;` exits a function that returns nothing.
+The value must match the function's declared return type.
+
+A function's last expression is still its value — `return` is for leaving
+*before* the end, not for producing the result. `return` inside a closure exits
+the closure, not the enclosing function.
+
+### Match Statements
+
+[`match`](#match) as a statement runs the arm that matches and produces no value:
+
+```yel
+match status {
+    pending -> { label = "waiting"; }
+    active -> { label = "running"; }
+    completed -> { label = "done"; done-at = now(); }
+}
+```
+
+Arms are blocks here, so they may contain several statements. Exhaustiveness is
+required, the same as everywhere else.
 
 ### Expression Statements
 
@@ -812,3 +1033,39 @@ _private
 Component and type names conventionally use PascalCase (`Counter`, `MailStore`,
 `Person`). Property and variable names use kebab-case (`selected-id`,
 `dark-mode`). Enum cases use kebab-case (`inbox`, `in-progress`).
+
+### Hyphens
+
+A hyphen is part of an identifier only when a letter, digit, or underscore
+follows it. Everywhere else it is the subtraction or negation operator:
+
+```
+selected-id          one identifier
+count-1              one identifier — `1` continues the name
+count - 1            subtraction
+count -= 1           compound assignment, not a name `count-`
+{ p: s32 -> p }      a closure; so is `{ p: s32->p }`
+```
+
+That rule is what lets kebab-case names and the `-` operator coexist without
+whitespace being significant.
+
+### Keywords are reserved at word boundaries
+
+`component`, `global`, `record`, `enum`, `variant`, `element`, `extern`,
+`package`, `export`, `func`, `callback`, `if`, `else`, `for`, `in`, `key`,
+`let`, `set`, and `bind` are keywords **only when a name character does not
+follow them**. A longer identifier that merely begins with one is an ordinary
+identifier:
+
+```
+if active { … }      an if-node
+ifactive { … }       an element named `ifactive`
+record Person { … }  a record declaration
+recordPerson         an identifier
+for item in xs { … } a for-loop
+format { … }         an element named `format`
+```
+
+So a keyword never claims the front of a longer name, and no identifier is
+rejected merely for starting with one.

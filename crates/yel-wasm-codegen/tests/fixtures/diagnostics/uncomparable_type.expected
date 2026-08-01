@@ -1,0 +1,2 @@
+operator is not supported on type `R`
+comparison requires a numeric, bool, char, or enum operand

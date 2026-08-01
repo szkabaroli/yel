@@ -10,10 +10,8 @@
 //!
 //! This renderer walks LIR directly and does not depend on any codegen
 //! helpers; emit order is deterministic for snapshot stability.
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::Write,
-};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::fmt::Write;
 
 use yel_core::{
     CompilerContext, DefId, InternedTyKind, NodeId, Ty,
@@ -69,7 +67,7 @@ pub fn generate_dot(
     // Without this resolution the DOT referenced dangling nodes like
     // `c0_sig_372` — a global property DefId that no component "owns" —
     // producing an unrenderable graph.
-    let mut local_signals: HashSet<DefId> = HashSet::new();
+    let mut local_signals: HashSet<DefId> = HashSet::default();
     for comp in components {
         for sig in &comp.signals {
             local_signals.insert(sig.def_id);
@@ -139,7 +137,7 @@ fn render_globals(
     // an owner (shouldn't happen for parsed source — guard defensively)
     // land under a synthetic "<orphan>" bucket.
     let mut owners_in_order: Vec<DefId> = Vec::new();
-    let mut by_owner: HashMap<DefId, Vec<DefId>> = HashMap::new();
+    let mut by_owner: HashMap<DefId, Vec<DefId>> = HashMap::default();
     let mut orphans: Vec<DefId> = Vec::new();
     for &def_id in globals {
         match ctx.defs.as_field(def_id) {
@@ -248,7 +246,7 @@ fn render_component(
     // in to a single node (preserving the "what gets called for what
     // update" view at a glance). Per-component because BlockIds are
     // component-local.
-    let mut fn_nodes_seen: HashSet<u32> = HashSet::new();
+    let mut fn_nodes_seen: HashSet<u32> = HashSet::default();
 
     // Effect nodes + edges. The yellow effect box is the entry update
     // fn dispatched by the dependency tracker; its label includes the
@@ -366,7 +364,7 @@ fn render_component(
             element_to_handler_indices.push((elem.node_id, idxs));
         }
     }
-    let element_to_handler_indices: std::collections::HashMap<_, _> =
+    let element_to_handler_indices: rustc_hash::FxHashMap<_, _> =
         element_to_handler_indices.into_iter().collect();
     for (i, (event_name, handler_block)) in handler_blocks.iter().enumerate() {
         let node_id = format!("c{}_handler_{}", comp_idx, i);
@@ -537,7 +535,7 @@ fn render_call_chain(
     ctx: &CompilerContext,
     caller_node: &str,
     entry_block: BlockId,
-    seen: &mut std::collections::HashSet<u32>,
+    seen: &mut rustc_hash::FxHashSet<u32>,
     path: &mut Vec<BlockId>,
     options: &DotOptions,
 ) {

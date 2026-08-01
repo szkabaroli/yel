@@ -7,8 +7,8 @@ digraph yel_signal_graph {
     label="component App (export)";
     style=rounded;
     color="#888";
-    "c0_sig_457" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withList\n: tuple<V, s32>", class="yel-signal"];
-    "c0_sig_458" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withStr\n: tuple<V, s32>", class="yel-signal"];
-    "c0_sig_459" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="plain\n: tuple<V, s32>", class="yel-signal"];
+    "c0_sig_489" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withList\n: tuple<V, s32>", class="yel-signal"];
+    "c0_sig_490" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="withStr\n: tuple<V, s32>", class="yel-signal"];
+    "c0_sig_491" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="plain\n: tuple<V, s32>", class="yel-signal"];
   }
 }

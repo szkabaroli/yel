@@ -1,0 +1,8 @@
+package yel:emptyenumbound@0.1.0;
+
+enum E { }
+
+export component App {
+    tag: option<E> = none;
+    VStack { Text { "ok" } }
+}

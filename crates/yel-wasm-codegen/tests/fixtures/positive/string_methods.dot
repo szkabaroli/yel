@@ -7,9 +7,9 @@ digraph yel_signal_graph {
     label="component App (export)";
     style=rounded;
     color="#888";
-    "c0_sig_453" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="name\n: string", class="yel-signal"];
-    "c0_eff_0" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 0\nupdate-b0-s453 #5", class="yel-effect"];
-    "c0_sig_453" -> "c0_eff_0" [label="reads", color="#3366cc", class="yel-reads"];
+    "c0_sig_485" [shape=ellipse, style=filled, fillcolor="#eaf4ff", label="name\n: string", class="yel-signal"];
+    "c0_eff_0" [shape=box, style="filled,rounded", fillcolor="#fff5d6", label="effect 0\nupdate-b0-s485 #5", class="yel-effect"];
+    "c0_sig_485" -> "c0_eff_0" [label="reads", color="#3366cc", class="yel-reads"];
     "c0_fn_4" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="if-update-b0 #4\nb0:root", class="yel-fn"];
     "c0_eff_0" -> "c0_fn_4" [label="calls", color="#6a4ca5", style=dashed, class="yel-calls"];
     "c0_fn_3" [shape=box, style="filled,rounded", fillcolor="#ede7f6", label="if-branch-unmount-b2 #3\nb2:if-branch, remove dom", class="yel-fn"];

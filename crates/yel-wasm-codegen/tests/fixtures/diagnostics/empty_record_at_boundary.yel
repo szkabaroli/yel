@@ -1,0 +1,8 @@
+package yel:emptyrecbound@0.1.0;
+
+record R { }
+
+export component App {
+    label: option<R> = none;
+    VStack { Text { "ok" } }
+}

@@ -1,19 +1,29 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { ExtensionContext, window, workspace, commands } from 'vscode';
+import { ExtensionContext, StatusBarAlignment, StatusBarItem, window, workspace, commands } from 'vscode';
 import {
     LanguageClient,
     LanguageClientOptions,
     ServerOptions,
     Executable,
+    State,
 } from 'vscode-languageclient/node';
 
 let client: LanguageClient | undefined;
 let context: ExtensionContext | undefined;
+let statusBarItem: StatusBarItem | undefined;
 
 export function activate(ctx: ExtensionContext) {
     context = ctx;
+
+    // Ark's status bar item (editors/code/src/extension.ts): the server's
+    // state, always visible.
+    statusBarItem = window.createStatusBarItem(StatusBarAlignment.Left, 0);
+    statusBarItem.text = 'yelc-lsp';
+    statusBarItem.command = 'yel.restartServer';
+    statusBarItem.show();
+    ctx.subscriptions.push(statusBarItem);
 
     // Register restart command
     const restartCommand = commands.registerCommand('yel.restartServer', async () => {
@@ -74,14 +84,26 @@ async function startServer() {
     };
 
     client = new LanguageClient(
-        'yel-lsp',
+        'yelc-lsp',
         'Yel Language Server',
         serverOptions,
         clientOptions
     );
 
+    client.onDidChangeState((event) => {
+        if (!statusBarItem) {
+            return;
+        }
+        if (event.newState === State.Running) {
+            statusBarItem.text = 'yelc-lsp';
+        } else if (event.newState === State.Starting) {
+            statusBarItem.text = 'yelc-lsp (starting)';
+        } else if (event.newState === State.Stopped) {
+            statusBarItem.text = 'yelc-lsp (stopped)';
+        }
+    });
+
     await client.start();
-    window.showInformationMessage('Yel Language Server started');
 }
 
 async function restartServer() {
@@ -115,16 +137,16 @@ function getServerPath(context: ExtensionContext): string | undefined {
     switch (platform) {
         case 'darwin':
             binaryName = arch === 'arm64'
-                ? 'yel-lsp-darwin-arm64'
-                : 'yel-lsp-darwin-x64';
+                ? 'yelc-lsp-darwin-arm64'
+                : 'yelc-lsp-darwin-x64';
             break;
         case 'linux':
             binaryName = arch === 'arm64'
-                ? 'yel-lsp-linux-arm64'
-                : 'yel-lsp-linux-x64';
+                ? 'yelc-lsp-linux-arm64'
+                : 'yelc-lsp-linux-x64';
             break;
         case 'win32':
-            binaryName = 'yel-lsp-win32-x64.exe';
+            binaryName = 'yelc-lsp-win32-x64.exe';
             break;
         default:
             window.showErrorMessage(`Unsupported platform: ${platform}`);
@@ -137,7 +159,7 @@ function getServerPath(context: ExtensionContext): string | undefined {
     }
 
     // Fallback: simple binary name (for development)
-    const simplePath = path.join(context.extensionPath, 'bin', platform === 'win32' ? 'yel-lsp.exe' : 'yel-lsp');
+    const simplePath = path.join(context.extensionPath, 'bin', platform === 'win32' ? 'yelc-lsp.exe' : 'yelc-lsp');
     if (fs.existsSync(simplePath)) {
         return simplePath;
     }
@@ -146,7 +168,7 @@ function getServerPath(context: ExtensionContext): string | undefined {
     const envPath = process.env.PATH || '';
     const pathDirs = envPath.split(path.delimiter);
     for (const dir of pathDirs) {
-        const candidate = path.join(dir, platform === 'win32' ? 'yel-lsp.exe' : 'yel-lsp');
+        const candidate = path.join(dir, platform === 'win32' ? 'yelc-lsp.exe' : 'yelc-lsp');
         if (fs.existsSync(candidate)) {
             return candidate;
         }
@@ -158,7 +180,7 @@ function getServerPath(context: ExtensionContext): string | undefined {
         workspaceRoot,
         'target',
         'release',
-        platform === 'win32' ? 'yel-lsp.exe' : 'yel-lsp'
+        platform === 'win32' ? 'yelc-lsp.exe' : 'yelc-lsp'
     );
     if (fs.existsSync(devPath)) {
         return devPath;
@@ -168,7 +190,7 @@ function getServerPath(context: ExtensionContext): string | undefined {
         workspaceRoot,
         'target',
         'debug',
-        platform === 'win32' ? 'yel-lsp.exe' : 'yel-lsp'
+        platform === 'win32' ? 'yelc-lsp.exe' : 'yelc-lsp'
     );
     if (fs.existsSync(debugPath)) {
         return debugPath;

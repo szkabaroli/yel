@@ -188,6 +188,14 @@ pub struct KnownVariants {
     /// (which holds `ctx` immutably) can build an `attribute-value`
     /// `VariantCtor` without re-interning.
     pub attribute_value_ty: Option<crate::types::Ty>,
+    /// The `event-value` variant from `yel:ui/dispatch` — the payload type
+    /// of the module `dispatch` export. Its canonical-ABI flattening backs
+    /// the core `dispatch` function signature; registering it as a real
+    /// variant (like `attribute-value`) is what lets the WIT + core ABI
+    /// derive from one source instead of two hardcoded copies.
+    pub event_value: Option<DefId>,
+    /// Interned `Ty` for [`Self::event_value`].
+    pub event_value_ty: Option<crate::types::Ty>,
 }
 
 impl KnownVariants {
@@ -203,6 +211,10 @@ impl KnownVariants {
     pub fn attribute_value_ty(&self) -> crate::types::Ty {
         self.attribute_value_ty
             .expect("AttributeValue Ty not initialized")
+    }
+
+    pub fn event_value_ty(&self) -> crate::types::Ty {
+        self.event_value_ty.expect("EventValue Ty not initialized")
     }
 
     pub fn brush(&self) -> DefId {

@@ -20,3 +20,8 @@ crossterm = "0.28"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tui-logger = { version = "0.14", features = ["tracing-support"] }
+
+# Dev host, not part of the compiler's emitted output — exempt from the
+# determinism-guard in root clippy.toml so its std HashMap uses aren't flagged.
+[lints.clippy]
+disallowed_types = "allow"

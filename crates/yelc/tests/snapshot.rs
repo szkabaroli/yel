@@ -30,7 +30,8 @@ fn compile_to(source: &str, format: &str, tag: &str) -> String {
     let path = std::env::temp_dir().join(format!("yelc-snap-{}-{}.yel", tag, std::process::id()));
     {
         let mut file = std::fs::File::create(&path).expect("create temp source");
-        file.write_all(source.as_bytes()).expect("write temp source");
+        file.write_all(source.as_bytes())
+            .expect("write temp source");
     }
 
     let output = Command::new(env!("CARGO_BIN_EXE_yelc"))

@@ -1,0 +1,17 @@
+# Determinism guard (docs/TECH_DEBT.md §7, CLAUDE.md rule #4).
+#
+# `std::collections::HashMap`/`HashSet` use `RandomState` — a per-process random
+# seed — so iterating them produces a different order every run, which leaks into
+# the emitted WASM/WIT/DOT and breaks byte-reproducible output and snapshot tests.
+# Use `rustc_hash::FxHashMap`/`FxHashSet` (seedless hashing) instead; where the
+# iteration order itself reaches output, additionally sort by a stable key
+# (`DefId`/`u32`) or use a `BTreeMap`.
+#
+# This config only takes effect where the `clippy::disallowed_types` lint is
+# enabled. It is denied in the output-producing crates (`yel-core`,
+# `yel-wasm-codegen`) via their `[lints.clippy]` sections and explicitly allowed
+# in non-output crates (e.g. `yel-host`, the dev host).
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "use rustc_hash::FxHashMap for deterministic iteration (rule #4); std HashMap has a random seed" },
+    { path = "std::collections::HashSet", reason = "use rustc_hash::FxHashSet for deterministic iteration (rule #4); std HashSet has a random seed" },
+]

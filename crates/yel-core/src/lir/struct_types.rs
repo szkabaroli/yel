@@ -20,7 +20,7 @@
 //! entry, in order, and resolving every cross-reference into a wasm
 //! type-section index.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -181,7 +181,7 @@ pub fn project_tree_shape(
     // The block lowering keys `Array*` ops by the same registry index via
     // `for_anchor_array_idx` (the Nth ForAnchor in boundary order → array
     // index N), which mirrors this allocation order.
-    let mut iter_body_to_array: HashMap<u32, LirArrayTypeIdx> = HashMap::new();
+    let mut iter_body_to_array: HashMap<u32, LirArrayTypeIdx> = HashMap::default();
     for boundary in &tree.boundaries {
         if let TreeBoundaryKind::ForAnchor {
             for_id,

@@ -13,12 +13,19 @@
 //! went with centralised-helpers instead of a full representation
 //! refactor — the latter pays runtime cost this doesn't.
 //!
-//! Rule enforced by convention (not yet type-system): the only call
-//! site of `crate::wasm::WasmPackageBuilder::flatten_core_valtypes`
-//! outside this module should be the boundary-shim generator (WIT
-//! export lifts/lowers). If you find yourself calling it in a new
-//! internal emit path, add a helper here instead.
-use std::collections::{HashMap, HashSet};
+//! Boundary-only flattening — both functions are now **type-enforced**:
+//! * `WasmPackageBuilder::canonical_flat_valtypes` (pure canonical ABI,
+//!   never GC refs) requires a [`WitBoundary`] witness.
+//! * `WasmPackageBuilder::flatten_core_valtypes` (the GC-collapsing
+//!   hybrid) also requires a [`WitBoundary`] witness. The last internal
+//!   caller (the `VariantCtor` stack-arity count) was migrated to
+//!   `internal_stack_slots`, so every surviving caller is boundary code
+//!   (WIT lift/lower accessors, ABI signatures, callback lower/return,
+//!   canonical memory layout, host-call arg pushes). For a new internal
+//!   stack-arity question, reach for `internal_stack_slots` / `InternalRepr`
+//!   — writing `WitBoundary::assert()` in an internal emit path is a
+//!   greppable red flag a reviewer will catch.
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use wasm_encoder::{BlockType, HeapType, RefType, ValType};
 use yel_core::lir::{LirExpr, LirExprKind};
@@ -27,6 +34,38 @@ use yel_core::{DefId, DefKind, InternedTyKind, Ty};
 use crate::CodegenError;
 
 use super::WasmPackageBuilder;
+
+/// Compile-time witness that a canonical-ABI flattening happens at a
+/// **WIT boundary** — the only place canonical multi-slot flattening is
+/// correct.
+///
+/// [`WasmPackageBuilder::canonical_flat_valtypes`] requires one. Internal
+/// emit paths must not construct it: on the internal WASM stack a record /
+/// tuple / migrated composite is a **single GC ref**
+/// ([`InternalRepr`] / `internal_stack_slots`), and only expands to N
+/// canonical flat slots when it crosses the component boundary — an
+/// exported getter/setter, an imported callback lower, an ABI function
+/// signature, or a canonical linear-memory layout. Constructing this token
+/// is therefore an assertion "this call site is boundary code," so it stays
+/// confined to the boundary-shim generators.
+///
+/// It is a zero-sized type: no runtime cost, purely a type-checked marker.
+/// It does not make canonical flattening *unreachable* from internal code
+/// (the constructor is crate-visible), but it converts what used to be a
+/// silent convention into an explicit, greppable, reviewable act —
+/// `canonical_flat_valtypes(ty, WitBoundary::assert())` in a new internal
+/// emit path is a red flag a reviewer will catch.
+#[derive(Clone, Copy)]
+pub(crate) struct WitBoundary(());
+
+impl WitBoundary {
+    /// Assert the caller is WIT-boundary code. Read [`WitBoundary`]'s docs
+    /// before using — never call from an internal emit path.
+    #[inline]
+    pub(crate) fn assert() -> Self {
+        WitBoundary(())
+    }
+}
 
 /// Classify the internal WASM-stack representation of a Yel type.
 ///
@@ -107,13 +146,15 @@ impl WasmPackageBuilder<'_> {
             return InternalRepr::GcRef(type_idx);
         }
         if let yel_core::types::InternedTyKind::Tuple(_) = self.ctx.ty_kind(ty)
-            && let Some(&tup_idx) = self.record_gc_types.tuple_struct_type_idx.get(&ty) {
-                return InternalRepr::GcRef(tup_idx);
-            }
+            && let Some(&tup_idx) = self.record_gc_types.tuple_struct_type_idx.get(&ty)
+        {
+            return InternalRepr::GcRef(tup_idx);
+        }
         if self.is_scalar_list_ty(ty)
-            && let Some(&arr_idx) = self.record_gc_types.list_array_type_idx.get(&ty) {
-                return InternalRepr::GcArrayRef(arr_idx);
-            }
+            && let Some(&arr_idx) = self.record_gc_types.list_array_type_idx.get(&ty)
+        {
+            return InternalRepr::GcArrayRef(arr_idx);
+        }
         // Option-of-ref collapse: option<T> where T has a ref repr is
         // itself just a nullable ref of T's heap type (none = null,
         // some(v) = v). No discriminant slot internally.
@@ -145,9 +186,10 @@ impl WasmPackageBuilder<'_> {
         // `yel_core::lir::block_lower::is_gc_variant_ty`; both
         // sides MUST agree per Ty.
         if self.is_gc_variant(ty)
-            && let Some(&super_idx) = self.record_gc_types.gc_variant_super_idx.get(&ty) {
-                return InternalRepr::GcVariant(super_idx);
-            }
+            && let Some(&super_idx) = self.record_gc_types.gc_variant_super_idx.get(&ty)
+        {
+            return InternalRepr::GcVariant(super_idx);
+        }
         // strings-to-GC (`plans/strings-to-gc.md`): a `String` is a GC byte
         // array `(ref $str_bytes)`. `$str_bytes` is always emitted, so the
         // index is present for every program that reaches here.
@@ -325,7 +367,7 @@ impl WasmPackageBuilder<'_> {
     /// sides MUST agree per Ty so that LIR slot allocation and WASM
     /// codegen pick the same shape (1 ref slot vs N flat slots).
     pub(crate) fn is_gc_variant(&self, ty: Ty) -> bool {
-        let mut visiting = HashSet::new();
+        let mut visiting = HashSet::default();
         self.is_gc_variant_inner(ty, &mut visiting)
     }
 
@@ -630,9 +672,13 @@ impl WasmPackageBuilder<'_> {
                 DefKind::Field(f) => f.ty,
                 _ => continue,
             };
-            let (_name, field_offset, _ty) = layout.field_offsets.get(i).cloned().ok_or_else(|| {
-                CodegenError::InvalidIR(format!("record leaf accesses: field offset missing for {}", i))
-            })?;
+            let (_name, field_offset, _ty) =
+                layout.field_offsets.get(i).cloned().ok_or_else(|| {
+                    CodegenError::InvalidIR(format!(
+                        "record leaf accesses: field offset missing for {}",
+                        i
+                    ))
+                })?;
             let gc_idx = *field_gc.get(i).ok_or_else(|| {
                 CodegenError::InvalidIR("record leaf accesses: gc field index out of range".into())
             })?;
@@ -640,9 +686,7 @@ impl WasmPackageBuilder<'_> {
             chain.push((type_idx, gc_idx));
             let abs_off = base_offset + field_offset;
             match self.ctx.ty_kind(fty) {
-                InternedTyKind::Adt(d)
-                    if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) =>
-                {
+                InternedTyKind::Adt(d) if matches!(self.ctx.defs.kind(*d), DefKind::Record(_)) => {
                     // Nested record: recurse, extending the chain + offset.
                     self.collect_record_leaf_accesses(*d, abs_off, &chain, out)?;
                 }
@@ -758,7 +802,7 @@ pub(super) fn collect_ternary_block_shapes(
             // runtime value) use BlockType::Empty, no registration
             // needed.
             if !matches!(builder.ctx.ty_kind(e.ty), InternedTyKind::Unit) {
-                let shape = builder.flatten_core_valtypes(e.ty);
+                let shape = builder.flatten_core_valtypes(e.ty, WitBoundary::assert());
                 if shape.len() >= 2 {
                     into.insert(shape, ());
                 }
@@ -850,7 +894,7 @@ fn collect_arg_block_shapes(
     into: &mut HashMap<Vec<ValType>, ()>,
 ) {
     if builder.is_gc_variant(ty) || builder.option_collapses_to_ref(ty).is_some() {
-        let shape = builder.flatten_core_valtypes(ty);
+        let shape = builder.flatten_core_valtypes(ty, WitBoundary::assert());
         if shape.len() >= 2 {
             into.insert(shape, ());
         }

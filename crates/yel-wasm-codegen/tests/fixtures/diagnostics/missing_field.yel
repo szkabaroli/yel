@@ -1,0 +1,9 @@
+// E0020: a record literal omits a required field.
+package yel:missingfield@0.1.0;
+
+record R { a: s32, b: s32 }
+
+export component App {
+    r: R = { a: 1 };
+    VStack { Text { "ok" } }
+}

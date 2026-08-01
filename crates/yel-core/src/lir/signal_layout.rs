@@ -21,14 +21,14 @@
 //!
 //! Field counts mirror `WasmPackageBuilder::signal_storage_valtypes` exactly.
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{InternedTyKind, Ty};
 use super::block::LirSlotValType;
 use super::layout::LirLayoutContext;
 use super::node::LirResource;
+use crate::types::{InternedTyKind, Ty};
 
 /// Per-signal layout: which GC struct fields each signal occupies.
 ///
@@ -117,10 +117,7 @@ pub fn lir_slot_val_ty_for_signal_field(
 /// Mirror of `LowerToLirCtx::ty_to_slot_val_type` for the signal-field
 /// case. Kept here (lib-side) so callers in `crate::lir` don't need a
 /// back-edge to `lower_to_lir`.
-fn ty_to_slot_val_type_for_signal(
-    ctx: &crate::context::CompilerContext,
-    ty: Ty,
-) -> LirSlotValType {
+fn ty_to_slot_val_type_for_signal(ctx: &crate::context::CompilerContext, ty: Ty) -> LirSlotValType {
     match ctx.ty_kind(ty) {
         InternedTyKind::F32 => LirSlotValType::F32,
         InternedTyKind::F64 => LirSlotValType::F64,
@@ -129,16 +126,13 @@ fn ty_to_slot_val_type_for_signal(
     }
 }
 
-pub fn slot_count_for_signal_ty(
-    ctx: &crate::context::CompilerContext,
-    ty: Ty,
-) -> u32 {
+pub fn slot_count_for_signal_ty(ctx: &crate::context::CompilerContext, ty: Ty) -> u32 {
     match ctx.ty_kind(ty) {
         InternedTyKind::Unit | InternedTyKind::Error | InternedTyKind::Unknown => 0,
         // A GC string is a single `(ref $str_bytes)` slot.
         InternedTyKind::String => 1,
         InternedTyKind::List(_) => {
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::default();
             if crate::lower_to_lir::blocks::is_scalar_list_ty_struct(ctx, ty, &mut seen) {
                 1
             } else {
@@ -168,7 +162,10 @@ pub fn compute_signal_layout(
         let gc = if slot_count > 0 {
             let field_start = next_struct_field;
             next_struct_field += slot_count;
-            Some(GcSlot { field_start, field_count: slot_count })
+            Some(GcSlot {
+                field_start,
+                field_count: slot_count,
+            })
         } else {
             None
         };
@@ -188,9 +185,10 @@ impl SignalLayout {
     /// Empty when no GC-struct slot is allocated.
     pub fn signal_field_path(&self, sig_idx: usize) -> Vec<u32> {
         match self.signals.get(sig_idx).and_then(|s| s.gc) {
-            Some(GcSlot { field_start, field_count }) => {
-                (field_start..field_start + field_count).collect()
-            }
+            Some(GcSlot {
+                field_start,
+                field_count,
+            }) => (field_start..field_start + field_count).collect(),
             None => Vec::new(),
         }
     }

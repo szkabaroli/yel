@@ -17,7 +17,8 @@ use super::super::CodegenError;
 use super::super::{MemoryLayout, WasmPackageBuilder};
 use super::constants::{HANDLER_ID_HANDLE_SHIFT, MAX_HANDLERS_PER_COMPONENT};
 use super::scratch::{mem_arg, slot_info, slot_local};
-use yel_core::lir::{LirBlock, LirResource, LirSlotId};
+use yel_core::lir::arena::LirResourceArena;
+use yel_core::lir::{LirBlock, LirExprId, LirSlotId};
 
 impl<'a> WasmPackageBuilder<'a> {
     /// Emit a single block operation as WASM instructions.
@@ -30,22 +31,37 @@ impl<'a> WasmPackageBuilder<'a> {
     /// `crate::flow`), so it's `pub(crate)` rather than `pub(super)`
     /// — keeps the codegen layering visible without forcing flow to
     /// duplicate ~1700 lines of op-dispatch.
+    /// Emit one op. `component` is the owning emission scope read through the
+    /// arena traits — a `LirResource` for component blocks, or a `ModuleScope`
+    /// for the module-start globals-init block. `comp_idx` is `Some(i)` for a
+    /// real component (index into `self.components`/`self.layouts`/`gc_layouts`)
+    /// and `None` in module scope; component-specific ops resolve it via a
+    /// guard that fails loudly (`InvalidIR`) if reached without a component.
     pub(crate) fn emit_op(
         &mut self,
         func: &mut Function,
         op: &LirOp,
-        comp_idx: usize,
+        component: &dyn LirResourceArena,
+        comp_idx: Option<usize>,
         block: &LirBlock,
         local_offset: u32,
     ) -> Result<(), CodegenError> {
-        let component = &self.components[comp_idx];
-        let layout = self.layouts.get(comp_idx).cloned().unwrap_or_else(|| {
-            // Fallback layout for a component missing from `self.layouts`.
-            // Per-signal linear memory was removed (every non-unit signal is
-            // GC-struct-resident), so there is no signal-sized region to
-            // reserve here.
-            MemoryLayout { base: 324, size: 0 }
-        });
+        // Per-signal linear memory was removed (every non-unit signal is
+        // GC-struct-resident), so a missing component layout reserves no
+        // region — and module scope has no component layout at all.
+        let layout = comp_idx
+            .and_then(|ci| self.layouts.get(ci))
+            .cloned()
+            .unwrap_or(MemoryLayout { base: 324, size: 0 });
+
+        // Module-scope emission (the globals-init block) has no component
+        // index. Only the component-agnostic ops are valid there; route them
+        // to the restricted emitter and keep `comp_idx` a plain `usize` for
+        // every component-specific arm below.
+        let comp_idx = match comp_idx {
+            Some(ci) => ci,
+            None => return self.emit_op_module_scope(func, op, component, block, local_offset),
+        };
 
         match op {
             // Phase 3.3: `LirOp::MountComponent` and `LirOp::ResourceNew`
@@ -209,7 +225,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 }
             }
             LirOp::EvalExpr { expr, result } => {
-                let lir_expr = component.get_expr(*expr);
+                let lir_expr = component.expr(*expr);
 
                 // Payload-less user-variant constructor targeting a
                 // single-i32 slot: `emit_variant_ctor_flat` would push
@@ -312,64 +328,17 @@ impl<'a> WasmPackageBuilder<'a> {
                 expr,
                 dest_first_slot,
             } => {
-                let lir_expr = component.get_expr(*expr);
-
-                // Payload-less user-variant constructor shortcut, same
-                // as the EvalExpr arm: push a single i32 discriminant.
-                if let LirExprKind::VariantCtor {
-                    case_idx,
-                    payload: None,
-                    ..
-                } = &lir_expr.kind
-                    && matches!(self.ctx.ty_kind(lir_expr.ty), InternedTyKind::Adt(_))
-                    && !matches!(
-                        self.internal_repr(lir_expr.ty),
-                        super::super::repr::InternalRepr::GcVariant(_)
-                    )
-                {
-                    func.instruction(&Instruction::I32Const(*case_idx as i32));
-                    func.instruction(&Instruction::LocalSet(slot_local(
-                        component,
-                        block,
-                        *dest_first_slot,
-                        local_offset,
-                    )));
-                    return Ok(());
-                }
-
-                self.emit_expr(func, lir_expr, component)?;
-
-                if lir_expr.ty == Ty::UNIT {
-                    return Ok(());
-                }
-
-                // Determine stack arity from the expression's storage
-                // valtypes (matches the SignalWriteExpr → store path):
-                // 1 for Scalar / GcRef / GcArrayRef / GcVariant,
-                // 2 for FatPointer (string / non-typed-array list).
-                // For Option / payload-less variant ctor, `emit_expr`
-                // pushes the partial set — handle the `none` case.
-                if let LirExprKind::VariantCtor { payload: None, .. } = &lir_expr.kind
-                    && matches!(self.ctx.ty_kind(lir_expr.ty), InternedTyKind::Option(_))
-                {
-                    // `none` — only discriminant on stack.
-                    func.instruction(&Instruction::LocalSet(slot_local(
-                        component,
-                        block,
-                        *dest_first_slot,
-                        local_offset,
-                    )));
-                    return Ok(());
-                }
-
-                let n = self.signal_storage_valtypes(lir_expr.ty).len();
-                let base = slot_local(component, block, *dest_first_slot, local_offset);
-                for i in (0..n).rev() {
-                    func.instruction(&Instruction::LocalSet(base + i as u32));
-                }
+                self.emit_eval_expr_to_slots(
+                    func,
+                    *expr,
+                    *dest_first_slot,
+                    component,
+                    block,
+                    local_offset,
+                )?;
             }
             LirOp::DropExpr { expr } => {
-                let lir_expr = component.get_expr(*expr);
+                let lir_expr = component.expr(*expr);
                 self.emit_expr(func, lir_expr, component)?;
                 // Drop exactly the number of values the expression pushed.
                 // Unit-typed expressions (e.g. callbacks returning nothing)
@@ -377,22 +346,10 @@ impl<'a> WasmPackageBuilder<'a> {
                 // that case. `flatten_core_valtypes` treats unknown primitives
                 // as a single i32, so we special-case Unit explicitly here.
                 if !matches!(self.ctx.ty_kind(lir_expr.ty), InternedTyKind::Unit) {
-                    // GcVariant produces a single supertype ref, not
-                    // canonical-flat slots, so drop count must follow
-                    // internal stack-slot count for those Tys.
-                    let drop_count = match self.internal_repr(lir_expr.ty) {
-                        crate::wasm::repr::InternalRepr::GcVariant(_) => {
-                            self.internal_stack_slots(lir_expr.ty)
-                        }
-                        // strings-to-GC: a string is a single $str_bytes ref
-                        // internally, not canonical (ptr, len).
-                        crate::wasm::repr::InternalRepr::GcArrayRef(_)
-                            if matches!(self.ctx.ty_kind(lir_expr.ty), InternedTyKind::String) =>
-                        {
-                            self.internal_stack_slots(lir_expr.ty)
-                        }
-                        _ => self.flatten_core_valtypes(lir_expr.ty).len(),
-                    };
+                    // §1.5: every non-unit value is a single stack slot
+                    // internally (scalar or one GC ref), so exactly one
+                    // Drop — never the canonical multi-slot count.
+                    let drop_count = self.internal_stack_slots(lir_expr.ty);
                     for _ in 0..drop_count {
                         func.instruction(&Instruction::Drop);
                     }
@@ -416,13 +373,27 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::If(BlockType::Empty));
 
                 for nested_op in &if_op.then_ops {
-                    self.emit_op(func, nested_op, comp_idx, block, local_offset)?;
+                    self.emit_op(
+                        func,
+                        nested_op,
+                        component,
+                        Some(comp_idx),
+                        block,
+                        local_offset,
+                    )?;
                 }
 
                 if !if_op.else_ops.is_empty() {
                     func.instruction(&Instruction::Else);
                     for nested_op in &if_op.else_ops {
-                        self.emit_op(func, nested_op, comp_idx, block, local_offset)?;
+                        self.emit_op(
+                            func,
+                            nested_op,
+                            component,
+                            Some(comp_idx),
+                            block,
+                            local_offset,
+                        )?;
                     }
                 }
 
@@ -442,7 +413,7 @@ impl<'a> WasmPackageBuilder<'a> {
             LirOp::PushStringPtr { string_id } => {
                 // Stack-push primitive: resolve `string_id` via the
                 // component's string pool and emit `i32.const <data_ptr>`.
-                let s = component.get_string(*string_id);
+                let s = component.string(*string_id);
                 let (ptr, _len) = self.get_string_info(s).ok_or_else(|| {
                     CodegenError::InvalidIR(format!(
                         "PushStringPtr: string {:?} (\"{}\") not in string pool",
@@ -452,7 +423,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::I32Const(ptr as i32));
             }
             LirOp::PushStringLen { string_id } => {
-                let s = component.get_string(*string_id);
+                let s = component.string(*string_id);
                 let (_ptr, len) = self.get_string_info(s).ok_or_else(|| {
                     CodegenError::InvalidIR(format!(
                         "PushStringLen: string {:?} (\"{}\") not in string pool",
@@ -468,12 +439,12 @@ impl<'a> WasmPackageBuilder<'a> {
                 // boundary lowering even when the type's in-memory repr is a
                 // GC struct — `emit_expr` would otherwise dispatch to the GC
                 // ctor and push a ref. Other exprs flatten via `emit_expr`.
-                let lir_expr = component.get_expr(*expr);
+                let lir_expr = component.expr(*expr);
                 if let LirExprKind::VariantCtor {
                     case_idx, payload, ..
                 } = &lir_expr.kind
                 {
-                    let payload_expr = payload.map(|p| component.get_expr(p));
+                    let payload_expr = payload.map(|p| component.expr(p));
                     self.emit_variant_ctor_flat(
                         func,
                         lir_expr.ty,
@@ -703,21 +674,15 @@ impl<'a> WasmPackageBuilder<'a> {
                 handle,
                 result,
             } => {
-                let ci = self.comp_idx_by_def_id(*comp_def).map_err(|_| {
-                    CodegenError::InvalidIR(format!(
-                        "CallResourceNew: no component for {:?}",
-                        comp_def
-                    ))
-                })?;
                 let import_layout = self.import_layout.as_ref().ok_or_else(|| {
                     CodegenError::InternalError(
                         "CallResourceNew: import_layout not populated".into(),
                     )
                 })?;
                 let resource_new_idx = import_layout
-                    .components
-                    .get(ci)
-                    .and_then(|c| c.resource_new)
+                    .resource_new
+                    .get(comp_def)
+                    .copied()
                     .ok_or_else(|| {
                         CodegenError::InvalidIR(format!(
                             "CallResourceNew: component {:?} has no [resource-new] import",
@@ -1020,7 +985,14 @@ impl<'a> WasmPackageBuilder<'a> {
                 func.instruction(&Instruction::BrIf(1));
 
                 for nested_op in body_ops {
-                    self.emit_op(func, nested_op, comp_idx, block, local_offset)?;
+                    self.emit_op(
+                        func,
+                        nested_op,
+                        component,
+                        Some(comp_idx),
+                        block,
+                        local_offset,
+                    )?;
                 }
 
                 func.instruction(&Instruction::Br(0));
@@ -1352,20 +1324,15 @@ impl<'a> WasmPackageBuilder<'a> {
                 field,
                 value,
             } => {
-                let &layout_idx = self.global_block_def_to_idx.get(block_def).ok_or_else(|| {
-                    CodegenError::InvalidIR(format!(
-                        "GlobalFieldSet: no globals layout for block {:?}",
-                        block_def
-                    ))
-                })?;
-                let g = self.globals_layouts[layout_idx].field_core_globals[*field as usize];
-                func.instruction(&Instruction::LocalGet(slot_local(
+                self.emit_global_field_set(
+                    func,
+                    *block_def,
+                    *field,
+                    *value,
                     component,
                     block,
-                    *value,
                     local_offset,
-                )));
-                func.instruction(&Instruction::GlobalSet(g));
+                )?;
             }
 
             // Stage 5a: dead `Array{NewDefault,Get,Set,Copy}` arms
@@ -1605,7 +1572,7 @@ impl<'a> WasmPackageBuilder<'a> {
                         "LoadListGc: signal {:?} is neither a component-local \
                          signal of `{}` nor a global property",
                         signal,
-                        self.ctx.str(component.name)
+                        self.ctx.str(component.name())
                     )));
                 }
                 func.instruction(&Instruction::LocalTee(slot_local(
@@ -1632,7 +1599,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 // ref on the stack (e.g. `array.new_fixed $<elem>_list
                 // ...`). Tee into ref_result; derive len via
                 // `array.len`.
-                let list_expr = component.get_expr(*expr);
+                let list_expr = component.expr(*expr);
                 self.emit_expr(func, list_expr, component)?;
                 func.instruction(&Instruction::LocalTee(slot_local(
                     component,
@@ -1801,6 +1768,153 @@ impl<'a> WasmPackageBuilder<'a> {
         Ok(())
     }
 
+    /// Emit a single op in **module scope** — the globals-init `(start)`
+    /// block, which has no owning component. Only the component-agnostic ops
+    /// are valid here (`EvalExprToSlots`, `GlobalFieldSet`); they share the
+    /// exact emission helpers the component arms use, so nothing is duplicated
+    /// or faked. Any other op is a leaked component-specific op — an IR bug.
+    fn emit_op_module_scope(
+        &mut self,
+        func: &mut Function,
+        op: &LirOp,
+        component: &dyn LirResourceArena,
+        block: &LirBlock,
+        local_offset: u32,
+    ) -> Result<(), CodegenError> {
+        match op {
+            LirOp::EvalExprToSlots {
+                expr,
+                dest_first_slot,
+            } => self.emit_eval_expr_to_slots(
+                func,
+                *expr,
+                *dest_first_slot,
+                component,
+                block,
+                local_offset,
+            ),
+            LirOp::GlobalFieldSet {
+                block: block_def,
+                field,
+                value,
+            } => self.emit_global_field_set(
+                func,
+                *block_def,
+                *field,
+                *value,
+                component,
+                block,
+                local_offset,
+            ),
+            other => Err(CodegenError::InvalidIR(format!(
+                "LirOp {:?} is not valid in module-scope (globals-init) emission — \
+                 only EvalExprToSlots / GlobalFieldSet are",
+                other
+            ))),
+        }
+    }
+
+    /// Emit an [`LirOp::EvalExprToSlots`]: evaluate `expr` and spill its
+    /// result into the wasm locals for `dest_first_slot` (and its
+    /// consecutive companions for multi-slot values). Shared by `emit_op`'s
+    /// arm and module-scope emission.
+    fn emit_eval_expr_to_slots(
+        &mut self,
+        func: &mut Function,
+        expr: LirExprId,
+        dest_first_slot: LirSlotId,
+        component: &dyn LirResourceArena,
+        block: &LirBlock,
+        local_offset: u32,
+    ) -> Result<(), CodegenError> {
+        let lir_expr = component.expr(expr);
+
+        // Payload-less user-variant constructor shortcut, same as the
+        // EvalExpr arm: push a single i32 discriminant.
+        if let LirExprKind::VariantCtor {
+            case_idx,
+            payload: None,
+            ..
+        } = &lir_expr.kind
+            && matches!(self.ctx.ty_kind(lir_expr.ty), InternedTyKind::Adt(_))
+            && !matches!(
+                self.internal_repr(lir_expr.ty),
+                super::super::repr::InternalRepr::GcVariant(_)
+            )
+        {
+            func.instruction(&Instruction::I32Const(*case_idx as i32));
+            func.instruction(&Instruction::LocalSet(slot_local(
+                component,
+                block,
+                dest_first_slot,
+                local_offset,
+            )));
+            return Ok(());
+        }
+
+        self.emit_expr(func, lir_expr, component)?;
+
+        if lir_expr.ty == Ty::UNIT {
+            return Ok(());
+        }
+
+        // For Option / payload-less variant ctor, `emit_expr` pushes the
+        // partial set — handle the `none` case (only discriminant on stack).
+        if let LirExprKind::VariantCtor { payload: None, .. } = &lir_expr.kind
+            && matches!(self.ctx.ty_kind(lir_expr.ty), InternedTyKind::Option(_))
+        {
+            func.instruction(&Instruction::LocalSet(slot_local(
+                component,
+                block,
+                dest_first_slot,
+                local_offset,
+            )));
+            return Ok(());
+        }
+
+        // Otherwise spill each storage slot (1 for scalar/GcRef/GcArrayRef/
+        // GcVariant, 2 for a fat pointer) into consecutive locals.
+        let n = self.signal_storage_valtypes(lir_expr.ty).len();
+        let base = slot_local(component, block, dest_first_slot, local_offset);
+        for i in (0..n).rev() {
+            func.instruction(&Instruction::LocalSet(base + i as u32));
+        }
+        Ok(())
+    }
+
+    /// Emit an [`LirOp::GlobalFieldSet`]: resolve `(block_def, field)` to its
+    /// per-field core wasm global and store `value`'s local into it. Shared
+    /// by `emit_op`'s arm and module-scope emission.
+    fn emit_global_field_set(
+        &mut self,
+        func: &mut Function,
+        block_def: DefId,
+        field: u32,
+        value: LirSlotId,
+        component: &dyn LirResourceArena,
+        block: &LirBlock,
+        local_offset: u32,
+    ) -> Result<(), CodegenError> {
+        let &layout_idx = self
+            .global_block_def_to_idx
+            .get(&block_def)
+            .ok_or_else(|| {
+                CodegenError::InvalidIR(format!(
+                    "GlobalFieldSet: no globals layout for block {:?}",
+                    block_def
+                ))
+            })?;
+        let g = self.globals_layouts[layout_idx].field_core_globals[field as usize];
+        func.instruction(&Instruction::LocalGet(slot_local(
+            component,
+            block,
+            value,
+            local_offset,
+        )));
+        func.instruction(&Instruction::GlobalSet(g));
+        Ok(())
+    }
+
     /// Find the index of a component in `self.components` by its
     /// `DefId`. Used by [`Self::resolve_lir_type_ref`] to route
     /// `LirTypeRef::OtherComponentStruct` lookups into the matching
@@ -1830,7 +1944,7 @@ impl<'a> WasmPackageBuilder<'a> {
     fn struct_ty_idx_from_rec(
         &self,
         comp_idx: usize,
-        component: &LirResource,
+        component: &dyn LirResourceArena,
         block: &LirBlock,
         rec: LirSlotId,
     ) -> Result<u32, CodegenError> {

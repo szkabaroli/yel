@@ -4,7 +4,7 @@
 
 ## Why It Matters
 
-A body can reference a component or type declared later in the same file, so every name must exist in the definition table before any body is lowered. yel's `lower_file` in `crates/yel-core/src/hir/lower.rs` runs in phases: (1) register top-level type definitions, (1b) register elements / imported components / globals, (2) register component declarations WITHOUT bodies, then (3) lower the component bodies. Lowering bodies in source order would fail the moment a declaration referenced something defined further down.
+A body can reference a component or type declared later in the same file, so every name must exist in the definition table before any body is lowered. yel's `lower_file` in `crates/yel-core/src/hir/lower.rs` runs in phases: (1) register top-level type definitions, (1b) register elements / extern components / globals, (2) register component declarations WITHOUT bodies, then (3) lower the component bodies. Lowering bodies in source order would fail the moment a declaration referenced something defined further down.
 
 ## Bad
 
@@ -22,7 +22,7 @@ fn lower_file(file: &File, ctx: &mut Ctx) {
 
 ```rust
 fn lower_file(file: &File, ctx: &mut Ctx) {
-    // 1. register type defs, then elements/imports/globals
+    // 1. register type defs, then elements/externs/globals
     for ty in file.types() { ctx.register_type(ty); }
     for g in file.globals() { ctx.register_global(g); }
     // 2. register component headers WITHOUT bodies

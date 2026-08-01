@@ -54,7 +54,7 @@ pub enum DefKind {
     /// An intrinsic element type (e.g., HStack, VStack, Text).
     Element(ElementDef),
     /// An imported external component.
-    ImportComponent(ImportComponentDef),
+    ExternComponent(ExternComponentDef),
     /// A singleton namespace shared across components.
     Global(GlobalDef),
 }
@@ -201,7 +201,7 @@ pub struct ElementDef {
 /// Imported component definition.
 /// Imported components are external components provided by the host or other modules.
 #[derive(Clone, Debug)]
-pub struct ImportComponentDef {
+pub struct ExternComponentDef {
     /// DefId of this imported component.
     pub def_id: DefId,
     /// Component name.
@@ -433,7 +433,9 @@ impl Definitions {
 
     /// Check if a definition is a signal (reactive property).
     pub fn is_signal(&self, def_id: DefId) -> bool {
-        self.items.get(def_id).is_some_and(|d| matches!(&d.kind, DefKind::Signal(_)))
+        self.items
+            .get(def_id)
+            .is_some_and(|d| matches!(&d.kind, DefKind::Signal(_)))
     }
 
     /// Find field by name within a record.
@@ -529,18 +531,18 @@ impl Definitions {
         }
     }
 
-    /// Get as an import component.
-    pub fn as_import_component(&self, def_id: DefId) -> Option<&ImportComponentDef> {
+    /// Get as an extern component.
+    pub fn as_extern_component(&self, def_id: DefId) -> Option<&ExternComponentDef> {
         match &self.items.get(def_id)?.kind {
-            DefKind::ImportComponent(c) => Some(c),
+            DefKind::ExternComponent(c) => Some(c),
             _ => None,
         }
     }
 
-    /// Get as a mutable import component.
-    pub fn as_import_component_mut(&mut self, def_id: DefId) -> Option<&mut ImportComponentDef> {
+    /// Get as a mutable extern component.
+    pub fn as_extern_component_mut(&mut self, def_id: DefId) -> Option<&mut ExternComponentDef> {
         match &mut self.items.get_mut(def_id)?.kind {
-            DefKind::ImportComponent(c) => Some(c),
+            DefKind::ExternComponent(c) => Some(c),
             _ => None,
         }
     }
@@ -555,12 +557,12 @@ impl Definitions {
             })
     }
 
-    /// Get all import component DefIds.
-    pub fn import_components(&self) -> impl Iterator<Item = DefId> + '_ {
+    /// Get all extern component DefIds.
+    pub fn extern_components(&self) -> impl Iterator<Item = DefId> + '_ {
         self.items
             .iter_enumerated()
             .filter_map(|(id, item)| match &item.kind {
-                DefKind::ImportComponent(_) => Some(id),
+                DefKind::ExternComponent(_) => Some(id),
                 _ => None,
             })
     }
@@ -598,19 +600,16 @@ impl Definitions {
     pub fn owning_global_block(&self, prop_def_id: DefId) -> Option<DefId> {
         for block_id in self.globals() {
             if let Some(g) = self.as_global(block_id)
-                && g.properties.contains(&prop_def_id) {
-                    return Some(block_id);
-                }
+                && g.properties.contains(&prop_def_id)
+            {
+                return Some(block_id);
+            }
         }
         None
     }
 
     /// Find global property by name. Returns (index, def_id).
-    pub fn find_global_property(
-        &self,
-        owner: DefId,
-        prop_name: Name,
-    ) -> Option<(FieldIdx, DefId)> {
+    pub fn find_global_property(&self, owner: DefId, prop_name: Name) -> Option<(FieldIdx, DefId)> {
         let props = match self.kind(owner) {
             DefKind::Global(g) => &g.properties,
             _ => return None,

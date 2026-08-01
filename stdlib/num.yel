@@ -1,0 +1,60 @@
+// Numeric operations.
+//
+// STATUS: `min` and `max` are **implemented**, not signatures — their bodies
+// are real yel and they parse. Nothing lowers them yet. See stdlib/README.md.
+
+package yel:std@0.1.0;
+
+export global Num {
+    // Documented in LANGUAGE.md § Built-in Functions. Monomorphic on s32
+    // today because there are no numeric constraints — see stdlib/README.md.
+    //
+    // These need **no primitive floor**: `<`, `>` and `? :` are surface
+    // syntax, so the whole implementation is ordinary yel. That is what §2's
+    // tier A ("writable now — nothing needed") means, and min/max are its only
+    // two entries. Every other stdlib function bottoms out somewhere.
+    min: func(a: s32, b: s32) -> s32 { a < b ? a : b }
+    max: func(a: s32, b: s32) -> s32 { a > b ? a : b }
+}
+
+// ---------------------------------------------------------------------------
+// The primitive floor
+// ---------------------------------------------------------------------------
+//
+// Nothing above uses these. They are here because this is the file where the
+// floor would sit if the floor were needed, and writing it down is what turns
+// "min/max need no primitives" into a measured claim rather than an assumption.
+//
+// A primitive is a **bodyless declaration carrying `@primitive`** — not a
+// keyword. See plans/rewrite/scope.md § "This collapses two breaks into one":
+// attributes already exist, so `primitive` never becomes a top-level item form
+// and the surface-break list drops from five to four.
+//
+// `@unsafe` gates them, and the pairing is not decoration: a primitive names a
+// WASM instruction directly, which is precisely what an unsafety marker is for.
+//
+// The `op` string is a key into the compiler's builtin table (directions.md
+// §1), the way Grain's `"@wasm.add_int32"` keys `prim_map`. An unknown key is a
+// hard error at registration, never a silently-unresolved name.
+
+export global NumPrimitive {
+    // Signed comparison. Reachable from yel today as `a < b`; declared here so
+    // the mapping from surface operator to WASM instruction is written in one
+    // place instead of being assumed by codegen.
+    @primitive(op = "@wasm.lt_s_int32")
+    lt-s32: func(a: s32, b: s32) -> bool;
+
+    @primitive(op = "@wasm.gt_s_int32")
+    gt-s32: func(a: s32, b: s32) -> bool;
+
+    // Unsigned — and this pair is why the floor cannot be inferred from the
+    // surface. `<` on u32 is a *different instruction* from `<` on s32, and the
+    // only thing selecting between them is the operand type. F17 records the
+    // same hazard for widening: `s32→s64` sign-extends where `u32→u64`
+    // zero-extends, a choice typeck makes and then discards.
+    @primitive(op = "@wasm.lt_u_int32")
+    lt-u32: func(a: u32, b: u32) -> bool;
+
+    @primitive(op = "@wasm.gt_u_int32")
+    gt-u32: func(a: u32, b: u32) -> bool;
+}

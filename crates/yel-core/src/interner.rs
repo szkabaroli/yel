@@ -4,9 +4,9 @@
 //! a [`Name`] (an index). This reduces memory usage and enables fast
 //! equality comparisons via integer comparison.
 
-use serde::{Serialize, Deserialize};
-use std::borrow::Borrow;
 use rustc_hash::FxHashMap as HashMap;
+use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -79,7 +79,6 @@ impl PartialEq<String> for ArcStr {
         &*self.0 == other.as_str()
     }
 }
-
 
 /// Internal interner state.
 #[derive(Debug)]

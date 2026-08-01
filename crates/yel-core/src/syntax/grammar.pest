@@ -17,15 +17,65 @@ CATCH_ALL = @{ (!NL ~ ANY)+ ~ NL }
 // Consume invalid content inside blocks (stops at closing brace or newline)
 BLOCK_LEVEL_CATCH_ALL = @{ !("}" | NL) ~ (!NL ~ ANY)+ ~ NL? }
 
+// ######################################
+// Keyword word boundary
+// ######################################
+// A keyword ends only where an identifier could not continue: `ifa` is an
+// identifier and not `if a`, `recordFoo` is not `record Foo`, `input: s32;`
+// is a property named `input` and not an `in` property named `put`.
+//
+// The check has to be a *negative lookahead over an atomic rule*, one rule per
+// keyword. It cannot be written inline as `"record" ~ !(ALNUM | "_" | "-")`,
+// because pest inserts implicit whitespace between every `~` in a non-atomic
+// rule: the boundary would be tested *after* the space in `record Foo`, see
+// `F`, and reject a valid declaration. An atomic rule pins the keyword and the
+// character after it together, so no whitespace can be skipped between them.
+//
+// It is a *predicate*, so it consumes nothing and — unlike an atomic
+// `kw_record = @{ "record" ~ !IDENT_CONT }` used positionally — emits no pair.
+// The pair tree that `syntax/parser.rs` walks with `into_inner()` is therefore
+// completely unchanged by this rule set.
+//
+// The negative form is also the safe one. If a call site were ever entered
+// with the cursor still on whitespace, `!GLUED_x` succeeds vacuously and the
+// keyword still matches; the positive form `&KEYWORD_x` would reject.
+//
+// NOT applied to `unit_suffix` (an ordered *prefix* match by design — `10second`
+// is `10s` followed by `econd`) or to `primitive_type` (handled separately;
+// `s32x` behaviour must not move).
+IDENT_CONT = _{ ASCII_ALPHANUMERIC | "_" | "-" }
+
+GLUED_RECORD    = @{ "record" ~ IDENT_CONT }
+GLUED_ENUM      = @{ "enum" ~ IDENT_CONT }
+GLUED_VARIANT   = @{ "variant" ~ IDENT_CONT }
+GLUED_ELEMENT   = @{ "element" ~ IDENT_CONT }
+GLUED_EXTERN    = @{ "extern" ~ IDENT_CONT }
+GLUED_COMPONENT = @{ "component" ~ IDENT_CONT }
+GLUED_GLOBAL    = @{ "global" ~ IDENT_CONT }
+GLUED_PACKAGE   = @{ "package" ~ IDENT_CONT }
+GLUED_EXPORT    = @{ "export" ~ IDENT_CONT }
+GLUED_FUNC      = @{ "func" ~ IDENT_CONT }
+GLUED_CALLBACK  = @{ "callback" ~ IDENT_CONT }
+GLUED_IF        = @{ "if" ~ IDENT_CONT }
+GLUED_ELSE      = @{ "else" ~ IDENT_CONT }
+GLUED_FOR       = @{ "for" ~ IDENT_CONT }
+GLUED_IN        = @{ "in" ~ IDENT_CONT }
+GLUED_KEY       = @{ "key" ~ IDENT_CONT }
+GLUED_LET       = @{ "let" ~ IDENT_CONT }
+GLUED_SET       = @{ "set" ~ IDENT_CONT }
+GLUED_BIND      = @{ "bind" ~ IDENT_CONT }
+GLUED_IN_OUT    = @{ "in-out" ~ IDENT_CONT }
+GLUED_OUT       = @{ "out" ~ IDENT_CONT }
+
 // Entry point - with error recovery
 file = { SOI ~ package_decl? ~ (top_level_item | CATCH_ALL)* ~ EOI }
 
 // Top-level items: records, enums, variants, elements, imports, globals, and components
-top_level_item = _{ record_decl | enum_decl | variant_decl | element_decl | import_component | global_decl | component }
+top_level_item = _{ record_decl | enum_decl | variant_decl | element_decl | extern_component | global_decl | component }
 
 // Record type declaration: record Name { field: type, ... }
 record_decl = {
-    "record" ~ identifier ~ "{" ~
+    !GLUED_RECORD ~ "record" ~ identifier ~ "{" ~
         record_field_list? ~
     "}"
 }
@@ -41,7 +91,7 @@ record_field = {
 // Enum type declaration (WIT-style, no payloads):
 // enum color { red, green, blue }
 enum_decl = {
-    "enum" ~ identifier ~ "{" ~
+    !GLUED_ENUM ~ "enum" ~ identifier ~ "{" ~
         enum_cases? ~
     "}"
 }
@@ -49,12 +99,12 @@ enum_decl = {
 enum_cases = { enum_case ~ ("," ~ enum_case)* ~ ","? }
 
 // Enum case names use kebab-case (lowercase with hyphens)
-enum_case = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
+enum_case = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | ("-" ~ &(ASCII_ALPHA_LOWER | ASCII_DIGIT)))* }
 
 // Variant type declaration (WIT-style, with optional payloads):
 // variant filter { all, none, some(list<string>) }
 variant_decl = {
-    "variant" ~ identifier ~ "{" ~
+    !GLUED_VARIANT ~ "variant" ~ identifier ~ "{" ~
         variant_cases? ~
     "}"
 }
@@ -67,12 +117,12 @@ variant_case = {
 }
 
 // Variant case names use kebab-case (lowercase with hyphens)
-variant_case_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
+variant_case_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | ("-" ~ &(ASCII_ALPHA_LOWER | ASCII_DIGIT)))* }
 
 // Element type declaration: element HStack { alignment: option<Alignment>; }
 // Elements are intrinsic UI primitives provided by the runtime.
 element_decl = {
-    "element" ~ identifier ~ "{" ~
+    !GLUED_ELEMENT ~ "element" ~ identifier ~ "{" ~
         element_property* ~
     "}"
 }
@@ -82,26 +132,26 @@ element_property = {
     identifier ~ ":" ~ type_annotation ~ ";"
 }
 
-// Imported component declaration: import component Dialog { name: string; func show(); }
-// Imported components are external components provided by the host or other modules.
-import_component = {
-    "import" ~ "component" ~ identifier ~ "{" ~
-        import_component_member* ~
+// External component declaration: extern component Dialog { name: string; func show(); }
+// These components are external components provided by the host or other modules.
+extern_component = {
+    !GLUED_EXTERN ~ "extern" ~ !GLUED_COMPONENT ~ "component" ~ identifier ~ "{" ~
+        extern_component_member* ~
     "}"
 }
 
-import_component_member = _{
-    import_method | import_property | children_node
+extern_component_member = _{
+    extern_method | extern_property | children_node
 }
 
-// Imported component property: name: type;
-import_property = {
+// External component property: name: type;
+extern_property = {
     identifier ~ ":" ~ type_annotation ~ ";"
 }
 
-// Imported component method: func name(params) -> ret;
-import_method = {
-    "func" ~ identifier ~ "(" ~ func_params? ~ ")" ~ func_return? ~ ";"
+// External component method: func name(params) -> ret;
+extern_method = {
+    !GLUED_FUNC ~ "func" ~ identifier ~ "(" ~ func_params? ~ ")" ~ func_return? ~ ";"
 }
 
 // Global declaration: a singleton object with properties and functions.
@@ -125,7 +175,7 @@ import_method = {
 //       toggle-dark-mode: func();     // host implements
 //   }
 global_decl = {
-    export_modifier? ~ "global" ~ identifier ~ "{" ~
+    export_modifier? ~ !GLUED_GLOBAL ~ "global" ~ identifier ~ "{" ~
         global_member* ~
     "}"
 }
@@ -136,29 +186,29 @@ global_property = {
     property_direction? ~ identifier ~ ":" ~ type_annotation ~ ("=" ~ expr)? ~ ";"
 }
 
-property_direction = { "in-out" | "in" | "out" }
+property_direction = { (!GLUED_IN_OUT ~ "in-out") | (!GLUED_IN ~ "in") | (!GLUED_OUT ~ "out") }
 
 // Legacy syntax — prefer `name: func(params);` instead.
 global_callback = {
-    "callback" ~ identifier ~ "(" ~ func_params? ~ ")" ~ func_return? ~ ";"
+    !GLUED_CALLBACK ~ "callback" ~ identifier ~ "(" ~ func_params? ~ ")" ~ func_return? ~ ";"
 }
 
 // Package declaration: package namespace:name@version;
 package_decl = {
-    "package" ~ package_id ~ ";"
+    !GLUED_PACKAGE ~ "package" ~ package_id ~ ";"
 }
 
 package_id = {
     package_namespace ~ ":" ~ package_name ~ package_version?
 }
 
-package_namespace = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
-package_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+package_namespace = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ("-" ~ &(ASCII_ALPHANUMERIC | "_")))* }
+package_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ("-" ~ &(ASCII_ALPHANUMERIC | "_")))* }
 package_version = @{ "@" ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)* }
 
 // Component definition: [export] component Name { ... }
 component = {
-    export_modifier? ~ "component" ~ identifier ~ "{" ~
+    export_modifier? ~ !GLUED_COMPONENT ~ "component" ~ identifier ~ "{" ~
         component_member* ~
     "}"
 }
@@ -175,10 +225,10 @@ function_decl = {
     export_modifier? ~ identifier ~ ":" ~ func_type ~ ";"
 }
 
-export_modifier = { "export" }
+export_modifier = { !GLUED_EXPORT ~ "export" }
 
 func_type = {
-    "func" ~ "(" ~ func_params? ~ ")" ~ func_return?
+    !GLUED_FUNC ~ "func" ~ "(" ~ func_params? ~ ")" ~ func_return?
 }
 
 func_params = {
@@ -265,7 +315,7 @@ element_node = {
 }
 
 // Element names: lowercase (html-like) or uppercase (component)
-element_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+element_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ("-" ~ &(ASCII_ALPHANUMERIC | "_")))* }
 
 // Element content: items separated by optional commas
 element_content = { element_item ~ (","? ~ element_item)* ~ ","? }
@@ -284,14 +334,14 @@ named_prop = {
 }
 
 // Property modifiers for special bindings
-prop_modifier = { "set" | "bind" }
+prop_modifier = { (!GLUED_SET ~ "set") | (!GLUED_BIND ~ "bind") }
 
 // Attribute names use kebab-case (lowercase with hyphens)
-attr_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
+attr_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | ("-" ~ &(ASCII_ALPHA_LOWER | ASCII_DIGIT)))* }
 
 // If node
 if_node = {
-    "if" ~ expr ~ "{" ~ if_body ~ "}" ~
+    !GLUED_IF ~ "if" ~ expr ~ "{" ~ if_body ~ "}" ~
     else_if_branch* ~
     else_branch?
 }
@@ -299,19 +349,19 @@ if_node = {
 if_body = { (node ~ ","?)* }
 
 else_if_branch = {
-    "else" ~ "if" ~ expr ~ "{" ~ if_body ~ "}"
+    !GLUED_ELSE ~ "else" ~ !GLUED_IF ~ "if" ~ expr ~ "{" ~ if_body ~ "}"
 }
 
 else_branch = {
-    "else" ~ "{" ~ if_body ~ "}"
+    !GLUED_ELSE ~ "else" ~ "{" ~ if_body ~ "}"
 }
 
 // For node: for item in collection key(expr) { ... }
 for_node = {
-    "for" ~ identifier ~ "in" ~ expr ~ key_clause? ~ "{" ~ for_body ~ "}"
+    !GLUED_FOR ~ "for" ~ identifier ~ !GLUED_IN ~ "in" ~ expr ~ key_clause? ~ "{" ~ for_body ~ "}"
 }
 
-key_clause = { "key" ~ "(" ~ expr ~ ")" }
+key_clause = { !GLUED_KEY ~ "key" ~ "(" ~ expr ~ ")" }
 
 for_body = { (node ~ ","?)* }
 
@@ -325,11 +375,11 @@ statement = {
 
 // Let binding: let name: type = value; or let name = value;
 let_statement = {
-    "let" ~ identifier ~ (":" ~ type_annotation)? ~ "=" ~ expr ~ ";"
+    !GLUED_LET ~ "let" ~ identifier ~ (":" ~ type_annotation)? ~ "=" ~ expr ~ ";"
 }
 
 if_statement = {
-    "if" ~ expr ~ "{" ~ statement* ~ "}" ~ ("else" ~ "{" ~ statement* ~ "}")?
+    !GLUED_IF ~ "if" ~ expr ~ "{" ~ statement* ~ "}" ~ (!GLUED_ELSE ~ "else" ~ "{" ~ statement* ~ "}")?
 }
 
 assign_statement = {
@@ -509,7 +559,7 @@ string_text = @{ (!("\"" | "{") ~ ANY)+ }
 
 // Identifiers - support kebab-case (lowercase with hyphens)
 // e.g., selected-id, on-click, mail-item
-identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ("-" ~ &(ASCII_ALPHANUMERIC | "_")))* }
 
 // Whitespace and comments
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }

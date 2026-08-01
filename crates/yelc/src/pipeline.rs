@@ -6,14 +6,11 @@
 //! in how they render diagnostics and emit output, so this module stays
 //! free of any target- or transport-specific types.
 
-use std::collections::HashMap;
-
 use yel_core::{
-    Compiler, DefId, Severity,
-    hir::HirComponent,
-    lir::{LirExpr, LirModule, LirResource},
+    Compiler, Severity,
+    hir::{HirComponent, HirItem},
+    lir::{LirExpr, LirGlobal, LirModule, LirResource},
     syntax::ast::PackageId,
-    thir::{ThirExpr, ThirItem},
 };
 use yel_wasm_codegen as codegen;
 
@@ -40,14 +37,14 @@ impl Lowered {
         self.module.interfaces.as_slice()
     }
 
-    /// The lowered global-singleton property defaults.
-    pub fn global_defaults(&self) -> &HashMap<DefId, LirExpr> {
-        &self.module.global_defaults
+    /// The lowered global-singleton items.
+    pub fn globals(&self) -> &[LirGlobal] {
+        &self.module.globals
     }
 
-    /// The expression arena backing the global-default top-level nodes.
-    pub fn global_default_exprs(&self) -> &[LirExpr] {
-        &self.module.global_default_exprs
+    /// The shared expression arena backing every global's default nodes.
+    pub fn global_exprs(&self) -> &[LirExpr] {
+        &self.module.global_exprs
     }
 
     /// The package declaration, if any source declared one.
@@ -73,74 +70,40 @@ pub fn lower_all<'a>(
     compiler: &mut Compiler,
     sources: impl IntoIterator<Item = &'a str>,
 ) -> Result<Lowered, LoweringFailed> {
-    let mut resources = Vec::new();
-    let mut hir: Vec<HirComponent> = Vec::new();
-    let mut global_thir_defaults: HashMap<DefId, ThirExpr> = HashMap::new();
+    // Parse + HIR-lower every source, accumulating one flat top-level item
+    // list. Package info comes from the first file that declares one.
+    let mut items: Vec<HirItem> = Vec::new();
     let mut package: Option<PackageId> = None;
 
     for source in sources {
         // Parse errors are recorded in the compiler's diagnostics.
         let parsed = compiler.parse(source).map_err(|_| LoweringFailed)?;
 
-        // Take package info from the first file that declares one.
         if package.is_none() {
             package = parsed.package.clone();
         }
 
-        let items = compiler.lower_to_hir(&parsed);
+        items.extend(compiler.lower_to_hir(&parsed));
         if compiler.has_errors() {
             return Err(LoweringFailed);
         }
-
-        // One spine for every top-level unit: type-check each item, then
-        // lower components to LIR resources and accumulate global-default
-        // expressions. The module start function seeds the global slots.
-        for item in &items {
-            match compiler.type_check(item) {
-                ThirItem::Component(thir) => {
-                    if compiler.has_errors() {
-                        return Err(LoweringFailed);
-                    }
-                    resources.push(compiler.lower_to_lir(&thir));
-                }
-                ThirItem::Global(global) => {
-                    if compiler.has_errors() {
-                        return Err(LoweringFailed);
-                    }
-                    global_thir_defaults.extend(global.signal_defaults);
-                }
-            }
-        }
-
-        // Retain HIR components for the `--hir` debug dump (globals carry
-        // no node tree, so they don't appear in it).
-        hir.extend(items.into_iter().filter_map(|item| match item {
-            yel_core::hir::HirItem::Component(c) => Some(c),
-            yel_core::hir::HirItem::Global(_) => None,
-        }));
     }
 
-    // Module-level pass: with every component lowered, synthesize the
-    // per-observer global fanout blocks and expand `TriggerEffects`
-    // placeholders into direct `CallBlock`s. Codegen rejects any
-    // surviving placeholder, so this must precede it.
-    compiler.resolve_global_triggers(&mut resources);
+    // Type-check + lower the whole module — components and globals — through
+    // the one shared spine (`Compiler::lower_items_to_module`), which also
+    // runs the module-level passes (global-trigger resolution, global
+    // lowering, import contract).
+    let module = compiler.lower_items_to_module(&items, package);
+    if compiler.has_errors() {
+        return Err(LoweringFailed);
+    }
 
-    let (global_defaults, global_default_exprs) =
-        compiler.lower_globals_to_lir(&global_thir_defaults);
-
-    // Build the import-side boundary contract (foreign-package globals —
-    // the DOM global today) as data on the module. The WIT backend renders
-    // it directly instead of re-deriving DOM from `ctx.dom_imports()`.
-    let interfaces = compiler.build_import_interfaces();
-
-    let module = LirModule {
-        resources,
-        global_defaults,
-        global_default_exprs,
-        interfaces,
-        package,
-    };
+    // Retain HIR components for the `--hir` debug dump (globals carry no node
+    // tree, so they don't appear in it).
+    let hir: Vec<HirComponent> = items
+        .into_iter()
+        .filter_map(HirItem::into_component)
+        .collect();
 
     Ok(Lowered { module, hir })
 }

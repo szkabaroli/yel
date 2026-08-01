@@ -1,0 +1,9 @@
+// E0012: referencing an enum case that does not exist.
+package yel:nosuchcase@0.1.0;
+
+enum Status { pending, active }
+
+export component App {
+    s: Status = Status.nonexistent;
+    VStack { Text { "ok" } }
+}

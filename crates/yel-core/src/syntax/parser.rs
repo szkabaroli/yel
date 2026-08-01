@@ -1,16 +1,16 @@
 //! Parser implementation for Yel.
 
 use super::ast::{
-    Binding, Component, Element, ElementNode, Enum, Expr, File, ForNode, FunctionDecl, Global,
-    GlobalProperty, Handler, IfNode, ImportComponent, InterpolationPart, Literal, Node, PackageId,
-    PropModifier, Property, PropertyDirection, Record, RecordField, Spanned, Statement, TextNode,
-    Ty, TyKind, Variant, VariantCase,
+    Binding, Component, Element, ElementNode, Enum, Expr, ExternComponent, File, ForNode,
+    FunctionDecl, Global, GlobalProperty, Handler, IfNode, InterpolationPart, Literal, Node,
+    PackageId, PropModifier, Property, PropertyDirection, Record, RecordField, Spanned, Statement,
+    TextNode, Ty, TyKind, Variant, VariantCase,
 };
 use crate::source::{SourceId, Span};
 use crate::syntax::NodeId;
+use pest::Parser;
 use pest::iterators::{Pair, Pairs};
 use pest::pratt_parser::{Assoc, Op, PrattParser};
-use pest::Parser;
 use pest_derive::Parser;
 use std::sync::LazyLock;
 
@@ -215,7 +215,7 @@ fn parse_file_inner(ctx: &mut ParserContext, mut pairs: Pairs<Rule>) -> Result<F
     let mut enums = Vec::new();
     let mut variants = Vec::new();
     let mut elements = Vec::new();
-    let mut import_components = Vec::new();
+    let mut extern_components = Vec::new();
     let mut globals = Vec::new();
     let mut components = Vec::new();
 
@@ -240,9 +240,9 @@ fn parse_file_inner(ctx: &mut ParserContext, mut pairs: Pairs<Rule>) -> Result<F
                 let span = ctx.span(&inner);
                 elements.push(Spanned::new(parse_element(ctx, inner)?, span));
             }
-            Rule::import_component => {
+            Rule::extern_component => {
                 let span = ctx.span(&inner);
-                import_components.push(Spanned::new(parse_import_component(ctx, inner)?, span));
+                extern_components.push(Spanned::new(parse_extern_component(ctx, inner)?, span));
             }
             Rule::global_decl => {
                 let span = ctx.span(&inner);
@@ -266,7 +266,7 @@ fn parse_file_inner(ctx: &mut ParserContext, mut pairs: Pairs<Rule>) -> Result<F
         enums,
         variants,
         elements,
-        import_components,
+        extern_components,
         globals,
         components,
     })
@@ -484,10 +484,10 @@ fn parse_element_property(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Prope
     })
 }
 
-fn parse_import_component(
+fn parse_extern_component(
     ctx: &ParserContext,
     pair: Pair<Rule>,
-) -> Result<ImportComponent, ParseError> {
+) -> Result<ExternComponent, ParseError> {
     let mut inner = pair.into_inner();
 
     let name_pair = inner
@@ -502,13 +502,13 @@ fn parse_import_component(
 
     for item in inner {
         match item.as_rule() {
-            Rule::import_property => {
+            Rule::extern_property => {
                 let span = ctx.span(&item);
-                properties.push(Spanned::new(parse_import_property(ctx, item)?, span));
+                properties.push(Spanned::new(parse_extern_property(ctx, item)?, span));
             }
-            Rule::import_method => {
+            Rule::extern_method => {
                 let span = ctx.span(&item);
-                methods.push(Spanned::new(parse_import_method(ctx, item)?, span));
+                methods.push(Spanned::new(parse_extern_method(ctx, item)?, span));
             }
             Rule::children_node => {
                 has_children_slot = true;
@@ -517,7 +517,7 @@ fn parse_import_component(
         }
     }
 
-    Ok(ImportComponent {
+    Ok(ExternComponent {
         name,
         name_span,
         properties,
@@ -526,7 +526,7 @@ fn parse_import_component(
     })
 }
 
-fn parse_import_property(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Property, ParseError> {
+fn parse_extern_property(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Property, ParseError> {
     let mut inner = pair.into_inner();
 
     let name_pair = inner
@@ -549,7 +549,7 @@ fn parse_import_property(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Proper
     })
 }
 
-fn parse_import_method(ctx: &ParserContext, pair: Pair<Rule>) -> Result<FunctionDecl, ParseError> {
+fn parse_extern_method(ctx: &ParserContext, pair: Pair<Rule>) -> Result<FunctionDecl, ParseError> {
     let mut inner = pair.into_inner();
 
     let name_pair = inner
@@ -711,14 +711,14 @@ fn parse_global_callback(
     ctx: &ParserContext,
     pair: Pair<Rule>,
 ) -> Result<FunctionDecl, ParseError> {
-    // Same shape as an import_method; the leading "callback" keyword is a
+    // Same shape as an extern_method; the leading "callback" keyword is a
     // literal that pest doesn't surface as an inner pair. Callbacks are
     // host-implemented (imports), so is_export = false.
     parse_func_sig(ctx, pair, /* is_export */ false)
 }
 
 /// Parse the body of a `name(params) -> ret` signature (shared by
-/// import_method and global_callback).
+/// extern_method and global_callback).
 fn parse_func_sig(
     ctx: &ParserContext,
     pair: Pair<Rule>,
@@ -1591,7 +1591,7 @@ fn parse_expr_with_span(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Spanned
                         expected: "prefix operator".into(),
                         found: format!("{:?}", op.as_rule()),
                         span: Some(op_span),
-                    })
+                    });
                 }
             };
             let combined_span = Span::new(op_span.source, op_span.start, rhs_span.end);
@@ -1725,7 +1725,7 @@ fn parse_expr_with_span(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Spanned
                                 expected: "infix operator".into(),
                                 found: format!("{:?}", op.as_rule()),
                                 span: Some(ctx.span(&op)),
-                            })
+                            });
                         }
                     };
                     Ok((
@@ -2052,9 +2052,10 @@ fn parse_string_expr(ctx: &ParserContext, pair: Pair<Rule>) -> Result<Expr, Pars
         return Ok(Expr::Literal(Literal::String(String::new())));
     }
     if parts.len() == 1
-        && let InterpolationPart::Literal(s) = &parts[0] {
-            return Ok(Expr::Literal(Literal::String(s.clone())));
-        }
+        && let InterpolationPart::Literal(s) = &parts[0]
+    {
+        return Ok(Expr::Literal(Literal::String(s.clone())));
+    }
 
     Ok(Expr::Interpolation(parts))
 }

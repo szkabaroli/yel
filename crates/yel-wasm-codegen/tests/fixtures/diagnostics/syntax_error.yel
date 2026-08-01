@@ -1,0 +1,6 @@
+// E0060: an unterminated element block is a parse error.
+package yel:syntaxerror@0.1.0;
+
+export component App {
+    VStack { Text { "ok"
+}

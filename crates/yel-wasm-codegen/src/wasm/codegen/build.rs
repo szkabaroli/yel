@@ -8,7 +8,7 @@
 //! - Data section for string literals
 //! - Name section for debugging
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use wasm_encoder::{
     CodeSection, DataSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
@@ -16,7 +16,8 @@ use wasm_encoder::{
     TypeSection, ValType,
 };
 
-use yel_core::lir::{LirExpr, LirResource, align_to};
+use yel_core::lir::arena::LirResourceArena;
+use yel_core::lir::{LirExpr, LirResource, ModuleScope, align_to};
 use yel_core::types::InternedTyKind;
 use yel_core::{DefId, Ty};
 
@@ -25,9 +26,9 @@ use super::super::runtime::{self, RuntimeFunctions};
 use super::super::{
     FuncTypes, ImportLayout, MemoryLayout, WasmPackageBuilder, to_kebab_case, to_wit_name,
 };
-use super::scratch::{compute_mount_retention_counts, merge_max_slot_counts, push_valtype_locals};
+use super::scratch::compute_mount_retention_counts;
+use crate::wasm::AllocatorFuncs;
 use crate::wasm::gc_types::{GlobalsBlockLayout, compute_globals_block_layout};
-use crate::wasm::{AllocatorFuncs, FlatScratchBases};
 
 impl<'a> WasmPackageBuilder<'a> {
     pub(crate) fn build_core_module(&mut self) -> Result<Module, CodegenError> {
@@ -51,6 +52,15 @@ impl<'a> WasmPackageBuilder<'a> {
             .map(|&i| &self.components[i])
             .collect();
         let all_components: Vec<&LirResource> = self.components.iter().collect();
+
+        // §6.7 dispatch: derive the core `dispatch` signature from the
+        // registered `event-value` variant's canonical flattening — one source
+        // of truth shared with the WIT `event-value` type. Computed before the
+        // `intern_type` closure borrows `self`. Must equal `(i32 disc, i64, i32)`.
+        let dispatch_event_flat = self.canonical_flat_valtypes(
+            self.ctx.known.variants.event_value_ty(),
+            crate::wasm::repr::WitBoundary::assert(),
+        );
 
         // Type section
         let mut types = TypeSection::new();
@@ -97,7 +107,7 @@ impl<'a> WasmPackageBuilder<'a> {
                         intern_type(vec![i; 2 * arity], vec![i, i], format!("concat{}", arity));
                     (arity, idx)
                 })
-                .collect::<std::collections::HashMap<usize, u32>>()
+                .collect::<rustc_hash::FxHashMap<usize, u32>>()
         };
 
         let func_types = FuncTypes {
@@ -132,15 +142,20 @@ impl<'a> WasmPackageBuilder<'a> {
         // (and ctor_at / ctor type indices for every record type) so the
         // function section can emit the right index and `generate_setter_for`
         // can match the body shape.
-        let mut setter_type_by_sig: std::collections::HashMap<(usize, usize), u32> =
-            std::collections::HashMap::new();
+        let mut setter_type_by_sig: rustc_hash::FxHashMap<(usize, usize), u32> =
+            rustc_hash::FxHashMap::default();
         for (comp_idx, component) in self.components.iter().enumerate() {
             for (sig_idx, signal) in component.signals.iter().enumerate() {
                 if matches!(self.ctx.ty_kind(signal.ty), InternedTyKind::Func { .. }) {
                     continue;
                 }
                 let mut params = vec![ValType::I32]; // self
-                params.extend(self.canonical_flat_valtypes(signal.ty));
+                params.extend(
+                    self.canonical_flat_valtypes(
+                        signal.ty,
+                        crate::wasm::repr::WitBoundary::assert(),
+                    ),
+                );
                 let comp_name = to_kebab_case(&self.ctx.str(component.name));
                 let sig_name = to_kebab_case(&self.ctx.str(self.ctx.defs.name(signal.def_id)));
                 let idx = intern_type(
@@ -153,10 +168,10 @@ impl<'a> WasmPackageBuilder<'a> {
         }
 
         // Precompute ctor_at / ctor type indices for every record type.
-        let mut record_ctor_at_types: std::collections::HashMap<DefId, u32> =
-            std::collections::HashMap::new();
-        let mut record_ctor_types: std::collections::HashMap<DefId, u32> =
-            std::collections::HashMap::new();
+        let mut record_ctor_at_types: rustc_hash::FxHashMap<DefId, u32> =
+            rustc_hash::FxHashMap::default();
+        let mut record_ctor_types: rustc_hash::FxHashMap<DefId, u32> =
+            rustc_hash::FxHashMap::default();
         for &record_def in &self.record_types {
             let field_params = self.flatten_record_fields_valtypes(record_def);
             let rec_name = to_kebab_case(&self.ctx.str(self.ctx.defs.name(record_def)));
@@ -183,14 +198,15 @@ impl<'a> WasmPackageBuilder<'a> {
         // depends on the element type (strings/lists = 2 i32s, records = sum
         // of field params, primitives = 1 i32). Dynamic interning means
         // arbitrarily large list literals are supported without a static cap.
-        let mut list_ctor_types: std::collections::HashMap<(Ty, usize), u32> =
-            std::collections::HashMap::new();
+        let mut list_ctor_types: rustc_hash::FxHashMap<(Ty, usize), u32> =
+            rustc_hash::FxHashMap::default();
         for &(elem_ty, count) in &self.list_constructs {
             // Use canonical-ABI flattening so each element's params carry the
             // right WASM value type (f32 stays f32, not i32). Previously this
             // hardcoded i32 for every param which caused validation failures
             // when `list<f32>` element values were passed as f32.
-            let per_elem = self.flatten_core_valtypes(elem_ty);
+            let per_elem =
+                self.flatten_core_valtypes(elem_ty, crate::wasm::repr::WitBoundary::assert());
             let mut params = Vec::with_capacity(per_elem.len() * count);
             for _ in 0..count {
                 params.extend_from_slice(&per_elem);
@@ -207,102 +223,36 @@ impl<'a> WasmPackageBuilder<'a> {
         // List-append helper type indices are interned later — after
         // `emit_program_record_types` populates `list_array_type_idx`.
         // See the late-intern block below.
-        let mut list_append_types: std::collections::HashMap<Ty, u32> =
-            std::collections::HashMap::new();
+        let mut list_append_types: rustc_hash::FxHashMap<Ty, u32> =
+            rustc_hash::FxHashMap::default();
         // List-get helper type indices, interned in the same late block.
-        let mut list_get_types: std::collections::HashMap<Ty, u32> =
-            std::collections::HashMap::new();
+        let mut list_get_types: rustc_hash::FxHashMap<Ty, u32> = rustc_hash::FxHashMap::default();
 
-        // Precompute callback import type indices. Every callback takes the
-        // component's resource handle as the implicit first `i32` param,
-        // followed by its declared params (flattened via canonical ABI), and
-        // returns its declared result (flattened). Keyed by
-        // (component_idx, name) — each component owns its own callback
-        // namespace (one WIT interface per component), so sibling
-        // components may freely have same-named callbacks with different
-        // signatures.
-        let precalc_import_layout = ImportLayout::new(&all_components, self.ctx)?;
-        let mut callback_import_types: std::collections::HashMap<(usize, String), u32> =
-            std::collections::HashMap::new();
+        // Precompute the wasm function type for every host import (component
+        // callbacks, global callbacks, DOM), keyed by callee `DefId`. The
+        // import registry (`self.imports`) is the single source of the set
+        // and its order; `import_wasm_type` applies the canonical-ABI
+        // lowering (leading `i32` self for `Borrow` receivers, flattened
+        // params, ret_ptr for multi-value results). `intern_type` dedups
+        // structurally identical signatures.
+        let mut import_types: rustc_hash::FxHashMap<DefId, u32> = rustc_hash::FxHashMap::default();
         {
-            for (comp_idx, comp_layout) in precalc_import_layout.components.iter().enumerate() {
-                for &cb_def_id in &comp_layout.callback_def_ids {
-                    let (name, params_flat, results_flat) = {
-                        let func_def = match self.ctx.defs.as_function(cb_def_id) {
-                            Some(f) => f,
-                            None => continue,
-                        };
-                        let name = to_kebab_case(&self.ctx.str(func_def.name));
-                        let mut params = vec![ValType::I32]; // self handle
-                        for pid in &func_def.params {
-                            if let Some(pty) = self.ctx.defs.type_of(*pid) {
-                                params.extend(self.canonical_flat_valtypes(pty));
-                            }
-                        }
-                        // Canonical ABI lowering for imports: flat results
-                        // of length 0 or 1 are returned directly; anything
-                        // larger is returned via a ret_ptr parameter and an
-                        // empty core return type.
-                        let mut results = if func_def.ret_ty == yel_core::types::Ty::UNIT {
-                            Vec::new()
-                        } else {
-                            self.canonical_flat_valtypes(func_def.ret_ty)
-                        };
-                        if results.len() > 1 {
-                            params.push(ValType::I32); // ret_ptr
-                            results = Vec::new();
-                        }
-                        (name, params, results)
-                    };
-                    let comp_name = to_kebab_case(&self.ctx.str(all_components[comp_idx].name));
-                    let idx = intern_type(
-                        params_flat,
-                        results_flat,
-                        format!("type-{}-callback-{}", comp_name, name),
-                    );
-                    callback_import_types.insert((comp_idx, name), idx);
-                }
+            let imports = self.imports.clone();
+            for import in &imports {
+                let (params_flat, results_flat) = self.import_wasm_type(import);
+                let iface_kebab = to_kebab_case(
+                    &self
+                        .ctx
+                        .str(self.import_interfaces[import.interface.index()].name),
+                );
+                let fname = to_kebab_case(&self.ctx.str(import.name));
+                let idx = intern_type(
+                    params_flat,
+                    results_flat,
+                    format!("type-import-{}-{}", iface_kebab, fname),
+                );
+                import_types.insert(import.def_id, idx);
             }
-        }
-
-        // Global callback import types — the same canonical-ABI lowering
-        // as component callbacks, but with NO leading `self` handle:
-        // globals are singletons, not resources, so their host imports
-        // are freestanding. Keyed by callback DefId (each global owns its
-        // own interface namespace, so DefId is a sufficient key).
-        let mut global_callback_import_types: std::collections::HashMap<DefId, u32> =
-            std::collections::HashMap::new();
-        for &(global_id, cb_def_id) in &precalc_import_layout.global_callbacks {
-            let (name, params_flat, results_flat) = {
-                let func_def = match self.ctx.defs.as_function(cb_def_id) {
-                    Some(f) => f,
-                    None => continue,
-                };
-                let name = to_kebab_case(&self.ctx.str(func_def.name));
-                let mut params: Vec<ValType> = Vec::new();
-                for pid in &func_def.params {
-                    if let Some(pty) = self.ctx.defs.type_of(*pid) {
-                        params.extend(self.canonical_flat_valtypes(pty));
-                    }
-                }
-                let mut results = if func_def.ret_ty == yel_core::types::Ty::UNIT {
-                    Vec::new()
-                } else {
-                    self.canonical_flat_valtypes(func_def.ret_ty)
-                };
-                if results.len() > 1 {
-                    params.push(ValType::I32); // ret_ptr
-                    results = Vec::new();
-                }
-                (name, params, results)
-            };
-            let g_name = to_kebab_case(&self.ctx.str(self.ctx.defs.name(global_id)));
-            let idx = intern_type(
-                params_flat,
-                results_flat,
-                format!("type-global-{}-callback-{}", g_name, name),
-            );
-            global_callback_import_types.insert(cb_def_id, idx);
         }
 
         // Stage 6: filter type interning is deferred until after
@@ -321,10 +271,16 @@ impl<'a> WasmPackageBuilder<'a> {
         // `WasmPackageBuilder::block_ty_for`, which consults this
         // registry — one source of truth for "multi-slot ternary block
         // type", no per-emit-site recomputation.
-        let mut ternary_shapes: std::collections::HashMap<Vec<ValType>, ()> =
-            std::collections::HashMap::new();
+        let mut ternary_shapes: rustc_hash::FxHashMap<Vec<ValType>, ()> =
+            rustc_hash::FxHashMap::default();
         crate::wasm::repr::collect_ternary_block_shapes(self, &mut ternary_shapes);
-        for (ternary_idx, (shape, ())) in ternary_shapes.into_iter().enumerate() {
+        // Determinism (rule #4): the registry is a `RandomState` HashMap, so
+        // its iteration order — and hence the type-section indices assigned
+        // here — varies run-to-run. Sort the shapes into a stable order before
+        // interning so the emitted module is byte-reproducible.
+        let mut ternary_shapes: Vec<Vec<ValType>> = ternary_shapes.into_keys().collect();
+        ternary_shapes.sort_by_cached_key(|shape| format!("{:?}", shape));
+        for (ternary_idx, shape) in ternary_shapes.into_iter().enumerate() {
             let idx = intern_type(
                 vec![],
                 shape.clone(),
@@ -333,23 +289,14 @@ impl<'a> WasmPackageBuilder<'a> {
             self.ternary_block_types.insert(shape, idx);
         }
 
-        // Dispatch: `(handler-id: u32, event: event-value) -> ()`.
-        // The WIT `event-value` variant flattens under canonical ABI
-        // to `(i32 disc, i64 slot0, i32 slot1)` because its payload
-        // arms include both f64 (one case) and (i32, i32) strings
-        // (another case) — the joined slot0 is an i64 wide enough
-        // for f64/f32-reinterpreted/s32/etc., slot1 is the string
-        // length.
-        let dispatch_type_idx = intern_type(
-            vec![
-                ValType::I32, // handler_id
-                ValType::I32, // event-value discriminant
-                ValType::I64, // joined slot 0 (f64 / reinterpret-f32 / s32-ext / ptr)
-                ValType::I32, // joined slot 1 (string len, else 0)
-            ],
-            vec![],
-            "type-dispatch".to_string(),
-        );
+        // Dispatch: `(handler-id: u32, event: event-value) -> ()`. The
+        // event-value slots come from the registered variant's canonical
+        // flattening (`dispatch_event_flat`, computed above) — `(i32 disc, i64
+        // slot0, i32 slot1)`: slot0 widened to i64 by the `input-f64` case,
+        // slot1 the string length.
+        let mut dispatch_params = vec![ValType::I32]; // handler_id
+        dispatch_params.extend(dispatch_event_flat.iter().copied());
+        let dispatch_type_idx = intern_type(dispatch_params, vec![], "type-dispatch".to_string());
 
         // Emit the dynamic types at the end of the Type section.
         for (params, results) in &dyn_types {
@@ -469,6 +416,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 | K::Def(_)
                 | K::Literal(_)
                 | K::SignalRead(_)
+                | K::GlobalRead(_)
                 | K::EnumCase { .. }
                 | K::ListStatic { .. }
                 | K::Closure { .. } => {}
@@ -495,13 +443,11 @@ impl<'a> WasmPackageBuilder<'a> {
         // A global property with no default has no expr to seed from, yet its
         // declared type still needs GC-type registration (the globals-layout
         // pass below calls `signal_storage_valtypes` on it). Seed every global
-        // property's type directly.
-        for block_def_id in self.ctx.defs.globals().collect::<Vec<_>>() {
-            if let Some(block) = self.ctx.defs.as_global(block_def_id) {
-                for &prop_id in &block.properties {
-                    if let Some(prop_ty) = self.ctx.defs.type_of(prop_id) {
-                        extra_seed_tys.push(prop_ty);
-                    }
+        // property's type directly from the first-class `LirGlobal` items.
+        for global in &self.globals {
+            for prop in &global.properties {
+                if let Some(prop_ty) = self.ctx.defs.type_of(prop.def_id) {
+                    extra_seed_tys.push(prop_ty);
                 }
             }
         }
@@ -908,37 +854,29 @@ impl<'a> WasmPackageBuilder<'a> {
         // type is emitted for a global block — globals are singletons,
         // not instantiable, so they need no struct.
         let mut globals_layouts: Vec<GlobalsBlockLayout> = Vec::new();
-        let mut global_block_def_to_idx: HashMap<DefId, usize> = HashMap::new();
-        let global_block_ids: Vec<DefId> = self.ctx.defs.globals().collect();
+        let mut global_block_def_to_idx: HashMap<DefId, usize> = HashMap::default();
 
-        for block_def_id in global_block_ids.iter().copied() {
-            let block = self
-                .ctx
-                .defs
-                .as_global(block_def_id)
-                .ok_or_else(|| {
-                    CodegenError::InternalError(format!(
-                        "globals() iterator yielded {:?} which is not a GlobalDef",
-                        block_def_id
-                    ))
-                })?
-                .clone();
-            let prop_slot_valtypes: Vec<Vec<ValType>> = block
+        // Walk the module's first-class `LirGlobal` items (not
+        // `ctx.defs.globals()`) for global structure. Property *types* still
+        // come from the interner (`type_of`), which is shared def-table state.
+        let globals = self.globals.clone();
+        for global in &globals {
+            let prop_slot_valtypes: Vec<Vec<ValType>> = global
                 .properties
                 .iter()
-                .map(|&prop_id| {
+                .map(|prop| {
                     let prop_ty = self
                         .ctx
                         .defs
-                        .type_of(prop_id)
+                        .type_of(prop.def_id)
                         .unwrap_or(yel_core::types::Ty::ERROR);
                     self.signal_storage_valtypes(prop_ty)
                 })
                 .collect();
 
-            let layout = compute_globals_block_layout(block_def_id, &prop_slot_valtypes);
+            let layout = compute_globals_block_layout(global.def_id, &prop_slot_valtypes);
 
-            global_block_def_to_idx.insert(block_def_id, globals_layouts.len());
+            global_block_def_to_idx.insert(global.def_id, globals_layouts.len());
             globals_layouts.push(layout);
         }
         self.globals_layouts = globals_layouts;
@@ -973,7 +911,7 @@ impl<'a> WasmPackageBuilder<'a> {
                 .expect("gc_list_arr_type_idxs: $str_bytes array type must be registered");
             gc_list_arr_type_idxs.push((yel_core::Ty::STRING, str_bytes_idx));
         }
-        let mut materializer_type_by_arr_idx: HashMap<u32, u32> = HashMap::new();
+        let mut materializer_type_by_arr_idx: HashMap<u32, u32> = HashMap::default();
         for (i, (_, arr_type_idx)) in gc_list_arr_type_idxs.iter().enumerate() {
             let type_idx = cursor + i as u32;
             let param = ValType::Ref(RefType {
@@ -985,7 +923,7 @@ impl<'a> WasmPackageBuilder<'a> {
         }
         // Phase 5e.6: per-array un-materializer types — (i32, i32) → (ref null $arr).
         let unmat_type_base = cursor + gc_list_arr_type_idxs.len() as u32;
-        let mut unmaterializer_type_by_arr_idx: HashMap<u32, u32> = HashMap::new();
+        let mut unmaterializer_type_by_arr_idx: HashMap<u32, u32> = HashMap::default();
         for (i, (_, arr_type_idx)) in gc_list_arr_type_idxs.iter().enumerate() {
             let type_idx = unmat_type_base + i as u32;
             let result = ValType::Ref(RefType {
@@ -1061,83 +999,25 @@ impl<'a> WasmPackageBuilder<'a> {
         // Import section - no memory import, define it locally instead
         let mut imports = ImportSection::new();
 
-        // Calculate import layout for all exported components
-        let import_layout = ImportLayout::new(&all_components, self.ctx)?;
+        // Calculate the import index space from the module's import registry.
+        let import_layout = ImportLayout::new(&self.imports, &all_components);
         // Store import_layout for use in expression emission
         self.import_layout = Some(import_layout.clone());
 
-        // Per-component callbacks interfaces: one WIT interface per
-        // component — `{namespace}:{package}/{component}-callbacks@{version}`.
-        // Sibling components no longer share a callback namespace, so two
-        // `on-submit` callbacks with different signatures compile cleanly
-        // (they land in distinct interfaces). Callbacks from non-exported
-        // components are still emitted — their component bodies can invoke
-        // them from event handlers, so the Call site needs a valid import
-        // target. Whether a callback appears in the component's WIT
-        // surface is handled by `wit_ast.rs`.
-        for &(comp_idx, cb_def_id) in &import_layout.unique_callbacks {
-            let name = if let Some(func_def) = self.ctx.defs.as_function(cb_def_id) {
-                to_kebab_case(&self.ctx.str(func_def.name))
-            } else {
-                continue;
-            };
-            let owner_comp = all_components[comp_idx];
-            let comp_kebab = to_kebab_case(&self.ctx.str(owner_comp.name));
-            let callbacks_interface =
-                if let Some((namespace, pkg_name, version)) = &self.wit_package {
-                    format!(
-                        "{}:{}/{}-callbacks@{}",
-                        namespace, pkg_name, comp_kebab, version
-                    )
-                } else {
-                    format!("yel:ui/{}-callbacks@0.1.0", comp_kebab)
-                };
-            let type_idx = callback_import_types
-                .get(&(comp_idx, name.clone()))
-                .copied()
-                .unwrap_or(1);
-            imports.import(&callbacks_interface, &name, EntityType::Function(type_idx));
-        }
-
-        // Global callbacks — one import per global `func` member, from
-        // the global's own interface (named after the global, matching
-        // `wit_ast::create_globals_interfaces`). Freestanding: no `self`
-        // handle. These follow every component callback in import order
-        // and precede the `[resource-new]` slots, exactly as allocated in
-        // `ImportLayout::new`.
-        for &(global_id, cb_def_id) in &import_layout.global_callbacks {
-            let name = if let Some(func_def) = self.ctx.defs.as_function(cb_def_id) {
-                to_kebab_case(&self.ctx.str(func_def.name))
-            } else {
-                continue;
-            };
-            let global_kebab = to_kebab_case(&self.ctx.str(self.ctx.defs.name(global_id)));
-            // A global may live in a foreign package (the built-in `Dom`
-            // global → `yel:ui/dom@…`); otherwise it's in this module's
-            // package.
-            let foreign_pkg = self
-                .ctx
-                .defs
-                .as_global(global_id)
-                .and_then(|g| g.package.clone());
-            let global_interface = if let Some(pkg) = &foreign_pkg {
-                format!(
-                    "{}:{}/{}@{}",
-                    pkg.namespace,
-                    pkg.name,
-                    global_kebab,
-                    pkg.version.as_deref().unwrap_or("0.1.0")
-                )
-            } else if let Some((namespace, pkg_name, version)) = &self.wit_package {
-                format!("{}:{}/{}@{}", namespace, pkg_name, global_kebab, version)
-            } else {
-                format!("yel:ui/{}@0.1.0", global_kebab)
-            };
-            let type_idx = global_callback_import_types
-                .get(&cb_def_id)
-                .copied()
-                .unwrap_or(1);
-            imports.import(&global_interface, &name, EntityType::Function(type_idx));
+        // Emit every host import from the module's registry, in registry
+        // order (which fixes the import indices). Each import's interface name
+        // and wasm type come from the same contract the WIT was rendered from,
+        // so the core import section and the WIT world cannot disagree. A
+        // `Borrow` receiver (component callbacks) carries a leading `i32`
+        // self handle; global / DOM callbacks are freestanding.
+        {
+            let imports_list = self.imports.clone();
+            for import in &imports_list {
+                let iface_name = self.import_interface_name(import.interface);
+                let fname = to_kebab_case(&self.ctx.str(import.name));
+                let type_idx = import_types.get(&import.def_id).copied().unwrap_or(1);
+                imports.import(&iface_name, &fname, EntityType::Function(type_idx));
+            }
         }
 
         // Import [resource-new] per exported component — each component is
@@ -1601,7 +1481,11 @@ impl<'a> WasmPackageBuilder<'a> {
                         continue;
                     }
                     // Returned-by-value (≤1 flat slot) getters allocate nothing.
-                    if self.canonical_flat_valtypes(ty).len() <= 1 {
+                    if self
+                        .canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert())
+                        .len()
+                        <= 1
+                    {
                         continue;
                     }
                     // Only GC-migrated getters materialise a fresh buffer;
@@ -1640,7 +1524,11 @@ impl<'a> WasmPackageBuilder<'a> {
                         continue;
                     }
                     // self handle (1) + flattened value > MAX_FLAT_PARAMS (16).
-                    if 1 + self.canonical_flat_valtypes(ty).len() <= 16 {
+                    if 1 + self
+                        .canonical_flat_valtypes(ty, crate::wasm::repr::WitBoundary::assert())
+                        .len()
+                        <= 16
+                    {
                         continue;
                     }
                     setter_spill_plan.push((next, comp_idx, sig_idx, ty));
@@ -1683,21 +1571,22 @@ impl<'a> WasmPackageBuilder<'a> {
         // unique callbacks (at least 16 bytes so a string/list always fits).
         let mut scratch_size: i32 = 16;
         {
-            let precalc_import_layout = ImportLayout::new(&all_components, self.ctx)?;
-            for &(_comp_idx, cb_def_id) in &precalc_import_layout.unique_callbacks {
-                if let Some(func_def) = self.ctx.defs.as_function(cb_def_id) {
-                    let ret_ty = func_def.ret_ty;
-                    if ret_ty == Ty::UNIT {
-                        continue;
-                    }
-                    let flat = self.canonical_flat_valtypes(ret_ty);
-                    if flat.len() <= 1 {
-                        continue;
-                    }
-                    let size = self.layout_ctx.size_of(ret_ty) as i32;
-                    if size > scratch_size {
-                        scratch_size = size;
-                    }
+            let imports_list = self.imports.clone();
+            for import in &imports_list {
+                let Some(ret_ty) = import.result else {
+                    continue;
+                };
+                if ret_ty == Ty::UNIT {
+                    continue;
+                }
+                let flat =
+                    self.canonical_flat_valtypes(ret_ty, crate::wasm::repr::WitBoundary::assert());
+                if flat.len() <= 1 {
+                    continue;
+                }
+                let size = self.layout_ctx.size_of(ret_ty) as i32;
+                if size > scratch_size {
+                    scratch_size = size;
                 }
             }
         }
@@ -1902,8 +1791,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // Gap 3: maps a spill trampoline's index → the wide setter's wasm
         // index it forwards to. Filled here in the export loop (where the wide
         // setter index is known) and read by the code-section body pass.
-        let mut spill_wide_idx: std::collections::HashMap<u32, u32> =
-            std::collections::HashMap::new();
+        let mut spill_wide_idx: rustc_hash::FxHashMap<u32, u32> = rustc_hash::FxHashMap::default();
         for exported_comp in exported_components.iter() {
             let prefix = to_kebab_case(&self.ctx.str(exported_comp.name));
 
@@ -2088,18 +1976,20 @@ impl<'a> WasmPackageBuilder<'a> {
         // Filter calls carry `Option<usize>` for their owning component:
         //   Some(i) → inside component i (uses its layout for signal reads)
         //   None    → module scope (e.g. in a global-singleton default);
-        //             synthesise an empty carrier so any component-local
+        //             emit against a signal-less carrier so any component-local
         //             SignalRead that leaks in fails loudly, while module
-        //             globals resolve via their core-global backing.
+        //             globals resolve via their core-global backing. The
+        //             carrier holds the global-default arena so a module-scope
+        //             predicate's `LirExprId` children resolve.
         let filter_calls_clone = self.filter_calls.clone();
         let module_carrier_name = self.ctx.intern("<module>");
-        let module_carrier = LirResource::empty_module_carrier(module_carrier_name);
+        let module_scope = ModuleScope::new(module_carrier_name, self.global_default_exprs.clone());
         for (filter_id, (comp_idx, elem_ty, elem_size, param, predicate)) in
             filter_calls_clone.iter().enumerate()
         {
-            let component = match comp_idx {
+            let component: &dyn LirResourceArena = match comp_idx {
                 Some(idx) => &self.components[*idx],
-                None => &module_carrier,
+                None => &module_scope,
             };
             code.function(&self.generate_filter_function(
                 filter_id,
@@ -2161,10 +2051,8 @@ impl<'a> WasmPackageBuilder<'a> {
             let component = &self.components[comp_idx];
 
             // For exported components, get the [resource-new] import index.
-            // `import_layout.components` is indexed by position in
-            // `self.components` (all components), so this is a direct lookup.
             let resource_new_idx: Option<u32> = if component.is_export {
-                import_layout.components[comp_idx].resource_new
+                import_layout.resource_new.get(&component.def_id).copied()
             } else {
                 None
             };
@@ -2184,17 +2072,35 @@ impl<'a> WasmPackageBuilder<'a> {
                 let ctor_block = component
                     .export_constructor_block
                     .expect("exported component must have export_constructor_block synthesized");
-                code.function(&self.generate_block_function(comp_idx, ctor_block)?);
+                let ctor = component.get_block(ctor_block);
+                code.function(&self.generate_block_function(
+                    component,
+                    Some(comp_idx),
+                    ctor,
+                    true,
+                )?);
                 // Reset handler counter before mount - dispatch uses same ordering
                 self.reset_handler_counter();
                 let mount_block = component
                     .export_mount_block
                     .expect("exported component must have export_mount_block synthesized");
-                code.function(&self.generate_block_function(comp_idx, mount_block)?);
+                let mount = component.get_block(mount_block);
+                code.function(&self.generate_block_function(
+                    component,
+                    Some(comp_idx),
+                    mount,
+                    true,
+                )?);
                 let unmount_block = component
                     .export_unmount_block
                     .expect("exported component must have export_unmount_block synthesized");
-                code.function(&self.generate_block_function(comp_idx, unmount_block)?);
+                let unmount = component.get_block(unmount_block);
+                code.function(&self.generate_block_function(
+                    component,
+                    Some(comp_idx),
+                    unmount,
+                    true,
+                )?);
             } else {
                 self.reset_handler_counter();
             }
@@ -2233,7 +2139,13 @@ impl<'a> WasmPackageBuilder<'a> {
                 {
                     continue;
                 }
-                code.function(&self.generate_block_function(comp_idx, block.id)?);
+                let is_lc = super::block_fn::block_is_lifecycle(component, block.id);
+                code.function(&self.generate_block_function(
+                    component,
+                    Some(comp_idx),
+                    block,
+                    is_lc,
+                )?);
             }
         }
 
@@ -2284,104 +2196,28 @@ impl<'a> WasmPackageBuilder<'a> {
     /// Generate the standalone dispatch function.
     /// Signature: `(handler-id: i32) -> ()`.
     /// Routes ALL handler IDs across all components to their block functions.
-    /// Generate the module start function that seeds global singleton
-    /// property slots with their declared defaults. Runs once at module
-    /// instantiation, before any export is invoked.
-    ///
-    /// Non-literal defaults (e.g. cross-global references, arithmetic) still
-    /// go through `emit_signal_store` which reuses the same expression
-    /// machinery as component constructors.
+    /// Generate the module `(start)` function that seeds global singleton
+    /// properties with their declared defaults. This is a pure **transcriber**
+    /// of `module.global_init_block` — the init sequence (which properties,
+    /// their field offsets, scratch slots, and `EvalExprToSlots`/`GlobalFieldSet`
+    /// ops) was planned in LIR by `synth_globals_init_block`; codegen only
+    /// declares the block's locals and emits each op through the ordinary
+    /// generic op emitter in module scope.
     fn generate_globals_init(&mut self) -> Result<Function, CodegenError> {
-        // Reserve per-valtype scratch locals sized to the widest global
-        // default expression under canonical-ABI flattening. Minimum of 3
-        // i32 keeps a stable baseline for simple string/result defaults.
-        let mut max_counts: (u32, u32, u32, u32) = (3, 0, 0, 0);
-        for global_id in self.ctx.defs.globals() {
-            let Some(g) = self.ctx.defs.as_global(global_id) else {
-                continue;
-            };
-            for &prop_id in &g.properties {
-                if let Some(default) = self.global_defaults.get(&prop_id) {
-                    let slots = self.flatten_core_slots(default.ty);
-                    merge_max_slot_counts(&mut max_counts, &slots);
-                }
-            }
-        }
-        let (max_i32, max_i64, max_f32, max_f64) = max_counts;
-        let mut locals: Vec<(u32, ValType)> = Vec::new();
-        push_valtype_locals(&mut locals, max_counts);
-        let mut func = Function::new(locals);
-
-        // No allocation pass: global state lives in core wasm globals
-        // (declared with zero/null inits in the global section), so there
-        // is no singleton struct to `struct.new`. The default-init loop
-        // below seeds each property's core global(s).
-
-        let globals_scratch = FlatScratchBases {
-            i32_base: 0,
-            i32_count: max_i32,
-            i64_base: max_i32,
-            i64_count: max_i64,
-            f32_base: max_i32 + max_i64,
-            f32_count: max_f32,
-            f64_base: max_i32 + max_i64 + max_f32,
-            f64_count: max_f64,
+        let Some(block) = self.global_init_block.clone() else {
+            // No defaulted global properties — an empty start function.
+            let mut func = Function::new(Vec::new());
+            func.instruction(&Instruction::End);
+            return Ok(func);
         };
-
-        // Collect (prop_id, default_expr) pairs in global declaration
-        // order so output is deterministic. §1.5: every non-unit
-        // property is core-global-backed, so each init goes through
-        // `emit_global_struct_store_from_expr`.
-        let mut inits: Vec<(DefId, LirExpr)> = Vec::new();
-        for global_id in self.ctx.defs.globals() {
-            let Some(g) = self.ctx.defs.as_global(global_id) else {
-                continue;
-            };
-            for &prop_id in &g.properties {
-                if let Some(default) = self.global_defaults.get(&prop_id) {
-                    inits.push((prop_id, default.clone()));
-                }
-            }
-        }
-
-        if !inits.is_empty() {
-            // Module scope has no owning component. `emit_signal_store` /
-            // `emit_expr` still take a `&LirResource` + `&MemoryLayout`,
-            // but global defaults never reference component-local state.
-            // Handing in an empty carrier turns any accidental
-            // component-local lookup into a loud failure — matching the
-            // No-Silent-Fallbacks rule.
-            let carrier_name = self.ctx.intern("<module>");
-            // The carrier owns no component-local state, but it MUST carry the
-            // global-default expression arena: each `default` top-level node
-            // holds `LirExprId` children that `emit_expr` resolves through the
-            // carrier's `exprs`.
-            let mut carrier = LirResource::empty_module_carrier(carrier_name);
-            carrier.exprs = self.global_default_exprs.clone();
-            self.current_init_scratch_start = Some(0);
-            self.current_flat_scratch = Some(globals_scratch);
-            for (prop_id, expr) in inits {
-                if self.global_in_struct(prop_id) {
-                    self.emit_global_struct_store_from_expr(
-                        &mut func,
-                        prop_id,
-                        &expr,
-                        &carrier,
-                        globals_scratch,
-                    )?;
-                } else {
-                    return Err(CodegenError::InvalidIR(format!(
-                        "globals_init: property {:?} has a default expression but no \
-                         core-global backing (§1.5: no memory-resident globals)",
-                        prop_id
-                    )));
-                }
-            }
-            self.current_init_scratch_start = None;
-            self.current_flat_scratch = None;
-        }
-
-        func.instruction(&Instruction::End);
-        Ok(func)
+        // The init block is emitted through the *same* arena-generic path as
+        // every component block: `generate_block_function` with a `ModuleScope`
+        // (no owning component, `is_lifecycle: false` — the block is
+        // paramless). Codegen makes no globals-specific decisions.
+        let scope = ModuleScope::new(
+            self.ctx.intern("<module>"),
+            self.global_default_exprs.clone(),
+        );
+        self.generate_block_function(&scope, None, &block, false)
     }
 }

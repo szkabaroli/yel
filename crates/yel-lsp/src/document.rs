@@ -140,9 +140,10 @@ impl Document {
 
         // Check if we're on a color literal (#rrggbb)
         if (bytes[offset] == b'#' || (offset > 0 && self.find_color_start(offset, bytes).is_some()))
-            && let Some(color) = self.get_color_at_offset(offset, &content, bytes) {
-                return Some(color);
-            }
+            && let Some(color) = self.get_color_at_offset(offset, &content, bytes)
+        {
+            return Some(color);
+        }
 
         // Find word boundaries (including digits for unit literals like 10px)
         let mut start = offset;

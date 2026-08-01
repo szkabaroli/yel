@@ -1,6 +1,6 @@
 //! LIR reactive signals and effects.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use crate::ids::{DefId, NodeId};
 use crate::types::Ty;

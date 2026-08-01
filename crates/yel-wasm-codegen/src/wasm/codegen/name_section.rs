@@ -37,9 +37,7 @@ fn build_block_func_name(
     s
 }
 
-use super::super::{
-    ImportLayout, MemoryLayout, WasmPackageBuilder, to_kebab_case, to_wit_name,
-};
+use super::super::{ImportLayout, MemoryLayout, WasmPackageBuilder, to_kebab_case, to_wit_name};
 
 impl<'a> WasmPackageBuilder<'a> {
     pub(super) fn generate_name_section_multi(
@@ -179,7 +177,8 @@ impl<'a> WasmPackageBuilder<'a> {
                     .get_block_name(comp.def_id, *block_id)
                     .unwrap_or_else(|| BlockDebugName::kind("block"));
                 let block = comp.get_block(*block_id);
-                let fn_name = build_block_func_name(&comp_name, &info, block, &comp.slots, block_id.0);
+                let fn_name =
+                    build_block_func_name(&comp_name, &info, block, &comp.slots, block_id.0);
                 type_names.append(ty_idx, &format!("type-{}", fn_name));
             }
         }
@@ -331,23 +330,17 @@ impl<'a> WasmPackageBuilder<'a> {
         // `Dom` global's callbacks are named here too, as
         // `[global-callback]dom.*`), then one `[resource-new]` per
         // exported component.
+        // Name each host import by its interface + function, in registry
+        // order (which matches the import section). The interface name (from
+        // the contract) labels whether it is a component callback, a global
+        // callback, or DOM — no per-kind branching here.
         let mut import_idx = 0u32;
-        for &(comp_idx, cb_def_id) in &import_layout.unique_callbacks {
-            if let Some(func_def) = self.ctx.defs.as_function(cb_def_id) {
-                let name = to_kebab_case(&self.ctx.str(func_def.name));
-                let owner_comp = &self.components[comp_idx];
-                let comp_kebab = to_kebab_case(&self.ctx.str(owner_comp.name));
-                func_names.append(import_idx, &format!("[callback]{}.{}", comp_kebab, name));
-                import_idx += 1;
-            }
-        }
-        for &(global_id, cb_def_id) in &import_layout.global_callbacks {
-            if let Some(func_def) = self.ctx.defs.as_function(cb_def_id) {
-                let name = to_kebab_case(&self.ctx.str(func_def.name));
-                let global_kebab = to_kebab_case(&self.ctx.str(self.ctx.defs.name(global_id)));
-                func_names.append(import_idx, &format!("[global-callback]{}.{}", global_kebab, name));
-                import_idx += 1;
-            }
+        for import in &self.imports {
+            let iface = &self.import_interfaces[import.interface.index()];
+            let iface_kebab = to_kebab_case(&self.ctx.str(iface.name));
+            let fname = to_kebab_case(&self.ctx.str(import.name));
+            func_names.append(import_idx, &format!("[import]{}.{}", iface_kebab, fname));
+            import_idx += 1;
         }
         for exported_comp in exported_components.iter() {
             let prefix = to_kebab_case(&self.ctx.str(exported_comp.name));
@@ -560,7 +553,8 @@ impl<'a> WasmPackageBuilder<'a> {
                 .unwrap_or_else(|| BlockDebugName::kind("block"));
 
             let block = component.get_block(*block_id);
-            let name = build_block_func_name(&comp_prefix, &info, block, &component.slots, block_id.0);
+            let name =
+                build_block_func_name(&comp_prefix, &info, block, &component.slots, block_id.0);
             func_names.append(wasm_func_idx, &name);
         }
 

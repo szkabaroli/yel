@@ -67,32 +67,6 @@ fn compile_fixture(source: &str) -> Result<CompileOutputs, String> {
         return Err(compiler.render_diagnostics());
     }
 
-    let mut lir_components = Vec::new();
-    let mut global_thir_defaults: std::collections::HashMap<
-        yel_core::DefId,
-        yel_core::thir::ThirExpr,
-    > = std::collections::HashMap::new();
-    for item in &hir {
-        match compiler.type_check(item) {
-            yel_core::thir::ThirItem::Component(thir) => {
-                if compiler.has_errors() {
-                    return Err(compiler.render_diagnostics());
-                }
-                lir_components.push(compiler.lower_to_lir(&thir));
-            }
-            yel_core::thir::ThirItem::Global(global) => {
-                if compiler.has_errors() {
-                    return Err(compiler.render_diagnostics());
-                }
-                global_thir_defaults.extend(global.signal_defaults);
-            }
-        }
-    }
-    compiler.resolve_global_triggers(&mut lir_components);
-
-    let (lir_globals, lir_global_default_exprs) =
-        compiler.lower_globals_to_lir(&global_thir_defaults);
-
     // Use the package from the source when available so the WIT output
     // has stable names; fall back to `yel:app` otherwise.
     let (namespace, name, version) = match file.package {
@@ -104,7 +78,10 @@ fn compile_fixture(source: &str) -> Result<CompileOutputs, String> {
         None => ("yel".into(), "app".into(), "0.1.0".into()),
     };
 
-    let interfaces = compiler.build_import_interfaces();
+    let module = compiler.lower_items_to_module(&hir, file.package.clone());
+    if compiler.has_errors() {
+        return Err(compiler.render_diagnostics());
+    }
     let ctx = compiler.context();
 
     let wit_options = codegen::WitOptions {
@@ -113,28 +90,24 @@ fn compile_fixture(source: &str) -> Result<CompileOutputs, String> {
         version: version.clone(),
         include_dom_interface: true,
     };
-    let wit = codegen::generate_wit(&lir_components, interfaces.as_slice(), ctx, &wit_options)
-        .map_err(|e| format!("WIT generation: {}", e))?;
+    let wit = codegen::generate_wit(
+        &module.resources,
+        module.interfaces.as_slice(),
+        ctx,
+        &wit_options,
+    )
+    .map_err(|e| format!("WIT generation: {}", e))?;
 
-    let module = yel_core::lir::LirModule {
-        resources: lir_components.clone(),
-        global_defaults: lir_globals.clone(),
-        global_default_exprs: lir_global_default_exprs.clone(),
-        interfaces,
-        package: file.package.clone(),
-    };
     let wasm_options = codegen::WasmWithWitOptions {
         namespace,
         name,
         version,
-        global_defaults: lir_globals,
-        global_default_exprs: lir_global_default_exprs,
         wasm_opt_args: None,
     };
     let wasm = codegen::generate_wasm_module(&module, ctx, &wasm_options)
         .map_err(|e| format!("WASM generation: {}", e))?;
 
-    let dot = codegen::generate_dot(&lir_components, ctx, &codegen::DotOptions::new())
+    let dot = codegen::generate_dot(&module.resources, ctx, &codegen::DotOptions::new())
         .map_err(|e| format!("DOT generation: {}", e))?;
 
     Ok(CompileOutputs { wit, wasm, dot })
@@ -357,6 +330,199 @@ fn diagnostic_fixtures() {
     if !failures.is_empty() {
         panic!(
             "\n{} diagnostic fixture(s) failed:\n\n{}",
+            failures.len(),
+            failures.join("\n\n")
+        );
+    }
+}
+
+/// §6.7 Phase 1: the frontend produces an `Export`-direction boundary interface
+/// per exported component — the resource's constructor + `mount`/`unmount` plus
+/// a `get-`/`set-` pair for each non-callback signal. This is produced as data
+/// on `LirModule.interfaces` but not yet consumed by the WIT renderer (that is
+/// Phase 2); this test pins the contract shape the renderer will consume.
+#[test]
+fn export_boundary_contract_is_produced() {
+    use yel_core::lir::{InterfaceDirection, LirReceiver};
+
+    let src = r#"
+        package yel:exportc@0.1.0;
+        export component App {
+            count: s32 = 0;
+            VStack { Text { "{count}" } }
+        }
+    "#;
+    let mut compiler = Compiler::new();
+    let file = compiler.parse(src).expect("parse");
+    let hir = compiler.lower_to_hir(&file);
+    assert!(!compiler.has_errors(), "{}", compiler.render_diagnostics());
+    let module = compiler.lower_items_to_module(&hir, file.package.clone());
+    assert!(!compiler.has_errors(), "{}", compiler.render_diagnostics());
+    let ctx = compiler.context();
+
+    let exports: Vec<_> = module
+        .interfaces
+        .iter()
+        .filter(|i| i.direction == InterfaceDirection::Export)
+        .collect();
+    assert_eq!(
+        exports.len(),
+        1,
+        "one export interface for the one exported component"
+    );
+    let iface = exports[0];
+    assert_eq!(ctx.str(iface.name).to_string(), "app-component");
+    assert_eq!(
+        iface.resources.len(),
+        1,
+        "the interface owns the component resource"
+    );
+
+    let fn_names: Vec<String> = iface
+        .functions
+        .iter()
+        .map(|f| ctx.str(f.name).to_string())
+        .collect();
+    assert!(
+        fn_names.contains(&"mount".to_string()),
+        "functions: {fn_names:?}"
+    );
+    assert!(
+        fn_names.contains(&"unmount".to_string()),
+        "functions: {fn_names:?}"
+    );
+    assert!(
+        fn_names.contains(&"get-count".to_string()),
+        "functions: {fn_names:?}"
+    );
+    assert!(
+        fn_names.contains(&"set-count".to_string()),
+        "functions: {fn_names:?}"
+    );
+
+    // The constructor takes no receiver param and returns own<resource>
+    // (encoded as the `Constructor` receiver + no explicit result type).
+    let ctor = iface
+        .functions
+        .iter()
+        .find(|f| matches!(f.receiver, LirReceiver::Constructor(_)))
+        .expect("constructor present");
+    assert!(ctor.params.is_empty() && ctor.result.is_none());
+    // Methods (mount/getters/setters) take borrow<resource>.
+    let mount = iface
+        .functions
+        .iter()
+        .find(|f| ctx.str(f.name).to_string() == "mount")
+        .unwrap();
+    assert!(matches!(mount.receiver, LirReceiver::Borrow(_)));
+}
+
+/// Known bugs of the **opposite** shape: programs the compiler wrongly
+/// *accepts*, dropping part of the source on the floor with no diagnostic.
+///
+/// These cannot use the `.failure` harness — that one asserts compilation
+/// fails, and these compile cleanly, so a fixture there would report itself
+/// fixed. They live in `known_bugs/silent_discard/`, which
+/// `known_bugs_fixtures` does not see because `list_yel_fixtures` does not
+/// recurse. Same split, and same reason, as `known_bugs/runtime/`.
+///
+/// Each `<name>.yel` is paired with `<name>.dropped`: one identifier per line
+/// that the **source writes** and the **AST must not contain**. Passes while
+/// the bug exists; fails with graduate-me instructions once the parser starts
+/// reporting.
+#[test]
+fn known_bugs_silently_discarded_members() {
+    let mut failures: Vec<String> = Vec::new();
+
+    for yel_path in list_yel_fixtures("known_bugs/silent_discard") {
+        let name = yel_path.file_stem().unwrap().to_string_lossy().into_owned();
+        let source = std::fs::read_to_string(&yel_path)
+            .unwrap_or_else(|e| panic!("read {}: {}", yel_path.display(), e));
+
+        let spec_path = yel_path.with_extension("dropped");
+        let spec = std::fs::read_to_string(&spec_path).unwrap_or_else(|e| {
+            panic!(
+                "[{}] missing .dropped file {}: {}",
+                name,
+                spec_path.display(),
+                e
+            )
+        });
+        let dropped: Vec<&str> = spec
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert!(!dropped.is_empty(), "[{}] .dropped file is empty", name);
+
+        let mut compiler = Compiler::new();
+        let file = match compiler.parse(&source) {
+            Ok(file) => file,
+            Err(e) => {
+                failures.push(format!(
+                    "[{}] the parser now REJECTS this input ({}).\n\
+                     The silent-discard bug appears to be fixed — move this fixture out of \
+                     known_bugs/silent_discard/ and delete the .dropped file.",
+                    name, e
+                ));
+                continue;
+            }
+        };
+        let _ = compiler.lower_to_hir(&file);
+
+        if compiler.has_errors() {
+            failures.push(format!(
+                "[{}] the compiler now REPORTS a diagnostic:\n{}\n\
+                 The silent-discard bug appears to be fixed — move this fixture out of \
+                 known_bugs/silent_discard/ and delete the .dropped file.",
+                name,
+                compiler.render_diagnostics()
+            ));
+            continue;
+        }
+
+        // Every name the AST does hold, across both silently-discarding sites.
+        let mut present: Vec<&str> = Vec::new();
+        for global in &file.globals {
+            for property in &global.node.properties {
+                present.push(&property.node.name);
+            }
+            for callback in &global.node.callbacks {
+                present.push(&callback.node.name);
+            }
+        }
+        for record in &file.records {
+            for field in &record.node.fields {
+                present.push(&field.node.name);
+            }
+        }
+
+        for needle in &dropped {
+            // Guard the guard: a name that is not in the source would be
+            // "absent from the AST" for a reason that has nothing to do with
+            // the bug, and the fixture would pass while testing nothing.
+            if !source.contains(needle) {
+                failures.push(format!(
+                    "[{}] `.dropped` lists `{}`, which does not appear in the fixture source \
+                     at all. Fix the spec — as written this assertion is vacuous.",
+                    name, needle
+                ));
+                continue;
+            }
+            if present.iter().any(|n| n == needle) {
+                failures.push(format!(
+                    "[{}] `{}` IS present in the AST — it is no longer discarded.\n\
+                     The silent-discard bug appears to be fixed — move this fixture out of \
+                     known_bugs/silent_discard/ and delete the .dropped file.",
+                    name, needle
+                ));
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "\n{} silent-discard fixture(s) changed state:\n\n{}",
             failures.len(),
             failures.join("\n\n")
         );

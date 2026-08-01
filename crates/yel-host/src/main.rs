@@ -98,7 +98,10 @@ impl HostState {
         let connector = if is_last { "└── " } else { "├── " };
         let child_prefix = if is_last { "    " } else { "│   " };
         if let Some(node) = self.nodes.get(&id) {
-            out.push(format!("│{}{}[{}] <{}>", prefix, connector, node.id, node.tag));
+            out.push(format!(
+                "│{}{}[{}] <{}>",
+                prefix, connector, node.id, node.tag
+            ));
             let attr_prefix = format!("{}{}    ", prefix, child_prefix);
             for (key, value) in &node.attributes {
                 if key != "textContent" {
@@ -578,7 +581,13 @@ fn inspect_lines(component: &Component, engine: &Engine) -> Vec<String> {
     out
 }
 
-fn push_item(engine: &Engine, name: &str, item: &ComponentItem, depth: usize, out: &mut Vec<String>) {
+fn push_item(
+    engine: &Engine,
+    name: &str,
+    item: &ComponentItem,
+    depth: usize,
+    out: &mut Vec<String>,
+) {
     let pad = "  ".repeat(depth);
     match item {
         ComponentItem::ComponentFunc(_) => out.push(format!("{}- fn   {}", pad, name)),
@@ -1386,9 +1395,9 @@ fn gc_build_tree(
             registry_name
         )
     })?;
-    let global = core.get_global(&mut *store, &registry_name).ok_or_else(|| {
-        anyhow!("core instance has no global named {:?}", registry_name)
-    })?;
+    let global = core
+        .get_global(&mut *store, &registry_name)
+        .ok_or_else(|| anyhow!("core instance has no global named {:?}", registry_name))?;
 
     let mut arena: Vec<INode> = Vec::new();
     let root = arena.len();
@@ -1456,11 +1465,19 @@ fn gc_node_from_anyref(
     let prefix = field_label.map(|s| format!("{} ", s)).unwrap_or_default();
 
     if max_depth == 0 {
-        return Ok(gc_push_leaf(arena, depth, format!("{}<…max-depth>", prefix)));
+        return Ok(gc_push_leaf(
+            arena,
+            depth,
+            format!("{}<…max-depth>", prefix),
+        ));
     }
     let key = gc_anyref_key(anyref);
     if let Some(&id) = visited.get(&key) {
-        return Ok(gc_push_leaf(arena, depth, format!("{}<seen #{}>", prefix, id)));
+        return Ok(gc_push_leaf(
+            arena,
+            depth,
+            format!("{}<seen #{}>", prefix, id),
+        ));
     }
     let my_id = *next_id;
     *next_id += 1;
@@ -1494,7 +1511,11 @@ fn gc_node_from_anyref(
             arena,
         );
     }
-    Ok(gc_push_leaf(arena, depth, format!("{}#{} opaque anyref", prefix, my_id)))
+    Ok(gc_push_leaf(
+        arena,
+        depth,
+        format!("{}#{} opaque anyref", prefix, my_id),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1510,7 +1531,9 @@ fn gc_node_from_struct(
     names: &HashMap<String, TypeDebug>,
     arena: &mut Vec<INode>,
 ) -> Result<usize> {
-    let ty = struct_ref.ty(&scope).map_err(|e| anyhow!("struct.ty: {}", e))?;
+    let ty = struct_ref
+        .ty(&scope)
+        .map_err(|e| anyhow!("struct.ty: {}", e))?;
     let field_count = ty.fields().len();
     let fingerprint = fingerprint_runtime_struct(&ty);
     let debug = names.get(&fingerprint);
@@ -1587,8 +1610,12 @@ fn gc_node_from_array(
     names: &HashMap<String, TypeDebug>,
     arena: &mut Vec<INode>,
 ) -> Result<usize> {
-    let length = array_ref.len(&scope).map_err(|e| anyhow!("array.len: {}", e))?;
-    let ty = array_ref.ty(&scope).map_err(|e| anyhow!("array.ty: {}", e))?;
+    let length = array_ref
+        .len(&scope)
+        .map_err(|e| anyhow!("array.len: {}", e))?;
+    let ty = array_ref
+        .ty(&scope)
+        .map_err(|e| anyhow!("array.ty: {}", e))?;
     let fingerprint = fingerprint_runtime_array(&ty);
     let name = names
         .get(&fingerprint)
@@ -1748,7 +1775,12 @@ fn walk_anyref(
     let lab = field_label.map(|s| format!("{} ", s)).unwrap_or_default();
 
     if max_depth == 0 {
-        out.push(format!("│{}{}{}<…max-depth>", prefix, connector(is_last), lab));
+        out.push(format!(
+            "│{}{}{}<…max-depth>",
+            prefix,
+            connector(is_last),
+            lab
+        ));
         return Ok(());
     }
 
@@ -2901,7 +2933,11 @@ impl App {
     /// (Re)build the State inspector by reading every signal from the live
     /// session. Rebuilt on entry / `r` / after `set`/`fire`.
     fn rebuild_state(&mut self) {
-        self.state = self.session.as_mut().map(build_state_tree).map(TreeState::from_arena);
+        self.state = self
+            .session
+            .as_mut()
+            .map(build_state_tree)
+            .map(TreeState::from_arena);
     }
 
     /// (Re)build the DOM "Elements" tree from the host's in-memory DOM.
@@ -2916,7 +2952,13 @@ impl App {
     fn rebuild_gc(&mut self) {
         let depth = self.gc_depth;
         match self.session.as_mut() {
-            Some(s) => match gc_build_tree(&mut s.store, &s.instance, &s.descriptor, depth, &s.type_names) {
+            Some(s) => match gc_build_tree(
+                &mut s.store,
+                &s.instance,
+                &s.descriptor,
+                depth,
+                &s.type_names,
+            ) {
                 Ok(arena) => {
                     self.gc = Some(TreeState::from_arena(arena));
                     self.gc_error = None;
@@ -2959,7 +3001,10 @@ impl App {
     }
 
     fn handler_count(&self) -> usize {
-        self.session.as_ref().map(|s| s.handlers().len()).unwrap_or(0)
+        self.session
+            .as_ref()
+            .map(|s| s.handlers().len())
+            .unwrap_or(0)
     }
 
     /// Execute a `:` command line.
@@ -3219,7 +3264,12 @@ fn ui(f: &mut Frame, app: &mut App) {
         },
         Tab::Inspect => match app.inspect.as_mut() {
             Some(tree) => render_tree(f, tree, chunks[1], "Inspect"),
-            None => render_placeholder(f, chunks[1], "Inspect", "no component loaded — :load <path>"),
+            None => render_placeholder(
+                f,
+                chunks[1],
+                "Inspect",
+                "no component loaded — :load <path>",
+            ),
         },
         Tab::Gc => match app.gc.as_mut() {
             Some(tree) => render_tree(f, tree, chunks[1], "GC Heap"),
@@ -3734,7 +3784,12 @@ fn add_inspect_item(
             let sig = if results.is_empty() {
                 format!("ƒ {}({})", name, params.join(", "))
             } else {
-                format!("ƒ {}({}) -> {}", name, params.join(", "), results.join(", "))
+                format!(
+                    "ƒ {}({}) -> {}",
+                    name,
+                    params.join(", "),
+                    results.join(", ")
+                )
             };
             (sig, d, Vec::new(), false)
         }
@@ -3745,7 +3800,14 @@ fn add_inspect_item(
                 .collect();
             let mut child_idx = Vec::with_capacity(kids.len());
             for (sub, subitem) in &kids {
-                child_idx.push(add_inspect_item(arena, engine, sub, subitem, depth + 1, &full));
+                child_idx.push(add_inspect_item(
+                    arena,
+                    engine,
+                    sub,
+                    subitem,
+                    depth + 1,
+                    &full,
+                ));
             }
             let d = vec![
                 format!("interface {}", name),
@@ -3758,19 +3820,42 @@ fn add_inspect_item(
         }
         ComponentItem::Resource(_) => (
             format!("resource {}", name),
-            vec![format!("resource {}", name), String::new(), format!("path: {}", full)],
+            vec![
+                format!("resource {}", name),
+                String::new(),
+                format!("path: {}", full),
+            ],
             Vec::new(),
             false,
         ),
         ComponentItem::Type(_) => (
             format!("type {}", name),
-            vec![format!("type {}", name), String::new(), format!("path: {}", full)],
+            vec![
+                format!("type {}", name),
+                String::new(),
+                format!("path: {}", full),
+            ],
             Vec::new(),
             false,
         ),
-        ComponentItem::CoreFunc(_) => (format!("core-fn {}", name), vec![format!("core fn {}", name)], Vec::new(), false),
-        ComponentItem::Module(_) => (format!("module {}", name), vec![format!("module {}", name)], Vec::new(), false),
-        ComponentItem::Component(_) => (format!("component {}", name), vec![format!("component {}", name)], Vec::new(), false),
+        ComponentItem::CoreFunc(_) => (
+            format!("core-fn {}", name),
+            vec![format!("core fn {}", name)],
+            Vec::new(),
+            false,
+        ),
+        ComponentItem::Module(_) => (
+            format!("module {}", name),
+            vec![format!("module {}", name)],
+            Vec::new(),
+            false,
+        ),
+        ComponentItem::Component(_) => (
+            format!("component {}", name),
+            vec![format!("component {}", name)],
+            Vec::new(),
+            false,
+        ),
     };
 
     arena[idx].label = label;
@@ -3823,7 +3908,9 @@ fn build_inspect_tree(component: &Component, engine: &Engine) -> Vec<INode> {
     });
     let mut import_children = Vec::new();
     for (name, item) in &imports {
-        import_children.push(add_inspect_item(&mut arena, engine, name, item, 1, "imports"));
+        import_children.push(add_inspect_item(
+            &mut arena, engine, name, item, 1, "imports",
+        ));
     }
     arena[imports_index].label = format!("Imports ({})", import_children.len());
     for &child_index in &import_children {
@@ -3846,7 +3933,9 @@ fn build_inspect_tree(component: &Component, engine: &Engine) -> Vec<INode> {
     });
     let mut export_children = Vec::new();
     for (name, item) in &exports {
-        export_children.push(add_inspect_item(&mut arena, engine, name, item, 1, "exports"));
+        export_children.push(add_inspect_item(
+            &mut arena, engine, name, item, 1, "exports",
+        ));
     }
     arena[exports_index].label = format!("Exports ({})", export_children.len());
     for &child_index in &export_children {
@@ -4010,7 +4099,14 @@ fn build_val_node(arena: &mut Vec<INode>, depth: usize, name: &str, val: &Val) -
         ),
         None => (name.to_string(), vec![Span::raw(name.to_string())]),
     };
-    let index = push_tree_node(arena, depth, label, detail, expandable, expandable && depth == 0);
+    let index = push_tree_node(
+        arena,
+        depth,
+        label,
+        detail,
+        expandable,
+        expandable && depth == 0,
+    );
     arena[index].search = format!(
         "{} {} {}",
         name,
@@ -4061,12 +4157,26 @@ fn build_state_tree(session: &mut Session) -> Vec<INode> {
             }
             Err(e) => {
                 let label = format!("{}: <error: {}>", prop, e);
-                push_tree_node(&mut arena, 0, label, vec![format!("getter failed: {}", e)], false, false);
+                push_tree_node(
+                    &mut arena,
+                    0,
+                    label,
+                    vec![format!("getter failed: {}", e)],
+                    false,
+                    false,
+                );
             }
         }
     }
     if arena.is_empty() {
-        push_tree_node(&mut arena, 0, "(no signals)".to_string(), Vec::new(), false, false);
+        push_tree_node(
+            &mut arena,
+            0,
+            "(no signals)".to_string(),
+            Vec::new(),
+            false,
+            false,
+        );
     }
     arena
 }
@@ -4080,7 +4190,16 @@ fn build_state_tree(session: &mut Session) -> Vec<INode> {
 fn build_dom_node(arena: &mut Vec<INode>, host: &HostState, id: u32, depth: usize) -> usize {
     let node = match host.nodes.get(&id) {
         Some(n) => n,
-        None => return push_tree_node(arena, depth, format!("<missing #{}>", id), Vec::new(), false, false),
+        None => {
+            return push_tree_node(
+                arena,
+                depth,
+                format!("<missing #{}>", id),
+                Vec::new(),
+                false,
+                false,
+            )
+        }
     };
 
     let text = node.attributes.get("textContent").cloned();
@@ -4134,7 +4253,10 @@ fn build_dom_node(arena: &mut Vec<INode>, host: &HostState, id: u32, depth: usiz
     if let Some(t) = &text {
         if node.tag == "#text" || node.tag == "#comment" {
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(format!("{:?}", t), Style::default().fg(COLOR_STRING)));
+            spans.push(Span::styled(
+                format!("{:?}", t),
+                Style::default().fg(COLOR_STRING),
+            ));
         }
     }
     arena[index].spans = spans;
@@ -4165,7 +4287,14 @@ fn build_dom_tree(host: &HostState) -> Vec<INode> {
         build_dom_node(&mut arena, host, *root, 0);
     }
     if arena.is_empty() {
-        push_tree_node(&mut arena, 0, "(empty DOM)".to_string(), Vec::new(), false, false);
+        push_tree_node(
+            &mut arena,
+            0,
+            "(empty DOM)".to_string(),
+            Vec::new(),
+            false,
+            false,
+        );
     }
     arena
 }
@@ -4349,8 +4478,9 @@ fn render_tree(
             } else {
                 spans.extend(node.spans.iter().cloned());
             }
-            let type_cell =
-                Cell::from(Line::from(Span::styled(node.type_col.clone(), dim)).alignment(Alignment::Right));
+            let type_cell = Cell::from(
+                Line::from(Span::styled(node.type_col.clone(), dim)).alignment(Alignment::Right),
+            );
             Row::new(vec![Cell::from(Line::from(spans)), type_cell])
         })
         .collect();

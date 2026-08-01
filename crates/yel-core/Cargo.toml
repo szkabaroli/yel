@@ -41,3 +41,9 @@ pretty_assertions.workspace = true
 
 [build-dependencies]
 serde_json.workspace = true
+
+# Determinism guard: forbid std HashMap/HashSet (random-seeded iteration order
+# leaks into emitted output). See root clippy.toml and docs/TECH_DEBT.md §7.
+# Crate-scoped (not [workspace.lints]) to match the existing per-crate style.
+[lints.clippy]
+disallowed_types = "deny"

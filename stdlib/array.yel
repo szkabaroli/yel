@@ -1,0 +1,159 @@
+// The primitive floor, and functions written on top of it.
+//
+// STATUS: the floor **parses**. `@unsafe` + `@primitive(op = …)` on a bodyless
+// declaration is the landed form — plans/rewrite/scope.md § "This collapses two
+// breaks into one". The functions above the floor do not parse yet, for two
+// measured reasons (GAP 1 and GAP 2 at the bottom).
+//
+// Rewritten 2026-07-29 from the superseded `primitive name: sig = "@op";`
+// keyword form, which was written before attributes were decided and never
+// parsed.
+
+package yel:std@0.1.0;
+
+// ── The floor ───────────────────────────────────────────────────────────────
+//
+// A primitive is a **bodyless declaration carrying `@primitive`** — not a
+// keyword. The compiler supplies the implementation, named by the op string,
+// which is a key into the builtin table (directions.md §1) exactly as Grain's
+// `"@wasm.add_int32"` keys `prim_map`. An unknown key is a hard error at
+// registration, never a silently-unresolved name.
+//
+// **`@unsafe` marks the `ref` surface, not the fact of being a primitive.**
+// Grain enforces one rule (`typed_well_formedness.re`): *"Wasm types cannot be
+// used outside of an `@unsafe` or `@disableGC` context"* — the attribute is the
+// permission to mention the untagged type layer, nothing more. Grain's
+// `WasmI32` is yel's `ref`.
+//
+// So every declaration in this file carries it and none in num.yel or
+// string.yel does: these are the ones that speak `ref`. The strongest cases are
+// `to-ref`/`from-ref` — Grain's `fromGrain`/`toGrain` — because reinterpreting a
+// value's type is the one operation here that can actually break the type
+// system. The array accessors trap on a bad index; they do not corrupt.
+//
+// They speak `ref` only — the uniform reference representation — so there is one
+// `array-get` rather than one per element type. That is Grain's arrangement and
+// it is why nothing below needs monomorphizing.
+//
+// They sit inside a `global` because yel has **no top-level function item**:
+// `ItemKind` is package / record / enum / variant / element / extern-component /
+// global / component. A bare `array-len: func(…);` at file scope is
+// `error[E0060]: expected a top-level declaration`.
+
+export global ArrayPrimitive {
+    @unsafe
+    @primitive(op = "@wasm.ref_array_len")
+    array-len: func(a: ref) -> s32;
+
+    @unsafe
+    @primitive(op = "@wasm.ref_array_any_get")
+    array-get: func(a: ref, index: s32) -> ref;
+
+    @unsafe
+    @primitive(op = "@wasm.ref_array_any_set")
+    array-set: func(a: ref, index: s32, value: ref);
+
+    @unsafe
+    @primitive(op = "@allocate.wasm_array_any_ref")
+    array-new: func(size: s32, init: ref) -> ref;
+
+    // Erase to / restore from the uniform representation. `T` in `from-ref`
+    // appears only in return position, so it is never determined by an argument
+    // — the bidirectional checker solves it from the expected type, and a
+    // position with no expected type is an error. That is correct behaviour: it
+    // demands an annotation exactly where the cast is genuinely ambiguous.
+    @unsafe
+    @primitive(op = "@wasm.fromGrain")
+    to-ref: func<T>(value: T) -> ref;
+
+    @unsafe
+    @primitive(op = "@wasm.toGrain")
+    from-ref: func<T>(value: ref) -> T;
+}
+
+// ── Above the floor: ordinary yel ───────────────────────────────────────────
+//
+// Commented out because **every function here is generic, and a generic
+// signature cannot yet carry a body** (GAP 1). Kept as written so the shape is
+// on record and the gap has a concrete cost attached.
+//
+// export global List {
+//     len: func<T>(items: list<T>) -> s32 {
+//         array-len(to-ref(items))
+//     }
+//
+//     // GAP 2: `if`/`else` is a statement, so it cannot be a tail expression.
+//     // Written with nested ternaries, which *does* parse — at the cost of
+//     // reading worse than the if-chain it replaces.
+//     get: func<T>(items: list<T>, index: s32) -> option<T> {
+//         let source = to-ref(items);
+//         index < 0 ? none
+//             : (index >= array-len(source) ? none
+//                : some(from-ref(array-get(source, index))))
+//     }
+//
+//     // Two passes: count, then fill. The output length is not known up front
+//     // and there is no way to grow an array, so counting first is the only
+//     // option that allocates exactly once.
+//     filter: func<T>(items: list<T>, keep: func(item: T) -> bool) -> list<T> {
+//         let matched = 0;
+//         for item in items {
+//             if keep(item) { matched = matched + 1; }
+//         }
+//
+//         // GAP 3: `array-new` needs an initial `ref` and there is no `T` in
+//         // hand to make one from. `to-ref(0)` only to keep it concrete — it is
+//         // a lie, and the real answer is a nullable element type or an
+//         // allocator that takes no init.
+//         let out = array-new(matched, to-ref(0));
+//
+//         let next = 0;
+//         for item in items {
+//             if keep(item) {
+//                 array-set(out, next, to-ref(item));
+//                 next = next + 1;
+//             }
+//         }
+//
+//         from-ref(out)
+//     }
+// }
+
+// ── What writing this surfaced ──────────────────────────────────────────────
+//
+// Re-measured 2026-07-29 against `yelc2`, each case reduced to one line.
+//
+// GAP 1 — **a generic signature cannot carry a body.** The two features parse
+//   independently and not together:
+//
+//       f: func<T>(items: list<T>) -> s32;        // OK
+//       f: func(items: list<s32>) -> s32 { 0 }    // OK
+//       f: func<T>(items: list<T>) -> s32 { 0 }   // error[E0060]: expected `;`, found `{`
+//
+//   This blocks **every function in this file**, since all of them are generic.
+//   It reads as an unwired combination rather than a decision — `<T>` landed in
+//   `8daa4b9` and bodies in `5ac81f3`, separately, and nothing tested the pair.
+//
+// GAP 2 — **`if` is a statement, not an expression**, so it cannot be a tail
+//   expression:
+//
+//       f: func(i: s32) -> s32 { if i < 0 { 0 } else { i } }        // error: expected `;`, found `}`
+//       f: func(i: s32) -> s32 { let x = 0; if i < 0 { x = 1; } x } // OK
+//
+//   Ternary is the only conditional *expression*, which is why `get` above is
+//   written with nested `? :`. This is findings.md F18 with a cost attached:
+//   three unrelated conditional constructs — expression, statement, UI node —
+//   and the expression form is the weakest of the three.
+//
+// GAP 3 — `array-new` requires an initial element and there is nothing sensible
+//   to pass. Grain sidesteps this by taking the item at the call site
+//   (`allocateArray(length, WasmRef.fromGrain(item))`), which works for `make`
+//   but not for `filter`, where the value is not known until the loop runs.
+//
+// RESOLVED, kept visible — *"no `return`"* and *"there is no loop statement at
+//   all"* were GAPs 1 and 2 here on 2026-07-28, the second recorded as the
+//   largest single blocker for a source stdlib. `560cde5` made `for` a statement
+//   and decided against `return`; the `filter` body above uses the former and is
+//   written in tail-expression style for the latter. Kept rather than deleted:
+//   the loop gap changed the plan's shape more than anything else while it was
+//   open, and a resolved gap is evidence the exercise works.

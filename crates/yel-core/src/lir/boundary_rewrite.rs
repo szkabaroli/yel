@@ -30,7 +30,7 @@
 //! emits exactly `local.get rec; struct.get/set <ty> <field>`, with `<ty>`
 //! recovered from the `rec` slot's `val_ty`).
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::ids::TreeBoundaryId;
 
@@ -78,7 +78,7 @@ pub fn rewrite_struct_field_ops(component: &mut LirResource) -> usize {
         // not leak into siblings. Stage 4: seed the map from
         // `boundary_param_slots` so BoundaryField uses whose binding
         // came from a function param resolve at the LIR layer too.
-        let mut current = HashMap::new();
+        let mut current = HashMap::default();
         for (b_id, slot) in component.blocks[bi]
             .boundary_param_ids()
             .zip(component.blocks[bi].boundary_param_slots.iter().copied())
@@ -143,8 +143,7 @@ pub fn rewrite_struct_field_ops(component: &mut LirResource) -> usize {
             // `b_id`, the rewriter falls back to lazy in-flow
             // synthesis inside `rewrite_ops` (which sees additional
             // `BindBoundaryLocal` / `Alloc*Boundary` bindings).
-            let (blocks, struct_types) =
-                (&mut component.blocks, &component.struct_types);
+            let (blocks, struct_types) = (&mut component.blocks, &component.struct_types);
             try_synthesize_ancestor_chain(
                 struct_types,
                 *b_id,
@@ -314,7 +313,7 @@ fn collect_unbound_boundary_ids(
     current: &HashMap<TreeBoundaryId, LirSlotId>,
 ) -> Vec<TreeBoundaryId> {
     let mut seen: Vec<TreeBoundaryId> = Vec::new();
-    let mut bound_in_flow: HashMap<TreeBoundaryId, ()> = HashMap::new();
+    let mut bound_in_flow: HashMap<TreeBoundaryId, ()> = HashMap::default();
     walk(ops, current, &mut bound_in_flow, &mut seen);
     seen
 }
@@ -418,7 +417,9 @@ fn rewrite_ops(
                 field_idx,
                 result,
             } => {
-                if let Some(rec) = resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out) {
+                if let Some(rec) =
+                    resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out)
+                {
                     *total += 1;
                     out.push(LirOp::StructGet {
                         rec,
@@ -438,7 +439,9 @@ fn rewrite_ops(
                 field_idx,
                 value,
             } => {
-                if let Some(rec) = resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out) {
+                if let Some(rec) =
+                    resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out)
+                {
                     *total += 1;
                     out.push(LirOp::StructSet {
                         rec,
@@ -458,7 +461,9 @@ fn rewrite_ops(
                 field_idx,
                 value,
             } => {
-                if let Some(rec) = resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out) {
+                if let Some(rec) =
+                    resolve_rec(struct_ty, current, block_id, slots, struct_types, &mut out)
+                {
                     *total += 1;
                     out.push(LirOp::StructSetConst {
                         rec,
@@ -536,7 +541,7 @@ mod tests {
     /// established the boundary's ref binding earlier.
     #[test]
     fn rewrite_after_bind() {
-        let mut comp = LirResource::empty_module_carrier(Name(0));
+        let mut comp = LirResource::empty(Name(0), Vec::new());
         comp.def_id = DefId::INVALID;
         // slot 0 = ref slot, slot 1 = result
         comp.slots = vec![
@@ -589,7 +594,7 @@ mod tests {
     /// stays as-is (counted as remaining; codegen would surface it).
     #[test]
     fn no_rewrite_without_bind() {
-        let mut comp = LirResource::empty_module_carrier(Name(0));
+        let mut comp = LirResource::empty(Name(0), Vec::new());
         comp.slots = vec![mk_slot(0, LirSlotKind::Temp { local_idx: 0 })];
         comp.blocks = vec![LirBlock {
             id: BlockId(0),
@@ -623,7 +628,7 @@ mod stage4_tests {
         // (allocated by `set_boundary_params`) — no BindBoundaryLocal or
         // AllocBoundary in the ops. The seeding makes the rewrite fire
         // anyway.
-        let mut comp = LirResource::empty_module_carrier(Name(0));
+        let mut comp = LirResource::empty(Name(0), Vec::new());
         comp.slots = vec![
             // slot 0 = result
             LirSlotInfo {
@@ -647,7 +652,10 @@ mod stage4_tests {
         assert!(matches!(
             comp.blocks[0].ops[0],
             LirOp::StructGet {
-                rec: LirSlotId::Block { block: BlockId(0), idx: 0 },
+                rec: LirSlotId::Block {
+                    block: BlockId(0),
+                    idx: 0
+                },
                 field_idx: 5,
                 result: LirSlotId::Resource { idx: 0 },
             }

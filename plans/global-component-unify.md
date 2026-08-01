@@ -1,9 +1,13 @@
 # Unifying globals & components onto one pipeline spine
 
-**Status:** active. Scope locked to **phases 1–4** (one typecheck + codegen path;
-no surface-language changes; byte-identical WASM/WIT/DOT on existing fixtures).
-Phases 5–6 (the `@annotation` free-fn/interface toggle and DOM-as-global) are
-**out of scope for now** but the design must not preclude them.
+**Status:** phases 1–4 **DONE**. One typecheck + codegen path; no
+surface-language changes; WIT/DOT byte-identical on existing fixtures and the
+execution suite green throughout. `LirModule` now carries first-class
+`globals: Vec<LirGlobal>` (replacing the `global_defaults`/`global_default_exprs`
+side-maps) and `imports: Vec<LirImport>` (the single host-import registry);
+codegen and `wit_ast` derive from these instead of re-walking `ctx.defs`. Phases
+5–6 (the `@annotation` free-fn/interface toggle and DOM-as-global) remain out of
+scope but are not precluded.
 
 ## Why
 
@@ -99,19 +103,32 @@ lives in **core wasm mutable globals**.
 Target `LirModule` (frontend-agnostic; mirrors the wit-parser world model):
 
 ```rust
+// As landed (lir/module.rs):
 LirModule {
-    resources:  Vec<LirResource>,            // was: components. Exported instantiable units.
-    imports:    Vec<LirImport>,              // host imports; interface: Option<InterfaceId>
-                                             //   None = freeform (WorldItem::Function @ WorldKey::Name)
-                                             //   Some = interface member (WorldItem::Interface)
-    globals:    Vec<LirGlobal>,              // was: global_defaults + global_default_exprs.
-                                             //   module state → core wasm mutable globals.
-    interfaces: IndexVec<InterfaceId, LirInterface>,
-    package,
+    resources:   Vec<LirResource>,           // exported instantiable units (components).
+    globals:     Vec<LirGlobal>,             // first-class global items; their default
+                                             //   exprs' children index into global_exprs.
+    global_exprs: Vec<LirExpr>,              // shared module-start default-expr arena.
+    imports:     Vec<LirImport>,             // the host-import registry (single source of truth).
+    interfaces:  IndexVec<InterfaceId, LirInterface>,
+    package:     Option<PackageId>,
 }
-struct LirInterface { name: Name, direction: Import | Export, package: Option<PackageId> }
-struct LirImport    { name: Name, interface: Option<InterfaceId>, kind: LirFnKind, /* sig */ }
+struct LirGlobal { def_id, name, is_export, package, properties: Vec<LirGlobalProperty>, callbacks }
+struct LirGlobalProperty { def_id, direction: GlobalPropDirection, default: Option<LirExpr> }
+struct LirImport { def_id, name: Name, interface: InterfaceId, params, result, receiver: LirReceiver }
+enum   LirReceiver { None, Borrow(DefId) }   // Borrow => leading borrow<resource> / core i32 self.
 ```
+
+Deviations from the original sketch, and why:
+- **`globals` keeps a module-shared `global_exprs` arena** rather than a per-global
+  one. All global defaults lower through one module scope and seed together at
+  module start; a shared arena keeps the module-scope `.filter()` path and the
+  `globals_init` carrier working with no `LirExprId` rebasing. `LirGlobal` is
+  still a first-class per-item struct (identity, properties, callbacks, package).
+- **`LirImport.interface` is a non-optional `InterfaceId`** (not
+  `Option<InterfaceId>`): every host import today belongs to an interface (the
+  freeform `WorldKey::Name` path is still unused). It can widen to `Option` if a
+  freeform import ever appears.
 
 Alignment notes (verified against `wit-parser` 0.248.0):
 - "Freeform" = `WorldItem::Function` keyed by `WorldKey::Name` (function directly
@@ -133,8 +150,32 @@ Sub-steps (each green; WASM bytes change once state moves to core globals, but
    `LirModule.interfaces: IndexVec<InterfaceId, LirInterface>` (scaffold, empty).
    Also removed vestigial serde: `LirModule` is never (de)serialized — only
    `LirResource` is (for `ir --json`), so `LirModule`/`IndexVec` carry no serde.
-3. Introduce `LirImport`; route the import registry + `wit_ast` off it (incl. the
-   freeform path). Populate `interfaces`; resources/imports reference it.
+3. ✅ **DONE (behaviour-preserving; WIT/DOT byte-identical, execution green).**
+   Introduced `LirImport` (`lir/module.rs`) as the module's **single host-import
+   registry** (`LirModule.imports`) — every function the core module imports
+   (component callbacks, global callbacks, DOM), in import-index order, each
+   referencing its `InterfaceId`. One frontend producer,
+   `CompilerContext::build_import_contract(component_def_ids) -> (interfaces,
+   imports)`, now builds **both** the import registry and the full set of import
+   `LirInterface`s (component-callbacks, local globals with setter/notifier
+   funcs, foreign DOM) — replacing the foreign-only `build_import_interfaces`.
+   `LirIfaceFn` gained a `receiver: LirReceiver` (`None` | `Borrow(component)`),
+   so a `borrow<resource>` self-param is contract data, not a per-kind code path.
+   - **Codegen routed off `imports`:** `ImportLayout::new(imports, all_components)`
+     derives the index space + `[resource-new]` slots from the registry (its
+     `unique_callbacks`/`global_callbacks`/`components` fields are gone); the
+     import section, per-import type interning (`import_types` keyed by `DefId`),
+     the callback return-area scratch sizing, and the name section all iterate
+     `module.imports` + `module.interfaces` instead of re-walking `ctx.defs`.
+   - **`wit_ast` routed off the contract:** one `render_import_contract` renders
+     every import interface (receiver → `borrow<self>`; foreign package → inline
+     types, local → shared-types `use` aliases); the per-kind
+     `create_per_component_callbacks_interfaces` / `create_globals_interfaces`
+     are deleted, and `create_world` takes one unified `import_interface_ids`
+     list. The WIT world is unchanged (byte-identical fixtures).
+   - Kebab-casing is now shared: `yel_core::naming::to_kebab_case` is the single
+     source of truth the frontend contract and the backend renderer both use, so
+     a frontend-computed interface name can't drift from its backend re-derivation.
 4. Global state → core wasm globals, in two halves:
    - **4a ✅ DONE (green).** Consolidated the global-*write* lowering onto a new
      `LirOp::GlobalFieldSet { block, field, value }` (replacing the explicit
@@ -326,12 +367,56 @@ lowering can build the ctor. WASM re-baselines (different instruction sequence);
 grid/checker fixtures); `.wit`/`.dot` unchanged. This removes the last
 UI-specific DOM op from codegen.
 
-Remaining (6.7): migrate the **export side** onto the contract — component
-resource interfaces + dispatch (the `resources` field is in the model; the
-resource must own its constructor/method surface, today synthesized by
-`create_component_interface` with UI lifecycle baked in) — and local globals
-(shared-types). The `color` branch in `emit_variant_ctor_flat` is a guarded reuse
-that generalizes to a nested-variant lift when a second nested-variant case appears.
+### 6.7 — exported component resource interfaces rendered from the contract  ✅ DONE (execution-verified)
+The **export** boundary is now data-driven like the import side. The frontend
+produces an `Export`-direction `LirInterface` per exported component
+(`CompilerContext::build_export_interfaces`): the resource plus a `LirIfaceFn`
+for the constructor (`LirReceiver::Constructor`), `mount`/`unmount`, and a
+`get-`/`set-` pair per non-callback signal (`LirReceiver::Borrow`). The WIT
+backend renders it via the generic `wit_ast::render_export_interface` (constructor
+→ `FunctionKind::Constructor` + `own<resource>`; borrow → `FunctionKind::Method`
++ `borrow<resource>` self), and the **201-line hardcoded `create_component_interface`
+is deleted** — the backend no longer knows mount/unmount/getters/setters "mean"
+anything; it renders whatever the contract holds. Latent bug fixed along the way:
+`create_world`'s `has_component_callbacks` proxy (`!resources.is_empty()`) now
+filters `direction == Import`, since export entries also carry `resources`. WIT/DOT
+byte-identical, 85 execution tests + 200-seed fuzz-validate green.
+
+### 6.7 Phase 3 — `import component` interfaces rendered from the contract  ✅ DONE (execution-verified)
+`import component X` declarations now flow through the same generic path as
+exported components. `render_export_interface` was generalized to
+`render_resource_interface` (direction-agnostic: renders any resource-owning
+interface — constructor + methods + property getters/setters), and the frontend
+produces `Import`-direction resource interfaces via
+`CompilerContext::build_import_component_interfaces` (reads `ImportComponentDef`:
+constructor + `get-`/`set-` per property + declared methods). The world builder
+places them in imports (an interface "owns a resource" iff it declares a
+constructor — the new `owns_resource` predicate splits resource-owning imports
+from borrow-only callback/DOM imports). The **185-line hardcoded
+`create_import_component_interfaces` is deleted**. Same latent-bug class fixed:
+`has_component_callbacks` now excludes owned-resource interfaces (callbacks
+*borrow*, `import component`s *own*). WIT/DOT byte-identical, full suite +
+execution + 200-seed fuzz green. (Local-global interfaces were already
+contract-driven — `create_globals_interfaces` no longer exists.)
+
+### 6.7 dispatch — `event-value` is a builtin variant; WIT + core ABI derive from it  ✅ DONE (execution-verified)
+The `event-value` type is now a **registered builtin variant** (`known.variants.event_value`,
+9 cases in discriminant order: `none`, `input-text`, `input-f64`, `input-f32`,
+`input-s32`, `input-bool`, `drop`, `drag-enter`, `drag-leave`) — the exact analog
+of DOM's `attribute-value`. The two former hardcoded copies are gone: the WIT
+`event-value` type renders from the variant `Ty` via `register_type` (inline in
+the foreign `dispatch` interface), and the core `dispatch` function signature
+derives its slots from `canonical_flat_valtypes(event_value_ty)` — proven to
+equal the old hardcoded `(i32 disc, i64 slot0, i32 slot1)` by the 85 host-linking
+execution tests (the host really sends dispatch events). WIT byte-identical; DOT
+re-baselined for the new builtin's DefId shift. Remaining polish (not UI-builtin
+debt): the `dispatch` *function* itself is still created imperatively in
+`create_module_dispatch_interface` (one freestanding fn referencing the
+registered type) rather than modeled as a contract `LirIfaceFn` — marginal, and
+needs a synthetic def for a non-user function.
+
+The `color` branch in `emit_variant_ctor_flat` is a guarded reuse that
+generalizes to a nested-variant lift when a second nested-variant case appears.
 
 Note: `.dot` encoding raw `DefId` numbers makes all 63 fixtures churn on any
 builtin-registration change — brittle; a follow-up could use stable per-component

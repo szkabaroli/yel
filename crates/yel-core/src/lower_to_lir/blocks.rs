@@ -9,7 +9,8 @@
 //! 4. Allocates slots (temps for DOM handles, memory for persistent state)
 //! 5. Creates blocks for branches (if/else) and handlers
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::component::TreeLirResource;
 use crate::context::CompilerContext;
@@ -61,7 +62,7 @@ pub fn ty_to_slot_val_type(
 ) -> crate::lir::block::LirSlotValType {
     use crate::lir::block::LirSlotValType;
 
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     // Phase 5b-v.3: scalar lists are typed GC array refs.
     if is_scalar_list_ty_struct(ctx, ty, &mut seen) {
         return LirSlotValType::RefNullForListGc(ty);
@@ -126,7 +127,7 @@ fn collapsed_ref_slot_val_ty(
         }
         InternedTyKind::Tuple(_) => Some(LirSlotValType::RefNullForTuple(inner)),
         InternedTyKind::List(_) => {
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::default();
             if is_scalar_list_ty_struct(ctx, inner, &mut seen) {
                 Some(LirSlotValType::RefNullForListGc(inner))
             } else {
@@ -151,7 +152,7 @@ pub(crate) fn is_dtr_record_struct(
     ctx: &crate::context::CompilerContext,
     def_id: crate::DefId,
 ) -> bool {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     is_dtr_record_struct_inner(ctx, def_id, &mut seen)
 }
 
@@ -231,7 +232,7 @@ pub(crate) fn is_gc_variant_ty_struct(
     ctx: &crate::context::CompilerContext,
     ty: crate::types::Ty,
 ) -> bool {
-    let mut visiting = HashSet::new();
+    let mut visiting = HashSet::default();
     is_gc_variant_ty_struct_inner(ctx, ty, &mut visiting)
 }
 
@@ -243,7 +244,7 @@ fn is_gc_variant_ty_struct_inner(
     match ctx.ty_kind(ty) {
         InternedTyKind::Option(inner) => {
             let inner = *inner;
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::default();
             if is_scalar_list_ty_struct(ctx, inner, &mut seen) {
                 return false;
             }
@@ -320,7 +321,7 @@ fn is_gc_variant_payload_ty_struct(
         | InternedTyKind::Char
         | InternedTyKind::String => true,
         InternedTyKind::List(_) => {
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::default();
             is_scalar_list_ty_struct(ctx, ty, &mut seen)
         }
         // Phase 5e.7: tuple payloads — typed `(ref null $tuple_<n>)`.
@@ -758,7 +759,7 @@ impl<'a> BlockLowering<'a> {
             effects: Vec::new(),
             slots: Vec::new(),
             strings: Vec::new(),
-            string_map: HashMap::new(),
+            string_map: HashMap::default(),
             // Continue the arena the tree stage started: `LirExprId`s already
             // baked into tree nodes index into these leading entries, and the
             // block stage appends further exprs via `intern_expr`.
@@ -775,17 +776,17 @@ impl<'a> BlockLowering<'a> {
             next_memory_offset: 1024,
             current_ops: Vec::new(),
             ops_stack: Vec::new(),
-            local_bindings: HashMap::new(),
-            outer_item_field_slots: HashMap::new(),
+            local_bindings: HashMap::default(),
+            outer_item_field_slots: HashMap::default(),
             current_block_locals: Vec::new(),
             block_locals_stack: Vec::new(),
             children_root_slot: None,
-            input_binding_handlers: HashMap::new(),
-            payload_binding_handlers: HashMap::new(),
+            input_binding_handlers: HashMap::default(),
+            payload_binding_handlers: HashMap::default(),
             for_stack: Vec::new(),
             for_iter_body_stack: Vec::new(),
-            for_item_iter_body: HashMap::new(),
-            for_contexts: HashMap::new(),
+            for_item_iter_body: HashMap::default(),
+            for_contexts: HashMap::default(),
             next_if_label_id: 0,
             tree_shape: ComponentTreeShape::default(),
             binding_collector: Vec::new(),
@@ -796,11 +797,11 @@ impl<'a> BlockLowering<'a> {
             // both kinds, so disjoint id spaces are required.
             next_binding_id: 1_000_000,
             boundary_dep_index: None,
-            attr_binding_data: HashMap::new(),
-            dyntext_binding_data: HashMap::new(),
-            ifcond_binding_data: HashMap::new(),
-            forlist_binding_data: HashMap::new(),
-            derivedsig_binding_data: HashMap::new(),
+            attr_binding_data: HashMap::default(),
+            dyntext_binding_data: HashMap::default(),
+            ifcond_binding_data: HashMap::default(),
+            forlist_binding_data: HashMap::default(),
+            derivedsig_binding_data: HashMap::default(),
             signal_layout_early: crate::lir::SignalLayout::default(),
             resource_self_ref_slot: None,
             parent_retention_cursor: 0,
@@ -849,11 +850,11 @@ impl<'a> BlockLowering<'a> {
         // intentionally have `parent_link = None` (they're reached via
         // the anchor's children-array). Without this stitch, deps in
         // an iter-body's subtree never propagate up past the anchor.
-        let mut children: HashMap<TreeBoundaryId, Vec<TreeBoundaryId>> = HashMap::new();
+        let mut children: HashMap<TreeBoundaryId, Vec<TreeBoundaryId>> = HashMap::default();
         // Pseudo-parent-link map for iter-bodies, keyed by iter-body id
         // → its anchor id. Mirrors `parent_link` for the deps walk.
-        let mut iter_to_anchor: HashMap<TreeBoundaryId, TreeBoundaryId> = HashMap::new();
-        let mut depth: HashMap<TreeBoundaryId, u32> = HashMap::new();
+        let mut iter_to_anchor: HashMap<TreeBoundaryId, TreeBoundaryId> = HashMap::default();
+        let mut depth: HashMap<TreeBoundaryId, u32> = HashMap::default();
         for b in &tree_shape.boundaries {
             if let Some((parent, _)) = b.parent_link {
                 children.entry(parent).or_default().push(b.id);
@@ -1061,13 +1062,13 @@ impl<'a> BlockLowering<'a> {
             // along the combined edge set so leaves have higher depth
             // than ancestors. Children must be emitted before parents
             // so parent walks can reference each child's BlockId.
-            let mut iter_to_anchor: HashMap<TreeBoundaryId, TreeBoundaryId> = HashMap::new();
+            let mut iter_to_anchor: HashMap<TreeBoundaryId, TreeBoundaryId> = HashMap::default();
             for tb in &self.tree_shape.boundaries {
                 if let TreeBoundaryKind::ForAnchor { iter_body_idx, .. } = tb.kind {
                     iter_to_anchor.insert(TreeBoundaryId(iter_body_idx), tb.id);
                 }
             }
-            let mut depth: HashMap<TreeBoundaryId, u32> = HashMap::new();
+            let mut depth: HashMap<TreeBoundaryId, u32> = HashMap::default();
             for &b in &path_set {
                 let mut d = 0u32;
                 let mut cur = b;
@@ -1089,17 +1090,17 @@ impl<'a> BlockLowering<'a> {
             }
 
             // Per-(b, sig) BlockId map, populated as we emit.
-            let mut update_blocks: HashMap<TreeBoundaryId, BlockId> = HashMap::new();
+            let mut update_blocks: HashMap<TreeBoundaryId, BlockId> = HashMap::default();
 
             // Index of attr-binding ids by owning_boundary for this
             // signal — only the bindings whose deps include `sig`.
-            let mut attr_bindings_at: HashMap<TreeBoundaryId, Vec<u32>> = HashMap::new();
+            let mut attr_bindings_at: HashMap<TreeBoundaryId, Vec<u32>> = HashMap::default();
             if let Some(pairs) = attr_signals.get(&sig) {
                 for (b, leg) in pairs {
                     attr_bindings_at.entry(*b).or_default().push(*leg);
                 }
             }
-            let mut dyntext_bindings_at: HashMap<TreeBoundaryId, Vec<u32>> = HashMap::new();
+            let mut dyntext_bindings_at: HashMap<TreeBoundaryId, Vec<u32>> = HashMap::default();
             if let Some(pairs) = dyntext_signals.get(&sig) {
                 for (b, leg) in pairs {
                     dyntext_bindings_at.entry(*b).or_default().push(*leg);
@@ -1116,7 +1117,7 @@ impl<'a> BlockLowering<'a> {
             // through `$self.tree`).
             //
             // Index by owning_boundary for the walker.
-            let mut structural_calls_at: HashMap<TreeBoundaryId, Vec<BlockId>> = HashMap::new();
+            let mut structural_calls_at: HashMap<TreeBoundaryId, Vec<BlockId>> = HashMap::default();
 
             // Boundaries that need a walker block emitted purely to host
             // structural calls (no inline bindings, not naturally on the
@@ -1239,7 +1240,7 @@ impl<'a> BlockLowering<'a> {
             .collect();
         // Map binding_id → signal that absorbs it (by deps lookup
         // through PendingBinding metadata).
-        let mut binding_to_signal: HashMap<u32, DefId> = HashMap::new();
+        let mut binding_to_signal: HashMap<u32, DefId> = HashMap::default();
         for pb in &self.binding_collector {
             if !migrated_binding_ids.contains(&pb.binding_id) {
                 continue;
@@ -1261,7 +1262,7 @@ impl<'a> BlockLowering<'a> {
                 binding_to_signal.insert(pb.binding_id, s);
             }
         }
-        let mut signals_used: HashSet<DefId> = HashSet::new();
+        let mut signals_used: HashSet<DefId> = HashSet::default();
         let old_effects = std::mem::take(&mut self.effects);
         let mut spliced: Vec<LirBlockEffect> = Vec::with_capacity(old_effects.len());
         for e in old_effects {
@@ -1645,7 +1646,7 @@ impl<'a> BlockLowering<'a> {
         // site. The walker hierarchy itself was descended through, so by
         // induction every parent walker can supply its own enclosing
         // iter-bodies forward.
-        let mut iter_to_anchor: HashMap<TreeBoundaryId, TreeBoundaryId> = HashMap::new();
+        let mut iter_to_anchor: HashMap<TreeBoundaryId, TreeBoundaryId> = HashMap::default();
         for tb in &self.tree_shape.boundaries {
             if let TreeBoundaryKind::ForAnchor { iter_body_idx, .. } = tb.kind {
                 iter_to_anchor.insert(TreeBoundaryId(iter_body_idx), tb.id);
@@ -1860,15 +1861,14 @@ impl<'a> BlockLowering<'a> {
                 exprs: Vec::new(),
                 signals: tree.signals.clone(),
                 children_root_slot: None,
-                input_binding_handlers: HashMap::new(),
-                payload_binding_handlers: HashMap::new(),
+                input_binding_handlers: HashMap::default(),
+                payload_binding_handlers: HashMap::default(),
                 for_contexts: Vec::new(),
-                effects_by_signal: HashMap::new(),
+                effects_by_signal: HashMap::default(),
                 body_tree: Vec::new(),
                 struct_types: Vec::new(),
                 array_types: Vec::new(),
                 signal_layout: crate::lir::SignalLayout::default(),
-                internal_lifecycle_scratch: crate::lir::InternalLifecycleScratch::default(),
                 comp_struct_layout: crate::lir::node::ComponentStructLayout::default(),
             };
             let mut sig_layout_ctx = LirLayoutContext::new(self.ctx);
@@ -1918,7 +1918,7 @@ impl<'a> BlockLowering<'a> {
                     // ListMemory until Phase 6. Eligible elements:
                     // primitive scalars (5b-v.3), DTR records (5e.1).
                     let is_component_signal = match &iterable_expr.kind {
-                        LirExprKind::SignalRead(def_id) => {
+                        LirExprKind::SignalRead(def_id) | LirExprKind::GlobalRead(def_id) => {
                             tree_signals.iter().any(|s| s.def_id == *def_id)
                         }
                         _ => true, // Non-signal exprs: allow GC if eligible
@@ -1931,7 +1931,7 @@ impl<'a> BlockLowering<'a> {
                     // this in lockstep is what avoids the for-loop update
                     // `debug_assert!(is_gc_list)` panic.
                     let elem_is_gc =
-                        is_scalar_list_ty_struct(ctx, iterable_expr.ty, &mut HashSet::new());
+                        is_scalar_list_ty_struct(ctx, iterable_expr.ty, &mut HashSet::default());
                     if is_component_signal && elem_is_gc {
                         IterSource::ListGc
                     } else {
@@ -2101,7 +2101,7 @@ impl<'a> BlockLowering<'a> {
                 v.sort_by_key(|c| c.id.0);
                 v
             },
-            effects_by_signal: HashMap::new(),
+            effects_by_signal: HashMap::default(),
             body_tree: tree.body.clone(),
             // Projected from the lowering-internal `self.tree_shape`
             // below — the resource carries only the registry; the tree
@@ -2110,7 +2110,6 @@ impl<'a> BlockLowering<'a> {
             struct_types: Vec::new(),
             array_types: Vec::new(),
             signal_layout: crate::lir::SignalLayout::default(),
-            internal_lifecycle_scratch: crate::lir::InternalLifecycleScratch::default(),
             comp_struct_layout: crate::lir::node::ComponentStructLayout::default(),
         };
         let (st, at) = crate::lir::struct_types::project_tree_shape(&self.tree_shape);
@@ -2166,12 +2165,6 @@ impl<'a> BlockLowering<'a> {
         // Populate per-block structural metadata that codegen would
         // otherwise recompute by re-walking the op tree on every emit.
         populate_block_structural_metadata(self.ctx, &mut component);
-
-        // Phase 0.3d (lir-resource-flatten plan): cache the per-valtype
-        // flat-scratch counts for the codegen-synthesized internal
-        // lifecycle wrappers. Codegen still recomputes locally and
-        // cross-checks via `debug_assert_eq!`.
-        populate_internal_lifecycle_scratch(self.ctx, &mut component);
 
         // Build the inverted dependency index: signal DefId → effect ids.
         for effect in &component.effects {
@@ -2357,7 +2350,7 @@ impl<'a> BlockLowering<'a> {
                         // lower caller's children under that slot.
                         let target_has_slot = match self.ctx.defs.kind(*component_def) {
                             DefKind::Component(c) => c.has_children_slot,
-                            DefKind::ImportComponent(ic) => ic.has_children_slot,
+                            DefKind::ExternComponent(ic) => ic.has_children_slot,
                             _ => false,
                         };
                         let children_root = if target_has_slot {
@@ -3433,7 +3426,7 @@ impl<'a> BlockLowering<'a> {
         // they're skipped here. Body code reading them resolves via
         // the per-block `local_to_slot` mechanism, unchanged.
         let mut outer_item_field_slots: HashMap<LocalId, (Ty, TreeBoundaryId, LirBindingMode)> =
-            HashMap::new();
+            HashMap::default();
         for (outer_id, _outer_slot, outer_ty, outer_mode) in &outer_items {
             if let Some(&outer_iter_body_id) = self.for_item_iter_body.get(outer_id) {
                 // The outer item lives in field 0 of its iter-body struct;
@@ -3889,8 +3882,10 @@ impl<'a> BlockLowering<'a> {
     /// Classify an iterable expression for a for-loop.
     fn classify_iterable(&mut self, expr: &LirExpr) -> IterableKind {
         match &expr.kind {
-            // Signal reads are reactive - create update effects
-            LirExprKind::SignalRead(def_id) => IterableKind::Signal(*def_id),
+            // Signal / global-property reads are reactive - create update effects
+            LirExprKind::SignalRead(def_id) | LirExprKind::GlobalRead(def_id) => {
+                IterableKind::Signal(*def_id)
+            }
             // All other list-producing expressions: literals, field accesses,
             // calls returning lists (e.g. list.filter/map stdlib calls), etc.
             LirExprKind::ListConstruct { .. }
@@ -3921,7 +3916,7 @@ impl<'a> BlockLowering<'a> {
         // Delegate to the free-function predicate so the mount-path
         // `is_gc_list` decision and the codegen classification stay in
         // exact lockstep (a divergence panics the for-loop update path).
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         is_scalar_list_ty_struct(self.ctx, ty, &mut seen)
     }
 
@@ -4038,7 +4033,7 @@ impl<'a> BlockLowering<'a> {
         // Load outer items from boundary fields and update local_bindings.
         // Phase 5b-v.3: propagate BindingMode from the outer map so GC-list
         // items use Value (direct slot) and memory/range items use Ptr (deref).
-        let mut outer_loaded_slots: HashMap<LocalId, LirSlotId> = HashMap::new();
+        let mut outer_loaded_slots: HashMap<LocalId, LirSlotId> = HashMap::default();
         for (outer_id, (outer_ty, item_struct_ty, outer_mode)) in outer_item_field_slots {
             // Phase 5e.6: type the temp slot based on the outer item's
             // type. For typed records / GC arrays the boundary field
@@ -4873,7 +4868,7 @@ impl<'a> BlockLowering<'a> {
         // 5e.5 Stage 7e: type the temp slot from the outer item's Ty
         // (when bound by Value) so list<GcVariant> elements arrive
         // as the typed supertype ref.
-        let mut loaded_items: HashMap<LocalId, LirSlotId> = HashMap::new();
+        let mut loaded_items: HashMap<LocalId, LirSlotId> = HashMap::default();
         for (local_id, outer_ty, item_struct_ty, mode) in &outer_items_snapshot {
             let temp_slot = if matches!(*mode, LirBindingMode::Value) {
                 self.alloc_temp_slot_typed_named(self.ty_to_slot_val_type(*outer_ty), "temp_slot")
@@ -4950,7 +4945,7 @@ impl<'a> BlockLowering<'a> {
         let unmount_parent = self.alloc_temp_slot_named("parent");
 
         // Load for-loop items from memory (unmount might need them for cleanup)
-        let mut unmount_loaded_items: HashMap<LocalId, LirSlotId> = HashMap::new();
+        let mut unmount_loaded_items: HashMap<LocalId, LirSlotId> = HashMap::default();
         for (local_id, outer_ty, item_struct_ty, mode) in &outer_items_snapshot {
             let temp_slot = if matches!(*mode, LirBindingMode::Value) {
                 self.alloc_temp_slot_typed_named(self.ty_to_slot_val_type(*outer_ty), "temp_slot")
@@ -5195,7 +5190,9 @@ impl<'a> BlockLowering<'a> {
 
     fn collect_deps_recursive(&self, expr: &LirExpr, deps: &mut Vec<DefId>) {
         match &expr.kind {
-            LirExprKind::SignalRead(def_id) => {
+            // A component-local signal read or a global-property read are both
+            // reactive dependencies on their `DefId`.
+            LirExprKind::SignalRead(def_id) | LirExprKind::GlobalRead(def_id) => {
                 if !deps.contains(def_id) {
                     deps.push(*def_id);
                 }
@@ -5365,8 +5362,8 @@ impl<'a> BlockLowering<'a> {
         // Build local_to_slot + local_modes from current_block_locals.
         // Every entry defaults to `BindingMode::Ptr` — Phase 5b-v.2 is a
         // pure-plumbing change.
-        let mut local_to_slot = HashMap::new();
-        let mut local_modes: HashMap<LocalId, LirBindingMode> = HashMap::new();
+        let mut local_to_slot = HashMap::default();
+        let mut local_modes: HashMap<LocalId, LirBindingMode> = HashMap::default();
         for local_id in &self.current_block_locals {
             if let Some((slot, _ty, mode)) = self.local_bindings.get(local_id) {
                 local_to_slot.insert(*local_id, *slot);
@@ -5384,7 +5381,7 @@ impl<'a> BlockLowering<'a> {
         self.blocks.push(LirBlock {
             id,
             ops,
-            captured_locals: HashMap::new(),
+            captured_locals: HashMap::default(),
             local_to_slot,
             local_modes,
             return_slot: None,
@@ -5437,7 +5434,7 @@ impl<'a> BlockLowering<'a> {
     /// emission sweep reads this map via `emit_trigger_for_signal` to
     /// inline `CallBlock` sequences at every signal-write emit site.
     fn build_signal_to_update_blocks_for_deferred(&mut self) {
-        let mut map: HashMap<DefId, Vec<BlockId>> = HashMap::new();
+        let mut map: HashMap<DefId, Vec<BlockId>> = HashMap::default();
         for effect in &self.effects {
             for &dep in &effect.dependencies {
                 if self.ctx.defs.owning_global_block(dep).is_some() {
@@ -6333,7 +6330,7 @@ impl<'a> BlockLowering<'a> {
 // This pass runs after all blocks are constructed so we can borrow the
 // component's signals / exprs by reference while writing to each block.
 
-use crate::lir::layout::{FlatValTypeCounts, max_flat_counts};
+use crate::lir::layout::FlatValTypeCounts;
 
 /// Walks every block in `component` and fills in the structural metadata
 /// fields on each `LirBlock`.
@@ -6553,13 +6550,13 @@ pub(crate) fn synth_internal_constructor_block(ctx: &CompilerContext, component:
     component.internal_constructor_block = Some(new_block_id);
     component.internal_constructor_self_ref_slot = Some(self_ref_slot);
 
-    // Stamp the ctor scratch onto the user constructor_block, which
-    // now executes its own InitSignal/InitSignalDefault ops as a
-    // standalone wasm function.
-    let ctor_scratch = component.internal_lifecycle_scratch.ctor;
-    if let Some(user_ctor) = component.blocks.iter_mut().find(|b| b.id == ctor_block_id) {
-        user_ctor.max_flat_scratch_counts = ctor_scratch;
-    }
+    // §1.5: the user constructor block keeps the expr-shape-based scratch
+    // counts computed by `populate_block_structural_metadata`
+    // (`compute_flat_scratch_counts` over its inline `EvalExprToSlots` +
+    // `StructSetSym` init ops) — the only scratch its emitter actually
+    // uses. The former type-based stamp (max over signals' canonical-ABI
+    // flat counts) was a legacy canonical-flat bridge that over-allocated
+    // locals; removed with the whole `InternalLifecycleScratch` machinery.
 }
 
 /// Phase 0.3h: synthesize the internal unmount block. Codegen
@@ -6940,8 +6937,7 @@ pub fn resolve_global_triggers(ctx: &CompilerContext, resources: &mut [LirResour
     // signal → fanout blocks of every observing component, in resource
     // declaration order (deterministic — resources is a Vec, and the
     // per-resource signal list is sorted).
-    let mut fanout: std::collections::HashMap<DefId, Vec<BlockId>> =
-        std::collections::HashMap::new();
+    let mut fanout: rustc_hash::FxHashMap<DefId, Vec<BlockId>> = rustc_hash::FxHashMap::default();
     for resource in resources.iter() {
         let mut observed: Vec<DefId> = resource
             .effects_by_signal
@@ -6968,7 +6964,7 @@ pub fn resolve_global_triggers(ctx: &CompilerContext, resources: &mut [LirResour
     // Phase 2: expand the placeholders.
     fn expansion_count(
         ops: &[LirOp],
-        fanout: &std::collections::HashMap<DefId, Vec<BlockId>>,
+        fanout: &rustc_hash::FxHashMap<DefId, Vec<BlockId>>,
     ) -> usize {
         ops.iter()
             .map(|op| match op {
@@ -6988,7 +6984,7 @@ pub fn resolve_global_triggers(ctx: &CompilerContext, resources: &mut [LirResour
     fn rewrite_ops(
         ctx: &CompilerContext,
         ops: &mut Vec<LirOp>,
-        fanout: &std::collections::HashMap<DefId, Vec<BlockId>>,
+        fanout: &rustc_hash::FxHashMap<DefId, Vec<BlockId>>,
         dummy_parent: LirSlotId,
     ) {
         let mut i = 0;
@@ -7071,6 +7067,109 @@ pub fn resolve_global_triggers(ctx: &CompilerContext, resources: &mut [LirResour
             resource.blocks[block_index].ops = ops;
         }
     }
+}
+
+/// Allocate one block-local `Temp` slot of `val_ty` in `block`, returning its
+/// id. Used by [`synth_globals_init_block`] to lay out its scratch slots.
+fn alloc_init_block_temp(
+    block: &mut LirBlock,
+    next_local: &mut u32,
+    val_ty: LirSlotValType,
+) -> LirSlotId {
+    let idx = block.slots.len() as u16;
+    let id = LirSlotId::Block {
+        block: block.id,
+        idx,
+    };
+    block.slots.push(LirSlotInfo {
+        id,
+        kind: LirSlotKind::Temp {
+            local_idx: *next_local,
+        },
+        val_ty,
+        name: None,
+    });
+    *next_local += 1;
+    id
+}
+
+/// Synthesize the module-start **globals-init block**: for each global
+/// property with a default, evaluate the default into block-local scratch
+/// slots and store them into the property's core-global fields.
+///
+/// This makes the module-start init a complete part of the LIR plan rather
+/// than imperative back-end code. The returned [`LirBlock`] is self-contained
+/// — its own `Temp` slots, an `EvalExprToSlots` + `GlobalFieldSet` sequence
+/// per defaulted property, and the flat-scratch counts (the same core
+/// computation component blocks use) — so the backend transcribes it verbatim
+/// as the `(start)` function via the ordinary op emitter.
+///
+/// `exprs` is the shared global default-expr arena; each default's top-level
+/// node is interned into it so `EvalExprToSlots` can reference it by id.
+/// Returns `None` when no global property has a default (no init needed).
+pub fn synth_globals_init_block(
+    ctx: &CompilerContext,
+    globals: &[crate::lir::module::LirGlobal],
+    exprs: &mut Vec<LirExpr>,
+) -> Option<LirBlock> {
+    use crate::lir::signal_layout::{lir_slot_val_ty_for_signal_field, slot_count_for_signal_ty};
+
+    let mut block = LirBlock::new(BlockId(0));
+    let mut next_local: u32 = 0;
+
+    for global in globals {
+        // The core-global field offset accumulates over *every* property
+        // (defaulted or not) — undefaulted properties still occupy
+        // zero-initialised core-global fields.
+        let mut field_start: u32 = 0;
+        for prop in &global.properties {
+            let Some(prop_ty) = ctx.defs.type_of(prop.def_id) else {
+                continue;
+            };
+            let count = slot_count_for_signal_ty(ctx, prop_ty);
+            if let Some(default) = &prop.default
+                && count > 0
+            {
+                let expr_id = LirExprId(exprs.len() as u32);
+                exprs.push(default.clone());
+                // Field 0 uses the value's natural slot val-ty (a typed ref
+                // for gc shapes); companion fields use the per-field mirror.
+                let dest_first = alloc_init_block_temp(
+                    &mut block,
+                    &mut next_local,
+                    ty_to_slot_val_type(ctx, prop_ty),
+                );
+                for i in 1..count {
+                    let vt = lir_slot_val_ty_for_signal_field(ctx, prop_ty, i);
+                    alloc_init_block_temp(&mut block, &mut next_local, vt);
+                }
+                block.ops.push(LirOp::EvalExprToSlots {
+                    expr: expr_id,
+                    dest_first_slot: dest_first,
+                });
+                for i in 0..count {
+                    block.ops.push(LirOp::GlobalFieldSet {
+                        block: global.def_id,
+                        field: field_start + i,
+                        value: dest_first.offset_by(i),
+                    });
+                }
+            }
+            field_start += count;
+        }
+    }
+
+    if block.ops.is_empty() {
+        return None;
+    }
+
+    // Flat-scratch counts for the block's `EvalExprToSlots` evaluations — the
+    // same core computation component blocks use; the backend only reads it.
+    let mut layout_ctx = LirLayoutContext::new(ctx);
+    block.max_flat_scratch_counts =
+        compute_flat_scratch_counts(&block.ops, &[], exprs, ctx, &mut layout_ctx);
+
+    Some(block)
 }
 
 /// Synthesize per-(observing-component, global-signal) fanout
@@ -7372,8 +7471,8 @@ fn synth_one_global_fanout_block(
         });
 
     // Cache: boundary_id -> slot holding its ref.
-    let mut boundary_slot_for: std::collections::HashMap<TreeBoundaryId, LirSlotId> =
-        std::collections::HashMap::new();
+    let mut boundary_slot_for: rustc_hash::FxHashMap<TreeBoundaryId, LirSlotId> =
+        rustc_hash::FxHashMap::default();
 
     // Iteratively resolve. For each needed boundary, recursively make sure
     // its parent is resolved first (or fetch from root directly).
@@ -7385,7 +7484,7 @@ fn synth_one_global_fanout_block(
         signal_def: DefId,
         inst_typed: LirSlotId,
         tree_root_field_idx: u32,
-        boundary_slot_for: &mut std::collections::HashMap<TreeBoundaryId, LirSlotId>,
+        boundary_slot_for: &mut rustc_hash::FxHashMap<TreeBoundaryId, LirSlotId>,
         ops_out: &mut Vec<crate::lir::block::LirOp>,
     ) -> LirSlotId {
         use crate::lir::block::{LirOp, LirSlotInfo, LirSlotKind, LirSlotValType, LirTypeRef};
@@ -7594,34 +7693,6 @@ fn synth_one_global_fanout_block(
             signal: None,
         },
     );
-}
-
-pub(crate) fn populate_internal_lifecycle_scratch(
-    ctx: &CompilerContext,
-    component: &mut LirResource,
-) {
-    use crate::lir::InternalLifecycleScratch;
-    use crate::types::InternedTyKind;
-
-    let mut layout_ctx = LirLayoutContext::new(ctx);
-    let mut ctor_counts: FlatValTypeCounts = (0, 0, 0, 0);
-    for s in &component.signals {
-        if matches!(ctx.ty_kind(s.ty), InternedTyKind::Func { .. }) {
-            continue;
-        }
-        let c = layout_ctx.canonical_flat_valtype_counts(s.ty);
-        ctor_counts = max_flat_counts(ctor_counts, c);
-    }
-
-    let mount_counts = component
-        .get_block(component.mount_block)
-        .max_flat_scratch_counts;
-
-    component.internal_lifecycle_scratch = InternalLifecycleScratch {
-        ctor: ctor_counts,
-        mount: mount_counts,
-        unmount: (0, 0, 0, 0),
-    };
 }
 
 /// Phase 3.3: MountComponent was deleted. Each mount site now
@@ -8110,6 +8181,44 @@ fn expr_contains_float_binop_scratch(
 /// `Index` whose element type is a non-fat-ptr multi-slot composite.
 /// Mirrors the legacy codegen-side predicate; both routes need an i32
 /// scratch local to stash the base pointer across per-slot loads.
+/// Mirror of `wasm/repr.rs::is_primitive_only_record`: a record whose every
+/// field is a single scalar slot (bool / int / float / char, or a payload-less
+/// enum). Such a record returned from a callback is lifted from its return
+/// buffer via `emit_flat_slot_load_at_ptr`, which needs one i32 scratch local.
+/// Both sides MUST agree so the counting pass reserves what emission consumes.
+fn is_primitive_only_record_ty(ty: Ty, ctx: &CompilerContext) -> bool {
+    let def_id = match ctx.ty_kind(ty) {
+        InternedTyKind::Adt(d) => *d,
+        _ => return false,
+    };
+    let record = match ctx.defs.kind(def_id) {
+        DefKind::Record(r) => r.clone(),
+        _ => return false,
+    };
+    record.fields.iter().all(|&field_def_id| {
+        let field_ty = match ctx.defs.kind(field_def_id) {
+            DefKind::Field(f) => f.ty,
+            _ => return false,
+        };
+        match ctx.ty_kind(field_ty) {
+            InternedTyKind::Bool
+            | InternedTyKind::S8
+            | InternedTyKind::S16
+            | InternedTyKind::S32
+            | InternedTyKind::S64
+            | InternedTyKind::U8
+            | InternedTyKind::U16
+            | InternedTyKind::U32
+            | InternedTyKind::U64
+            | InternedTyKind::F32
+            | InternedTyKind::F64
+            | InternedTyKind::Char => true,
+            InternedTyKind::Adt(d) => matches!(ctx.defs.kind(*d), DefKind::Enum(_)),
+            _ => false,
+        }
+    })
+}
+
 fn expr_contains_composite_field_load(
     expr: &LirExpr,
     exprs: &[LirExpr],
@@ -8165,14 +8274,12 @@ fn expr_contains_composite_field_load(
             expr_contains_composite_field_load(arena_expr(exprs, *operand), exprs, ctx, layout_ctx)
         }
         LirExprKind::Index { base, index } => {
-            let elem_slot_count = layout_ctx.canonical_flat_valtypes(expr.ty).len();
-            let is_fat_slot = matches!(
-                ctx.ty_kind(expr.ty),
-                InternedTyKind::String | InternedTyKind::List(_)
-            );
-            if elem_slot_count >= 2 && !is_fat_slot {
-                return true;
-            }
+            // §1.5: indexing a list is a single `array.get` yielding one
+            // value (the element's GC ref for records/tuples/variants,
+            // or a scalar) — it uses no memory base-pointer scratch (the
+            // legacy memory `list_get` path was deleted in Phase 7). Any
+            // composite *field* load on the indexed element is caught by
+            // the `Field` arm above, so only recurse into the operands.
             expr_contains_composite_field_load(arena_expr(exprs, *base), exprs, ctx, layout_ctx)
                 || expr_contains_composite_field_load(
                     arena_expr(exprs, *index),
@@ -8181,9 +8288,21 @@ fn expr_contains_composite_field_load(
                     layout_ctx,
                 )
         }
-        LirExprKind::Call { args, .. } => args.iter().any(|a| {
-            expr_contains_composite_field_load(arena_expr(exprs, *a), exprs, ctx, layout_ctx)
-        }),
+        LirExprKind::Call { args, .. } => {
+            // A callback whose return type is a primitive-only record is lifted
+            // from its linear-memory return buffer via `emit_flat_slot_load_at_ptr`
+            // (the pointer-convention path in `wasm/expr.rs`), which stashes the
+            // base pointer in one i32 scratch local. The counting pass must
+            // reserve it here or emission fails with "reserved 0 i32 scratch
+            // locals, need >= 1". Mirror the emit-site condition on the call's
+            // own return type (`expr.ty`), then recurse into the args.
+            if is_primitive_only_record_ty(expr.ty, ctx) {
+                return true;
+            }
+            args.iter().any(|a| {
+                expr_contains_composite_field_load(arena_expr(exprs, *a), exprs, ctx, layout_ctx)
+            })
+        }
         LirExprKind::Ternary {
             condition,
             then_expr,
@@ -8239,6 +8358,7 @@ fn expr_contains_composite_field_load(
         | LirExprKind::Def(_)
         | LirExprKind::Literal(_)
         | LirExprKind::SignalRead(_)
+        | LirExprKind::GlobalRead(_)
         | LirExprKind::EnumCase { .. }
         | LirExprKind::VariantCtor { payload: None, .. }
         | LirExprKind::ListStatic { .. } => false,

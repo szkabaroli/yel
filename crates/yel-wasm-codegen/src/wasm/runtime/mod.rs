@@ -8,11 +8,14 @@
 pub mod memory;
 pub mod strings;
 
-use std::collections::HashMap;
-pub use memory::{emit_alloc, emit_allocator_globals, emit_cabi_realloc, emit_free, emit_store_fat_ptr, emit_load_fat_ptr, emit_pack_fat_ptr_to_i64, AllocatorGlobals};
+pub use memory::{
+    AllocatorGlobals, emit_alloc, emit_allocator_globals, emit_cabi_realloc, emit_free,
+    emit_load_fat_ptr, emit_pack_fat_ptr_to_i64, emit_store_fat_ptr,
+};
+use rustc_hash::FxHashMap as HashMap;
 pub use strings::{
-    emit_bool_to_string, emit_concat_n, emit_f32_to_string, emit_s32_to_string,
-    emit_s64_to_string, emit_starts_with, StringData,
+    StringData, emit_bool_to_string, emit_concat_n, emit_f32_to_string, emit_s32_to_string,
+    emit_s64_to_string, emit_starts_with,
 };
 use yel_core::{DefId, Ty};
 
@@ -57,7 +60,7 @@ pub struct RuntimeFunctions {
     /// f32_to_string function index
     pub f32_to_string: Option<u32>,
     /// Map of concat arity -> function index (concat2, concat3, etc.)
-    pub concat_indices: std::collections::HashMap<usize, u32>,
+    pub concat_indices: rustc_hash::FxHashMap<usize, u32>,
 
     // Fat pointer operations
     /// store_fat_ptr function index: (addr, ptr, len) -> ()
@@ -140,7 +143,7 @@ impl RuntimeFunctions {
         let bool_to_string = alloc_if(&mut idx, needs.bool_to_string);
         let f32_to_string = alloc_if(&mut idx, needs.f32_to_string);
 
-        let mut concat_indices = std::collections::HashMap::new();
+        let mut concat_indices = rustc_hash::FxHashMap::default();
         for &arity in concat_arities {
             concat_indices.insert(arity, idx);
             idx += 1;
@@ -157,8 +160,8 @@ impl RuntimeFunctions {
         // For each record type, we generate two functions:
         // - $ctor_X_at(dest, ...fields) -> () - stores at given address
         // - $ctor_X(...fields) -> ptr - allocates and returns ptr
-        let mut record_ctors_at = std::collections::HashMap::new();
-        let mut record_ctors = std::collections::HashMap::new();
+        let mut record_ctors_at = rustc_hash::FxHashMap::default();
+        let mut record_ctors = rustc_hash::FxHashMap::default();
         for &def_id in record_types {
             record_ctors_at.insert(def_id, idx);
             idx += 1;
@@ -169,14 +172,14 @@ impl RuntimeFunctions {
         // List constructor helpers
         // For each (element_type, count) pair, generate a function:
         // - list_ctor_N_T(...element_values...) -> (ptr, len)
-        let mut list_ctors = std::collections::HashMap::new();
+        let mut list_ctors = rustc_hash::FxHashMap::default();
         for &(elem_ty, count) in list_constructs {
             list_ctors.insert((elem_ty, count), idx);
             idx += 1;
         }
 
         // List append helpers (one per unique list type).
-        let mut list_appends_map = std::collections::HashMap::new();
+        let mut list_appends_map = rustc_hash::FxHashMap::default();
         for &list_ty in list_appends {
             list_appends_map.insert(list_ty, idx);
             idx += 1;
@@ -184,7 +187,7 @@ impl RuntimeFunctions {
 
         // List get helpers (one per unique list type). Keyed by list_ty; the
         // paired option_ty is consumed only during generation.
-        let mut list_gets_map = std::collections::HashMap::new();
+        let mut list_gets_map = rustc_hash::FxHashMap::default();
         for &(list_ty, _option_ty) in list_gets {
             list_gets_map.insert(list_ty, idx);
             idx += 1;
@@ -196,7 +199,7 @@ impl RuntimeFunctions {
         // Filter functions
         // For each filter call site, generate a specialized filter function:
         // - $filter_N(src_ptr, src_len) -> (result_ptr, result_len)
-        let mut filter_indices = std::collections::HashMap::new();
+        let mut filter_indices = rustc_hash::FxHashMap::default();
         for filter_id in 0..filter_count {
             filter_indices.insert(filter_id, idx);
             idx += 1;
@@ -257,4 +260,3 @@ impl RuntimeFunctions {
         self.filter_indices.get(&filter_id).copied()
     }
 }
-

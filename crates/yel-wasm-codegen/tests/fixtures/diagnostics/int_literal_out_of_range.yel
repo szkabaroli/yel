@@ -1,0 +1,7 @@
+// E0003: 999 does not fit in a u8 (0..=255).
+package yel:intoutofrange@0.1.0;
+
+export component App {
+    x: u8 = 999;
+    VStack { Text { "ok" } }
+}

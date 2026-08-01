@@ -8,7 +8,6 @@
 //! This enables type inference for expressions that cannot determine their own type
 //! (anonymous records, empty lists, none, lambdas without annotations).
 
-
 use crate::context::CompilerContext;
 use crate::definitions::{DefKind, Namespace};
 use crate::diagnostic::{Diagnostic, ErrorCode};
@@ -119,7 +118,7 @@ pub fn type_check(item: &HirItem, ctx: &mut CompilerContext) -> ThirItem {
 /// signal-defaults contract as a component so the same lowering drives it.
 /// Private — globals reach type-checking only through [`type_check`].
 fn type_check_global(global: &HirGlobal, ctx: &mut CompilerContext) -> super::node::ThirGlobal {
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap as HashMap;
 
     let gid = global.def_id;
     let (name, span, is_export, prop_ids, defaults) = match ctx.defs.as_global(gid) {
@@ -134,7 +133,7 @@ fn type_check_global(global: &HirGlobal, ctx: &mut CompilerContext) -> super::no
         None => unreachable!("HirItem::Global wraps non-global DefId {gid:?}"),
     };
 
-    let mut signal_defaults: HashMap<DefId, ThirExpr> = HashMap::new();
+    let mut signal_defaults: HashMap<DefId, ThirExpr> = HashMap::default();
     {
         let mut checker = TypeChecker::new(ctx);
         for (prop_id, default) in prop_ids.iter().copied().zip(defaults) {
@@ -183,6 +182,78 @@ pub fn type_check_with_map(component: &HirComponent, ctx: &mut CompilerContext) 
     }
 }
 
+/// Walk `ty` through every boundary-carried position (option/result/list/tuple
+/// payloads, record fields, variant case payloads) and return the `DefId` and
+/// kind label of the first *empty aggregate* reachable, if any: a `record {}`,
+/// an `enum {}`, or a `variant {}`. The WebAssembly component model requires
+/// each of these to have at least one field/case, so an empty one cannot cross
+/// the component boundary. `visiting` guards recursive record types.
+fn ty_reaches_empty_aggregate(
+    ctx: &CompilerContext,
+    ty: Ty,
+    visiting: &mut rustc_hash::FxHashSet<DefId>,
+) -> Option<(DefId, &'static str)> {
+    match ctx.ty_kind(ty) {
+        InternedTyKind::Adt(def_id) => {
+            let def_id = *def_id;
+            if let Some(rec) = ctx.defs.as_record(def_id) {
+                if rec.fields.is_empty() {
+                    return Some((def_id, "record"));
+                }
+                if !visiting.insert(def_id) {
+                    return None; // already on the stack — break the cycle
+                }
+                // Collect field types up front so no borrow of `rec` is held
+                // across the recursive calls.
+                let field_tys: Vec<Ty> = rec
+                    .fields
+                    .iter()
+                    .filter_map(|&f| match ctx.defs.kind(f) {
+                        DefKind::Field(field) => Some(field.ty),
+                        _ => None,
+                    })
+                    .collect();
+                let found = field_tys
+                    .into_iter()
+                    .find_map(|t| ty_reaches_empty_aggregate(ctx, t, visiting));
+                visiting.remove(&def_id);
+                found
+            } else if ctx.defs.as_enum(def_id).is_some_and(|e| e.cases.is_empty()) {
+                Some((def_id, "enum"))
+            } else if let Some(var) = ctx.defs.as_variant(def_id) {
+                if var.cases.is_empty() {
+                    return Some((def_id, "variant"));
+                }
+                let payload_tys: Vec<Ty> = var
+                    .cases
+                    .iter()
+                    .filter_map(|&c| match ctx.defs.kind(c) {
+                        DefKind::VariantCase(case) => case.payload,
+                        _ => None,
+                    })
+                    .collect();
+                payload_tys
+                    .into_iter()
+                    .find_map(|t| ty_reaches_empty_aggregate(ctx, t, visiting))
+            } else {
+                None
+            }
+        }
+        InternedTyKind::Option(inner) => ty_reaches_empty_aggregate(ctx, *inner, visiting),
+        InternedTyKind::Result { ok, err } => {
+            let (ok, err) = (*ok, *err);
+            ok.and_then(|t| ty_reaches_empty_aggregate(ctx, t, visiting))
+                .or_else(|| err.and_then(|t| ty_reaches_empty_aggregate(ctx, t, visiting)))
+        }
+        InternedTyKind::List(elem) => ty_reaches_empty_aggregate(ctx, *elem, visiting),
+        InternedTyKind::Tuple(elems) => elems
+            .clone()
+            .into_iter()
+            .find_map(|t| ty_reaches_empty_aggregate(ctx, t, visiting)),
+        _ => None,
+    }
+}
+
 /// Inclusive `[min, max]` range (widened to `i128`) an integer literal must
 /// satisfy for the given target type, plus the type's display name. Returns
 /// `None` for non-integer targets (e.g. floats), where an int literal is
@@ -200,7 +271,6 @@ fn int_literal_bounds(kind: &InternedTyKind) -> Option<(i128, i128, &'static str
         _ => return None,
     })
 }
-
 
 /// Type checker state.
 struct TypeChecker<'ctx> {
@@ -246,13 +316,13 @@ impl<'ctx> TypeChecker<'ctx> {
     // ========================================================================
 
     fn check_component(&mut self, component: &HirComponent) -> ThirComponent {
-        use std::collections::HashMap;
+        use rustc_hash::FxHashMap as HashMap;
 
         self.current_component = component.def_id;
         self.locals = LocalScope::new();
 
         // Store type-checked signal defaults
-        let mut signal_defaults: HashMap<DefId, ThirExpr> = HashMap::new();
+        let mut signal_defaults: HashMap<DefId, ThirExpr> = HashMap::default();
 
         // Phase 1: Add ALL component properties to local scope first
         // This matches HIR lowering order, ensuring LocalIds are consistent
@@ -279,14 +349,50 @@ impl<'ctx> TypeChecker<'ctx> {
             vec![]
         };
 
+        // Boundary check: an exported component exposes each property as a WIT
+        // getter/setter. The component model forbids an empty aggregate (a
+        // `record`/`enum`/`variant` with no fields/cases), so one reachable
+        // through an exposed property type cannot cross the boundary. Flag it
+        // here with a precise span instead of letting codegen fail later with
+        // an opaque encoder error. (Callbacks and imported components are caught
+        // by the codegen backstop in `wit_ast::register_type`.)
+        if component.is_export {
+            for &prop_id in &prop_ids {
+                let prop_ty = self.ctx.defs.type_of(prop_id).unwrap_or(Ty::ERROR);
+                if let Some((empty_def, kind)) = ty_reaches_empty_aggregate(
+                    self.ctx,
+                    prop_ty,
+                    &mut rustc_hash::FxHashSet::default(),
+                ) {
+                    let name = self.ctx.str(self.ctx.defs.name(empty_def)).to_string();
+                    let prop_name = self.ctx.str(self.ctx.defs.name(prop_id)).to_string();
+                    let member = if kind == "record" { "field" } else { "case" };
+                    self.ctx.diagnostics.push(
+                        Diagnostic::error(format!(
+                            "empty {kind} `{name}` cannot cross the component boundary"
+                        ))
+                        .with_span(self.ctx.defs.span(prop_id))
+                        .with_code(ErrorCode::EmptyTypeAtBoundary)
+                        .with_note(format!(
+                            "property `{prop_name}` is exposed as a component getter/setter, \
+                             but the WebAssembly component model requires a {kind} to have at \
+                             least one {member}. Give `{name}` a {member}, or keep it internal \
+                             (do not expose it through an exported component's property)."
+                        )),
+                    );
+                }
+            }
+        }
+
         // Phase 2: Type check default values (after all properties are in scope)
         for &prop_id in &prop_ids {
             let prop_ty = self.ctx.defs.type_of(prop_id).unwrap_or(Ty::ERROR);
             if let Some(signal_def) = self.ctx.defs.as_signal(prop_id)
-                && let Some(ref default_expr) = signal_def.default.clone() {
-                    let thir_default = self.type_check_expr(default_expr, Mode::Check(prop_ty));
-                    signal_defaults.insert(prop_id, thir_default);
-                }
+                && let Some(ref default_expr) = signal_def.default.clone()
+            {
+                let thir_default = self.type_check_expr(default_expr, Mode::Check(prop_ty));
+                signal_defaults.insert(prop_id, thir_default);
+            }
         }
 
         // Type check body nodes
@@ -331,17 +437,17 @@ impl<'ctx> TypeChecker<'ctx> {
                 // Check for recursive component instantiation (component using itself)
                 if let Some(def_id) = component_def
                     && def_id == self.current_component
-                        && !self.ctx.known.elements.is_builtin(def_id)
-                    {
-                        self.ctx.diagnostics.push(
-                            Diagnostic::error(format!(
-                                "recursive component instantiation: '{}' cannot use itself",
-                                name
-                            ))
-                            .with_span(node.span)
-                            .with_code(ErrorCode::RecursiveInstantiation),
-                        );
-                    }
+                    && !self.ctx.known.elements.is_builtin(def_id)
+                {
+                    self.ctx.diagnostics.push(
+                        Diagnostic::error(format!(
+                            "recursive component instantiation: '{}' cannot use itself",
+                            name
+                        ))
+                        .with_span(node.span)
+                        .with_code(ErrorCode::RecursiveInstantiation),
+                    );
+                }
 
                 let thir_bindings: Vec<ThirBinding> = bindings
                     .iter()
@@ -359,28 +465,30 @@ impl<'ctx> TypeChecker<'ctx> {
                 // VStack, Button, …) and non-component names route through
                 // the DOM child-propagation path unchanged.
                 if let Some(def_id) = component_def
-                    && !children.is_empty() && !self.ctx.known.elements.is_builtin(def_id) {
-                        let accepts = match self.ctx.defs.kind(def_id) {
-                            DefKind::Component(c) => c.has_children_slot,
-                            DefKind::ImportComponent(ic) => ic.has_children_slot,
-                            _ => false,
-                        };
-                        if !accepts {
-                            self.ctx.diagnostics.push(
-                                Diagnostic::error(format!(
-                                    "component `{}` does not declare `@children`; \
+                    && !children.is_empty()
+                    && !self.ctx.known.elements.is_builtin(def_id)
+                {
+                    let accepts = match self.ctx.defs.kind(def_id) {
+                        DefKind::Component(c) => c.has_children_slot,
+                        DefKind::ExternComponent(ic) => ic.has_children_slot,
+                        _ => false,
+                    };
+                    if !accepts {
+                        self.ctx.diagnostics.push(
+                            Diagnostic::error(format!(
+                                "component `{}` does not declare `@children`; \
                                      cannot accept caller-supplied child nodes",
-                                    name
-                                ))
-                                .with_span(node.span)
-                                .with_code(ErrorCode::MissingChildrenSlot)
-                                .with_note(
-                                    "add `@children` inside the component body to make it a container"
-                                        .to_string(),
-                                ),
-                            );
-                        }
+                                name
+                            ))
+                            .with_span(node.span)
+                            .with_code(ErrorCode::MissingChildrenSlot)
+                            .with_note(
+                                "add `@children` inside the component body to make it a container"
+                                    .to_string(),
+                            ),
+                        );
                     }
+                }
 
                 ThirNodeKind::Element {
                     component: component_def,
@@ -766,8 +874,9 @@ impl<'ctx> TypeChecker<'ctx> {
                         if let Some(field) = field {
                             let field_name = self.ctx.str(field.name);
                             // Find the corresponding field in the literal
-                            if let Some((_, expr)) =
-                                fields.iter().find(|(name, _)| name.as_str() == &*field_name)
+                            if let Some((_, expr)) = fields
+                                .iter()
+                                .find(|(name, _)| name.as_str() == &*field_name)
                             {
                                 let thir_expr = self.type_check_expr(expr, Mode::Check(field.ty));
                                 thir_fields.push(thir_expr);
@@ -792,9 +901,11 @@ impl<'ctx> TypeChecker<'ctx> {
                 } else {
                     // The expected ADT isn't a record — report instead of
                     // poisoning silently.
-                    self.ctx
-                        .diagnostics
-                        .error(span, ErrorCode::NotARecord, "record literal requires a record type");
+                    self.ctx.diagnostics.error(
+                        span,
+                        ErrorCode::NotARecord,
+                        "record literal requires a record type",
+                    );
                     (ThirExprKind::Error, Ty::ERROR)
                 }
             }
@@ -1280,14 +1391,15 @@ impl<'ctx> TypeChecker<'ctx> {
 
                 // If not found, check current component's callbacks
                 if func_def.is_none()
-                    && let Some(comp) = self.ctx.defs.as_component(self.current_component) {
-                        for &callback_id in &comp.callbacks.clone() {
-                            if self.ctx.defs.name(callback_id) == func_name {
-                                func_def = Some(callback_id);
-                                break;
-                            }
+                    && let Some(comp) = self.ctx.defs.as_component(self.current_component)
+                {
+                    for &callback_id in &comp.callbacks.clone() {
+                        if self.ctx.defs.name(callback_id) == func_name {
+                            func_def = Some(callback_id);
+                            break;
                         }
                     }
+                }
 
                 if let Some(func_def) = func_def {
                     let func_ty = self.ctx.defs.type_of(func_def).unwrap_or(Ty::ERROR);
@@ -1346,9 +1458,11 @@ impl<'ctx> TypeChecker<'ctx> {
                 }
 
                 // Unknown function - emit error
-                self.ctx
-                    .diagnostics
-                    .error(expr.span, ErrorCode::UnresolvedName, format!("unknown function `{}`", func));
+                self.ctx.diagnostics.error(
+                    expr.span,
+                    ErrorCode::UnresolvedName,
+                    format!("unknown function `{}`", func),
+                );
                 (ThirExprKind::Error, Ty::ERROR)
             }
 
@@ -1370,9 +1484,11 @@ impl<'ctx> TypeChecker<'ctx> {
                         ("len", InternedTyKind::List(_)) => {
                             // list.len() -> s32
                             if !args.is_empty() {
-                                self.ctx
-                                    .diagnostics
-                                    .error(expr.span, ErrorCode::WrongArgCount, "len() takes no arguments".to_string());
+                                self.ctx.diagnostics.error(
+                                    expr.span,
+                                    ErrorCode::WrongArgCount,
+                                    "len() takes no arguments".to_string(),
+                                );
                             }
                             let base_expr = ThirExpr::new(
                                 self.fresh_expr_id(),
@@ -1393,9 +1509,11 @@ impl<'ctx> TypeChecker<'ctx> {
                         ("len", InternedTyKind::String) => {
                             // string.len() -> s32
                             if !args.is_empty() {
-                                self.ctx
-                                    .diagnostics
-                                    .error(expr.span, ErrorCode::WrongArgCount, "len() takes no arguments".to_string());
+                                self.ctx.diagnostics.error(
+                                    expr.span,
+                                    ErrorCode::WrongArgCount,
+                                    "len() takes no arguments".to_string(),
+                                );
                             }
                             let base_expr = ThirExpr::new(
                                 self.fresh_expr_id(),
@@ -1452,9 +1570,11 @@ impl<'ctx> TypeChecker<'ctx> {
                             );
                         }
                         _ => {
-                            self.ctx
-                                .diagnostics
-                                .error(expr.span, ErrorCode::NoSuchMember, format!("unknown method `{}` on type", member));
+                            self.ctx.diagnostics.error(
+                                expr.span,
+                                ErrorCode::NoSuchMember,
+                                format!("unknown method `{}` on type", member),
+                            );
                             return (ThirExprKind::Error, Ty::ERROR);
                         }
                     }
@@ -1522,45 +1642,47 @@ impl<'ctx> TypeChecker<'ctx> {
                         for &case_def_id in &variant.cases.clone() {
                             if let DefKind::VariantCase(case) =
                                 self.ctx.defs.kind(case_def_id).clone()
-                                && case.name == member_name {
-                                    // Found the case - build the variant constructor
-                                    let payload = if let Some(payload_ty) = case.payload {
-                                        if args.len() != 1 {
-                                            self.ctx.diagnostics.error(
-                                                expr.span,
-                                                ErrorCode::WrongArgCount,
-                                                format!("variant case `{}` expects 1 argument, found {}", member, args.len()),
-                                            );
-                                            return (ThirExprKind::Error, Ty::ERROR);
-                                        }
-                                        Some(Box::new(
-                                            self.type_check_expr(&args[0], Mode::Check(payload_ty)),
-                                        ))
-                                    } else {
-                                        if !args.is_empty() {
-                                            self.ctx.diagnostics.error(
-                                                expr.span,
-                                                ErrorCode::WrongArgCount,
-                                                format!(
-                                                    "variant case `{}` takes no arguments",
-                                                    member
-                                                ),
-                                            );
-                                            return (ThirExprKind::Error, Ty::ERROR);
-                                        }
-                                        None
-                                    };
+                                && case.name == member_name
+                            {
+                                // Found the case - build the variant constructor
+                                let payload = if let Some(payload_ty) = case.payload {
+                                    if args.len() != 1 {
+                                        self.ctx.diagnostics.error(
+                                            expr.span,
+                                            ErrorCode::WrongArgCount,
+                                            format!(
+                                                "variant case `{}` expects 1 argument, found {}",
+                                                member,
+                                                args.len()
+                                            ),
+                                        );
+                                        return (ThirExprKind::Error, Ty::ERROR);
+                                    }
+                                    Some(Box::new(
+                                        self.type_check_expr(&args[0], Mode::Check(payload_ty)),
+                                    ))
+                                } else {
+                                    if !args.is_empty() {
+                                        self.ctx.diagnostics.error(
+                                            expr.span,
+                                            ErrorCode::WrongArgCount,
+                                            format!("variant case `{}` takes no arguments", member),
+                                        );
+                                        return (ThirExprKind::Error, Ty::ERROR);
+                                    }
+                                    None
+                                };
 
-                                    let result_ty = self.ctx.mk_adt(type_def);
-                                    return (
-                                        ThirExprKind::VariantCtor {
-                                            ty_def: type_def,
-                                            case_idx: case.idx,
-                                            payload,
-                                        },
-                                        result_ty,
-                                    );
-                                }
+                                let result_ty = self.ctx.mk_adt(type_def);
+                                return (
+                                    ThirExprKind::VariantCtor {
+                                        ty_def: type_def,
+                                        case_idx: case.idx,
+                                        payload,
+                                    },
+                                    result_ty,
+                                );
+                            }
                         }
                         // Case not found
                         self.ctx.diagnostics.error(
@@ -1569,14 +1691,18 @@ impl<'ctx> TypeChecker<'ctx> {
                             format!("variant `{}` has no case `{}`", base, member),
                         );
                     } else {
-                        self.ctx
-                            .diagnostics
-                            .error(expr.span, ErrorCode::UnresolvedName, format!("`{}` is not a variant type", base));
+                        self.ctx.diagnostics.error(
+                            expr.span,
+                            ErrorCode::UnresolvedName,
+                            format!("`{}` is not a variant type", base),
+                        );
                     }
                 } else {
-                    self.ctx
-                        .diagnostics
-                        .error(expr.span, ErrorCode::UnresolvedName, format!("unknown type or variable `{}`", base));
+                    self.ctx.diagnostics.error(
+                        expr.span,
+                        ErrorCode::UnresolvedName,
+                        format!("unknown type or variable `{}`", base),
+                    );
                 }
                 (ThirExprKind::Error, Ty::ERROR)
             }
@@ -1801,9 +1927,11 @@ impl<'ctx> TypeChecker<'ctx> {
                         }
                     }
 
-                    self.ctx
-                        .diagnostics
-                        .error(expr.span, ErrorCode::UnresolvedName, format!("unknown type `{}` in path", type_name));
+                    self.ctx.diagnostics.error(
+                        expr.span,
+                        ErrorCode::UnresolvedName,
+                        format!("unknown type `{}` in path", type_name),
+                    );
                 }
                 (ThirExprKind::Error, Ty::ERROR)
             }
@@ -1823,9 +1951,11 @@ impl<'ctx> TypeChecker<'ctx> {
                     ("len", InternedTyKind::List(_)) | ("len", InternedTyKind::String) => {
                         // list.len() or string.len() -> s32
                         if !args.is_empty() {
-                            self.ctx
-                                .diagnostics
-                                .error(expr.span, ErrorCode::WrongArgCount, "len() takes no arguments".to_string());
+                            self.ctx.diagnostics.error(
+                                expr.span,
+                                ErrorCode::WrongArgCount,
+                                "len() takes no arguments".to_string(),
+                            );
                         }
                         let len_func = self.ctx.known.functions.len();
                         (
@@ -1972,14 +2102,15 @@ impl<'ctx> TypeChecker<'ctx> {
 
         // If not found, check current component's callbacks
         if func_def.is_none()
-            && let Some(comp) = self.ctx.defs.as_component(self.current_component) {
-                for &callback_id in &comp.callbacks.clone() {
-                    if self.ctx.defs.name(callback_id) == func_name {
-                        func_def = Some(callback_id);
-                        break;
-                    }
+            && let Some(comp) = self.ctx.defs.as_component(self.current_component)
+        {
+            for &callback_id in &comp.callbacks.clone() {
+                if self.ctx.defs.name(callback_id) == func_name {
+                    func_def = Some(callback_id);
+                    break;
                 }
             }
+        }
 
         if let Some(func_def) = func_def {
             let func_ty = self.ctx.defs.type_of(func_def).unwrap_or(Ty::ERROR);
@@ -2010,9 +2141,11 @@ impl<'ctx> TypeChecker<'ctx> {
         }
 
         // Unknown function - emit error
-        self.ctx
-            .diagnostics
-            .error(span, ErrorCode::UnresolvedName, format!("unknown function `{}`", func));
+        self.ctx.diagnostics.error(
+            span,
+            ErrorCode::UnresolvedName,
+            format!("unknown function `{}`", func),
+        );
         (ThirExprKind::Error, Ty::ERROR)
     }
 
@@ -2028,20 +2161,22 @@ impl<'ctx> TypeChecker<'ctx> {
         // First, try to find from expected type if it's a variant
         if let Some(expected_ty) = expected {
             if let InternedTyKind::Adt(expected_def) = self.ctx.ty_kind(expected_ty)
-                && let Some(variant) = self.ctx.defs.as_variant(*expected_def) {
-                    for &case_def_id in &variant.cases.clone() {
-                        if let DefKind::VariantCase(case) = self.ctx.defs.kind(case_def_id).clone()
-                            && case.name == case_name {
-                                return self.build_variant_ctor(
-                                    *expected_def,
-                                    case.idx,
-                                    case.payload,
-                                    args,
-                                    span,
-                                );
-                            }
+                && let Some(variant) = self.ctx.defs.as_variant(*expected_def)
+            {
+                for &case_def_id in &variant.cases.clone() {
+                    if let DefKind::VariantCase(case) = self.ctx.defs.kind(case_def_id).clone()
+                        && case.name == case_name
+                    {
+                        return self.build_variant_ctor(
+                            *expected_def,
+                            case.idx,
+                            case.payload,
+                            args,
+                            span,
+                        );
                     }
                 }
+            }
             // Check for option<T> - special built-in variant
             if let InternedTyKind::Option(inner_ty) = self.ctx.ty_kind(expected_ty) {
                 let some_name = self.ctx.intern("some");
@@ -2078,15 +2213,17 @@ impl<'ctx> TypeChecker<'ctx> {
             if let Some(variant) = self.ctx.defs.as_variant(variant_def_id) {
                 for &case_def_id in &variant.cases.clone() {
                     if let DefKind::VariantCase(case) = self.ctx.defs.kind(case_def_id).clone()
-                        && case.name == case_name && case.payload.is_some() {
-                            return self.build_variant_ctor(
-                                variant_def_id,
-                                case.idx,
-                                case.payload,
-                                args,
-                                span,
-                            );
-                        }
+                        && case.name == case_name
+                        && case.payload.is_some()
+                    {
+                        return self.build_variant_ctor(
+                            variant_def_id,
+                            case.idx,
+                            case.payload,
+                            args,
+                            span,
+                        );
+                    }
                 }
             }
         }
@@ -2138,9 +2275,11 @@ impl<'ctx> TypeChecker<'ctx> {
             ))
         } else {
             if !args.is_empty() {
-                self.ctx
-                    .diagnostics
-                    .error(span, ErrorCode::WrongArgCount, "variant case takes no arguments");
+                self.ctx.diagnostics.error(
+                    span,
+                    ErrorCode::WrongArgCount,
+                    "variant case takes no arguments",
+                );
                 return Some((ThirExprKind::Error, Ty::ERROR));
             }
             None
@@ -2164,9 +2303,11 @@ impl<'ctx> TypeChecker<'ctx> {
         span: Span,
     ) -> Option<(ThirExprKind, Ty)> {
         if args.len() != 1 {
-            self.ctx
-                .diagnostics
-                .error(span, ErrorCode::WrongArgCount, "some expects exactly 1 argument");
+            self.ctx.diagnostics.error(
+                span,
+                ErrorCode::WrongArgCount,
+                "some expects exactly 1 argument",
+            );
             return Some((ThirExprKind::Error, Ty::ERROR));
         }
 
@@ -2195,7 +2336,9 @@ impl<'ctx> TypeChecker<'ctx> {
         span: Span,
     ) -> Option<(ThirExprKind, Ty)> {
         if !args.is_empty() {
-            self.ctx.diagnostics.error(span, ErrorCode::WrongArgCount, "none takes no arguments");
+            self.ctx
+                .diagnostics
+                .error(span, ErrorCode::WrongArgCount, "none takes no arguments");
             return Some((ThirExprKind::Error, Ty::ERROR));
         }
 
@@ -2218,9 +2361,11 @@ impl<'ctx> TypeChecker<'ctx> {
         span: Span,
     ) -> Option<(ThirExprKind, Ty)> {
         if args.len() != 1 {
-            self.ctx
-                .diagnostics
-                .error(span, ErrorCode::WrongArgCount, "ok expects exactly 1 argument");
+            self.ctx.diagnostics.error(
+                span,
+                ErrorCode::WrongArgCount,
+                "ok expects exactly 1 argument",
+            );
             return Some((ThirExprKind::Error, Ty::ERROR));
         }
 
@@ -2250,9 +2395,11 @@ impl<'ctx> TypeChecker<'ctx> {
         span: Span,
     ) -> Option<(ThirExprKind, Ty)> {
         if args.len() != 1 {
-            self.ctx
-                .diagnostics
-                .error(span, ErrorCode::WrongArgCount, "err expects exactly 1 argument");
+            self.ctx.diagnostics.error(
+                span,
+                ErrorCode::WrongArgCount,
+                "err expects exactly 1 argument",
+            );
             return Some((ThirExprKind::Error, Ty::ERROR));
         }
 
@@ -2301,9 +2448,11 @@ impl<'ctx> TypeChecker<'ctx> {
                 // to-string: func(any) -> string
                 // Resolves to type-specific conversion function based on argument type
                 if args.len() != 1 {
-                    self.ctx
-                        .diagnostics
-                        .error(span, ErrorCode::WrongArgCount, "to-string expects exactly 1 argument");
+                    self.ctx.diagnostics.error(
+                        span,
+                        ErrorCode::WrongArgCount,
+                        "to-string expects exactly 1 argument",
+                    );
                     return Some((ThirExprKind::Error, Ty::STRING));
                 }
                 let thir_arg = self.type_check_expr(&args[0], Mode::Infer);
@@ -2321,9 +2470,11 @@ impl<'ctx> TypeChecker<'ctx> {
             "len" | "length" => {
                 // len: func(list<T> | string) -> s32
                 if args.len() != 1 {
-                    self.ctx
-                        .diagnostics
-                        .error(span, ErrorCode::WrongArgCount, format!("{} expects exactly 1 argument", name));
+                    self.ctx.diagnostics.error(
+                        span,
+                        ErrorCode::WrongArgCount,
+                        format!("{} expects exactly 1 argument", name),
+                    );
                     return Some((ThirExprKind::Error, Ty::S32));
                 }
                 let thir_arg = self.type_check_expr(&args[0], Mode::Infer);
@@ -2368,9 +2519,11 @@ impl<'ctx> TypeChecker<'ctx> {
                     "len" | "length" => (Ty::S32, FieldIdx::new(0), DefId::INVALID),
                     "is_empty" => (Ty::BOOL, FieldIdx::new(1), DefId::INVALID),
                     _ => {
-                        self.ctx
-                            .diagnostics
-                            .error(span, ErrorCode::NoSuchField, format!("no field `{}` on string", field));
+                        self.ctx.diagnostics.error(
+                            span,
+                            ErrorCode::NoSuchField,
+                            format!("no field `{}` on string", field),
+                        );
                         (Ty::ERROR, FieldIdx::new(0), DefId::INVALID)
                     }
                 }
@@ -2382,9 +2535,11 @@ impl<'ctx> TypeChecker<'ctx> {
                     "len" | "length" | "count" => (Ty::S32, FieldIdx::new(0), DefId::INVALID),
                     "is_empty" => (Ty::BOOL, FieldIdx::new(1), DefId::INVALID),
                     _ => {
-                        self.ctx
-                            .diagnostics
-                            .error(span, ErrorCode::NoSuchField, format!("no field `{}` on list", field));
+                        self.ctx.diagnostics.error(
+                            span,
+                            ErrorCode::NoSuchField,
+                            format!("no field `{}` on list", field),
+                        );
                         (Ty::ERROR, FieldIdx::new(0), DefId::INVALID)
                     }
                 }
@@ -2421,9 +2576,11 @@ impl<'ctx> TypeChecker<'ctx> {
                 "ms" | "s" => self.ctx.types.intern(InternedTyKind::Duration),
                 "%" => self.ctx.types.intern(InternedTyKind::Percent),
                 other => {
-                    self.ctx
-                        .diagnostics
-                        .error(span, ErrorCode::UnknownUnitSuffix, format!("unknown unit suffix `{other}`"));
+                    self.ctx.diagnostics.error(
+                        span,
+                        ErrorCode::UnknownUnitSuffix,
+                        format!("unknown unit suffix `{other}`"),
+                    );
                     Ty::ERROR
                 }
             },
@@ -2671,8 +2828,8 @@ impl<'ctx> TypeChecker<'ctx> {
         getter: &ThirExpr,
         setter: &[ThirStatement],
     ) {
-        let mut getter_reads = std::collections::HashSet::new();
-        let mut setter_writes = std::collections::HashSet::new();
+        let mut getter_reads = rustc_hash::FxHashSet::default();
+        let mut setter_writes = rustc_hash::FxHashSet::default();
 
         let is_signal = |d: DefId| self.ctx.defs.is_signal(d);
         super::signalck::collect_expr_reads(getter, &self.locals, &is_signal, &mut getter_reads);
@@ -2727,7 +2884,10 @@ mod tests {
 
         assert_eq!(hir.len(), 1);
 
-        let thir = compiler.type_check(&hir[0]).into_component().expect("component");
+        let thir = compiler
+            .type_check(&hir[0])
+            .into_component()
+            .expect("component");
         assert_eq!(compiler.context().str(thir.name), "Counter");
     }
 
@@ -2745,7 +2905,10 @@ mod tests {
 
         let file = compiler.parse(source).unwrap();
         let hir = compiler.lower_to_hir(&file);
-        let thir = compiler.type_check(&hir[0]).into_component().expect("component");
+        let thir = compiler
+            .type_check(&hir[0])
+            .into_component()
+            .expect("component");
 
         assert_eq!(thir.body.len(), 1);
     }
@@ -2766,7 +2929,10 @@ mod tests {
 
         let file = compiler.parse(source).unwrap();
         let hir = compiler.lower_to_hir(&file);
-        let thir = compiler.type_check(&hir[0]).into_component().expect("component");
+        let thir = compiler
+            .type_check(&hir[0])
+            .into_component()
+            .expect("component");
 
         assert_eq!(thir.body.len(), 1);
         assert!(!compiler.has_errors());

@@ -1,0 +1,7 @@
+// E0002: an empty list literal with no expected type has no inferable
+// element type.
+package yel:cannotinfer@0.1.0;
+
+export component App {
+    VStack { Text { "{[]}" } }
+}

@@ -3,8 +3,8 @@
 //! The SourceMap holds all source files and provides source IDs for
 //! accurate error reporting across multiple files.
 
+use rustc_hash::FxHashMap as HashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Unique identifier for a source file.

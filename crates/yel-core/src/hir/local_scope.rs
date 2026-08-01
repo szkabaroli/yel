@@ -5,7 +5,7 @@ use crate::index_vec::IndexVec;
 use crate::interner::Name;
 use crate::source::Span;
 use crate::types::Ty;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// Information about a local variable.
 #[derive(Debug, Clone)]
@@ -38,7 +38,7 @@ impl LocalScope {
     pub fn new() -> Self {
         Self {
             locals: IndexVec::new(),
-            current: HashMap::new(),
+            current: HashMap::default(),
             stack: Vec::new(),
         }
     }
@@ -49,8 +49,19 @@ impl LocalScope {
     }
 
     /// Define a new local variable that corresponds to a property/signal.
-    pub fn define_with_def_id(&mut self, name: Name, ty: Ty, span: Span, def_id: Option<DefId>) -> LocalId {
-        let id = self.locals.push(LocalInfo { name, ty, span, def_id });
+    pub fn define_with_def_id(
+        &mut self,
+        name: Name,
+        ty: Ty,
+        span: Span,
+        def_id: Option<DefId>,
+    ) -> LocalId {
+        let id = self.locals.push(LocalInfo {
+            name,
+            ty,
+            span,
+            def_id,
+        });
         self.current.insert(name, id);
         id
     }

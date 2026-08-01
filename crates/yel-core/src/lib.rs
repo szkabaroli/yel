@@ -1,4 +1,4 @@
-//! Yel Compiler 
+//! Yel Compiler
 //!
 //! This crate implements a compiler for the Yel DSL with:
 //! - Centralized type definitions with interning
@@ -38,6 +38,7 @@ pub mod ids;
 pub mod index_vec;
 pub mod interner;
 pub mod known;
+pub mod naming;
 pub mod ops;
 pub mod source;
 pub mod stdlib_lookup;
@@ -62,5 +63,5 @@ pub use ids::{DefId, ExprId, FieldIdx, LocalId, NodeId, VariantIdx};
 pub use index_vec::{Idx, IndexVec};
 pub use interner::{ArcStr, Interner, Name};
 pub use source::{Source, SourceId, SourceMap, Span};
-pub use syntax::{parse, ParseError};
+pub use syntax::{ParseError, parse};
 pub use types::{InternedTyKind, Ty, TypeInterner};

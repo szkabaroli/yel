@@ -18,10 +18,13 @@ Full framing: [`docs/ARCHITECTURE.md` §0](docs/ARCHITECTURE.md).
 ## Start here
 
 - **Deep architecture (current state):** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — pipeline, every IR layer, key types, codegen, flow frontend, testing. Read before non-trivial work.
+- **Stage-by-stage reference:** [`docs/PIPELINE.md`](docs/PIPELINE.md) — what each stage (AST→HIR→THIR→LIR→WASM) establishes, its entry functions, which desugarings happen where, and a "where does X happen?" lookup.
 - **Hacks / shortcuts / ugly corners:** [`docs/TECH_DEBT.md`](docs/TECH_DEBT.md) — read before refactoring LIR or codegen.
 - **Refactor plans:** [`plans/`](plans) — `lir-resource-flatten.md`, `flow-frontend.md`.
+- **The internals rewrite (active):** [`plans/rewrite/README.md`](plans/rewrite/README.md) — status board, frozen-vs-free scope, anti-spec, keep-list, ratchet, and the 2000-seed oracle corpus. `crates/{yel-core,yel-wasm-codegen,yelc}` are **frozen read-only reference**; new work goes in `yelc-*` crates beside them.
 - **Coding rules as a skill:** [`/compiler-skills`](.agents/skills/compiler-skills/SKILL.md) (compiler patterns), [`/rust-skills`](.agents/skills/rust-skills/SKILL.md) (general Rust).
 - **Hunting miscompilation bugs with the fuzzer:** [`/fuzzer-debugging`](.agents/skills/fuzzer-debugging/SKILL.md) — the yel-smith triage loop (measure → categorize → minimize → narrow → locate) and verify-with-round-trips discipline. The [`fuzzer-bug-hunter`](.claude/agents/fuzzer-bug-hunter.md) agent runs this end-to-end.
+- **Orchestrating the internals rewrite:** [`/compiler-rewrite`](.agents/skills/compiler-rewrite/SKILL.md) — freeze the old compiler as a read-only oracle, rewrite stage-by-stage in new crates beside it, verify differentially with yel-smith, gate on a ratchet + review panel. Read before briefing any rewrite subagent.
 
 ## The pipeline (one line)
 
@@ -64,6 +67,33 @@ cargo run -p yelc -- compile -o wit  path.yel
 cargo run -p yelc -- ir --pretty path.yel   # dump LIR
 wasm-tools validate out.wasm
 ```
+
+## CI (`.github/workflows/`)
+
+`ci.yml` runs on every PR and every push to `main`:
+
+| job | what it gates |
+|-----|---------------|
+| `rustfmt` | `cargo fmt --all --check` — the whole repo, frozen tree included |
+| `clippy` | **rewrite crates at `-D warnings`**; frozen/legacy crates checked, not gated |
+| `test` | build + test on ubuntu / macos / windows |
+| `freeze check` | PRs only — `scripts/freeze-check.sh` against the base branch |
+| `vscode extension` | `tsc --noEmit` + esbuild bundle (`--skip-lsp`) |
+
+Two things to know before you touch it:
+
+- **The clippy job must keep `--no-deps`.** `cargo clippy -- -D warnings` applies
+  the deny to every locally-built crate, path dependencies included, and
+  `yel-core` is a dev-dependency of `yelc-hir`. Without `--no-deps` the frozen
+  tree's ~90 warnings fail the rewrite tree's gate, and the freeze forbids
+  fixing them.
+- **Five test targets do not run in CI**: `yelc-syntax/{corpus,parity,identity}`,
+  `yelc-hir/frozen_parity`, `yelc-sema/single_namespace`. They sweep
+  `corpus/src`, which is untracked, and the corpus is only sound when generated
+  at the freeze SHA. They run in `corpus.yml` (weekly + manual), which rebuilds
+  the frozen compiler at that SHA in a worktree and verifies the result against
+  `corpus/SHA256SUMS` before sweeping. Run them locally after
+  `scripts/freeze-corpus.sh`.
 
 ## When you change things
 

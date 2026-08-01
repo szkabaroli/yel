@@ -186,9 +186,7 @@ pub enum ExportShape {
     FreeFunction,
     /// `func` inside a `resource` block. The implicit `SelfRef(D)`
     /// is the resource's `self`.
-    ResourceMethod {
-        resource: DefId,
-    },
+    ResourceMethod { resource: DefId },
 }
 
 /// Convenience aggregate: identity + signature shape + export flag.
@@ -249,9 +247,10 @@ pub fn ui_block_calling_conv(
             super::block::LirSlotId::Resource { idx } => slots.get(*idx as usize),
         };
         if let Some(info) = info
-            && let LirSlotValType::RefNullForBoundary(b_id) = info.val_ty {
-                implicit_post.push(ImplicitParam::Boundary(b_id));
-            }
+            && let LirSlotValType::RefNullForBoundary(b_id) = info.val_ty
+        {
+            implicit_post.push(ImplicitParam::Boundary(b_id));
+        }
     }
     if block.params.is_empty() && block.boundary_param_slots.is_empty() {
         implicit_post.push(ImplicitParam::LegacyI32);
@@ -288,7 +287,9 @@ impl LirFunction {
     pub fn export_shape(&self) -> ExportShape {
         match &self.role {
             FunctionRole::Internal { .. } => ExportShape::Internal,
-            FunctionRole::FreeFunction { is_export: false, .. } => ExportShape::Internal,
+            FunctionRole::FreeFunction {
+                is_export: false, ..
+            } => ExportShape::Internal,
             FunctionRole::FreeFunction { .. } => {
                 // WIT-exportable shapes look only at `implicit_pre`:
                 // anything in `implicit_post` (boundary refs, legacy
@@ -299,9 +300,7 @@ impl LirFunction {
                 }
                 match self.conv.implicit_pre.as_slice() {
                     [] => ExportShape::FreeFunction,
-                    [ImplicitParam::SelfRef(d)] => {
-                        ExportShape::ResourceMethod { resource: *d }
-                    }
+                    [ImplicitParam::SelfRef(d)] => ExportShape::ResourceMethod { resource: *d },
                     [ImplicitParam::ResourceSelf(d)] => {
                         // Canonical-ABI variant — `i32` handle rather than
                         // typed component ref. Same export shape from the

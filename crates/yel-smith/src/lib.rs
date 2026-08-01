@@ -3014,7 +3014,8 @@ mod tests {
         // Full compilation pipeline
         let mut compiler = yel_core::Compiler::new();
         let parsed = compiler.parse(&source).expect("Failed to parse");
-        let hir_components = compiler.lower_to_hir(&parsed);
+        let package = parsed.package.clone();
+        let hir_items = compiler.lower_to_hir(&parsed);
 
         assert!(
             !compiler.has_errors(),
@@ -3023,32 +3024,30 @@ mod tests {
             source
         );
 
-        for item in &hir_components {
-            let thir_item = compiler.type_check(item);
-            assert!(
-                !compiler.has_errors(),
-                "Type errors: {}\nSource:\n{}",
-                compiler.render_diagnostics(),
-                source
-            );
-            // The fuzzer exercises component codegen; globals carry no
-            // body to lower on this per-item path.
-            let yel_core::thir::ThirItem::Component(thir) = thir_item else {
-                continue;
-            };
+        // Lower the WHOLE module — components AND globals — through the one
+        // uniform spine, so the fuzzer exercises the global codegen paths
+        // (globals-init, cross-component fan-out, module-scope default
+        // expressions) and not just per-component compilation.
+        let lir_module = compiler.lower_items_to_module(&hir_items, package);
+        assert!(
+            !compiler.has_errors(),
+            "Type/lowering errors: {}\nSource:\n{}",
+            compiler.render_diagnostics(),
+            source
+        );
 
-            let lir = compiler.lower_to_lir(&thir);
-            let ctx = compiler.context();
-
-            // Generate WASM
-            let wasm_result = yel_wasm_codegen::generate_wasm(&[lir], ctx);
-            assert!(
-                wasm_result.is_ok(),
-                "WASM generation failed: {:?}\nSource:\n{}",
-                wasm_result.err(),
-                source
-            );
-        }
+        let ctx = compiler.context();
+        let wasm_result = yel_wasm_codegen::generate_wasm_module(
+            &lir_module,
+            ctx,
+            &yel_wasm_codegen::WasmWithWitOptions::default(),
+        );
+        assert!(
+            wasm_result.is_ok(),
+            "WASM generation failed: {:?}\nSource:\n{}",
+            wasm_result.err(),
+            source
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@
 //! assert_eq!(layout.align, 4);
 //! ```
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::context::CompilerContext;
 use crate::types::{InternedTyKind, Ty};
@@ -85,8 +85,8 @@ impl<'ctx> LirLayoutContext<'ctx> {
     pub fn new(ctx: &'ctx CompilerContext) -> Self {
         Self {
             ctx,
-            cache: HashMap::new(),
-            record_cache: HashMap::new(),
+            cache: HashMap::default(),
+            record_cache: HashMap::default(),
         }
     }
 
@@ -321,11 +321,12 @@ impl<'ctx> LirLayoutContext<'ctx> {
 
         for &case_def_id in &variant.cases {
             if let crate::definitions::DefKind::VariantCase(case) = self.ctx.defs.kind(case_def_id)
-                && let Some(payload_ty) = case.payload {
-                    let payload_layout = self.layout_of(payload_ty);
-                    max_payload_size = max_payload_size.max(payload_layout.size);
-                    max_payload_align = max_payload_align.max(payload_layout.align);
-                }
+                && let Some(payload_ty) = case.payload
+            {
+                let payload_layout = self.layout_of(payload_ty);
+                max_payload_size = max_payload_size.max(payload_layout.size);
+                max_payload_align = max_payload_align.max(payload_layout.align);
+            }
         }
 
         let payload_offset = align_to(disc_size, max_payload_align);
@@ -360,15 +361,16 @@ pub enum LirCoreValType {
 pub type FlatValTypeCounts = (u32, u32, u32, u32);
 
 impl<'ctx> LirLayoutContext<'ctx> {
-    /// Compute the canonical-ABI flat core valtypes for a value of `ty`,
-    /// matching `yel_wasm_codegen::wasm::flatten_core_valtypes` exactly
-    /// (same join rules for Result/Variant). Used by LIR-side passes to
-    /// pre-compute scratch-local counts without crossing into the codegen
-    /// crate.
-    pub fn canonical_flat_valtypes(&mut self, ty: Ty) -> Vec<LirCoreValType> {
-        // Snapshot the owned data we need before recursing, since recursion
-        // takes `&mut self` and would conflict with `self.ctx.ty_kind(ty)`'s
-        // borrow held across the match arms.
+    /// Compute the canonical-ABI flat core valtypes for a value of `ty`.
+    ///
+    /// **Single source of truth for canonical-ABI flattening.** The
+    /// codegen crate's `WasmPackageBuilder::canonical_flat_valtypes`
+    /// delegates here and maps [`LirCoreValType`] → `wasm_encoder::ValType`,
+    /// so the join rules for Result/Variant live in exactly one place and
+    /// can't drift between the LIR and codegen layers.
+    pub fn canonical_flat_valtypes(&self, ty: Ty) -> Vec<LirCoreValType> {
+        // Snapshot the type's shape into owned data so the match arms don't
+        // hold `self.ctx.ty_kind(ty)`'s borrow across the recursive calls.
         enum Shape {
             Single(LirCoreValType),
             FatPtr,
@@ -469,13 +471,6 @@ impl<'ctx> LirLayoutContext<'ctx> {
             Shape::DiscOnly => vec![LirCoreValType::I32],
         }
     }
-
-    /// Per-valtype slot counts (i32, i64, f32, f64) for a value of `ty`
-    /// under canonical ABI flattening.
-    pub fn canonical_flat_valtype_counts(&mut self, ty: Ty) -> FlatValTypeCounts {
-        let flat = self.canonical_flat_valtypes(ty);
-        per_valtype_counts(&flat)
-    }
 }
 
 /// Per-valtype tally over a flattened valtype list.
@@ -518,11 +513,6 @@ fn join_flat_lir_valtypes(a: &[LirCoreValType], b: &[LirCoreValType]) -> Vec<Lir
         out.push(merged);
     }
     out
-}
-
-/// Element-wise max over two `FlatValTypeCounts` tuples.
-pub fn max_flat_counts(a: FlatValTypeCounts, b: FlatValTypeCounts) -> FlatValTypeCounts {
-    (a.0.max(b.0), a.1.max(b.1), a.2.max(b.2), a.3.max(b.3))
 }
 
 // ============================================================================

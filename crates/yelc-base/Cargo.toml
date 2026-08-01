@@ -1,0 +1,19 @@
+[package]
+name = "yelc-base"
+version.workspace = true
+edition = "2024"
+description = "Shared compiler infrastructure for the yel compiler (diagnostics, spans, interning, typed ids)"
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+rustc-hash.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+
+# Determinism guard: forbid std HashMap/HashSet (random-seeded iteration order
+# leaks into emitted output). See root clippy.toml, plans/rewrite/anti-spec.md A6.
+[lints.clippy]
+disallowed_types = "deny"

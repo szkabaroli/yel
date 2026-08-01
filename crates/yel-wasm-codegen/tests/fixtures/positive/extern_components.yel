@@ -1,13 +1,13 @@
 package yel:embed@0.1.0;
 
-import component Dialog {
+extern component Modal {
     title: string;
     open: bool;
     func show();
     func hide();
 }
 
-import component Icon {
+extern component Glyph {
     name: string;
     size: s32;
 }

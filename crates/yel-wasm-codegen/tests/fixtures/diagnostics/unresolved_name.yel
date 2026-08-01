@@ -1,0 +1,6 @@
+// E0011: interpolation references a name that is not in scope.
+package yel:unresolved@0.1.0;
+
+export component App {
+    VStack { Text { "{nonexistent_thing}" } }
+}

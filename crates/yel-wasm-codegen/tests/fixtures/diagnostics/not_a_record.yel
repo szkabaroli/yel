@@ -1,0 +1,9 @@
+// E0021: a record literal supplied where an enum type is expected.
+package yel:notarecord@0.1.0;
+
+enum E { a, b }
+
+export component App {
+    x: E = { a: 1 };
+    VStack { Text { "ok" } }
+}

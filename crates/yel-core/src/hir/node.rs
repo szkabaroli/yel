@@ -61,6 +61,30 @@ impl HirItem {
             HirItem::Global(_) => None,
         }
     }
+
+    /// The global, if this item is one.
+    pub fn as_global(&self) -> Option<&HirGlobal> {
+        match self {
+            HirItem::Global(g) => Some(g),
+            HirItem::Component(_) => None,
+        }
+    }
+
+    /// Consume the item, yielding the component if it is one.
+    pub fn into_component(self) -> Option<HirComponent> {
+        match self {
+            HirItem::Component(c) => Some(c),
+            HirItem::Global(_) => None,
+        }
+    }
+
+    /// Consume the item, yielding the global if it is one.
+    pub fn into_global(self) -> Option<HirGlobal> {
+        match self {
+            HirItem::Global(g) => Some(g),
+            HirItem::Component(_) => None,
+        }
+    }
 }
 
 /// A HIR UI node.

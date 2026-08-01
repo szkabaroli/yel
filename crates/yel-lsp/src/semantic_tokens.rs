@@ -266,13 +266,7 @@ fn collect_tokens_from_file(
 
         // Body nodes
         for node in &component.node.body {
-            collect_tokens_from_node(
-                &node.node,
-                content,
-                enum_names,
-                variant_names,
-                tokens,
-            );
+            collect_tokens_from_node(&node.node, content, enum_names, variant_names, tokens);
         }
     }
 }
@@ -380,16 +374,17 @@ fn collect_tokens_from_expr(
         Expr::Member(obj, _field) => {
             // Check for EnumName.case pattern
             if let Expr::Ident(name) = &obj.node
-                && (enum_names.contains(&name.as_str()) || variant_names.contains(&name.as_str())) {
-                    let (line, col) = offset_to_line_col(content, obj.span.start);
-                    tokens.push(Token {
-                        line,
-                        start_char: col,
-                        length: name.len() as u32,
-                        token_type: ENUM_INDEX,
-                        modifiers: 0,
-                    });
-                }
+                && (enum_names.contains(&name.as_str()) || variant_names.contains(&name.as_str()))
+            {
+                let (line, col) = offset_to_line_col(content, obj.span.start);
+                tokens.push(Token {
+                    line,
+                    start_char: col,
+                    length: name.len() as u32,
+                    token_type: ENUM_INDEX,
+                    modifiers: 0,
+                });
+            }
         }
         Expr::Literal(lit) => {
             match lit {
@@ -535,13 +530,7 @@ fn collect_tokens_from_node(
 
             // Recurse into children
             for child in &el.children {
-                collect_tokens_from_node(
-                    &child.node,
-                    content,
-                    enum_names,
-                    variant_names,
-                    tokens,
-                );
+                collect_tokens_from_node(&child.node, content, enum_names, variant_names, tokens);
             }
         }
         Node::If(if_node) => {
@@ -554,13 +543,7 @@ fn collect_tokens_from_node(
                 tokens,
             );
             for child in &if_node.then_branch {
-                collect_tokens_from_node(
-                    &child.node,
-                    content,
-                    enum_names,
-                    variant_names,
-                    tokens,
-                );
+                collect_tokens_from_node(&child.node, content, enum_names, variant_names, tokens);
             }
             for (cond, branch) in &if_node.else_if_branches {
                 collect_tokens_from_expr(
@@ -603,13 +586,7 @@ fn collect_tokens_from_node(
                 tokens,
             );
             for child in &for_node.body {
-                collect_tokens_from_node(
-                    &child.node,
-                    content,
-                    enum_names,
-                    variant_names,
-                    tokens,
-                );
+                collect_tokens_from_node(&child.node, content, enum_names, variant_names, tokens);
             }
         }
         Node::Text(_) => {}

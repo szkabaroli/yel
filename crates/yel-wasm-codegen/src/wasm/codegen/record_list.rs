@@ -3,9 +3,10 @@
 //! and shared across all components that need them.
 
 use wasm_encoder::{BlockType, Function, Instruction, ValType};
-use yel_core::lir::{LirResource, LirExpr, LirExprKind};
-use yel_core::types::InternedTyKind;
 use yel_core::ids::LocalId;
+use yel_core::lir::arena::LirResourceArena;
+use yel_core::lir::{LirExpr, LirExprKind};
+use yel_core::types::InternedTyKind;
 use yel_core::{DefId, DefKind, Ty};
 
 use super::super::CodegenError;
@@ -277,7 +278,7 @@ impl<'a> WasmPackageBuilder<'a> {
         signals: &mut Vec<(DefId, Ty)>,
     ) {
         match &expr.kind {
-            LirExprKind::SignalRead(def_id) => {
+            LirExprKind::SignalRead(def_id) | LirExprKind::GlobalRead(def_id) => {
                 if !signals.iter().any(|(id, _)| id == def_id) {
                     signals.push((*def_id, expr.ty));
                 }
@@ -325,7 +326,7 @@ impl<'a> WasmPackageBuilder<'a> {
         param: (LocalId, Ty),
         predicate: LirExpr,
         _alloc_idx: u32,
-        component: &LirResource,
+        component: &dyn LirResourceArena,
     ) -> Result<Function, CodegenError> {
         // Stage 6 of typed-GC migration: filter operates entirely in
         // typed-GC space. Param 0 is `(ref null $list_arr)` (was
@@ -359,7 +360,7 @@ impl<'a> WasmPackageBuilder<'a> {
 
         // Extract captured signals from predicate.
         let mut captured_signals: Vec<(DefId, Ty)> = Vec::new();
-        self.extract_signal_reads(&predicate, &component.exprs, &mut captured_signals);
+        self.extract_signal_reads(&predicate, component.exprs(), &mut captured_signals);
 
         // Build param slot map: param 0 is src_arr; captured signals
         // start at param 1, each consuming `signal_storage_valtypes`
@@ -368,7 +369,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // String signals (FatPointer repr). Typed list signals collapse
         // to 1 typed ref slot.
         let mut next_param_idx: u32 = 1; // After src_arr
-        let mut captured_signal_map = std::collections::HashMap::new();
+        let mut captured_signal_map = rustc_hash::FxHashMap::default();
         for (def_id, ty) in &captured_signals {
             let storage = self.signal_storage_valtypes(*ty);
             let is_fat_ptr = storage.len() == 2;
@@ -396,12 +397,12 @@ impl<'a> WasmPackageBuilder<'a> {
         );
 
         let local_decls: Vec<(u32, ValType)> = vec![
-            (1, ValType::I32),       // src_len
-            (1, arr_ref_ty),         // scratch_arr
-            (1, ValType::I32),       // result_count
-            (1, ValType::I32),       // loop_index
-            (1, item_val_ty),        // item
-            (1, arr_ref_ty),         // final_arr
+            (1, ValType::I32), // src_len
+            (1, arr_ref_ty),   // scratch_arr
+            (1, ValType::I32), // result_count
+            (1, ValType::I32), // loop_index
+            (1, item_val_ty),  // item
+            (1, arr_ref_ty),   // final_arr
         ];
         let mut func = Function::new(local_decls);
 
@@ -447,8 +448,8 @@ impl<'a> WasmPackageBuilder<'a> {
         let (param_local_id, _param_ty) = param;
         let old_captured = self.current_block_captured_locals.take();
         let old_modes = self.current_block_local_modes.take();
-        let mut captured_map = std::collections::HashMap::new();
-        let mut local_modes = std::collections::HashMap::new();
+        let mut captured_map = rustc_hash::FxHashMap::default();
+        let mut local_modes = rustc_hash::FxHashMap::default();
         captured_map.insert(param_local_id, item_local);
         local_modes.insert(param_local_id, yel_core::lir::LirBindingMode::Value);
         self.current_block_captured_locals = Some(captured_map);
@@ -553,10 +554,7 @@ impl<'a> WasmPackageBuilder<'a> {
         // Locals: src_len i32, new_arr (ref null $arr).
         let src_len_local = 2u32;
         let new_arr_local = 3u32;
-        let local_decls: Vec<(u32, ValType)> = vec![
-            (1, ValType::I32),
-            (1, arr_ref_ty),
-        ];
+        let local_decls: Vec<(u32, ValType)> = vec![(1, ValType::I32), (1, arr_ref_ty)];
         let mut func = Function::new(local_decls);
 
         // src_len = array.len(src)

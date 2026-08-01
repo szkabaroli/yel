@@ -10,13 +10,19 @@
 
 use wasm_encoder::{Function, Instruction, ValType};
 
+use yel_core::lir::arena::LirResourceArena;
 use yel_core::lir::{LirBlock, LirResource, LirSlotId, LirSlotInfo, LirSlotKind};
 
 /// Emit `cabi_realloc(0, 0, align, size)`, leaving the freshly-allocated
 /// pointer on the stack. The canonical-ABI realloc with `old_ptr = 0` and
 /// `old_size = 0` is a plain allocation of `size` bytes at `align`. The caller
 /// consumes the pointer (e.g. `local.set`).
-pub(super) fn emit_cabi_realloc_fixed(func: &mut Function, align: u32, size: u32, cabi_realloc: u32) {
+pub(super) fn emit_cabi_realloc_fixed(
+    func: &mut Function,
+    align: u32,
+    size: u32,
+    cabi_realloc: u32,
+) {
     func.instruction(&Instruction::I32Const(0));
     func.instruction(&Instruction::I32Const(0));
     func.instruction(&Instruction::I32Const(align as i32));
@@ -72,7 +78,7 @@ pub(super) fn compute_mount_retention_counts(component: &LirResource) -> u32 {
 /// at the call site, so the `WasmParam` variant can bypass the offset.
 #[inline]
 pub(crate) fn slot_local(
-    component: &LirResource,
+    component: &dyn LirResourceArena,
     block: &LirBlock,
     slot: LirSlotId,
     local_offset: u32,
@@ -89,7 +95,7 @@ pub(crate) fn slot_local(
             // Resource Temp slots in the component.
             LirSlotId::Block { .. } => {
                 let n_resource_temp = component
-                    .slots
+                    .slots()
                     .iter()
                     .filter(|s| matches!(s.kind, LirSlotKind::Temp { .. }))
                     .count() as u32;
@@ -115,7 +121,7 @@ pub(crate) fn slot_local(
 pub(crate) fn slot_info<'a>(
     slot: LirSlotId,
     block: &'a LirBlock,
-    component: &'a LirResource,
+    component: &'a dyn LirResourceArena,
 ) -> &'a LirSlotInfo {
     match slot {
         LirSlotId::Block { block: bid, idx } => {
@@ -134,7 +140,7 @@ pub(crate) fn slot_info<'a>(
             }
             &block.slots[idx as usize]
         }
-        LirSlotId::Resource { idx } => &component.slots[idx as usize],
+        LirSlotId::Resource { idx } => &component.slots()[idx as usize],
     }
 }
 
@@ -145,12 +151,12 @@ pub(crate) fn slot_info<'a>(
 /// non-block contexts today) and panics on `Block`.
 #[inline]
 pub(crate) fn slot_local_resource_only(
-    component: &LirResource,
+    component: &dyn LirResourceArena,
     slot: LirSlotId,
     local_offset: u32,
 ) -> u32 {
     match slot {
-        LirSlotId::Resource { idx } => match component.slots[idx as usize].kind {
+        LirSlotId::Resource { idx } => match component.slots()[idx as usize].kind {
             LirSlotKind::Temp { local_idx } => local_idx + local_offset,
             LirSlotKind::WasmParam { idx } => idx,
             LirSlotKind::Memory { .. } => panic!(
@@ -171,43 +177,6 @@ pub(crate) fn mem_arg(offset: u64, align: u32) -> wasm_encoder::MemArg {
         offset,
         align,
         memory_index: 0,
-    }
-}
-
-/// Count the number of flat slots of each valtype required to hold a
-/// composite value of `ty`. Used to size the per-valtype scratch local
-/// regions on the caller side.
-pub(super) fn per_valtype_counts(slots: &[crate::wasm::FlatSlot]) -> (u32, u32, u32, u32) {
-    let (mut n_i32, mut n_i64, mut n_f32, mut n_f64) = (0u32, 0u32, 0u32, 0u32);
-    for s in slots {
-        match s.valtype {
-            ValType::I32 => n_i32 += 1,
-            ValType::I64 => n_i64 += 1,
-            ValType::F32 => n_f32 += 1,
-            ValType::F64 => n_f64 += 1,
-            _ => {}
-        }
-    }
-    (n_i32, n_i64, n_f32, n_f64)
-}
-
-/// Accumulate per-valtype slot counts into a running max tuple.
-pub(super) fn merge_max_slot_counts(
-    max: &mut (u32, u32, u32, u32),
-    slots: &[crate::wasm::FlatSlot],
-) {
-    let (a, b, c, d) = per_valtype_counts(slots);
-    if a > max.0 {
-        max.0 = a;
-    }
-    if b > max.1 {
-        max.1 = b;
-    }
-    if c > max.2 {
-        max.2 = c;
-    }
-    if d > max.3 {
-        max.3 = d;
     }
 }
 
@@ -251,4 +220,3 @@ pub(super) fn push_valtype_locals(
         locals.push((counts.3, ValType::F64));
     }
 }
-

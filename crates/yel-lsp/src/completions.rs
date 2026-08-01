@@ -15,7 +15,7 @@ const KEYWORDS: &[(&str, &str)] = &[
     ("enum", "Enum type definition"),
     ("variant", "Variant (sum) type definition"),
     ("element", "Intrinsic element type definition"),
-    ("import", "Import or import component"),
+    ("extern", "Declare an extern component"),
     ("component", "Component definition"),
     ("property", "Declare a component property"),
     ("callback", "Declare a callback"),
@@ -389,9 +389,9 @@ fn get_property_type(
                     .properties
                     .iter()
                     .find(|p| p.node.name == property)
-                {
-                    return Some(prop.node.ty.kind.clone());
-                }
+            {
+                return Some(prop.node.ty.kind.clone());
+            }
         }
     }
 

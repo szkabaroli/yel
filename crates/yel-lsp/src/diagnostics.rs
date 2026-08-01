@@ -117,8 +117,9 @@ pub fn convert_compile_error(
 
 fn parse_error_range(pe: &ParseError, expected_source: SourceId, rope: &Rope) -> Range {
     if let Some(span) = pe.span()
-        && span.source == expected_source {
-            return span_to_range(&span, rope);
-        }
+        && span.source == expected_source
+    {
+        return span_to_range(&span, rope);
+    }
     Range::new(Position::new(0, 0), Position::new(0, 1))
 }
