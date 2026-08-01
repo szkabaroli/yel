@@ -242,7 +242,7 @@ impl<'a> Parser<'a> {
     fn parse_if_node(&mut self) -> ast::IfNode {
         self.start_node();
         self.assert(IF_KW);
-        let condition = self.parse_expr();
+        let condition = self.parse_expr_no_typed_record();
         let then_branch = self.parse_node_body();
 
         let mut else_if_branches = Vec::new();
@@ -252,7 +252,7 @@ impl<'a> Parser<'a> {
             self.start_node();
             self.assert(ELSE_KW);
             if self.eat(IF_KW) {
-                let branch_condition = self.parse_expr();
+                let branch_condition = self.parse_expr_no_typed_record();
                 let body = self.parse_node_body();
                 let span = self.finish_node(ELSE_IF_BRANCH);
                 else_if_branches.push(ast::ElseIfBranch {
@@ -304,7 +304,7 @@ impl<'a> Parser<'a> {
         self.assert(FOR_KW);
         let item = self.expect_name();
         self.expect(IN_KW);
-        let iterable = self.parse_expr();
+        let iterable = self.parse_expr_no_typed_record();
 
         let key = if self.is2(KEY_KW, L_PAREN) {
             self.start_node();
@@ -494,7 +494,7 @@ mod tests {
         let ast::UiNode::If(node) = p.component(0).body().next().unwrap() else {
             panic!("expected an if node")
         };
-        assert!(matches!(node.condition.kind, ast::ExprKind::Record(_)));
+        assert!(matches!(node.condition.kind, ast::ExprKind::Record { .. }));
         assert_eq!(node.then_branch.present().map(Vec::len), Some(1));
     }
 

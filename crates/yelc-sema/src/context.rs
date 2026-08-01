@@ -5,7 +5,7 @@
 //! each was: **is it produced and consumed within sema, or is it a later
 //! stage's state parked here?**
 
-use yelc_base::{Diagnostics, Interner, SourceMap};
+use yelc_base::{Diagnostics, NameInterner, SourceMap};
 
 use crate::definitions::Definitions;
 use crate::ids::PackageId;
@@ -45,7 +45,7 @@ use crate::types::TypeInterner;
 /// happens to live today is how the god object re-forms, one justified field at
 /// a time.
 pub struct CompilerContext {
-    pub names: Interner,
+    pub names: NameInterner,
     pub types: TypeInterner,
     pub defs: Definitions,
     /// Definition tables of every **included** package, loaded from module
@@ -68,7 +68,7 @@ pub struct CompilerContext {
 impl CompilerContext {
     pub fn new(package: PackageId) -> Self {
         Self {
-            names: Interner::new(),
+            names: NameInterner::new(),
             types: TypeInterner::new(),
             defs: Definitions::new(package),
             imported: Vec::new(),

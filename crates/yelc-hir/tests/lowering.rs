@@ -39,7 +39,7 @@ fn the_component(module: &HirModule) -> &yelc_hir::HirComponent {
         .iter_enumerated()
         .filter_map(|(_, item)| match item {
             HirItem::Component(component) => Some(component),
-            HirItem::Global(_) => None,
+            HirItem::Global(_) | HirItem::Function { .. } => None,
         });
     let component = components.next().expect("a component was lowered");
     assert!(
@@ -132,7 +132,7 @@ fn h2_two_files_do_not_collide_in_the_map() {
         .iter_enumerated()
         .filter_map(|(_, item)| match item {
             HirItem::Global(global) => Some(global),
-            HirItem::Component(_) => None,
+            HirItem::Component(_) | HirItem::Function { .. } => None,
         });
     let one = items.next().expect("global One");
     let two = items.next().expect("global Two");
@@ -294,25 +294,53 @@ fn ternary_desugars_to_match() {
     assert!(matches!(node.arms[1].pattern, HirPattern::Bool(false)));
 }
 
-/// UI `if` / `else if` / `else` → `match` directly (§9), the chain nested in
-/// the false arm (D7), each level keyed to the `ElseIfBranch`'s own real node.
+/// UI `if` / `else if` / `else` → **one** conditional boundary (the chain is
+/// one anchor in the tree), the chain nested in the false arm as plain
+/// matches (D7), each level keyed to the `ElseIfBranch`'s own real node.
 #[test]
-fn ui_if_chain_desugars_to_nested_match() {
+fn ui_if_chain_desugars_to_one_conditional_boundary() {
     let (module, _) = lower(&[
         "package a:b;\ncomponent App { v: s32 = 0;\n  if v > 2 { Text { } } else if v > 1 { Box { } } else { Group { } }\n}\n",
     ]);
     let roots = build_roots(&module);
-    let HirExprKind::Match(outer) = &roots[0].kind else {
-        panic!("UI if lowers to match, got {:?}", roots[0].kind);
+    let HirExprKind::Boundary(boundary) = &roots[0].kind else {
+        panic!("UI if lowers to a boundary, got {:?}", roots[0].kind);
+    };
+    let yelc_hir::HirBoundary::Conditional(outer) = &**boundary else {
+        panic!("UI if is a conditional boundary, got {boundary:?}");
     };
     // true arm: the then-branch fragment.
     assert!(matches!(outer.arms[0].value.kind, HirExprKind::Fragment(_)));
-    // false arm: the else-if, as its own nested match…
+    // false arm: the else-if, as a plain nested match — *inside* the region,
+    // not a boundary of its own.
     let HirExprKind::Match(inner) = &outer.arms[1].value.kind else {
         panic!("else-if nests as a match in the false arm");
     };
     // …whose false arm is the else fragment.
     assert!(matches!(inner.arms[1].value.kind, HirExprKind::Fragment(_)));
+}
+
+/// UI `for` → a repeat boundary; `@children` → a children boundary. The three
+/// dynamic template forms share one node kind — the unit that mounts,
+/// unmounts and reconciles, and signalck's dependency site.
+#[test]
+fn ui_for_and_children_lower_to_boundaries() {
+    let (module, _) = lower(&[
+        "package a:b;\ncomponent App { items: list<s32>;\n  for item in items key(item) { Text { } }\n  @children\n}\n",
+    ]);
+    let roots = build_roots(&module);
+    let HirExprKind::Boundary(repeat) = &roots[0].kind else {
+        panic!("UI for lowers to a boundary, got {:?}", roots[0].kind);
+    };
+    let yelc_hir::HirBoundary::Repeat(node) = &**repeat else {
+        panic!("UI for is a repeat boundary, got {repeat:?}");
+    };
+    assert!(node.key.is_some(), "key(item) survives");
+    assert_eq!(node.children.len(), 1);
+    let HirExprKind::Boundary(children) = &roots[1].kind else {
+        panic!("@children lowers to a boundary, got {:?}", roots[1].kind);
+    };
+    assert!(matches!(&**children, yelc_hir::HirBoundary::Children));
 }
 
 /// `x.f(a)` → `f(x, a)`: pure UFCS, no `MethodCall` (modules.md §8) — and
@@ -425,6 +453,7 @@ fn d5_globals_lower_before_components() {
         .iter_enumerated()
         .map(|(_, item)| match item {
             HirItem::Global(_) => "global",
+            HirItem::Function { .. } => "function",
             HirItem::Component(_) => "component",
         })
         .collect();

@@ -11,6 +11,16 @@ pub enum Severity {
     Note,
 }
 
+impl fmt::Display for Severity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Note => "note",
+        })
+    }
+}
+
 /// Stable diagnostic codes.
 ///
 /// The `E####` / `W####` string returned by [`ErrorCode::code`] is the *stable
@@ -185,16 +195,10 @@ impl Diagnostic {
         let mut output = String::new();
 
         // Severity and code
-        let severity_str = match self.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-            Severity::Note => "note",
-        };
-
         if let Some(ref code) = self.code {
-            output.push_str(&format!("{}[{}]: {}\n", severity_str, code, self.message));
+            output.push_str(&format!("{}[{}]: {}\n", self.severity, code, self.message));
         } else {
-            output.push_str(&format!("{}: {}\n", severity_str, self.message));
+            output.push_str(&format!("{}: {}\n", self.severity, self.message));
         }
 
         // Source location
@@ -277,16 +281,7 @@ impl Diagnostics {
 impl fmt::Display for Diagnostics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for diag in &self.diagnostics {
-            writeln!(
-                f,
-                "{}: {}",
-                match diag.severity {
-                    Severity::Error => "error",
-                    Severity::Warning => "warning",
-                    Severity::Note => "note",
-                },
-                diag.message
-            )?;
+            writeln!(f, "{}: {}", diag.severity, diag.message)?;
         }
         Ok(())
     }

@@ -27,7 +27,7 @@ pub mod lexer;
 pub mod parser;
 pub mod token;
 
-use yelc_base::{Diagnostics, Interner, SourceId};
+use yelc_base::{Diagnostics, NameInterner, SourceId};
 
 pub use green::GreenNode;
 
@@ -74,13 +74,13 @@ pub struct ParsedFile {
 /// never early-returns on the first error and never panics on malformed input.
 /// See `plans/rewrite/keep-list.md` §6.
 ///
-/// Note the signature takes `&mut Diagnostics` + `&Interner` rather than a whole
+/// Note the signature takes `&mut Diagnostics` + `&NameInterner` rather than a whole
 /// `CompilerContext`: the parser must stay usable by the LSP without dragging in
 /// type-checking state.
 pub fn parse(
     source: SourceId,
     content: &str,
-    interner: &Interner,
+    interner: &NameInterner,
     diags: &mut Diagnostics,
 ) -> ParsedFile {
     parser::Parser::new(source, content, interner, diags).parse()

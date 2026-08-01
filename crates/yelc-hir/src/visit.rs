@@ -10,7 +10,9 @@
 //! Every `match` here is exhaustive over the node enums. A new variant is a
 //! compile error in this file, not a silently-unvisited subtree.
 
-use crate::expr::{HirBlock, HirClosure, HirExpr, HirExprKind, HirInterpolationPart, HirStmt};
+use crate::expr::{
+    HirBlock, HirBoundary, HirClosure, HirExpr, HirExprKind, HirInterpolationPart, HirStmt,
+};
 use crate::module::{HirBody, HirComponent, HirGlobal, HirItem};
 
 /// A read-only walk over HIR. Default methods visit everything; override the
@@ -57,6 +59,9 @@ pub fn walk_item<V: Visitor>(visitor: &mut V, item: &HirItem) {
     match item {
         HirItem::Component(component) => visitor.visit_component(component),
         HirItem::Global(global) => visitor.visit_global(global),
+        // A root function's body is a body, reached by id like every other —
+        // the item's own structure holds nothing more to walk.
+        HirItem::Function { .. } => {}
     }
 }
 
@@ -110,7 +115,6 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &HirExpr) {
         | HirExprKind::Intrinsic(_)
         | HirExprKind::Unresolved(_)
         | HirExprKind::Literal(_)
-        | HirExprKind::ChildrenPlaceholder
         | HirExprKind::Error => {}
         HirExprKind::List(items) | HirExprKind::Tuple(items) => {
             for item in items {
@@ -176,15 +180,24 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &HirExpr) {
             }
         }
         HirExprKind::UiText(content) => visitor.visit_expr(content),
-        HirExprKind::Repeat(node) => {
-            visitor.visit_expr(&node.iterable);
-            if let Some(key) = &node.key {
-                visitor.visit_expr(key);
+        HirExprKind::Boundary(boundary) => match &**boundary {
+            HirBoundary::Conditional(node) => {
+                visitor.visit_expr(&node.scrutinee);
+                for arm in &node.arms {
+                    visitor.visit_expr(&arm.value);
+                }
             }
-            for child in &node.children {
-                visitor.visit_expr(child);
+            HirBoundary::Repeat(node) => {
+                visitor.visit_expr(&node.iterable);
+                if let Some(key) = &node.key {
+                    visitor.visit_expr(key);
+                }
+                for child in &node.children {
+                    visitor.visit_expr(child);
+                }
             }
-        }
+            HirBoundary::Children => {}
+        },
         HirExprKind::Fragment(children) => {
             for child in children {
                 visitor.visit_expr(child);

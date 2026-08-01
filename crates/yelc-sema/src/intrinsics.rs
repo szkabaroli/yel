@@ -183,10 +183,10 @@ impl IntrinsicTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yelc_base::Interner;
+    use yelc_base::NameInterner;
 
-    fn table() -> (Interner, IntrinsicTable) {
-        let interner = Interner::new();
+    fn table() -> (NameInterner, IntrinsicTable) {
+        let interner = NameInterner::new();
         let mut table = IntrinsicTable::new();
         table.register(Intrinsic {
             name: interner.intern("concat"),

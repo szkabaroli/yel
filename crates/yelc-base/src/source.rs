@@ -14,9 +14,7 @@ pub struct SourceId(pub u32);
 impl SourceId {
     /// Sentinel for "no real source file". Used by [`Span::default`] and any
     /// synthetic span with no origin. `SourceMap::add_file`/`add_inline` hand
-    /// out ids counting up from 0, so this can never collide with a real file
-    /// — unlike the old `SourceId(0)` default, which silently aliased the
-    /// first file added.
+    /// out ids counting up from 0, so this can never collide with a real file.
     pub const INVALID: SourceId = SourceId(u32::MAX);
 
     pub fn new(index: u32) -> Self {

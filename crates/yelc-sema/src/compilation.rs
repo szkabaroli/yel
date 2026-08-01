@@ -141,11 +141,11 @@ impl Compilation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yelc_base::Interner;
+    use yelc_base::NameInterner;
 
     #[test]
     fn a_package_row_carries_its_top_level_module() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut compilation = Compilation::new();
         let program = compilation.add_package(PackageId::LOCAL, PackageRole::Program, None);
         let geo = compilation.add_package(

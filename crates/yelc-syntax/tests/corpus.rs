@@ -15,7 +15,7 @@
 //!
 //! Accept/reject parity against the frozen pest parser lives in `parity.rs`.
 
-use yelc_base::{Diagnostics, Interner, SourceId};
+use yelc_base::{Diagnostics, NameInterner, SourceId};
 use yelc_syntax::ast::visit::ErrorNodeCounter;
 
 mod support;
@@ -106,7 +106,7 @@ fn trivia_bytes(content: &str) -> Vec<bool> {
 }
 
 fn parse_source(content: &str) -> Outcome {
-    let interner = Interner::new();
+    let interner = NameInterner::new();
     let mut diags = Diagnostics::new();
     let parsed = yelc_syntax::parse(SourceId(0), content, &interner, &mut diags);
 
@@ -577,7 +577,7 @@ fn real_programs_stay_well_under_both_depth_limits() {
         let content = read(&path);
         deepest_parse = deepest_parse.max(yelc_syntax::parser::measure_max_depth(&content));
 
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut diags = Diagnostics::new();
         let parsed = yelc_syntax::parse(SourceId(0), &content, &interner, &mut diags);
         let tree = parsed.green.max_depth();
@@ -624,7 +624,7 @@ fn flat_operator_chains_survive_past_the_frozen_parsers_ceiling() {
         ("index", format!("a{}", "[0]".repeat(LINKS))),
     ] {
         let source = format!("component A {{ x: s32 = {body}; }}");
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut diags = Diagnostics::new();
         let parsed = yelc_syntax::parse(SourceId(0), &source, &interner, &mut diags);
 

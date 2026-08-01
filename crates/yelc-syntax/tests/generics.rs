@@ -9,12 +9,12 @@
 
 mod support;
 
-use yelc_base::{Diagnostics, Interner, SourceMap};
+use yelc_base::{Diagnostics, NameInterner, SourceMap};
 
 fn parse(source: &str) -> (String, usize) {
     let mut map = SourceMap::new();
     let id = map.add_inline(source.to_string());
-    let interner = Interner::new();
+    let interner = NameInterner::new();
     let mut diags = Diagnostics::new();
     let parsed = yelc_syntax::parse(id, source, &interner, &mut diags);
     assert_eq!(

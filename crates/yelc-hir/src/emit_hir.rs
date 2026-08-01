@@ -18,8 +18,8 @@
 use std::fmt::Write;
 
 use crate::{
-    HirBlock, HirBody, HirCallee, HirExpr, HirExprKind, HirInterpolationPart, HirItem, HirLiteral,
-    HirMatchArm, HirModule, HirPattern, HirStmt,
+    HirBlock, HirBody, HirBoundary, HirCallee, HirExpr, HirExprKind, HirInterpolationPart, HirItem,
+    HirLiteral, HirMatchArm, HirModule, HirPattern, HirStmt,
 };
 use yelc_sema::definitions::MemberKind;
 use yelc_sema::{CompilerContext, DefId, Ty, TyKind};
@@ -45,6 +45,7 @@ pub fn hir(module: &HirModule, context: &CompilerContext) -> String {
         match item {
             HirItem::Global(global) => printer.global(&mut out, global),
             HirItem::Component(component) => printer.component(&mut out, component),
+            HirItem::Function { def, function } => printer.root_function(&mut out, *def, function),
         }
     }
     out
@@ -85,60 +86,63 @@ impl Printer<'_> {
 /// A type, rendered the dump's way — public because the LSP's hovers want the
 /// same spelling.
 pub fn render_ty(context: &CompilerContext, ty: Ty) -> String {
-    struct Renderer<'a> {
-        context: &'a CompilerContext,
-    }
-    impl Renderer<'_> {
-        fn def(&self, def: DefId) -> String {
-            match self.context.definition(def) {
-                Some(definition) => self.context.names.str(definition.name).to_string(),
-                None => format!("?#pkg{}.{}", def.package.0, def.index),
+    match context.types.kind(ty) {
+        TyKind::Bool => "bool".into(),
+        TyKind::S8 => "s8".into(),
+        TyKind::S16 => "s16".into(),
+        TyKind::S32 => "s32".into(),
+        TyKind::S64 => "s64".into(),
+        TyKind::U8 => "u8".into(),
+        TyKind::U16 => "u16".into(),
+        TyKind::U32 => "u32".into(),
+        TyKind::U64 => "u64".into(),
+        TyKind::F32 => "f32".into(),
+        TyKind::F64 => "f64".into(),
+        TyKind::Char => "char".into(),
+        TyKind::String => "string".into(),
+        TyKind::List(inner) => format!("list<{}>", render_ty(context, inner)),
+        TyKind::Option(inner) => format!("option<{}>", render_ty(context, inner)),
+        TyKind::Result { ok, err } => match (ok, err) {
+            (None, None) => "result".into(),
+            (Some(ok), None) => format!("result<{}>", render_ty(context, ok)),
+            (Some(ok), Some(err)) => format!(
+                "result<{}, {}>",
+                render_ty(context, ok),
+                render_ty(context, err)
+            ),
+            (None, Some(err)) => format!("result<_, {}>", render_ty(context, err)),
+        },
+        TyKind::Tuple(elements) => {
+            let elements: Vec<String> = elements
+                .iter()
+                .map(|element| render_ty(context, *element))
+                .collect();
+            format!("tuple<{}>", elements.join(", "))
+        }
+        TyKind::Adt(def) => render_def_name(context, def),
+        TyKind::Func { params, ret } => {
+            let params: Vec<String> = params
+                .iter()
+                .map(|param| render_ty(context, *param))
+                .collect();
+            match ret {
+                Some(ret) => format!("func({}) -> {}", params.join(", "), render_ty(context, ret)),
+                None => format!("func({})", params.join(", ")),
             }
         }
-        fn ty(&self, ty: Ty) -> String {
-            match self.context.types.kind(ty) {
-                TyKind::Bool => "bool".into(),
-                TyKind::S8 => "s8".into(),
-                TyKind::S16 => "s16".into(),
-                TyKind::S32 => "s32".into(),
-                TyKind::S64 => "s64".into(),
-                TyKind::U8 => "u8".into(),
-                TyKind::U16 => "u16".into(),
-                TyKind::U32 => "u32".into(),
-                TyKind::U64 => "u64".into(),
-                TyKind::F32 => "f32".into(),
-                TyKind::F64 => "f64".into(),
-                TyKind::Char => "char".into(),
-                TyKind::String => "string".into(),
-                TyKind::List(inner) => format!("list<{}>", self.ty(inner)),
-                TyKind::Option(inner) => format!("option<{}>", self.ty(inner)),
-                TyKind::Result { ok, err } => match (ok, err) {
-                    (None, None) => "result".into(),
-                    (Some(ok), None) => format!("result<{}>", self.ty(ok)),
-                    (Some(ok), Some(err)) => format!("result<{}, {}>", self.ty(ok), self.ty(err)),
-                    (None, Some(err)) => format!("result<_, {}>", self.ty(err)),
-                },
-                TyKind::Tuple(elements) => {
-                    let elements: Vec<String> =
-                        elements.iter().map(|element| self.ty(*element)).collect();
-                    format!("tuple<{}>", elements.join(", "))
-                }
-                TyKind::Adt(def) => self.def(def),
-                TyKind::Func { params, ret } => {
-                    let params: Vec<String> = params.iter().map(|param| self.ty(*param)).collect();
-                    match ret {
-                        Some(ret) => format!("func({}) -> {}", params.join(", "), self.ty(ret)),
-                        None => format!("func({})", params.join(", ")),
-                    }
-                }
-                TyKind::Param(index) => format!("param({index})"),
-                TyKind::Infer(index) => format!("infer({index})"),
-                TyKind::Error => "{error}".into(),
-                TyKind::Unit => "unit".into(),
-            }
-        }
+        TyKind::Param(index) => format!("param({index})"),
+        TyKind::Infer(index) => format!("infer({index})"),
+        TyKind::Error => "{error}".into(),
+        TyKind::Unit => "unit".into(),
     }
-    Renderer { context }.ty(ty)
+}
+
+/// A definition's bare name; a placeholder when the id resolves to nothing.
+fn render_def_name(context: &CompilerContext, def: DefId) -> String {
+    match context.definition(def) {
+        Some(definition) => context.names.str(definition.name).to_string(),
+        None => format!("?#pkg{}.{}", def.package.0, def.index),
+    }
 }
 
 impl Printer<'_> {
@@ -221,6 +225,27 @@ impl Printer<'_> {
             parts.push(format!("writes({})", render(&dependencies.writes)));
         }
         let _ = writeln!(out, "{pad}deps: {}", parts.join(" "));
+    }
+
+    fn root_function(&self, out: &mut String, def: DefId, function: &crate::HirFunction) {
+        let export = if function.is_export { "export " } else { "" };
+        match function.body {
+            Some(body) => {
+                let body = &self.module.bodies[body];
+                let _ = writeln!(
+                    out,
+                    "{}func {}({}):",
+                    export,
+                    self.def(def),
+                    self.params(body)
+                );
+                self.deps(out, body, 1);
+                self.block(out, &body.block, 1);
+            }
+            None => {
+                let _ = writeln!(out, "{}extern func {};", export, self.def(def));
+            }
+        }
     }
 
     fn item_bodies(
@@ -426,22 +451,35 @@ impl Printer<'_> {
                 format!("{}{{ {} }}", self.callee(&node.target), parts.join(", "))
             }
             HirExprKind::UiText(content) => format!("text({})", self.expr(content)),
-            HirExprKind::Repeat(node) => {
-                let key = node
-                    .key
-                    .as_ref()
-                    .map(|key| format!(" key({})", self.expr(key)))
-                    .unwrap_or_default();
-                format!(
-                    "repeat local({}) in {}{} {{ {} }}",
-                    node.binder.0,
-                    self.expr(&node.iterable),
-                    key,
-                    self.exprs(&node.children)
-                )
-            }
+            // Boundaries render representationally, not parseably — the
+            // `boundary` prefix marks the dynamic regions in a dump, and no
+            // surface spelling exists to round-trip them through.
+            HirExprKind::Boundary(boundary) => match &**boundary {
+                HirBoundary::Conditional(node) => {
+                    let arms: Vec<String> = node.arms.iter().map(|arm| self.arm(arm)).collect();
+                    format!(
+                        "boundary match {} {{ {} }}",
+                        self.expr(&node.scrutinee),
+                        arms.join(", ")
+                    )
+                }
+                HirBoundary::Repeat(node) => {
+                    let key = node
+                        .key
+                        .as_ref()
+                        .map(|key| format!(" key({})", self.expr(key)))
+                        .unwrap_or_default();
+                    format!(
+                        "boundary repeat local({}) in {}{} {{ {} }}",
+                        node.binder.0,
+                        self.expr(&node.iterable),
+                        key,
+                        self.exprs(&node.children)
+                    )
+                }
+                HirBoundary::Children => "boundary children".into(),
+            },
             HirExprKind::Fragment(children) => format!("fragment({})", self.exprs(children)),
-            HirExprKind::ChildrenPlaceholder => "@children".into(),
             HirExprKind::Error => "{error}".into(),
         }
     }
@@ -449,6 +487,8 @@ impl Printer<'_> {
     fn arm(&self, arm: &HirMatchArm) -> String {
         let pattern = match arm.pattern {
             HirPattern::Bool(value) => value.to_string(),
+            HirPattern::Int(value) => value.to_string(),
+            HirPattern::Error => "<error>".to_string(),
         };
         format!("{pattern} -> {}", self.expr(&arm.value))
     }

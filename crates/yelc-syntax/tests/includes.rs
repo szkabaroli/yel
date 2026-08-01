@@ -9,19 +9,19 @@
 //! enumerate against the oracle. Node-shape assertions are the whole test, plus
 //! S1/S5 through the shared harness.
 
-use yelc_base::{Diagnostics, Interner, SourceId};
+use yelc_base::{Diagnostics, NameInterner, SourceId};
 use yelc_syntax::ast;
 use yelc_syntax::ast::visit::ErrorNodeCounter;
 
 struct Parsed {
-    interner: Interner,
+    interner: NameInterner,
     file: ast::File,
     diagnostics: usize,
     error_nodes: usize,
 }
 
 fn parse(source: &str) -> Parsed {
-    let interner = Interner::new();
+    let interner = NameInterner::new();
     let mut diags = Diagnostics::new();
     let parsed = yelc_syntax::parse(SourceId(0), source, &interner, &mut diags);
     assert_eq!(

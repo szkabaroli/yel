@@ -72,6 +72,12 @@ pub trait Visitor: Sized {
     fn visit_extern_member(&mut self, node: &ExternMember) {
         walk_extern_member(self, node);
     }
+    fn visit_module_decl(&mut self, node: &ModuleDecl) {
+        walk_module_decl(self, node);
+    }
+    fn visit_use_decl(&mut self, node: &UseDecl) {
+        walk_use_decl(self, node);
+    }
     fn visit_global_decl(&mut self, node: &GlobalDecl) {
         walk_global_decl(self, node);
     }
@@ -243,7 +249,27 @@ pub fn walk_item<V: Visitor>(v: &mut V, node: &ItemKind) {
         ItemKind::ExternComponent(it) => v.visit_extern_component_decl(it),
         ItemKind::Global(it) => v.visit_global_decl(it),
         ItemKind::Component(it) => v.visit_component_decl(it),
+        ItemKind::Module(it) => v.visit_module_decl(it),
+        ItemKind::Use(it) => v.visit_use_decl(it),
+        ItemKind::Function(it) => v.visit_function_decl(it),
+        ItemKind::Property(it) => v.visit_property_decl(it),
         ItemKind::Error { id, span } => v.visit_error(*id, *span),
+    }
+}
+
+pub fn walk_module_decl<V: Visitor>(v: &mut V, node: &ModuleDecl) {
+    walk_attributes(v, &node.attributes);
+    walk_maybe_ident(v, &node.name);
+    for item in &node.items {
+        v.visit_item(item);
+    }
+}
+
+pub fn walk_use_decl<V: Visitor>(v: &mut V, node: &UseDecl) {
+    walk_attributes(v, &node.attributes);
+    walk_maybe_ident(v, &node.base);
+    for name in &node.names {
+        walk_maybe_ident(v, name);
     }
 }
 
@@ -625,7 +651,10 @@ fn walk_expr_inner<V: Visitor>(v: &mut V, node: &Expr) {
                 v.visit_expr(item);
             }
         }
-        ExprKind::Record(fields) => {
+        ExprKind::Record { name, fields } => {
+            if let Some(name) = name {
+                walk_maybe_ident(v, name);
+            }
             for field in fields {
                 walk_recovered(v, field, |v, field| v.visit_record_field_init(field));
             }
@@ -678,6 +707,17 @@ fn walk_expr_inner<V: Visitor>(v: &mut V, node: &Expr) {
         ExprKind::Index { base, index } => {
             v.visit_expr(base);
             v.visit_expr(index);
+        }
+        ExprKind::Match(match_expr) => {
+            v.visit_expr(&match_expr.scrutinee);
+            for arm in &match_expr.arms {
+                v.visit_expr(&arm.pattern);
+                match &arm.body {
+                    MatchArmBody::Expr(expr) => v.visit_expr(expr),
+                    MatchArmBody::Block(block) => v.visit_block(block),
+                    MatchArmBody::Assign(assign) => v.visit_assign_stmt(assign),
+                }
+            }
         }
         ExprKind::Error => v.visit_error(node.id, node.span),
     }

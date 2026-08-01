@@ -177,6 +177,7 @@ fn hover_in_package(
     let mut cursor = AtCursor {
         offset,
         candidates: Vec::new(),
+        type_names: Vec::new(),
     };
     Visitor::visit_file(&mut cursor, &file.ast);
     // Smallest span first; ties keep discovery order, and the loop below tries
@@ -205,6 +206,36 @@ fn hover_in_package(
         if let Some(target) = target {
             let value = render_usage(context, checked, target)?;
             return Some(hover(source, candidate.span, value));
+        }
+    }
+
+    // Type positions: annotations and typed-record heads. No HIR node exists
+    // for them, but under the single root namespace the definition is one
+    // lookup away. Smallest span first, same policy as the candidates.
+    let mut type_names = cursor.type_names;
+    type_names.sort_by_key(|(span, _)| span.end - span.start);
+    for (span, name) in type_names {
+        let mut value = None;
+        for sym in context.defs.lookup(name) {
+            if let Some(def) = sym.def() {
+                value = Some(render_definition(context, checked, context.defs.get(def)));
+                break;
+            }
+            if matches!(sym, yelc_sema::Sym::Module(_)) {
+                // A module binding: no `Definition` behind it, but the head
+                // slicer knows the declaration, attributes included.
+                let signature = declaration_head(context, checked, span)
+                    .unwrap_or_else(|| format!("module {}", context.names.str(name)));
+                value = Some(markup_parts(
+                    package_container(context, checked).as_deref(),
+                    &signature,
+                    None,
+                ));
+                break;
+            }
+        }
+        if let Some(value) = value {
+            return Some(hover(source, span, value));
         }
     }
 
@@ -810,7 +841,14 @@ fn standalone_hover(
         identity,
         module,
     };
-    hover_in_package(&context, &checked, source_id, &checked.parsed[0], position, config)
+    hover_in_package(
+        &context,
+        &checked,
+        source_id,
+        &checked.parsed[0],
+        position,
+        config,
+    )
 }
 
 /// r-a's `markup()` in `hover/render.rs`, shape for shape: an optional fenced
@@ -827,6 +865,19 @@ fn markup_parts(container: Option<&str>, signature: &str, docs: Option<&str>) ->
     buf
 }
 
+fn package_container(
+    context: &yelc_sema::CompilerContext,
+    checked: &yelc_hir::CheckedPackage,
+) -> Option<String> {
+    checked.identity.as_ref().map(|identity| {
+        format!(
+            "{}:{}",
+            context.names.str(identity.namespace),
+            context.names.str(identity.name)
+        )
+    })
+}
+
 fn render_definition(
     context: &yelc_sema::CompilerContext,
     checked: &yelc_hir::CheckedPackage,
@@ -837,25 +888,20 @@ fn render_definition(
     // package, yel's module-path equivalent.
     let name = context.names.str(definition.name).to_string();
     let export = if definition.is_export { "export " } else { "" };
-    let signature = declaration_head(context, checked, definition.span).unwrap_or(match definition.kind {
-        yelc_sema::DefKind::Component => format!("{export}component {name}"),
-        yelc_sema::DefKind::Global => format!("{export}global {name}"),
-        yelc_sema::DefKind::Value => match definition.ty {
-            Some(ty) => format!(
-                "{export}{name}: {}",
-                yelc_hir::emit_hir::render_ty(context, ty)
-            ),
-            None => format!("{export}{name}"),
-        },
-        yelc_sema::DefKind::Type => format!("{export}{name}"),
-    });
-    let container = checked.identity.as_ref().map(|identity| {
-        format!(
-            "{}:{}",
-            context.names.str(identity.namespace),
-            context.names.str(identity.name)
-        )
-    });
+    let signature =
+        declaration_head(context, checked, definition.span).unwrap_or(match definition.kind {
+            yelc_sema::DefKind::Component => format!("{export}component {name}"),
+            yelc_sema::DefKind::Global => format!("{export}global {name}"),
+            yelc_sema::DefKind::Value => match definition.ty {
+                Some(ty) => format!(
+                    "{export}{name}: {}",
+                    yelc_hir::emit_hir::render_ty(context, ty)
+                ),
+                None => format!("{export}{name}"),
+            },
+            yelc_sema::DefKind::Type => format!("{export}{name}"),
+        });
+    let container = package_container(context, checked);
     let docs = checked
         .module
         .docs
@@ -1000,6 +1046,12 @@ impl Visitor for DeclHeadAt {
         let start = Self::attributes_start(&node.attributes, node.span.start);
         self.named(&node.name, start, self.name_span.end);
         ast::visit::walk_extern_component_decl(self, node);
+    }
+
+    fn visit_module_decl(&mut self, node: &ast::ModuleDecl) {
+        let start = Self::attributes_start(&node.attributes, node.span.start);
+        self.named(&node.name, start, self.name_span.end);
+        ast::visit::walk_module_decl(self, node);
     }
 
     fn visit_variant_case(&mut self, node: &ast::VariantCase) {
@@ -1225,6 +1277,11 @@ struct CursorCandidate {
 struct AtCursor {
     offset: usize,
     candidates: Vec<CursorCandidate>,
+    /// Named types under the cursor — annotations and typed-record heads.
+    /// A type position has no HIR node of its own (types are not
+    /// re-represented — the stage-3 contract), so these resolve by root-scope
+    /// lookup instead of through the map.
+    type_names: Vec<(yelc_base::Span, yelc_base::Name)>,
 }
 
 impl AtCursor {
@@ -1253,6 +1310,16 @@ impl Visitor for AtCursor {
                     self.consider(node.id, member.span, false);
                 }
             }
+            ast::ExprKind::Record {
+                name: Some(name), ..
+            } => {
+                if let Some(ident) = name.present() {
+                    if ident.span.start <= self.offset && self.offset < ident.span.end {
+                        self.type_names.push((ident.span, ident.name));
+                    }
+                }
+                self.consider(node.id, node.span, false);
+            }
             // Literals are never usage candidates: a `#ff8000` desugars to
             // `Color.rgba(…)` and its node maps to that call, so letting it
             // resolve here hovers the desugaring instead of the color. The
@@ -1274,6 +1341,53 @@ impl Visitor for AtCursor {
             self.consider(node.id, name.span, true);
         }
         ast::visit::walk_element_node(self, node);
+    }
+
+    fn visit_func_param(&mut self, node: &ast::FuncParam) {
+        if let Some(name) = node.name.present() {
+            // The binder's local maps from one of these two nodes; the
+            // try-until-resolved loop makes guessing wrong free.
+            self.consider(node.id, name.span, false);
+            self.consider(name.id, name.span, false);
+        }
+        ast::visit::walk_func_param(self, node);
+    }
+
+    fn visit_closure_param(&mut self, node: &ast::ClosureParam) {
+        if let Some(name) = node.name.present() {
+            self.consider(node.id, name.span, false);
+            self.consider(name.id, name.span, false);
+        }
+        ast::visit::walk_closure_param(self, node);
+    }
+
+    fn visit_type_ref(&mut self, node: &ast::TypeRef) {
+        if let ast::TypeKind::Named(name) = node.kind {
+            if node.span.start <= self.offset && self.offset < node.span.end {
+                self.type_names.push((node.span, name));
+            }
+        }
+        ast::visit::walk_type_ref(self, node);
+    }
+
+    fn visit_module_decl(&mut self, node: &ast::ModuleDecl) {
+        if let Some(ident) = node.name.present() {
+            if ident.span.start <= self.offset && self.offset < ident.span.end {
+                self.type_names.push((ident.span, ident.name));
+            }
+        }
+        ast::visit::walk_module_decl(self, node);
+    }
+
+    fn visit_use_decl(&mut self, node: &ast::UseDecl) {
+        for name in std::iter::once(&node.base).chain(node.names.iter()) {
+            if let Some(ident) = name.present() {
+                if ident.span.start <= self.offset && self.offset < ident.span.end {
+                    self.type_names.push((ident.span, ident.name));
+                }
+            }
+        }
+        ast::visit::walk_use_decl(self, node);
     }
 
     fn visit_let_stmt(&mut self, node: &ast::LetStmt) {
@@ -1361,7 +1475,7 @@ pub(super) fn document_symbol_request(state: &mut ServerState, request: Request)
 /// content — the tree is not shared across threads and a parse is
 /// milliseconds.
 pub(crate) fn scan_for_symbols(content: Arc<str>) -> Vec<DocumentSymbol> {
-    let interner = yelc_base::Interner::new();
+    let interner = yelc_base::NameInterner::new();
     let mut diagnostics = yelc_base::Diagnostics::new();
     let parsed = yelc_syntax::parse(
         yelc_base::SourceId(0),
@@ -1477,7 +1591,7 @@ enum YelSymbolKind {
 struct SymbolScanner {
     symbols: Vec<Symbol>,
     levels: Vec<usize>,
-    interner: yelc_base::Interner,
+    interner: yelc_base::NameInterner,
 }
 
 impl SymbolScanner {
@@ -1600,7 +1714,7 @@ impl Visitor for SymbolScanner {
 }
 
 fn ensure_name(
-    interner: &yelc_base::Interner,
+    interner: &yelc_base::NameInterner,
     ident: &ast::MaybeIdent,
     default_name: &str,
 ) -> (String, yelc_base::Span) {
@@ -1945,6 +2059,22 @@ mod tests {
         assert!(value.contains("color"), "got: {value}");
     }
 
+    /// Modules bind a name (the first surface populator of the module arena),
+    /// and `use` lists are name positions — both hover through root lookup.
+    #[test]
+    fn module_and_use_names_hover() {
+        let content = "package my:app;\n\n@interface(name = \"a:b@0.1.0\")\nmodule D§om {\n    ping: func() -> s32 { 1 }\n}\n\nuse Dom.{ ping };\n";
+        let value = hover_value("module-name", content).expect("hover");
+        assert!(value.contains("module Dom"), "got: {value}");
+        assert!(value.contains("@interface"), "got: {value}");
+
+        let content = content
+            .replace('§', "")
+            .replacen("{ ping }", "{ pi§ng }", 1);
+        let value = hover_value("use-name", &content).expect("hover");
+        assert!(value.contains("ping: func() -> s32"), "got: {value}");
+    }
+
     /// r-a's ranking, ported: at a boundary the token that *ends* at the cursor
     /// still wins over the trivia that starts there.
     #[test]
@@ -1953,5 +2083,4 @@ mod tests {
         let value = hover_value("keyword-boundary", &content).expect("hover");
         assert!(value.starts_with("```yel\nexport\n```"), "got: {value}");
     }
-
 }

@@ -2,7 +2,7 @@
 
 use rustc_hash::FxHashMap;
 use serde::Serialize;
-use yelc_base::Interner;
+use yelc_base::NameInterner;
 
 use crate::definitions::{Definition, Definitions, MemberDirection, MemberKind};
 use crate::ids::DefId;
@@ -19,7 +19,7 @@ use super::wire::{
 /// Owns the type table being built, so every `Ty` that reaches the wire goes
 /// through [`ArtifactWriter::write_ty`] and arrives as a [`TypeIndex`].
 pub struct ArtifactWriter<'a> {
-    names: &'a Interner,
+    names: &'a NameInterner,
     types: &'a TypeInterner,
     defs: &'a Definitions,
     package: &'a PackageName,
@@ -32,7 +32,7 @@ pub struct ArtifactWriter<'a> {
 impl<'a> ArtifactWriter<'a> {
     pub fn new(
         package: &'a PackageName,
-        names: &'a Interner,
+        names: &'a NameInterner,
         types: &'a TypeInterner,
         defs: &'a Definitions,
     ) -> Self {

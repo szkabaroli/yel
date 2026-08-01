@@ -138,31 +138,6 @@ impl fmt::Display for ExprId {
     }
 }
 
-/// Index of an exported/imported interface within a compiled module.
-///
-/// General-purpose: an interface is a named group of functions at the module
-/// boundary. Nothing about it is UI-specific.
-#[derive(
-    Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Default, Serialize, Deserialize,
-)]
-pub struct InterfaceId(pub u32);
-
-impl InterfaceId {
-    pub fn new(index: u32) -> Self {
-        Self(index)
-    }
-
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-impl fmt::Display for InterfaceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "interface#{}", self.0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

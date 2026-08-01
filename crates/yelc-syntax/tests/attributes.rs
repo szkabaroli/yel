@@ -19,7 +19,7 @@
 
 mod support;
 
-use yelc_base::{Diagnostics, Interner, SourceId};
+use yelc_base::{Diagnostics, NameInterner, SourceId};
 use yelc_syntax::ast;
 use yelc_syntax::ast::visit::ErrorNodeCounter;
 
@@ -28,7 +28,7 @@ use yelc_syntax::ast::visit::ErrorNodeCounter;
 // ---------------------------------------------------------------------------
 
 struct Parsed {
-    interner: Interner,
+    interner: NameInterner,
     file: ast::File,
     diagnostics: usize,
     error_nodes: usize,
@@ -36,7 +36,7 @@ struct Parsed {
 
 /// Parse, and assert invariants S1 and S2 on the way through.
 fn parse(source: &str) -> Parsed {
-    let interner = Interner::new();
+    let interner = NameInterner::new();
     let mut diags = Diagnostics::new();
     let parsed = yelc_syntax::parse(SourceId(0), source, &interner, &mut diags);
     assert_eq!(
@@ -618,7 +618,7 @@ fn children_nodes(source: &str) -> usize {
         }
     }
 
-    let interner = Interner::new();
+    let interner = NameInterner::new();
     let mut diags = Diagnostics::new();
     let parsed = yelc_syntax::parse(SourceId(0), source, &interner, &mut diags);
     let mut count = Count::default();

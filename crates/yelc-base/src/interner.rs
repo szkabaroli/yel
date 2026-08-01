@@ -1,6 +1,6 @@
 //! String interner for efficient symbol storage.
 //!
-//! The [`Interner`] deduplicates strings and assigns each unique string
+//! The [`NameInterner`] deduplicates strings and assigns each unique string
 //! a [`Name`] (an index). This reduces memory usage and enables fast
 //! equality comparisons via integer comparison.
 
@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 /// An interned string identifier.
 ///
 /// This is a lightweight handle (a `u32` index) that can be used to
-/// retrieve the original string from an [`Interner`].
+/// retrieve the original string from a [`NameInterner`].
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Name(pub u32);
 
@@ -92,14 +92,14 @@ struct Internal {
 /// Interns strings to produce [`Name`] handles that can be compared
 /// cheaply and used to retrieve the original string.
 #[derive(Debug)]
-pub struct Interner {
+pub struct NameInterner {
     data: Arc<Mutex<Internal>>,
 }
 
-impl Interner {
+impl NameInterner {
     /// Create a new empty interner.
-    pub fn new() -> Interner {
-        Interner {
+    pub fn new() -> NameInterner {
+        NameInterner {
             data: Arc::new(Mutex::new(Internal {
                 map: HashMap::default(),
                 vec: Vec::new(),
@@ -153,7 +153,7 @@ thread_local! {
 }
 
 /// `Name("count")` when a debug interner is installed and knows this name;
-/// `Name(16)` otherwise. See [`Interner::install_for_debug`].
+/// `Name(16)` otherwise. See [`NameInterner::install_for_debug`].
 impl fmt::Debug for Name {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let resolved = DEBUG_INTERNER.with(|slot| {
@@ -168,7 +168,7 @@ impl fmt::Debug for Name {
     }
 }
 
-impl Default for Interner {
+impl Default for NameInterner {
     fn default() -> Self {
         Self::new()
     }
@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn test_interner() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
 
         assert_eq!(Name(0), interner.intern("hello"));
         assert_eq!(Name(0), interner.intern("hello"));

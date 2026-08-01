@@ -1,71 +1,22 @@
-//! Dumpers. One per view of the tree; neither is a golden.
+//! Debug dumps of the syntax stage: the green tree (`--emit-green`) and the
+//! typed AST (`--emit-ast`), one indented line per node.
 //!
-//! Nothing in `tests/` asserts on this text. The moment something does, the
-//! driver becomes a thing that must not change, and it is supposed to be the
-//! cheap-to-change one.
+//! Nothing in `tests/` asserts on this text — it is a debugging instrument,
+//! free to change shape.
 
 use std::fmt::Write as _;
 
-use yelc_base::{Interner, Span};
-use yelc_sema::{CompilerContext, Known, LoweringTarget};
+use yelc_base::{NameInterner, Span};
 use yelc_syntax::NodeId;
 use yelc_syntax::ast::visit::{self, Visitor};
 use yelc_syntax::ast::*;
 use yelc_syntax::green::GreenNode;
 
 // ---------------------------------------------------------------------------
-// Intrinsics
-// ---------------------------------------------------------------------------
-
-/// The intrinsic table and the lang-items, in registration order.
-///
-/// Both halves, because a builtin is one of two shapes (intrinsic row vs lang item) and the bug this dump
-/// was added for was exactly half of it being empty: the callable rows lived in
-/// `IntrinsicTable` and the named definitions were registered nowhere, so
-/// `resolve_known` had never once succeeded outside a test.
-pub fn intrinsics(context: &CompilerContext) -> String {
-    let mut out = String::new();
-
-    let _ = writeln!(out, "intrinsics ({})", context.intrinsics.len());
-    for (id, intrinsic) in context.intrinsics.iter() {
-        let lowering = match &intrinsic.lowering {
-            LoweringTarget::Op(op) => format!("op {op}"),
-            LoweringTarget::HostImport { interface, func } => {
-                format!("import {interface}#{func}")
-            }
-        };
-        let _ = writeln!(
-            out,
-            "  {:?} {} params={} {lowering} {:?}",
-            id,
-            context.names.str(intrinsic.name),
-            intrinsic.params.len(),
-            intrinsic.visibility,
-        );
-    }
-
-    let _ = writeln!(out, "lang-items ({})", Known::ALL.len());
-    for &item in Known::ALL {
-        let id = context.known().get(item);
-        let _ = writeln!(
-            out,
-            "  {} = {:?} ({:?})",
-            item.source_name(),
-            id,
-            context.defs.get(id).kind,
-        );
-    }
-
-    out
-}
-
-// ---------------------------------------------------------------------------
 // Green tree
 // ---------------------------------------------------------------------------
 
-/// Kinds and widths, trivia included. Widths rather than offsets, because the
-/// tree stores widths — printing offsets would be the driver computing
-/// something the tree does not have, which is how a dump starts lying.
+/// Kinds and widths, trivia included.
 pub fn green_tree(node: &GreenNode) -> String {
     let mut out = String::new();
     green_node(node, 0, &mut out);
@@ -97,13 +48,12 @@ fn green_node(node: &GreenNode, depth: usize, out: &mut String) {
 
 /// Walk the typed AST, one indented line per node.
 ///
-/// `filter` restricts the dump to a single top-level item, matched on its name.
-/// Ark's `--emit-ast=<fct>` does the same thing for the same reason: the whole
-/// AST of a real file is not readable, and the question is almost always about
-/// one declaration.
+/// `filter` restricts the dump to a single top-level item, matched on its
+/// name: the whole AST of a real file is not readable, and the question is
+/// almost always about one declaration.
 pub fn ast(
     file: &File,
-    interner: &Interner,
+    interner: &NameInterner,
     filter: Option<&str>,
     identified: bool,
     spans: bool,
@@ -126,7 +76,7 @@ pub fn ast(
 struct Dumper<'a> {
     out: String,
     depth: usize,
-    interner: &'a Interner,
+    interner: &'a NameInterner,
     filter: Option<&'a str>,
     identified: bool,
     spans: bool,
@@ -311,7 +261,7 @@ impl Labelled for Expr {
             ExprKind::Interpolation(_) => "Interpolation",
             ExprKind::List(_) => "List",
             ExprKind::Tuple(_) => "Tuple",
-            ExprKind::Record(_) => "Record",
+            ExprKind::Record { .. } => "Record",
             ExprKind::Closure(_) => "Closure",
             ExprKind::Ident(_) => "Ident",
             ExprKind::Unary { .. } => "Unary",
@@ -323,6 +273,7 @@ impl Labelled for Expr {
             ExprKind::Member { .. } => "Member",
             ExprKind::OptionalMember { .. } => "OptionalMember",
             ExprKind::Index { .. } => "Index",
+            ExprKind::Match(_) => "Match",
             ExprKind::Error => "Error",
         };
         kind.to_string()

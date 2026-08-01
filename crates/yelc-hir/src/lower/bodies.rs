@@ -24,6 +24,26 @@ use crate::sym::{ModuleSymTable, SymbolKind};
 // Items
 // ---------------------------------------------------------------------------
 
+/// A root function — the .yelir subset's `name: func(…) { … }` at item or
+/// module level. Same lowering a global's member function gets, with no
+/// owner: bare names inside resolve to locals and root definitions only.
+pub(super) fn lower_item_function(
+    lcx: &mut LoweringContext,
+    file: &ParsedFile,
+    decl: &ast::FunctionDecl,
+) {
+    let Some(def) = lcx.def_of(file, decl.id) else {
+        // Unregistered: a parse hole or a duplicate; the diagnostic exists (H5).
+        return;
+    };
+    // `member: 0` — a root function has no owner row; the def alongside is
+    // the identity (see `HirItem::Function`).
+    let Some(function) = lower_function(lcx, file, None, decl, 0) else {
+        return;
+    };
+    lcx.module.items.push(HirItem::Function { def, function });
+}
+
 pub(super) fn lower_global(lcx: &mut LoweringContext, file: &ParsedFile, decl: &ast::GlobalDecl) {
     let Some(def) = lcx.def_of(file, decl.id) else {
         // Unregistered: a parse hole where the name should be, or a duplicate.
@@ -49,7 +69,7 @@ pub(super) fn lower_global(lcx: &mut LoweringContext, file: &ParsedFile, decl: &
                 member += 1;
             }
             ast::GlobalMember::Callback(callback) => {
-                if let Some(function) = lower_function(lcx, file, def, callback, member) {
+                if let Some(function) = lower_function(lcx, file, Some(def), callback, member) {
                     functions.push(function);
                 }
                 if callback.name.present().is_some() {
@@ -97,7 +117,7 @@ pub(super) fn lower_component(
                 member += 1;
             }
             ast::ComponentMember::Function(function) => {
-                if let Some(lowered) = lower_function(lcx, file, def, function, member) {
+                if let Some(lowered) = lower_function(lcx, file, Some(def), function, member) {
                     functions.push(lowered);
                 }
                 if function.name.present().is_some() {
@@ -110,7 +130,7 @@ pub(super) fn lower_component(
         }
     }
 
-    let build = ui::lower_build(lcx, file, def, decl);
+    let build = ui::lower_tree(lcx, file, def, decl);
 
     lcx.module.items.push(HirItem::Component(HirComponent {
         hir_id,
@@ -148,7 +168,7 @@ fn lower_default(
 fn lower_function(
     lcx: &mut LoweringContext,
     file: &ParsedFile,
-    owner: DefId,
+    owner: Option<DefId>,
     decl: &ast::FunctionDecl,
     member: u32,
 ) -> Option<HirFunction> {
@@ -157,7 +177,7 @@ fn lower_function(
 
     let body = decl.body.as_ref().map(|block| {
         let origin = lcx.node(file, decl.id);
-        let mut lowering = BodyLowering::new(lcx, file, origin, Some(owner));
+        let mut lowering = BodyLowering::new(lcx, file, origin, owner);
         let mut params = 0u32;
         if let Some(signature) = decl.signature.present() {
             for param in signature.present_params() {
@@ -379,6 +399,25 @@ impl<'a, 'ctx> BodyLowering<'a, 'ctx> {
 
     // -- blocks and statements ---------------------------------------------
 
+    /// A surface `match` arm's pattern. Only what the grammar produces
+    /// today: literal patterns. Anything else is reported and lowered to
+    /// [`HirPattern::Error`] (H5) — never guessed at (H4).
+    fn lower_match_pattern(&mut self, pattern: &ast::Expr) -> HirPattern {
+        match &pattern.kind {
+            ast::ExprKind::Bool(value) => HirPattern::Bool(*value),
+            ast::ExprKind::Int(value) => HirPattern::Int(*value),
+            _ => {
+                self.report(
+                    pattern.span,
+                    ErrorCode::SyntaxError,
+                    "only literal patterns are supported in `match` arms for now".to_string(),
+                    None,
+                );
+                HirPattern::Error
+            }
+        }
+    }
+
     pub(super) fn lower_block(&mut self, block: &ast::Block) -> HirBlock {
         self.push_scope();
         let stmts = block
@@ -560,7 +599,10 @@ impl<'a, 'ctx> BodyLowering<'a, 'ctx> {
             ast::ExprKind::Tuple(items) => {
                 HirExprKind::Tuple(items.iter().map(|item| self.lower_expr(item)).collect())
             }
-            ast::ExprKind::Record(fields) => HirExprKind::Record {
+            // The literal's type name (if written) is carried by the AST and
+            // resolved by stage 4 — type-directed, like every other type
+            // position. The fields lower now.
+            ast::ExprKind::Record { name: _, fields } => HirExprKind::Record {
                 fields: fields
                     .iter()
                     .filter_map(|field| {
@@ -663,6 +705,51 @@ impl<'a, 'ctx> BodyLowering<'a, 'ctx> {
                 base: Box::new(self.lower_expr(base)),
                 index: Box::new(self.lower_expr(index)),
             },
+            ast::ExprKind::Match(match_expr) => {
+                let scrutinee = self.lower_expr(&match_expr.scrutinee);
+                let arms = match_expr
+                    .arms
+                    .iter()
+                    .map(|arm| {
+                        let pattern = self.lower_match_pattern(&arm.pattern);
+                        let value = match &arm.body {
+                            ast::MatchArmBody::Expr(expr) => self.lower_expr(expr),
+                            ast::MatchArmBody::Block(block) => {
+                                let block = self.lower_block(block);
+                                HirExpr {
+                                    hir_id: self.invent(arm.id),
+                                    kind: HirExprKind::Block(Box::new(block)),
+                                }
+                            }
+                            // `pattern -> place = value`: a one-statement
+                            // block, the same shape the statement-`if`
+                            // desugar produces for its branches.
+                            ast::MatchArmBody::Assign(assign) => {
+                                let target = self.lower_expr(&assign.target);
+                                let value = self.lower_expr(&assign.value);
+                                let stmt = HirStmt::Assign {
+                                    hir_id: self.alloc(assign.id),
+                                    target,
+                                    value,
+                                };
+                                HirExpr {
+                                    hir_id: self.invent(arm.id),
+                                    kind: HirExprKind::Block(Box::new(HirBlock {
+                                        stmts: vec![stmt],
+                                        tail: None,
+                                    })),
+                                }
+                            }
+                        };
+                        HirMatchArm {
+                            hir_id: self.alloc(arm.id),
+                            pattern,
+                            value,
+                        }
+                    })
+                    .collect();
+                HirExprKind::Match(Box::new(HirMatch { scrutinee, arms }))
+            }
             ast::ExprKind::Error => HirExprKind::Error,
         };
         HirExpr { hir_id, kind }

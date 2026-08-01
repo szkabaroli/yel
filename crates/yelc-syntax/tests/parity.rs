@@ -24,7 +24,7 @@
 //! frozen tree at cutover phase 4. Shelling out to `yelc check` two thousand
 //! times would measure the same thing an order of magnitude slower.
 
-use yelc_base::{Diagnostics, Interner, SourceId};
+use yelc_base::{Diagnostics, NameInterner, SourceId};
 
 mod support;
 use support::{
@@ -62,7 +62,7 @@ fn frozen_rejects(content: &str) -> bool {
 }
 
 fn new_rejects(content: &str) -> bool {
-    let interner = Interner::new();
+    let interner = NameInterner::new();
     let mut diags = Diagnostics::new();
     let _ = yelc_syntax::parse(SourceId(0), content, &interner, &mut diags);
     diags.has_errors()
@@ -441,7 +441,7 @@ fn accept_reject_parity_over_handwritten_edge_cases() {
 
 /// Byte offset of the earliest diagnostic the **new** parser reports.
 fn new_first_error_offset(content: &str) -> Option<usize> {
-    let interner = Interner::new();
+    let interner = NameInterner::new();
     let mut diags = Diagnostics::new();
     let _ = yelc_syntax::parse(SourceId(0), content, &interner, &mut diags);
     diags

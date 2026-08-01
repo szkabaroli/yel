@@ -12,8 +12,9 @@
 //! before stage 4 exists. Running it *after* the UI desugaring is equivalent
 //! to the pre-desugaring order the plans sketched, because the desugaring
 //! keeps every reactive site explicit — a prop getter, a `UiText` content, a
-//! build-position `Match` scrutinee, a `Repeat` iterable, a handler closure —
-//! and resolves every reference to exactly the form dependency tracking wants.
+//! [`Boundary`](HirExprKind::Boundary)'s condition or iterable, a handler
+//! closure — and resolves every reference to exactly the form dependency
+//! tracking wants.
 //!
 //! # What counts as reactive state
 //!
@@ -30,7 +31,7 @@
 //! they feed effect wiring and eventually output, so hash-map iteration order
 //! must never reach them (A6).
 
-use crate::expr::{HirExpr, HirExprKind, HirStmt};
+use crate::expr::{HirBoundary, HirExpr, HirExprKind, HirStmt};
 use crate::module::HirModule;
 use crate::visit::{self, Visitor};
 use yelc_base::Name;
@@ -147,17 +148,31 @@ impl Visitor for Sites<'_, '_> {
             HirExprKind::UiText(content) => {
                 self.site(expr.hir_id, |collector| collector.visit_expr(content));
             }
-            HirExprKind::Repeat(node) => {
-                self.site(expr.hir_id, |collector| {
-                    collector.visit_expr(&node.iterable);
-                    if let Some(key) = &node.key {
-                        collector.visit_expr(key);
+            HirExprKind::Boundary(boundary) => match &**boundary {
+                HirBoundary::Conditional(node) => {
+                    self.site(expr.hir_id, |collector| {
+                        collector.visit_expr(&node.scrutinee)
+                    });
+                    for arm in &node.arms {
+                        self.visit_expr(&arm.value);
                     }
-                });
-                for child in &node.children {
-                    self.visit_expr(child);
                 }
-            }
+                HirBoundary::Repeat(node) => {
+                    self.site(expr.hir_id, |collector| {
+                        collector.visit_expr(&node.iterable);
+                        if let Some(key) = &node.key {
+                            collector.visit_expr(key);
+                        }
+                    });
+                    for child in &node.children {
+                        self.visit_expr(child);
+                    }
+                }
+                HirBoundary::Children => {}
+            },
+            // A plain `Match` in build position is the *inside* of a
+            // conditional boundary — an `else if` level nested in the false
+            // arm. Each level's condition is its own re-evaluation site.
             HirExprKind::Match(node) => {
                 self.site(expr.hir_id, |collector| {
                     collector.visit_expr(&node.scrutinee)

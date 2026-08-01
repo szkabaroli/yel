@@ -114,7 +114,6 @@ impl_idx!(crate::ids::FieldIdx);
 impl_idx!(crate::ids::VariantIdx);
 impl_idx!(crate::ids::LocalId);
 impl_idx!(crate::ids::ExprId);
-impl_idx!(crate::ids::InterfaceId);
 
 #[cfg(test)]
 mod tests {

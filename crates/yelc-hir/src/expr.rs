@@ -42,10 +42,9 @@ pub struct HirExpr {
 /// What an expression is.
 ///
 /// UI vocabulary ([`Instantiate`](HirExprKind::Instantiate),
-/// [`UiText`](HirExprKind::UiText), [`Repeat`](HirExprKind::Repeat),
-/// [`Fragment`](HirExprKind::Fragment),
-/// [`ChildrenPlaceholder`](HirExprKind::ChildrenPlaceholder)) is legal here —
-/// stage 3 is a frontend stage. C1 forbids it below the LIR seam, not in HIR.
+/// [`UiText`](HirExprKind::UiText), [`Fragment`](HirExprKind::Fragment),
+/// [`Boundary`](HirExprKind::Boundary)) is legal here — stage 3 is a frontend
+/// stage. C1 forbids it below the LIR seam, not in HIR.
 #[derive(Debug)]
 pub enum HirExprKind {
     /// A body-scoped local: parameter, `let`, loop or arm binder.
@@ -136,16 +135,14 @@ pub enum HirExprKind {
     Instantiate(Box<HirInstantiate>),
     /// A bare string child — text content.
     UiText(Box<HirExpr>),
-    /// A UI `for`: builder children repeated over an iterable. Not a
-    /// conditional, so not `Match`. The binder is a local of the region body's
-    /// scope whose type stage 4 derives from the iterable (the binder
-    /// exception).
-    Repeat(Box<HirRepeat>),
+    /// A dynamic region of the tree — see [`HirBoundary`]. Everything in a
+    /// build body outside a boundary is static structure that runs once at
+    /// mount; a boundary is the unit that mounts, unmounts and reconciles
+    /// afterwards.
+    Boundary(Box<HirBoundary>),
     /// A run of builder children with no element of their own — a UI `if`
     /// arm's node list.
     Fragment(Vec<HirExpr>),
-    /// The `@children` slot marker.
-    ChildrenPlaceholder,
     /// A recovery node the parser produced, carried through (H5: lowered, not
     /// skipped). The parse diagnostic already exists.
     Error,
@@ -218,6 +215,11 @@ pub struct HirMatchArm {
 #[derive(Debug)]
 pub enum HirPattern {
     Bool(bool),
+    /// An integer-literal arm — the surface `match`'s form (.yelir subset).
+    Int(i64),
+    /// A pattern the lowering does not understand yet; its diagnostic exists
+    /// (H5), and stage 4 will skip the arm.
+    Error,
 }
 
 /// A statement block: the body of a branch, loop, function or closure.
@@ -298,7 +300,28 @@ pub struct HirProp {
     pub setter: Option<HirClosure>,
 }
 
-/// A UI `for` region.
+/// A dynamic region of the UI tree: the three template forms whose content
+/// changes after first render. The name is the tree-shape concept — the
+/// anchor at which subtrees mount, unmount and reconcile — and each boundary
+/// is `signalck`'s natural dependency unit: the state its condition or
+/// iterable reads decides when the region re-evaluates.
+///
+/// One boundary per surface construct: a whole `if`/`else if`/`else` chain is
+/// **one** [`Conditional`](HirBoundary::Conditional) — the chain nests as
+/// plain [`Match`](HirExprKind::Match) expressions inside it, because the
+/// chain occupies one anchor in the tree, not one per branch.
+#[derive(Debug)]
+pub enum HirBoundary {
+    /// A UI `if` chain. The conditional itself is still a [`HirMatch`] — the
+    /// boundary wrapper carries the region identity, not the branching.
+    Conditional(HirMatch),
+    /// A UI `for`: children repeated per item, reconciled by `key`.
+    Repeat(HirRepeat),
+    /// `@children` — the mount point where a parent inserts its children.
+    Children,
+}
+
+/// A UI `for` region — the payload of [`HirBoundary::Repeat`].
 #[derive(Debug)]
 pub struct HirRepeat {
     /// The loop binder — a local of the enclosing build body's scope. Untyped

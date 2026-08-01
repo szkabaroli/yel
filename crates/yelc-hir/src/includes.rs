@@ -63,7 +63,17 @@ pub fn resolve_includes(
             let span = decl.specifier_span.unwrap_or(decl.span);
 
             let text = context.names.str(specifier).to_string();
-            if let Some(std_name) = text.strip_prefix("std:") {
+            // Two spellings, one registry: `std:num` is the shorthand the
+            // registry keys; `yel:std/num@0.1.0` is the WIT-style full name
+            // plans/modules.md designs and the desugar artifact writes. The
+            // version is dropped in the normalization — the embedded stdlib
+            // has exactly one, the compiler's own.
+            let std_lookup = text.strip_prefix("std:").map(str::to_string).or_else(|| {
+                let full = text.strip_prefix("yel:std/")?;
+                let name = full.split('@').next()?;
+                Some(name.to_string())
+            });
+            if let Some(std_name) = std_lookup.as_deref() {
                 // The embedded stdlib, compiled by build.rs from
                 // `stdlib/*.yel` and stamped by the same yelc-sema build —
                 // never the --include directories, which is the point of the

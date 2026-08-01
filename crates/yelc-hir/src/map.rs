@@ -1,8 +1,7 @@
 //! The `HirId ↔ SourceNodeId` map — how a HIR node points back at source.
 //!
-//! What lets a diagnostic name a construct the user wrote, and what the LSP needs
-//! to answer *"what is under the cursor"*. Invariant
-//! [H2](../../../plans/rewrite/stage-3-hir-build.md).
+//! What lets a diagnostic name a construct the user wrote, and what the LSP
+//! needs to answer *"what is under the cursor"*.
 
 use rustc_hash::FxHashMap;
 
@@ -16,23 +15,20 @@ use crate::ids::{HirId, SourceNodeId};
 /// [`next_hir_id`](Self::next_hir_id) is the only way to obtain a [`HirId`], and
 /// it records the mapping in the same step. There is no *"allocate now, map
 /// later"* path, so a `HirId` with no source cannot be produced by forgetting
-/// the second half — the shape ark's `hir_map.rs` established, and the reason to
-/// keep the counter private.
+/// the second half — which is the reason the counter is private.
 ///
 /// # Injective, not merely total
 ///
-/// [H2](../../../plans/rewrite/stage-3-hir-build.md) originally read *"total and
-/// bidirectional"*, asserted by `hir_of(node_of(h)) == h`. That round-trip
-/// **passes under a key collision**: if two distinct AST nodes hash to one key,
-/// the reverse map keeps the last writer, the forward map still answers, and the
+/// A bidirectionality round-trip check (`hir_of(node_of(h)) == h`) **passes
+/// under a key collision**: if two distinct AST nodes hash to one key, the
+/// reverse map keeps the last writer, the forward map still answers, and the
 /// property holds for the survivor. So the insert asserts injectivity where the
-/// invariant is established rather than leaving it to a test that cannot observe
-/// it ([A8](../../../plans/rewrite/anti-spec.md)).
+/// invariant is established rather than leaving it to a test that cannot
+/// observe it.
 ///
-/// This is not hypothetical. Keyed by a bare `yelc_syntax::NodeId` — which is
-/// what the brief specifies and what ark does — the collision is guaranteed the
-/// moment a second file is lowered, because `NodeId`s restart at zero per file.
-/// See [`SourceNodeId`].
+/// This is not hypothetical. Keyed by a bare `yelc_syntax::NodeId`, the
+/// collision is guaranteed the moment a second file is lowered, because
+/// `NodeId`s restart at zero per file. See [`SourceNodeId`].
 #[derive(Debug, Default)]
 pub struct HirMap {
     map: FxHashMap<HirId, SourceNodeId>,

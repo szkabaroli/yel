@@ -156,6 +156,14 @@ pub enum ItemKind {
     ExternComponent(ExternComponentDecl),
     Global(GlobalDecl),
     Component(ComponentDecl),
+    // The .yelir subset (user-approved surface, 2026-07-31 —
+    // plans/desugar/README.md §1). `module`/`use` are contextual words, not
+    // lexer keywords; the member-form function and property are the same
+    // shapes a `global` body holds, legal at item position.
+    Module(Box<ModuleDecl>),
+    Use(Box<UseDecl>),
+    Function(Box<FunctionDecl>),
+    Property(Box<PropertyDecl>),
     /// Recovery node: the parser could not match a top-level item here.
     /// Carries the span it consumed so the text is still attributable.
     Error {
@@ -176,6 +184,10 @@ impl ItemKind {
             ItemKind::ExternComponent(it) => it.id,
             ItemKind::Global(it) => it.id,
             ItemKind::Component(it) => it.id,
+            ItemKind::Module(it) => it.id,
+            ItemKind::Use(it) => it.id,
+            ItemKind::Function(it) => it.id,
+            ItemKind::Property(it) => it.id,
             ItemKind::Error { id, .. } => *id,
         }
     }
@@ -191,6 +203,10 @@ impl ItemKind {
             ItemKind::ExternComponent(it) => it.span,
             ItemKind::Global(it) => it.span,
             ItemKind::Component(it) => it.span,
+            ItemKind::Module(it) => it.span,
+            ItemKind::Use(it) => it.span,
+            ItemKind::Function(it) => it.span,
+            ItemKind::Property(it) => it.span,
             ItemKind::Error { span, .. } => *span,
         }
     }
@@ -454,6 +470,28 @@ impl ExternComponentDecl {
     }
 }
 
+/// `module NAME { item* }` — plans/modules.md §3's surface. Contents are
+/// ordinary items: the artifact writes variants, records, `use`, member-form
+/// functions and module-level state inside one.
+#[derive(Debug)]
+pub struct ModuleDecl {
+    pub id: NodeId,
+    pub span: Span,
+    pub attributes: Option<AttributeList>,
+    pub name: MaybeIdent,
+    pub items: Vec<ItemKind>,
+}
+
+/// `use Base.{ name, name, };` — plans/modules.md §4.1's in-package half.
+#[derive(Debug)]
+pub struct UseDecl {
+    pub id: NodeId,
+    pub span: Span,
+    pub attributes: Option<AttributeList>,
+    pub base: MaybeIdent,
+    pub names: Vec<MaybeIdent>,
+}
+
 /// `[export] global Name { … }`
 #[derive(Debug)]
 pub struct GlobalDecl {
@@ -601,6 +639,9 @@ pub struct FunctionDecl {
     pub attributes: Option<AttributeList>,
     pub name: MaybeIdent,
     pub is_export: bool,
+    /// `name: extern func(…);` — the import-contract form the .yelir subset
+    /// writes at module level. `false` everywhere the keyword was not written.
+    pub is_extern: bool,
     /// `Missing` when the `func` keyword itself was absent — which is different
     /// from a function with no parameters, and used to be indistinguishable
     /// from it. `component A { export x: s32; }` produced a `FunctionDecl`
@@ -1142,11 +1183,29 @@ fn flatten(kind: ExprKind, worklist: &mut Vec<ExprKind>) {
         ExprKind::List(items) | ExprKind::Tuple(items) => {
             worklist.extend(items.into_iter().map(detach_owned));
         }
-        ExprKind::Record(fields) => {
+        ExprKind::Record { name: _, fields } => {
             worklist.extend(fields.into_iter().filter_map(|field| match field {
                 Recovered::Present(field) => Some(detach_owned(field.value)),
                 Recovered::Missing { .. } => None,
             }));
+        }
+        ExprKind::Match(match_expr) => {
+            let match_expr = *match_expr;
+            worklist.push(detach_owned(match_expr.scrutinee));
+            for arm in match_expr.arms {
+                worklist.push(detach_owned(arm.pattern));
+                match arm.body {
+                    MatchArmBody::Expr(expr) => worklist.push(detach_owned(*expr)),
+                    // Blocks are not detached — the `Closure` arm above
+                    // is the precedent: statement bodies do not participate
+                    // in expression deep-drop.
+                    MatchArmBody::Block(_) => {}
+                    MatchArmBody::Assign(assign) => {
+                        worklist.push(detach_owned(assign.target));
+                        worklist.push(detach_owned(assign.value));
+                    }
+                }
+            }
         }
         ExprKind::Unary { op: _, operand } => worklist.push(detach_owned(*operand)),
         ExprKind::Binary { op: _, lhs, rhs } => {
@@ -1236,7 +1295,13 @@ pub enum ExprKind {
     Interpolation(Vec<InterpolationPart>),
     List(Vec<Expr>),
     Tuple(Vec<Expr>),
-    Record(Vec<Recovered<RecordFieldInit>>),
+    /// `{ f: e }` (anonymous) or `Name { f: e }` (typed — the .yelir
+    /// subset's form). The name's meaning is type-directed and stage 4's; it
+    /// is carried, not resolved.
+    Record {
+        name: Option<MaybeIdent>,
+        fields: Vec<Recovered<RecordFieldInit>>,
+    },
     Closure(Box<ClosureExpr>),
     Ident(Name),
     Unary {
@@ -1281,8 +1346,37 @@ pub enum ExprKind {
         base: Box<Expr>,
         index: Box<Expr>,
     },
+    /// `match scrutinee { arms }` — directions §9's general conditional,
+    /// surface form (.yelir subset).
+    Match(Box<MatchExpr>),
     /// Recovery node.
     Error,
+}
+
+#[derive(Debug)]
+pub struct MatchExpr {
+    pub scrutinee: Expr,
+    /// In source order, whitespace-separated; an optional `,` between arms is
+    /// tolerated and not recorded.
+    pub arms: Vec<MatchArm>,
+}
+
+#[derive(Debug)]
+pub struct MatchArm {
+    pub id: NodeId,
+    pub span: Span,
+    /// Patterns parse as expressions — literal patterns are literal exprs;
+    /// what a bare name means is type-directed and stage 4's.
+    pub pattern: Expr,
+    pub body: MatchArmBody,
+}
+
+#[derive(Debug)]
+pub enum MatchArmBody {
+    Expr(Box<Expr>),
+    Block(Block),
+    /// `pattern -> place = value` — one assignment, statement-shaped, no `;`.
+    Assign(Box<AssignStmt>),
 }
 
 #[derive(Debug)]

@@ -1,36 +1,26 @@
-//! `yelc-base` — shared compiler infrastructure for the rewritten pipeline.
-//!
-//! This crate is the **keep-list** made concrete: the parts of the frozen
-//! compiler that were already better than what a rewrite would produce, carried
-//! over intact. See `plans/rewrite/keep-list.md`.
-//!
-//! # These files are copies, not a dependency
-//!
-//! `yelc-base` deliberately does **not** depend on `yel-core`. The frozen tree
-//! and the new tree share nothing mutable: a shared dependency is an edge along
-//! which the freeze eventually breaks, and the frozen tree is the differential
-//! baseline that must behave identically in week 1 and week 20.
+//! `yelc-base` — shared compiler infrastructure: diagnostics, source files,
+//! string interning, typed ids.
 //!
 //! # What lives here
 //!
-//! | Module | Carried over from | Why it stays |
-//! |---|---|---|
-//! | [`diagnostic`] | `yel-core/src/diagnostic.rs` | Builder API, real `ErrorCode` enum, accumulating sink, span-aware rendering |
-//! | [`source`] | `yel-core/src/source.rs` | `SourceMap`, `Span`, byte offsets, snippet rendering |
-//! | [`interner`] | `yel-core/src/interner.rs` | `Interner`/`Name` — no `String` survives past lowering |
-//! | [`ids`] | `yel-core/src/ids.rs` | Typed `u32` newtype per index space |
-//! | [`index_vec`] | `yel-core/src/index_vec.rs` | `IndexVec<I, T>` — never a raw `usize` index |
+//! | Module | What |
+//! |---|---|
+//! | [`diagnostic`] | `Diagnostic` builder, `ErrorCode`, the accumulating `Diagnostics` sink, span-aware rendering |
+//! | [`source`] | `SourceMap`, `Span`, byte offsets, snippet rendering |
+//! | [`interner`] | `NameInterner`/`Name` — no `String` survives past lowering |
+//! | [`ids`] | Typed `u32` newtype per index space |
+//! | [`index_vec`] | `IndexVec<I, T>` — never a raw `usize` index |
 //!
-//! # What deliberately did NOT come over
+//! # What deliberately does NOT live here
 //!
-//! The UI-specific ids — `NodeId` (UI tree nodes), `BlockId`, `ForId`, `IfId`,
-//! `TreeBoundaryId` — are frontend vocabulary, not general infrastructure. They
-//! must not be visible to `yelc-lir` or `yelc-codegen`, which depend on this
-//! crate. A stage that needs an index space defines its own newtype; it does not
-//! reuse an existing one because the integer happens to fit.
+//! Frontend vocabulary. This crate is general infrastructure that back-end
+//! crates depend on too, so stage-specific index spaces (AST node ids, HIR
+//! ids, UI-tree ids) are defined by the stage that owns them. A stage that
+//! needs an index space defines its own newtype; it does not reuse an existing
+//! one because the integer happens to fit.
 //!
-//! Note `yelc-syntax` defines its own `NodeId` for AST nodes. It is a different
-//! index space from the frozen tree's UI-node `NodeId`, and from `HirId`.
+//! Note `yelc-syntax` defines its own `NodeId` for AST nodes — a different
+//! index space from `HirId`.
 //!
 //! # Policy this crate carries
 //!
@@ -50,7 +40,7 @@ pub mod interner;
 pub mod source;
 
 pub use diagnostic::{Diagnostic, Diagnostics, ErrorCode, Severity};
-pub use ids::{DefId, ExprId, FieldIdx, InterfaceId, LocalId, ParamIdx, VariantIdx};
+pub use ids::{DefId, ExprId, FieldIdx, LocalId, ParamIdx, VariantIdx};
 pub use index_vec::{Idx, IndexVec};
-pub use interner::{ArcStr, Interner, Name};
+pub use interner::{ArcStr, Name, NameInterner};
 pub use source::{Source, SourceId, SourceMap, Span};

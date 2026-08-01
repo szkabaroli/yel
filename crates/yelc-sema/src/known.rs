@@ -25,7 +25,7 @@
 //! afterwards every accessor returns a plain [`DefId`].
 
 use rustc_hash::FxHashMap;
-use yelc_base::{Interner, Name};
+use yelc_base::{Name, NameInterner};
 
 use crate::definitions::{DefKind, Definitions};
 use crate::ids::DefId;
@@ -100,7 +100,7 @@ impl KnownItems {
     /// Call **after** builtin registration and before any lowering. This is the
     /// single point at which "the builtins are all present" is checked; every
     /// later read is infallible because of it.
-    pub fn resolve(defs: &Definitions, interner: &Interner) -> Result<Self, MissingKnownItems> {
+    pub fn resolve(defs: &Definitions, interner: &NameInterner) -> Result<Self, MissingKnownItems> {
         let mut resolved = FxHashMap::default();
         let mut missing = Vec::new();
 
@@ -138,7 +138,7 @@ mod tests {
         Span::new(SourceId::new(0), 0, 1)
     }
 
-    fn registered_all(interner: &Interner) -> Definitions {
+    fn registered_all(interner: &NameInterner) -> Definitions {
         let mut defs = Definitions::new(PackageId::LOCAL);
         for &item in Known::ALL {
             defs.register(
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn a_complete_registration_resolves_and_reads_infallibly() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let defs = registered_all(&interner);
         let known = KnownItems::resolve(&defs, &interner).unwrap();
         for &item in Known::ALL {
@@ -173,7 +173,7 @@ mod tests {
     /// available statement of the property today.
     #[test]
     fn an_incomplete_registration_fails_at_resolve() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let defs = Definitions::new(PackageId::LOCAL); // nothing registered
         let err = KnownItems::resolve(&defs, &interner).unwrap_err();
         assert_eq!(err.missing, Known::ALL.to_vec());
@@ -229,7 +229,7 @@ mod tests {
     /// `Known::ALL` and belongs beside it.
     #[test]
     fn resolution_covers_the_whole_inventory() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let defs = registered_all(&interner);
         let known = KnownItems::resolve(&defs, &interner).unwrap();
         for &item in Known::ALL {
@@ -251,7 +251,7 @@ mod tests {
     /// is not.
     #[test]
     fn a_known_of_the_wrong_kind_is_missing() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         defs.register(interner.intern("Color"), DefKind::Value, span(), false)
             .unwrap();

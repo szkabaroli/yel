@@ -66,7 +66,7 @@ mod write;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use yelc_base::Interner;
+use yelc_base::NameInterner;
 
 use crate::context::CompilerContext;
 use crate::definitions::Definitions;
@@ -210,7 +210,7 @@ impl Artifact {
     /// Build an artifact from a finished compilation's tables.
     pub fn build(
         package: PackageName,
-        names: &Interner,
+        names: &NameInterner,
         types: &TypeInterner,
         defs: &Definitions,
     ) -> Self {

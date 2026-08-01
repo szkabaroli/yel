@@ -448,6 +448,12 @@ pub enum TokenKind {
     ARG_LIST,
     MEMBER_EXPR,
     INDEX_EXPR,
+
+    // The .yelir subset (2026-07-31): appended so no existing kind moves.
+    MODULE_DECL,
+    USE_DECL,
+    MATCH_EXPR,
+    MATCH_ARM,
 }
 
 impl TokenKind {

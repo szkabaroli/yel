@@ -26,7 +26,7 @@
 //! [`the_frozen_parser_rejects_every_shape_this_change_adds`]. Those two tests
 //! are the whole boundary, enumerated in both directions.
 
-use yelc_base::{Diagnostics, Interner, SourceId};
+use yelc_base::{Diagnostics, NameInterner, SourceId};
 use yelc_syntax::ast;
 use yelc_syntax::ast::visit::{self, ErrorNodeCounter, Visitor};
 
@@ -35,7 +35,7 @@ use yelc_syntax::ast::visit::{self, ErrorNodeCounter, Visitor};
 // ---------------------------------------------------------------------------
 
 struct Parsed {
-    interner: Interner,
+    interner: NameInterner,
     file: ast::File,
     diagnostics: usize,
     error_nodes: usize,
@@ -43,7 +43,7 @@ struct Parsed {
 
 /// Parse, and assert invariants S1 and S2 on the way through.
 fn parse(source: &str) -> Parsed {
-    let interner = Interner::new();
+    let interner = NameInterner::new();
     let mut diags = Diagnostics::new();
     let parsed = yelc_syntax::parse(SourceId(0), source, &interner, &mut diags);
     assert_eq!(
@@ -197,7 +197,7 @@ fn every_source_in_this_file_round_trips() {
     // S1 again, as a sweep: `parse` asserts it per call, and this is the check
     // that no constant here is reachable only from a test that was deleted.
     for source in EVERY_SOURCE {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut diags = Diagnostics::new();
         let parsed = yelc_syntax::parse(SourceId(0), source, &interner, &mut diags);
         assert_eq!(parsed.green.text(), *source, "S1 failed for {source:?}");
@@ -219,7 +219,7 @@ fn green_return_stmts(source: &str) -> Vec<String> {
             }
         }
     }
-    let interner = Interner::new();
+    let interner = NameInterner::new();
     let mut diags = Diagnostics::new();
     let parsed = yelc_syntax::parse(SourceId(0), source, &interner, &mut diags);
     let mut out = Vec::new();

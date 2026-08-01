@@ -27,6 +27,13 @@ use crate::node_map::NodeMap;
 pub enum HirItem {
     Component(HirComponent),
     Global(HirGlobal),
+    /// A root function — the .yelir subset's `name: func(…) { … }` at item
+    /// or module level. No owner row: `member` on the inner function is 0
+    /// and meaningless, which is why the `DefId` rides alongside.
+    Function {
+        def: DefId,
+        function: HirFunction,
+    },
 }
 
 impl HirItem {
@@ -34,6 +41,7 @@ impl HirItem {
         match self {
             HirItem::Component(component) => component.def,
             HirItem::Global(global) => global.def,
+            HirItem::Function { def, .. } => *def,
         }
     }
 
@@ -41,6 +49,7 @@ impl HirItem {
         match self {
             HirItem::Component(component) => component.name,
             HirItem::Global(global) => global.name,
+            HirItem::Function { function, .. } => function.name,
         }
     }
 }

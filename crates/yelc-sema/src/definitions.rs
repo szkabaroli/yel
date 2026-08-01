@@ -42,7 +42,7 @@
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use yelc_base::{Diagnostic, ErrorCode, Interner, Name, SourceMap, Span};
+use yelc_base::{Diagnostic, ErrorCode, Name, NameInterner, SourceMap, Span};
 
 use crate::ids::{DefId, ModuleId, OverloadKey, PackageId};
 use crate::types::Ty;
@@ -339,7 +339,7 @@ impl Collision {
     /// being rejected and a note carries the file and line of the one that won,
     /// which is the shape [`Diagnostic`] supports (it has one span and a list of
     /// notes).
-    pub fn diagnostic(&self, names: &Interner, sources: &SourceMap) -> Diagnostic {
+    pub fn diagnostic(&self, names: &NameInterner, sources: &SourceMap) -> Diagnostic {
         let name = names.str(self.name);
         let previously = match sources.get(self.existing_span.source) {
             Some(source) => format!(
@@ -654,7 +654,7 @@ impl Definitions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yelc_base::{Interner, SourceId};
+    use yelc_base::{NameInterner, SourceId};
 
     fn span() -> Span {
         Span::new(SourceId::new(0), 0, 1)
@@ -670,7 +670,7 @@ mod tests {
     /// deleted so the reversal stays visible.
     #[test]
     fn kinds_share_one_namespace_and_therefore_collide() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         let name = interner.intern("Panel");
         let first = defs.register(name, DefKind::Type, span(), false).unwrap();
@@ -687,7 +687,7 @@ mod tests {
     /// the frozen compiler's own test named.
     #[test]
     fn every_pair_of_distinct_kinds_collides() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         for &first in DefKind::ALL {
             for &second in DefKind::ALL {
                 if first == second {
@@ -708,7 +708,7 @@ mod tests {
 
     #[test]
     fn a_duplicate_reports_and_keeps_the_original() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         let name = interner.intern("R");
         let first = defs.register(name, DefKind::Type, span(), false).unwrap();
@@ -724,7 +724,7 @@ mod tests {
     /// B3: the scope is multi-valued, and this is the API that fills it.
     #[test]
     fn values_with_distinct_overload_keys_share_a_name() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         let name = interner.intern("len");
         let on_list = defs
@@ -755,7 +755,7 @@ mod tests {
 
     #[test]
     fn an_overload_set_rejects_a_repeated_key() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         let name = interner.intern("len");
         let key = OverloadKey {
@@ -771,7 +771,7 @@ mod tests {
     /// including another empty key on the same kind.
     #[test]
     fn an_empty_overload_key_never_forms_a_set() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         let name = interner.intern("len");
         defs.register(name, DefKind::Value, span(), false).unwrap();
@@ -797,7 +797,7 @@ mod tests {
     /// A module occupies the same namespace as everything else.
     #[test]
     fn a_module_collides_with_a_definition_of_the_same_name() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         let name = interner.intern("Hash");
         let module = defs
@@ -825,7 +825,7 @@ mod tests {
     /// see the note on [`Module`].)
     #[test]
     fn a_module_row_points_at_its_package_and_owns_no_names() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         let foreign = PackageId::new(4);
         let module = defs
@@ -851,7 +851,7 @@ mod tests {
     /// than silently indexing with it (decision B2).
     #[test]
     fn defids_are_package_qualified() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         let id = defs
             .register(interner.intern("R"), DefKind::Type, span(), false)
@@ -874,7 +874,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "from another package")]
     fn reading_a_foreign_def_id_panics_rather_than_returning_a_local_row() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         let local = defs
             .register(interner.intern("Local"), DefKind::Type, span(), false)
@@ -887,7 +887,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "from another package")]
     fn writing_through_a_foreign_def_id_panics_rather_than_overwriting_a_local_row() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         let local = defs
             .register(interner.intern("Local"), DefKind::Value, span(), false)
@@ -898,7 +898,7 @@ mod tests {
     /// A6: iteration order must not come from the hash map.
     #[test]
     fn iteration_is_registration_order() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         for name in ["zeta", "alpha", "mu"] {
             defs.register(interner.intern(name), DefKind::Type, span(), false)
@@ -913,7 +913,7 @@ mod tests {
 
     #[test]
     fn declared_types_start_absent_not_placeholder() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         let id = defs
             .register(interner.intern("x"), DefKind::Value, span(), false)
@@ -927,7 +927,7 @@ mod tests {
     /// bridge, so the two cannot drift.
     #[test]
     fn a_definitions_kind_agrees_with_the_symbol_bound_to_its_name() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         for (index, &kind) in DefKind::ALL.iter().enumerate() {
             let name = interner.intern(&format!("n{index}"));
@@ -943,7 +943,7 @@ mod tests {
     /// taken by another kind resolves to nothing at all.
     #[test]
     fn lookup_def_reports_nothing_when_the_name_is_another_kind() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut defs = Definitions::new(PackageId::LOCAL);
         let name = interner.intern("Color");
         defs.register(name, DefKind::Global, span(), false).unwrap();

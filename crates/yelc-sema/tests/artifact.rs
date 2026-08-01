@@ -14,7 +14,7 @@
 //! [B1](../../../plans/rewrite/open-decisions.md) tested rather than asserted.
 
 use pretty_assertions::assert_eq;
-use yelc_base::{Interner, SourceId, Span};
+use yelc_base::{NameInterner, SourceId, Span};
 use yelc_sema::artifact::{SerializedDefPath, StructuralTy, decode, encode};
 use yelc_sema::definitions::DefKind;
 use yelc_sema::ids::PackageId;
@@ -34,7 +34,7 @@ fn package() -> PackageName {
 
 /// A compilation that produces an artifact.
 struct Producer {
-    names: Interner,
+    names: NameInterner,
     types: TypeInterner,
     defs: Definitions,
 }
@@ -42,7 +42,7 @@ struct Producer {
 impl Producer {
     fn new() -> Self {
         Self {
-            names: Interner::new(),
+            names: NameInterner::new(),
             types: TypeInterner::new(),
             defs: Definitions::new(PackageId::LOCAL),
         }
@@ -67,7 +67,7 @@ impl Producer {
 /// Render a type's full structure as text, so two interners can be compared on
 /// *meaning* rather than on handles — which is the only comparison that means
 /// anything across a boundary.
-fn render(types: &TypeInterner, defs: &Definitions, names: &Interner, ty: Ty) -> String {
+fn render(types: &TypeInterner, defs: &Definitions, names: &NameInterner, ty: Ty) -> String {
     match types.kind(ty) {
         TyKind::Bool => "bool".into(),
         TyKind::S8 => "s8".into(),
@@ -155,7 +155,7 @@ fn a_type_survives_a_differently_populated_interner() {
     // A fresh interner with *different* types interned first. Each one pushes
     // the artifact's types further down, so the same structural type cannot
     // land on the same handle.
-    let consumer_names = Interner::new();
+    let consumer_names = NameInterner::new();
     let consumer_types = TypeInterner::new();
     let before_decoys = consumer_types.len();
     consumer_types.intern(TyKind::List(Ty::STRING));
@@ -237,7 +237,7 @@ fn an_adt_survives_a_differently_populated_interner() {
 
     let artifact = producer.build();
 
-    let consumer_names = Interner::new();
+    let consumer_names = NameInterner::new();
     let consumer_types = TypeInterner::new();
     consumer_types.intern(TyKind::Option(Ty::U64));
     consumer_types.intern(TyKind::List(Ty::CHAR));
@@ -284,7 +284,7 @@ fn a_path_resolves_to_a_local_defid_with_a_different_index() {
 
     let artifact = producer.build();
 
-    let consumer_names = Interner::new();
+    let consumer_names = NameInterner::new();
     let consumer_types = TypeInterner::new();
     let mut consumer_defs = Definitions::new(PackageId(2));
     for existing in ["alpha", "beta", "gamma"] {
@@ -346,7 +346,7 @@ fn two_kinds_sharing_a_name_no_longer_load_as_two_definitions() {
         members: Vec::new(),
     });
 
-    let consumer_names = Interner::new();
+    let consumer_names = NameInterner::new();
     let consumer_types = TypeInterner::new();
     assert!(matches!(
         artifact.load(PackageId(1), &consumer_names, &consumer_types),
@@ -365,7 +365,7 @@ fn a_definitions_kind_survives_the_round_trip() {
     }
 
     let artifact = producer.build();
-    let consumer_names = Interner::new();
+    let consumer_names = NameInterner::new();
     let consumer_types = TypeInterner::new();
     let loaded = artifact
         .load(PackageId(1), &consumer_names, &consumer_types)
@@ -384,7 +384,7 @@ fn a_definitions_kind_survives_the_round_trip() {
 fn an_unknown_path_does_not_resolve() {
     let producer = Producer::new();
     let artifact = producer.build();
-    let names = Interner::new();
+    let names = NameInterner::new();
     let types = TypeInterner::new();
     let loaded = artifact.load(PackageId(1), &names, &types).unwrap();
 
@@ -417,7 +417,7 @@ fn a_colliding_definition_is_rejected_not_dropped() {
         members: Vec::new(),
     });
 
-    let names = Interner::new();
+    let names = NameInterner::new();
     let types = TypeInterner::new();
     assert!(matches!(
         artifact.load(PackageId(1), &names, &types),
@@ -455,7 +455,7 @@ fn an_overload_set_is_refused_by_the_loader_not_lost() {
         "the wire cannot yet tell two overloads apart — that is why load refuses",
     );
 
-    let names = Interner::new();
+    let names = NameInterner::new();
     let types = TypeInterner::new();
     assert!(matches!(
         artifact.load(PackageId(1), &names, &types),
@@ -477,7 +477,7 @@ fn a_compiler_mismatch_rejects_the_artifact() {
         "only `compiler` moved"
     );
 
-    let names = Interner::new();
+    let names = NameInterner::new();
     let types = TypeInterner::new();
     match artifact.load(PackageId(1), &names, &types) {
         Err(LoadError::CompilerMismatch { expected, found }) => {
@@ -499,7 +499,7 @@ fn a_format_mismatch_rejects_the_artifact() {
         "only `format` moved",
     );
 
-    let names = Interner::new();
+    let names = NameInterner::new();
     let types = TypeInterner::new();
     match artifact.load(PackageId(1), &names, &types) {
         Err(LoadError::FormatMismatch { expected, found }) => {
@@ -538,7 +538,7 @@ fn a_rejected_artifact_touches_no_table() {
     let mut artifact = producer.build();
     artifact.stamp.format = 999;
 
-    let names = Interner::new();
+    let names = NameInterner::new();
     let types = TypeInterner::new();
     let mut defs = Definitions::new(PackageId(1));
     defs.register(names.intern("existing"), DefKind::Value, span(), false)
@@ -550,7 +550,7 @@ fn a_rejected_artifact_touches_no_table() {
     // artifact whose every type the consumer already holds — which is how the
     // `Ty::S32` version of this test was vacuous.
     let interned_by_a_good_load = {
-        let probe_names = Interner::new();
+        let probe_names = NameInterner::new();
         let probe_types = TypeInterner::new();
         let before = probe_types.len();
         producer
@@ -597,7 +597,7 @@ fn param_and_infer_survive_and_stay_distinct() {
 
     let artifact = producer.build();
 
-    let consumer_names = Interner::new();
+    let consumer_names = NameInterner::new();
     let consumer_types = TypeInterner::new();
     consumer_types.intern(TyKind::Infer(0));
     consumer_types.intern(TyKind::Param(0));
@@ -696,7 +696,7 @@ fn every_composite_shape_survives() {
 
     let artifact = producer.build();
 
-    let consumer_names = Interner::new();
+    let consumer_names = NameInterner::new();
     let consumer_types = TypeInterner::new();
     // Skew hard: seven decoys before anything from the artifact.
     for decoy in [
@@ -892,7 +892,7 @@ fn a_type_index_past_the_table_is_rejected() {
     let mut artifact = Producer::new().build();
     artifact.types.push(StructuralTy::List(99));
 
-    let names = Interner::new();
+    let names = NameInterner::new();
     let types = TypeInterner::new();
     assert!(matches!(
         artifact.load(PackageId(1), &names, &types),
@@ -909,7 +909,7 @@ fn a_parent_before_its_child_is_rejected() {
     artifact.types.push(StructuralTy::List(1));
     artifact.types.push(StructuralTy::S32);
 
-    let names = Interner::new();
+    let names = NameInterner::new();
     let types = TypeInterner::new();
     assert!(matches!(
         artifact.load(PackageId(1), &names, &types),
@@ -935,7 +935,7 @@ fn a_path_with_no_segments_is_rejected() {
         members: Vec::new(),
     });
 
-    let names = Interner::new();
+    let names = NameInterner::new();
     let types = TypeInterner::new();
     assert!(matches!(
         artifact.load(PackageId(1), &names, &types),
@@ -949,7 +949,7 @@ fn a_path_with_no_segments_is_rejected() {
 
 #[test]
 fn export_visibility_and_declared_types_survive() {
-    let names = Interner::new();
+    let names = NameInterner::new();
     let types = TypeInterner::new();
     let mut defs = Definitions::new(PackageId::LOCAL);
     let public = defs
@@ -961,7 +961,7 @@ fn export_visibility_and_declared_types_survive() {
     defs.set_ty(public, Ty::STRING);
 
     let artifact = Artifact::build(package(), &names, &types, &defs);
-    let consumer_names = Interner::new();
+    let consumer_names = NameInterner::new();
     let consumer_types = TypeInterner::new();
     let loaded = artifact
         .load(PackageId(3), &consumer_names, &consumer_types)
@@ -996,7 +996,7 @@ fn a_span_does_not_cross_the_boundary() {
     assert_eq!(producer.defs.get(yelc_sema::DefId::local(0)).span, span());
 
     let artifact = producer.build();
-    let names = Interner::new();
+    let names = NameInterner::new();
     let types = TypeInterner::new();
     let loaded = artifact.load(PackageId(1), &names, &types).unwrap();
     let x = loaded
@@ -1012,7 +1012,7 @@ fn the_package_identity_survives() {
     let artifact = Producer::new().build();
     assert_eq!(artifact.package.to_string(), "test:artifact@1.0.0");
 
-    let names = Interner::new();
+    let names = NameInterner::new();
     let types = TypeInterner::new();
     let loaded = artifact.load(PackageId(1), &names, &types).unwrap();
     assert_eq!(loaded.package(), &package());
@@ -1021,7 +1021,7 @@ fn the_package_identity_survives() {
 #[test]
 fn an_empty_package_round_trips() {
     let artifact = Producer::new().build();
-    let names = Interner::new();
+    let names = NameInterner::new();
     let types = TypeInterner::new();
     let loaded = decode(&encode(&artifact))
         .unwrap()
@@ -1074,7 +1074,7 @@ fn member_rows_round_trip_through_a_different_interner() {
     let artifact = decode(&bytes).expect("decodes");
 
     // The consumer's interner is pre-polluted so producer indices are wrong.
-    let consumer_names = Interner::new();
+    let consumer_names = NameInterner::new();
     for filler in ["aa", "bb", "cc", "dd"] {
         consumer_names.intern(filler);
     }

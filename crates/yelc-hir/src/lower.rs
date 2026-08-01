@@ -91,10 +91,25 @@ pub(crate) struct LoweringContext<'a> {
     type_memo: FxHashMap<TypeId, Option<Ty>>,
 }
 
-/// Walk one file's items of one shape, in source order.
+/// Every item in the file, source order, with `module` contents inline where
+/// the module sits. One namespace is the current language truth (ca905d0), so
+/// module members participate in every phase exactly as top-level items do —
+/// flattening here is registration policy stated once, not per phase.
+fn flattened_items<'i>(items: &'i [ast::ItemKind], out: &mut Vec<&'i ast::ItemKind>) {
+    for item in items {
+        out.push(item);
+        if let ast::ItemKind::Module(module) = item {
+            flattened_items(&module.items, out);
+        }
+    }
+}
+
+/// Walk one file's items of one shape, in source order, modules flattened.
 macro_rules! for_items {
     ($file:expr, $pat:pat => $body:expr) => {
-        for item in &$file.ast.items {
+        let mut flattened = Vec::new();
+        flattened_items(&$file.ast.items, &mut flattened);
+        for item in flattened {
             if let $pat = item {
                 $body
             }
@@ -137,6 +152,57 @@ impl<'a> LoweringContext<'a> {
         for file in parsed {
             for_items!(file, I::Component(decl) => self.register_component(file, decl));
         }
+        // A `module` declaration binds its name in the root scope — the
+        // first surface populator of `ca905d0`'s module arena. Its CONTENTS
+        // still register flat (the sweeps above walked them); binding them
+        // under the module node is the open scoping decision
+        // (plans/modules.md §7), and hover/`use` need only the name.
+        for file in parsed {
+            for_items!(file, I::Module(decl) => self.register_module_decl(decl));
+        }
+        // The .yelir subset's item forms, registered last: values name types
+        // in their signatures, never the reverse.
+        for file in parsed {
+            for_items!(file, I::Function(decl) => self.register_item_function(file, decl));
+        }
+        for file in parsed {
+            for_items!(file, I::Property(decl) => self.register_item_state(file, decl));
+        }
+    }
+
+    fn register_module_decl(&mut self, decl: &ast::ModuleDecl) {
+        let Some(ident) = decl.name.present() else {
+            return;
+        };
+        if let Err(collision) =
+            self.sema
+                .defs
+                .register_module(ident.name, self.sema.defs.package(), ident.span)
+        {
+            report_duplicate(
+                &mut self.sema.diagnostics,
+                &self.sema.sources,
+                &self.sema.names,
+                &collision,
+            );
+        }
+    }
+
+    fn register_item_function(&mut self, file: &ParsedFile, decl: &ast::FunctionDecl) {
+        // extern or not registers the same: externness says who implements
+        // it, not whether the name exists.
+        self.register_item(
+            file,
+            decl.id,
+            decl.span,
+            &decl.name,
+            DefKind::Value,
+            decl.is_export,
+        );
+    }
+
+    fn register_item_state(&mut self, file: &ParsedFile, decl: &ast::PropertyDecl) {
+        self.register_item(file, decl.id, decl.span, &decl.name, DefKind::Value, false);
     }
 
     /// Register one item's name. `None` when the name is a parse hole (its
@@ -384,7 +450,9 @@ impl<'a> LoweringContext<'a> {
     fn collect(&mut self, parsed: &[ParsedFile]) {
         use ast::ItemKind as I;
         for file in parsed {
-            for item in &file.ast.items {
+            let mut items = Vec::new();
+            flattened_items(&file.ast.items, &mut items);
+            for item in items {
                 match item {
                     I::Record(decl) => self.collect_record(file, decl),
                     I::Enum(decl) => self.collect_enum(file, decl),
@@ -393,12 +461,38 @@ impl<'a> LoweringContext<'a> {
                     I::ExternComponent(decl) => self.collect_extern(file, decl),
                     I::Global(decl) => self.collect_global(file, decl),
                     I::Component(decl) => self.collect_component(file, decl),
+                    I::Function(decl) => self.collect_item_function(file, decl),
+                    I::Property(decl) => self.collect_item_state(file, decl),
+                    // A module's contents were flattened above; the module
+                    // itself declares no type. A `use` binds names, not
+                    // types — and under the single root namespace it has no
+                    // names to bind that registration did not already make
+                    // visible, which is also why `lower` has no arm for it.
+                    I::Module(_) | I::Use(_) => {}
                     // An include was consumed by the driver — the module
                     // binding and any not-found diagnostic exist before this
                     // sweep starts (H5's diagnostic arm, one level up).
                     I::Package(_) | I::Include(_) | I::Error { .. } => {}
                 }
             }
+        }
+    }
+
+    fn collect_item_function(&mut self, file: &ParsedFile, decl: &ast::FunctionDecl) {
+        let Some(def) = self.def_of(file, decl.id) else {
+            return;
+        };
+        if let Some(ty) = self.signature_ty(file, &decl.signature) {
+            self.sema.defs.set_ty(def, ty);
+        }
+    }
+
+    fn collect_item_state(&mut self, file: &ParsedFile, decl: &ast::PropertyDecl) {
+        let Some(def) = self.def_of(file, decl.id) else {
+            return;
+        };
+        if let Some(ty) = self.type_of(file, &decl.ty, &[]) {
+            self.sema.defs.set_ty(def, ty);
         }
     }
 
@@ -727,6 +821,9 @@ impl<'a> LoweringContext<'a> {
         for file in parsed {
             for_items!(file, I::Component(decl) => bodies::lower_component(self, file, decl));
         }
+        for file in parsed {
+            for_items!(file, I::Function(decl) => bodies::lower_item_function(self, file, decl));
+        }
     }
 
     /// Allocate a **primary** id: this HIR node is the lowering of that AST
@@ -820,7 +917,7 @@ pub(crate) fn report_duplicate_collision(
 fn report_duplicate(
     diagnostics: &mut Diagnostics,
     sources: &yelc_base::SourceMap,
-    names: &yelc_base::Interner,
+    names: &yelc_base::NameInterner,
     collision: &yelc_sema::Collision,
 ) {
     let name = names.str(collision.name);

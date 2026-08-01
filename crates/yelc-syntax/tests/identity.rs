@@ -48,7 +48,7 @@
 //! input are deliberately different (invariant S5 materialises holes pest simply
 //! discards), and `parity.rs` is what holds the accept/reject line.
 
-use yelc_base::{Diagnostics, Interner, SourceId};
+use yelc_base::{Diagnostics, NameInterner, SourceId};
 
 mod support;
 use support::{
@@ -299,12 +299,12 @@ mod frozen {
 
 mod fresh {
     use super::Construct;
-    use yelc_base::{Diagnostics, Interner, SourceId};
+    use yelc_base::{Diagnostics, NameInterner, SourceId};
     use yelc_syntax::ast as na;
 
     /// `None` when the new parser reported anything.
     pub fn constructs(content: &str) -> Option<Vec<Construct>> {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut diags = Diagnostics::new();
         let parsed = yelc_syntax::parse(SourceId(0), content, &interner, &mut diags);
         if diags.has_errors() {
@@ -322,6 +322,13 @@ mod fresh {
                 // containing one never reaches this comparison, because the
                 // frozen side fails to parse it first.
                 na::ItemKind::Include(_) => {}
+                // Same reasoning for the whole .yelir subset: the frozen
+                // grammar has none of these forms, so a program containing
+                // one never reaches this comparison.
+                na::ItemKind::Module(_)
+                | na::ItemKind::Use(_)
+                | na::ItemKind::Function(_)
+                | na::ItemKind::Property(_) => {}
                 na::ItemKind::Record(_) => out.push(("item:record", span.start, span.end)),
                 na::ItemKind::Enum(_) => out.push(("item:enum", span.start, span.end)),
                 na::ItemKind::Variant(_) => out.push(("item:variant", span.start, span.end)),
@@ -516,12 +523,26 @@ mod fresh {
                 na::ExprKind::List(items) | na::ExprKind::Tuple(items) => {
                     stack.extend(items.iter())
                 }
-                na::ExprKind::Record(fields) => stack.extend(
+                na::ExprKind::Record { name: _, fields } => stack.extend(
                     fields
                         .iter()
                         .filter_map(|field| field.present())
                         .map(|field| &field.value),
                 ),
+                na::ExprKind::Match(match_expr) => {
+                    stack.push(&match_expr.scrutinee);
+                    for arm in &match_expr.arms {
+                        stack.push(&arm.pattern);
+                        match &arm.body {
+                            na::MatchArmBody::Expr(expr) => stack.push(expr),
+                            na::MatchArmBody::Block(block) => push_stmt_block(out, block),
+                            na::MatchArmBody::Assign(assign) => {
+                                stack.push(&assign.target);
+                                stack.push(&assign.value);
+                            }
+                        }
+                    }
+                }
                 na::ExprKind::Unary { operand, .. } => stack.push(operand),
                 na::ExprKind::Binary { lhs, rhs, .. } => {
                     stack.push(lhs);
@@ -965,7 +986,7 @@ fn the_projection_catches_an_injected_misidentification() {
 /// returning `None` for everything, which would make every sweep above vacuous.
 #[test]
 fn the_projections_are_not_empty() {
-    let interner = Interner::new();
+    let interner = NameInterner::new();
     let mut diags = Diagnostics::new();
     let sample = read(&positive_fixtures()[0]);
     let parsed = yelc_syntax::parse(SourceId(0), &sample, &interner, &mut diags);

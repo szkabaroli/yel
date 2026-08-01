@@ -99,7 +99,7 @@ pub enum TyKind {
 /// Interns [`TyKind`]s to [`Ty`] handles.
 ///
 /// Interior mutability so interning is available through a shared reference —
-/// the same arrangement as `yelc_base::Interner`, and for the same reason: a
+/// the same arrangement as `yelc_base::NameInterner`, and for the same reason: a
 /// type is looked up far more often than the surrounding code holds `&mut`.
 pub struct TypeInterner {
     inner: RefCell<Inner>,

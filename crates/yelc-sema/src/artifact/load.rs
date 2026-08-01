@@ -2,7 +2,7 @@
 
 use rustc_hash::FxHashMap;
 use serde::de::DeserializeOwned;
-use yelc_base::{Interner, Span};
+use yelc_base::{NameInterner, Span};
 
 use crate::definitions::{Definitions, Member, MemberDirection, MemberKind};
 use crate::ids::{DefId, PackageId};
@@ -19,7 +19,7 @@ use super::{Artifact, LoadError, PackageName};
 /// why [`FromArtifact`] takes it by shared reference: resolution is finished, so
 /// nothing a consumer does can leave it half-built.
 pub struct LoadedPackage<'a> {
-    names: &'a Interner,
+    names: &'a NameInterner,
     package: PackageName,
     defs: Definitions,
     type_remap: Vec<Ty>,
@@ -41,7 +41,7 @@ impl<'a> LoadedPackage<'a> {
         self.defs
     }
 
-    pub fn names(&self) -> &'a Interner {
+    pub fn names(&self) -> &'a NameInterner {
         self.names
     }
 
@@ -139,7 +139,7 @@ impl Artifact {
     pub fn load<'a>(
         &self,
         package: PackageId,
-        names: &'a Interner,
+        names: &'a NameInterner,
         types: &TypeInterner,
     ) -> Result<LoadedPackage<'a>, LoadError> {
         self.load_into(Definitions::new(package), names, types)
@@ -156,7 +156,7 @@ impl Artifact {
     pub fn load_into<'a>(
         &self,
         defs: Definitions,
-        names: &'a Interner,
+        names: &'a NameInterner,
         types: &TypeInterner,
     ) -> Result<LoadedPackage<'a>, LoadError> {
         self.stamp.check()?;

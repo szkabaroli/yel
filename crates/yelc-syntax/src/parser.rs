@@ -106,7 +106,7 @@ use crate::lexer::lex;
 use crate::token::{TokenKind, TokenKind::*, TokenSet};
 use crate::{NodeId, ParsedFile, ast};
 use rustc_hash::FxHashSet;
-use yelc_base::{Diagnostics, ErrorCode, Interner, Name, SourceId, Span};
+use yelc_base::{Diagnostics, ErrorCode, Name, NameInterner, SourceId, Span};
 
 /// Maximum nesting the parser descends before it stops and reports.
 ///
@@ -123,7 +123,7 @@ pub const MAX_NESTING_DEPTH: usize = 256;
 /// Exists so the headroom between real programs and [`MAX_NESTING_DEPTH`] is a
 /// measured number rather than a belief.
 pub fn measure_max_depth(content: &str) -> usize {
-    let interner = Interner::new();
+    let interner = NameInterner::new();
     let mut diags = Diagnostics::new();
     let mut parser = Parser::new(SourceId(0), content, &interner, &mut diags);
     let _ = parser.parse_file();
@@ -174,10 +174,23 @@ pub(crate) struct Parser<'a> {
     shallow_marks: Vec<ShallowMarks>,
     token_idx: usize,
     offset: u32,
+    /// rustc's `Restrictions::NO_STRUCT_LITERAL`, one flag wide: while true,
+    /// `Name { … }` in expression position stays an identifier so the `{`
+    /// belongs to the enclosing construct. Set around `if`/`for` headers and
+    /// `match` scrutinees, restored immediately after — deliberately NOT
+    /// reset inside nested brackets, so a typed record literal inside a
+    /// condition's call arguments needs parentheses. That conservatism costs
+    /// nothing existing: the typed form is new surface.
+    no_typed_record_literal: bool,
+    /// How many `module { … }` bodies enclose the current position. Some item
+    /// forms are legal only inside one — module-level state (`registry:
+    /// list<Handle>;`) — while member-form functions are legal at any depth
+    /// (counter.yelir writes `cabi-realloc: func(…)` at the root).
+    module_depth: usize,
     /// Open AST nodes: `(token index, byte offset)` at the point they started.
     nodes: Vec<(usize, u32)>,
     builder: GreenTreeBuilder,
-    interner: &'a Interner,
+    interner: &'a NameInterner,
     diags: &'a mut Diagnostics,
     next_node_id: u32,
     /// Current nesting of the guarded recursive entry points.
@@ -257,7 +270,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn new(
         source: SourceId,
         content: &'a str,
-        interner: &'a Interner,
+        interner: &'a NameInterner,
         diags: &'a mut Diagnostics,
     ) -> Parser<'a> {
         let result = lex(source, content, diags);
@@ -272,6 +285,8 @@ impl<'a> Parser<'a> {
             bracket_close,
             condition_scan,
             shallow_marks,
+            no_typed_record_literal: false,
+            module_depth: 0,
             token_idx: 0,
             offset: 0,
             nodes: Vec::new(),
@@ -1244,7 +1259,7 @@ pub(crate) mod tests {
 
     /// Drive a failing speculation over `src` and assert nothing moved.
     fn assert_rollback_is_exact(src: &str, consume: usize) {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut diags = Diagnostics::new();
         let mut p = Parser::new(SourceId(0), src, &interner, &mut diags);
 
@@ -1375,7 +1390,7 @@ pub(crate) mod tests {
         ];
         for (body, frozen) in cases {
             let src = format!("package a:b@0.1.0;\ncomponent A {{ {body} }}");
-            let interner = Interner::new();
+            let interner = NameInterner::new();
             let mut diags = Diagnostics::new();
             let parsed = crate::parse(SourceId(0), &src, &interner, &mut diags);
             let errors = ErrorNodeCounter::run(&parsed.ast).count;
@@ -1410,7 +1425,7 @@ pub(crate) mod tests {
 
         for src in sources {
             let run = || {
-                let interner = Interner::new();
+                let interner = NameInterner::new();
                 let mut diags = Diagnostics::new();
                 let parsed = crate::parse(SourceId(0), src, &interner, &mut diags);
                 // The whole typed tree, `NodeId`s and `Span`s included — not a
@@ -1453,7 +1468,7 @@ pub(crate) mod tests {
         );
 
         let kind_of = |src: &str| {
-            let interner = Interner::new();
+            let interner = NameInterner::new();
             let mut diags = Diagnostics::new();
             let parsed = crate::parse(SourceId(0), src, &interner, &mut diags);
             let component = parsed
@@ -1508,7 +1523,7 @@ pub(crate) mod tests {
         // `expect_type_close` taking the `>` out of a `>=` — a separate
         // scannerless artifact, and the reason `partial_offset` survives.
         let src = ">= 1";
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut diags = Diagnostics::new();
         let mut p = Parser::new(SourceId(0), src, &interner, &mut diags);
         p.skip_trivia();
@@ -1537,7 +1552,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_memo_table_stops_a_second_attempt_at_the_same_place() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut diags = Diagnostics::new();
         let mut p = Parser::new(SourceId(0), "component A { }", &interner, &mut diags);
         p.skip_trivia();
@@ -1555,7 +1570,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_successful_speculation_flushes_its_diagnostics() {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut diags = Diagnostics::new();
         let mut p = Parser::new(SourceId(0), "component A { }", &interner, &mut diags);
         p.skip_trivia();
@@ -1578,7 +1593,7 @@ pub(crate) mod tests {
     pub(crate) struct Parsed {
         pub(crate) file: ParsedFile,
         pub(crate) diags: Diagnostics,
-        pub(crate) interner: Interner,
+        pub(crate) interner: NameInterner,
     }
 
     impl Parsed {
@@ -1616,7 +1631,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn check(source: &str) -> Parsed {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut diags = Diagnostics::new();
         let file = crate::parse(SourceId(0), source, &interner, &mut diags);
         assert_eq!(file.green.text(), source, "green tree did not round-trip");
@@ -2088,7 +2103,7 @@ pub(crate) mod tests {
                 continue;
             }
             let prefix = &source[..cut];
-            let interner = Interner::new();
+            let interner = NameInterner::new();
             let mut diags = Diagnostics::new();
             let parsed = crate::parse(SourceId(0), prefix, &interner, &mut diags);
             assert_eq!(
@@ -2309,7 +2324,7 @@ mod spec_perf {
     /// linear without `shallow_marks.semicolon`, i.e. the case the machinery
     /// actually exists for.
     fn median_parse_micros(src: &str, reps: u32) -> u128 {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         for _ in 0..3 {
             let mut warm = Diagnostics::new();
             let _ = crate::parse(SourceId(0), src, &interner, &mut warm);

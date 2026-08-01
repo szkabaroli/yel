@@ -415,6 +415,31 @@ impl<'a> Parser<'a> {
                 }
             }
             _ if self.is_name() => {
+                // `match scrutinee { … }` — contextual: `match` is a legal
+                // name, so this fires only when an expression can follow and
+                // that expression does not start with `{` (a bare
+                // `match { … }` stays whatever its context makes of it).
+                if self.is(IDENTIFIER)
+                    && self.current_text() == "match"
+                    && self.nth_non_trivia(1) != L_BRACE
+                    && self.nth_is_set(1, EXPRESSION_FIRST)
+                {
+                    return self.parse_match_expr();
+                }
+                // `Name { field: … }` — the typed record literal. At least
+                // one field is REQUIRED: an empty `Name {}` form would make
+                // any stray identifier before braces parse (`elsex { }` —
+                // caught by the let/if parity class), and the artifact never
+                // writes one. The field-shape lookahead keeps
+                // `if x { y = 1; }` honest and the restriction flag keeps
+                // headers out wholesale.
+                if !self.no_typed_record_literal
+                    && self.nth_non_trivia(1) == L_BRACE
+                    && self.nth_is_name(2)
+                    && self.nth_non_trivia(3) == COLON
+                {
+                    return self.parse_typed_record_literal();
+                }
                 self.start_node();
                 let name = self.intern(self.current_text());
                 self.advance();
@@ -743,6 +768,117 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `parse_expr` with the typed-record restriction on: the caller's `{` is
+    /// load-bearing (an `if`/`for` header, a `match` scrutinee), so
+    /// `Name { … }` must stay an identifier there.
+    pub(super) fn parse_expr_no_typed_record(&mut self) -> ast::Expr {
+        let saved = self.no_typed_record_literal;
+        self.no_typed_record_literal = true;
+        let expr = self.parse_expr();
+        self.no_typed_record_literal = saved;
+        expr
+    }
+
+    /// `match scrutinee { (pattern "->" body ","?)* }` — directions §9's
+    /// general conditional, surface form (.yelir subset, user-approved
+    /// 2026-07-31).
+    fn parse_match_expr(&mut self) -> ast::Expr {
+        self.start_node();
+        self.assert(IDENTIFIER); // the contextual `match`
+        let scrutinee = self.parse_expr_no_typed_record();
+        self.expect(L_BRACE);
+        let mut arms = Vec::new();
+        while !self.is(R_BRACE) && !self.is(EOF) {
+            // The stall guard makes "recovery always advances" a checked
+            // property rather than a hope — a stalled loop here is a hang (S6).
+            let before = self.current_span().start;
+            arms.push(self.parse_match_arm());
+            // Arms are whitespace-separated; a comma between them is
+            // tolerated, not recorded.
+            self.eat(COMMA);
+            if self.current_span().start == before && !self.is(R_BRACE) {
+                self.advance();
+            }
+        }
+        self.expect(R_BRACE);
+        let span = self.finish_node(MATCH_EXPR);
+        ast::Expr {
+            id: self.new_node_id(),
+            span,
+            kind: ast::ExprKind::Match(Box::new(ast::MatchExpr { scrutinee, arms })),
+        }
+    }
+
+    fn parse_match_arm(&mut self) -> ast::MatchArm {
+        self.start_node();
+        let pattern = self.parse_expr_no_typed_record();
+        self.expect(ARROW);
+        let body = if self.is(L_BRACE) {
+            self.assert(L_BRACE);
+            // The same statement block a closure body is — the "brace block
+            // whose tail is its value" arrangement, and the same node kind.
+            let block = self.parse_stmt_block(CLOSURE_BODY, true);
+            self.expect(R_BRACE);
+            ast::MatchArmBody::Block(block)
+        } else {
+            let value = self.parse_expr();
+            if self.eat(EQ) {
+                // `pattern -> place = value` — one assignment, statement-shaped,
+                // no `;` (counter.yelir:232).
+                let rhs = self.parse_expr();
+                let span = Span {
+                    source: value.span.source,
+                    start: value.span.start,
+                    end: rhs.span.end,
+                };
+                ast::MatchArmBody::Assign(Box::new(ast::AssignStmt {
+                    id: self.new_node_id(),
+                    span,
+                    op: ast::AssignOp::Assign,
+                    target: value,
+                    value: rhs,
+                }))
+            } else {
+                ast::MatchArmBody::Expr(Box::new(value))
+            }
+        };
+        let span = self.finish_node(MATCH_ARM);
+        ast::MatchArm {
+            id: self.new_node_id(),
+            span,
+            pattern,
+            body,
+        }
+    }
+
+    /// `Name { field: expr, … }` — the typed record literal (.yelir subset).
+    /// The name is carried, not resolved: which record it names is
+    /// type-directed and stage 4's.
+    fn parse_typed_record_literal(&mut self) -> ast::Expr {
+        let mark = self.mark();
+        self.builder.start_node();
+        let name = self.expect_name();
+        let fields = self.parse_list(
+            L_BRACE,
+            COMMA,
+            R_BRACE,
+            EXPR_LIST_RECOVERY,
+            RECORD_LITERAL_FIELD_LIST,
+            TrailingSep::Allowed,
+            |p| p.parse_record_literal_field().map(ast::Recovered::Present),
+        );
+        self.builder.finish_node(RECORD_LITERAL);
+        let span = self.span_from(&mark);
+        ast::Expr {
+            id: self.new_node_id(),
+            span,
+            kind: ast::ExprKind::Record {
+                name: Some(name),
+                fields,
+            },
+        }
+    }
+
     /// `record_literal = "{" ~ record_literal_field ~ ("," ~ …)* ~ ","? ~ "}"`
     fn parse_record_literal(&mut self) -> ast::Expr {
         let mark = self.mark();
@@ -762,7 +898,7 @@ impl<'a> Parser<'a> {
         ast::Expr {
             id: self.new_node_id(),
             span,
-            kind: ast::ExprKind::Record(fields),
+            kind: ast::ExprKind::Record { name: None, fields },
         }
     }
 
@@ -998,7 +1134,7 @@ mod tests {
     #[test]
     fn parse_record_literal_fields() {
         let p = parse_ok("component A { x: R = { field-a: 1, field-b: \"s\", }; }");
-        let ast::ExprKind::Record(fields) = &first_default(&p).kind else {
+        let ast::ExprKind::Record { name: None, fields } = &first_default(&p).kind else {
             panic!("expected a record literal")
         };
         assert_eq!(fields.len(), 2);
@@ -1014,7 +1150,7 @@ mod tests {
         };
         assert!(matches!(
             element.props[0].value.kind,
-            ast::ExprKind::Record(_)
+            ast::ExprKind::Record { .. }
         ));
         assert!(matches!(
             element.props[1].value.kind,

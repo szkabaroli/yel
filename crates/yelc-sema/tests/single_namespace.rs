@@ -38,7 +38,7 @@
 
 use std::path::{Path, PathBuf};
 
-use yelc_base::{Interner, SourceId, Span};
+use yelc_base::{NameInterner, SourceId, Span};
 use yelc_sema::OverloadKey;
 use yelc_sema::Ty;
 use yelc_sema::definitions::{DefKind, Definitions, Sym};
@@ -156,7 +156,7 @@ fn span() -> Span {
 /// Register a sequence of `(name, kind)` declarations into a fresh symbol
 /// table, stopping at the first rejection.
 fn register_all(declarations: &[(&str, DefKind)]) -> Result<(), String> {
-    let interner = Interner::new();
+    let interner = NameInterner::new();
     let mut defs = Definitions::new(PackageId::LOCAL);
     for &(name, kind) in declarations {
         defs.register(interner.intern(name), kind, span(), false)
@@ -404,7 +404,7 @@ fn the_new_table_accepts_an_overload_set_the_frozen_table_cannot() {
     );
 
     // New: the scope is multi-valued, so both live under the one name.
-    let interner = Interner::new();
+    let interner = NameInterner::new();
     let mut defs = Definitions::new(PackageId::LOCAL);
     let len = interner.intern("len");
     let on_string = defs

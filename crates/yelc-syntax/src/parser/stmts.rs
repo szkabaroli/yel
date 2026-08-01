@@ -342,7 +342,7 @@ impl<'a> Parser<'a> {
     fn parse_if_stmt(&mut self) -> ast::Stmt {
         self.start_node();
         self.assert(IF_KW);
-        let condition = self.parse_expr();
+        let condition = self.parse_expr_no_typed_record();
         let then_branch = self.parse_braced_stmt_block();
 
         // `("else" ~ "{" ~ statement* ~ "}")?` — the `{` is *inside* the

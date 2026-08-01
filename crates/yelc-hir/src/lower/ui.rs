@@ -1,15 +1,19 @@
-//! Phase 3: the UI tree, desugared to builder expressions.
+//! Lowers a component's UI tree to builder expressions.
 //!
 //! An element becomes an [`Instantiate`](HirExprKind::Instantiate) — a call
-//! whose target resolves like any name, whose props are one uniform list (D1)
-//! merged per F13, and whose children are builder expressions. A UI `if`
-//! becomes [`Match`](HirExprKind::Match) **directly** (§9); a UI `for` becomes
-//! [`Repeat`](HirExprKind::Repeat). The component's whole tree is one **build
-//! body** whose tail is a [`Fragment`](HirExprKind::Fragment) of the roots.
+//! whose target resolves like any name, whose props are one uniform list
+//! merged in source order, and whose children are builder expressions. The
+//! dynamic template forms become [`Boundary`](HirExprKind::Boundary) regions:
+//! a UI `if` chain is one [`Conditional`](HirBoundary::Conditional) holding a
+//! `match`, a UI `for` is a [`Repeat`](HirBoundary::Repeat), `@children` is a
+//! [`Children`](HirBoundary::Children) mount point. The component's whole
+//! tree is one **build body** whose tail is a
+//! [`Fragment`](HirExprKind::Fragment) of the roots.
 //!
 //! What is *not* here, on purpose: tree-shape flattening (anchors, mount
-//! layout — stage 6's), and prop **classification** (handler vs binding is a
-//! `Definitions` lookup wherever it is needed; storing it would be B3).
+//! layout — codegen's business), and prop **classification** (handler vs
+//! binding is a `Definitions` lookup wherever it is needed; storing it here
+//! would duplicate analysis results onto nodes).
 
 use yelc_base::ErrorCode;
 use yelc_sema::DefId;
@@ -18,13 +22,13 @@ use yelc_syntax::{ParsedFile, ast};
 use super::LoweringContext;
 use super::bodies::BodyLowering;
 use crate::expr::{
-    HirBlock, HirClosure, HirExpr, HirExprKind, HirInstantiate, HirMatch, HirMatchArm, HirPattern,
-    HirProp, HirRepeat,
+    HirBlock, HirBoundary, HirClosure, HirExpr, HirExprKind, HirInstantiate, HirMatch, HirMatchArm,
+    HirPattern, HirProp, HirRepeat,
 };
 use crate::ids::BodyId;
 
 /// The component's UI tree as one parameterless body.
-pub(super) fn lower_build(
+pub(super) fn lower_tree(
     lcx: &mut LoweringContext,
     file: &ParsedFile,
     def: DefId,
@@ -82,7 +86,7 @@ pub(super) fn lower_build(
     )
 }
 
-/// Tiny adaptor so `lower_build` can name its origin before constructing the
+/// Tiny adaptor so `lower_tree` can name its origin before constructing the
 /// `BodyLowering` that owns the file reference.
 struct SourceNodeIdOf<'a>(&'a ParsedFile, yelc_syntax::NodeId);
 
@@ -105,7 +109,7 @@ fn lower_node(body: &mut BodyLowering, node: &ast::UiNode) -> HirExpr {
             body.slots.push(*span);
             HirExpr {
                 hir_id: body.primary_id(*id),
-                kind: HirExprKind::ChildrenPlaceholder,
+                kind: HirExprKind::Boundary(Box::new(HirBoundary::Children)),
             }
         }
         ast::UiNode::Error { id, .. } => HirExpr {
@@ -256,10 +260,11 @@ fn lower_element(body: &mut BodyLowering, element: &ast::ElementNode) -> HirExpr
     }
 }
 
-/// UI `if` → `match`, directly (§9). An `else if` chain nests in the false
-/// arm, each level keyed to its own real AST node (D7's free part: stage 1
-/// gives every `ElseIfBranch` its own id and span, so H2 holds and no
-/// diagnostic moves).
+/// UI `if` → one [`HirBoundary::Conditional`] holding a `match`. The whole
+/// `else if` chain is inside it — the chain occupies one anchor in the tree —
+/// nesting as plain `Match` expressions in the false arm, each level keyed to
+/// its own real AST node (D7's free part: stage 1 gives every `ElseIfBranch`
+/// its own id and span, so H2 holds and no diagnostic moves).
 fn lower_ui_if(body: &mut BodyLowering, node: &ast::IfNode) -> HirExpr {
     let hir_id = body.primary_id(node.id);
     let scrutinee = body.lower_expr(&node.condition);
@@ -282,7 +287,10 @@ fn lower_ui_if(body: &mut BodyLowering, node: &ast::IfNode) -> HirExpr {
     ];
     HirExpr {
         hir_id,
-        kind: HirExprKind::Match(Box::new(HirMatch { scrutinee, arms })),
+        kind: HirExprKind::Boundary(Box::new(HirBoundary::Conditional(HirMatch {
+            scrutinee,
+            arms,
+        }))),
     }
 }
 
@@ -342,11 +350,11 @@ fn lower_ui_for(body: &mut BodyLowering, node: &ast::ForNode) -> HirExpr {
     body.pop_scope();
     HirExpr {
         hir_id,
-        kind: HirExprKind::Repeat(Box::new(HirRepeat {
+        kind: HirExprKind::Boundary(Box::new(HirBoundary::Repeat(HirRepeat {
             binder,
             iterable,
             key,
             children,
-        })),
+        }))),
     }
 }

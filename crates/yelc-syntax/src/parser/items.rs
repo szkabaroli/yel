@@ -105,6 +105,41 @@ impl<'a> Parser<'a> {
         // attributes needs that, so no `TokenSet` changes at all.
         let attributes = self.parse_attribute_list();
 
+        // The .yelir subset (user-approved surface, 2026-07-31 —
+        // plans/desugar/README.md §1). `module` and `use` are contextual
+        // words, not lexer keywords, and the member forms begin with a plain
+        // name — none of which may join ITEM_FIRST, because that set is also
+        // ITEM_RECOVERY and every stray identifier would become a recovery
+        // anchor in the five productions that union it.
+        if self.is(IDENTIFIER) {
+            if self.current_text() == "module"
+                && self.nth_is_name(1)
+                && self.nth_non_trivia(2) == L_BRACE
+            {
+                return self.parse_module_decl(attributes);
+            }
+            if self.current_text() == "use" && self.nth_is_name(1) && self.nth_non_trivia(2) == DOT
+            {
+                return self.parse_use_decl(attributes);
+            }
+        }
+        if self.nth_is_name(0) && self.nth_non_trivia(1) == COLON {
+            // `name: [extern] func(…)` is a function item, legal at any
+            // depth; `name: type;` is module-level state and legal only
+            // inside a `module` — at the root it would make any
+            // `garbage: garbage;` line parse (the keyword-prefix parity
+            // class caught `packagea:b;` doing exactly that).
+            let extern_slot = usize::from(self.nth_non_trivia(2) == EXTERN_KW);
+            if self.nth_non_trivia(2 + extern_slot) == FUNC_KW
+                && self.nth_non_trivia(3 + extern_slot) == L_PAREN
+            {
+                return ast::ItemKind::Function(Box::new(self.parse_function_decl(attributes)));
+            }
+            if self.module_depth > 0 {
+                return ast::ItemKind::Property(Box::new(self.parse_item_property(attributes)));
+            }
+        }
+
         if !self.is_set(ITEM_FIRST) {
             return self.error_item(attributes, "expected a top-level declaration");
         }
@@ -584,6 +619,94 @@ impl<'a> Parser<'a> {
     }
 
     /// `import_method = "func" ~ identifier ~ "(" ~ func_params? ~ ")" ~ func_return? ~ ";"`
+    /// `module NAME { item* }` — contents are ordinary items, parsed with the
+    /// same dispatch, so a module holds exactly what a file holds (minus
+    /// `package`, which `parse_item` already rejects past first position).
+    fn parse_module_decl(&mut self, attributes: Option<ast::AttributeList>) -> ast::ItemKind {
+        self.start_node();
+        self.assert(IDENTIFIER); // the contextual `module`
+        let name = self.expect_name();
+        self.expect(L_BRACE);
+        self.module_depth += 1;
+        let mut items = Vec::new();
+        while !self.is(R_BRACE) && !self.is(EOF) {
+            // `parse_item`'s recovery consumes at least one token for every
+            // error item; the stall guard makes that a checked property
+            // rather than a hope, because a stalled loop here is a hang (S6).
+            let before = self.current_span().start;
+            items.push(self.parse_item());
+            if self.current_span().start == before && !self.is(R_BRACE) {
+                self.advance();
+            }
+        }
+        self.module_depth -= 1;
+        self.expect(R_BRACE);
+        let span = self.finish_node(MODULE_DECL);
+        ast::ItemKind::Module(Box::new(ast::ModuleDecl {
+            id: self.new_node_id(),
+            span,
+            attributes,
+            name,
+            items,
+        }))
+    }
+
+    /// `use Base.{ name, (name ,)* };` — multi-line lists and a trailing
+    /// comma are both real (counter.yelir:114).
+    fn parse_use_decl(&mut self, attributes: Option<ast::AttributeList>) -> ast::ItemKind {
+        self.start_node();
+        self.assert(IDENTIFIER); // the contextual `use`
+        let base = self.expect_name();
+        self.expect(DOT);
+        self.expect(L_BRACE);
+        let mut names = Vec::new();
+        while !self.is(R_BRACE) && !self.is(EOF) {
+            let before = self.current_span().start;
+            names.push(self.expect_name());
+            if !self.is(R_BRACE) {
+                self.expect(COMMA);
+            }
+            if self.current_span().start == before {
+                self.advance();
+            }
+        }
+        self.expect(R_BRACE);
+        self.expect(SEMICOLON);
+        let span = self.finish_node(USE_DECL);
+        ast::ItemKind::Use(Box::new(ast::UseDecl {
+            id: self.new_node_id(),
+            span,
+            attributes,
+            base,
+            names,
+        }))
+    }
+
+    /// `name: type (= expr)? ;` at item position — module-level state
+    /// (counter.yelir:147). The same shape a global property has, minus the
+    /// direction modifiers, which are a host-boundary concept.
+    fn parse_item_property(&mut self, attributes: Option<ast::AttributeList>) -> ast::PropertyDecl {
+        self.start_node();
+        let name = self.expect_name();
+        self.expect(COLON);
+        let ty = self.parse_type();
+        let default = if self.eat(EQ) {
+            Some(self.parse_expr())
+        } else {
+            None
+        };
+        self.expect(SEMICOLON);
+        let span = self.finish_node(PROPERTY_DECL);
+        ast::PropertyDecl {
+            id: self.new_node_id(),
+            span,
+            attributes,
+            name,
+            ty,
+            default,
+        }
+    }
+
     fn parse_extern_method(&mut self) -> ast::FunctionDecl {
         self.start_node();
         self.assert(FUNC_KW);
@@ -597,6 +720,9 @@ impl<'a> Parser<'a> {
             attributes: None,
             name,
             is_export: false,
+            // The enclosing `extern component` carries the externness; the
+            // colon-form keyword was not written here.
+            is_extern: false,
             signature: ast::Recovered::Present(signature),
             // An `extern component` method is implemented by the host component
             // on the other side of the boundary, so it never has a body here.
@@ -795,6 +921,7 @@ impl<'a> Parser<'a> {
             attributes,
             name,
             is_export: false,
+            is_extern: false,
             signature: ast::Recovered::Present(signature),
             // `global_callback` is the `callback name(...)` spelling and is
             // bodyless by definition — the caller supplies the implementation.
@@ -959,6 +1086,10 @@ impl<'a> Parser<'a> {
         let name = self.expect_name();
         self.expect(COLON);
 
+        // `name: extern func(…);` — the import-contract form the .yelir
+        // subset writes at module level (plans/desugar/README.md §1).
+        let is_extern = self.eat(EXTERN_KW);
+
         // `func_type = "func" ~ "(" ~ func_params? ~ ")" ~ func_return?`
         self.start_node();
         let signature = if self.is(FUNC_KW) {
@@ -999,6 +1130,7 @@ impl<'a> Parser<'a> {
             attributes,
             name,
             is_export,
+            is_extern,
             signature,
             body,
         }

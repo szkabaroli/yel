@@ -543,7 +543,7 @@ pub mod widenings {
 
 pub mod catch_all {
     use super::single_token_deletions;
-    use yelc_base::{Diagnostics, Interner, SourceId};
+    use yelc_base::{Diagnostics, NameInterner, SourceId};
 
     /// Divergences whose root cause is the catch-all discard.
     ///
@@ -727,7 +727,7 @@ pub mod catch_all {
 
     /// Did the **new** parser report anything?
     fn we_report(content: &str) -> bool {
-        let interner = Interner::new();
+        let interner = NameInterner::new();
         let mut diags = Diagnostics::new();
         let _ = yelc_syntax::parse(SourceId(0), content, &interner, &mut diags);
         diags.has_errors()

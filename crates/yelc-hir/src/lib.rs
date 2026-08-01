@@ -1,55 +1,20 @@
-//! `yelc-hir` — one IR, built in stage 3 and checked in stage 4.
+//! `yelc-hir` — the frontend: package checking, AST → HIR lowering, and the
+//! HIR itself, the desugared and name-resolved IR that type checking runs on.
 //!
-//! Replaces the frozen `yel-core/src/hir/` (1,995 lines) and, in stage 4,
-//! `yel-core/src/thir/`. THIR is not a second IR: it merged into this one on
-//! 2026-07-28, as a second phase over the same nodes
-//! (`plans/rewrite/seam-changes.md`).
+//! The pipeline entry is [`check_package`]: collect the package's files, parse
+//! them, check they declare one package ([`packageck`]), bind included modules
+//! into the root scope ([`includes`]), then lower ([`lower_files`]) — register
+//! every item, collect every declared type, lower bodies and desugar the UI
+//! tree to builder expressions, with state-dependency analysis ([`signalck`])
+//! at the tail. Type checking is a later phase over the **same** nodes —
+//! there is no second IR after this one.
 //!
-//! | phase | does | produces |
-//! |---|---|---|
-//! | **3** | AST → HIR; register items; resolve names; collect declared types; desugar the UI tree to functions and calls | HIR, [`Definitions`](yelc_sema::Definitions) typed |
-//! | **4** | bidirectional type checking over the same nodes | [`HirModule::types`] total |
+//! Two decisions this crate's shape encodes:
 //!
-//! # SEAM. This file is the contract stage 3's lowering is written against.
-//!
-//! It landed **before the lowering body**, deliberately: a seam discovered while
-//! writing the body gets shaped by the body's convenience. A change is a request
-//! in `plans/rewrite/seam-changes.md`, not an edit.
-//!
-//! # What this crate does not contain yet
-//!
-//! - **The lowering.** [`lower_files`] is a signature with a `todo!()` body.
-//! - **The node vocabulary.** [`HirItem`] and [`HirBody`] are uninhabited, which
-//!   is the honest spelling of *"phase 3 declares these"* — an empty enum cannot
-//!   be constructed, so there is no placeholder variant to become permanent.
-//! - **`type_of`.** ⚠️ **The one seam type that could not be landed**, and now the
-//!   gate on phase 3. Three things about it are unresolved and all three are
-//!   contract:
-//!
-//!   1. The brief writes `pub fn type_of(&mut self, ty: TypeId) -> Ty` — `&mut
-//!      self` names no receiver, and no type in the brief owns it.
-//!   2. Its memo is specified as a [`NodeMap<Ty>`], which keys [`HirId`]; a
-//!      [`TypeId`] is not one. The two declarations sit twenty lines apart in the
-//!      same contract block and contradict each other.
-//!   3. The definition of done requires it *"structurally unreachable from H1
-//!      phase 1 (the collector does not exist yet)"* — a statement about a type
-//!      that is never named.
-//!
-//!   Landing it under a guess would have made the guess the contract. Naming its
-//!   owner closes all three at once: the receiver is that type, and the memo is a
-//!   field on it keyed by `TypeId`.
-//!
-//! # Two decisions this crate's shape already encodes
-//!
-//! | | | where |
-//! |---|---|---|
-//! | analysis results live **beside** nodes, never on them | [B3](../../../plans/rewrite/anti-spec.md) | [`NodeMap`] |
-//! | a HIR node points back at **which file's** AST node | [D8](../../../plans/rewrite/stage-3-hir-build.md) + stage 1's per-file ids | [`SourceNodeId`] |
-//!
-//! The second is a correction to the brief, found by landing it — ark's
-//! `hir_map.rs` keys the reverse map by a bare `NodeId` and is right to, because
-//! ark allocates them from a process-global counter. `yelc-syntax` allocates per
-//! file from zero, on purpose. See [`SourceNodeId`].
+//! - analysis results live **beside** nodes, never on them — [`NodeMap`];
+//! - a HIR node points back at **which file's** AST node — [`SourceNodeId`],
+//!   because `yelc-syntax` allocates node ids per file from zero, so a bare
+//!   node id cannot key a package-wide map.
 
 pub mod emit;
 pub mod emit_hir;
@@ -66,7 +31,7 @@ pub mod sym;
 pub mod visit;
 
 pub use expr::{
-    BinaryOp, HirBlock, HirCallee, HirExpr, HirExprKind, HirFieldInit, HirInstantiate,
+    BinaryOp, HirBlock, HirBoundary, HirCallee, HirExpr, HirExprKind, HirFieldInit, HirInstantiate,
     HirInterpolationPart, HirLiteral, HirLocal, HirMatch, HirMatchArm, HirPattern, HirProp,
     HirRepeat, HirStmt, UnaryOp,
 };
@@ -133,7 +98,7 @@ pub struct CheckedPackage {
     pub module: HirModule,
 }
 
-/// The frontend, end to end — ark's `check_program`.
+/// The frontend, end to end.
 ///
 /// Diagnostics accumulate on `context`; the driver reads `has_errors()` for
 /// its exit code. `Err` is reserved for the environment failing (unreadable
@@ -209,8 +174,8 @@ pub fn check_package_with_overlay(
     })
 }
 
-/// What one invocation asked for — clap-free, the ark `SemaArgs` shape: the
-/// driver parses whatever surface it likes and converts into this.
+/// What one invocation asked for — clap-free: the driver parses whatever
+/// surface it likes and converts into this.
 #[derive(Default)]
 pub struct RunArgs {
     pub path: PathBuf,
@@ -220,7 +185,6 @@ pub struct RunArgs {
     pub emit_ast: Option<String>,
     pub emit_green: bool,
     pub emit_green_text: bool,
-    pub emit_intrinsics: bool,
     pub emit_hir: bool,
     pub emit_module: Option<PathBuf>,
     pub identified: bool,
@@ -231,10 +195,9 @@ pub struct RunArgs {
 }
 
 /// The whole invocation: frontend behind [`check_package`], every `--emit-*`
-/// and `--debug-*` view, exit code out. Ark keeps `check_program` *and*
-/// `emit_ast` in `arkc-frontend`; this is the same line — the driver parses
-/// flags into [`RunArgs`], supplies the embedded std bytes, and exits with
-/// what this returns.
+/// and `--debug-*` view, exit code out. The driver parses flags into
+/// [`RunArgs`], supplies the embedded std bytes, and exits with what this
+/// returns.
 ///
 /// Exit code: 0 clean, 1 the program has errors, 2 the environment failed.
 pub fn run(args: &RunArgs, std_modules: &[(&str, &[u8])]) -> i32 {
@@ -244,9 +207,6 @@ pub fn run(args: &RunArgs, std_modules: &[(&str, &[u8])]) -> i32 {
     // `--debug-*` dumps print `Name("count")` instead of `Name(16)` — the
     // Debug impl resolves through this thread-local installation.
     context.names.install_for_debug();
-    if args.emit_intrinsics {
-        print!("{}", emit::intrinsics(&context));
-    }
 
     // The frontend, end to end.
     let checked = match check_package(
